@@ -1,0 +1,75 @@
+{
+  "flow_id": "11111111-1111-1111-1111-111111111111",
+  "tenant_id": "00000000-0000-0000-0000-000000000000",
+  "team": "support",
+  "name": "Support L0/L1 - tier-gated flow",
+  "version": 1,
+  "status": "draft",
+  "nodes": [
+    {
+      "node_id": "retrieve_1",
+      "type": "retrieve",
+      "label": "Retrieve context",
+      "config": { "source": ["supabase", "neo4j"], "top_k": 5 }
+    },
+    {
+      "node_id": "classify_1",
+      "type": "classify",
+      "label": "Classify customer",
+      "config": { "tier_field": "account.customer_type", "region_field": "account.region" }
+    },
+    {
+      "node_id": "draft_1",
+      "type": "draft",
+      "label": "Draft reply",
+      "config": { "model": "llama-3.3-70b-versatile", "max_tokens": 500 }
+    },
+    {
+      "node_id": "gate_1",
+      "type": "confidence_gate",
+      "label": "Confidence gate",
+      "config": {
+        "default_threshold": 0.35,
+        "tier_overrides": { "basic": 0.35, "premium": 0.45, "enterprise": 0.6 }
+      }
+    },
+    {
+      "node_id": "auto_reply_1",
+      "type": "auto_reply",
+      "label": "Auto-reply",
+      "config": {}
+    },
+    {
+      "node_id": "ask_human_1",
+      "type": "ask_human",
+      "label": "Ask human",
+      "config": { "channel": "salesforce_chatter" }
+    },
+    {
+      "node_id": "handover_1",
+      "type": "handover",
+      "label": "Full handover",
+      "config": { "reason": "enterprise_or_low_confidence" }
+    }
+  ],
+  "edges": [
+    { "source_node_id": "retrieve_1", "target_node_id": "classify_1", "condition": {} },
+    { "source_node_id": "classify_1", "target_node_id": "draft_1", "condition": {} },
+    { "source_node_id": "draft_1", "target_node_id": "gate_1", "condition": {} },
+    {
+      "source_node_id": "gate_1",
+      "target_node_id": "auto_reply_1",
+      "condition": { "if": "confidence_gate.pass and tier != 'enterprise'" }
+    },
+    {
+      "source_node_id": "gate_1",
+      "target_node_id": "ask_human_1",
+      "condition": { "if": "not confidence_gate.pass and tier != 'enterprise'" }
+    },
+    {
+      "source_node_id": "gate_1",
+      "target_node_id": "handover_1",
+      "condition": { "if": "tier == 'enterprise'" }
+    }
+  ]
+}

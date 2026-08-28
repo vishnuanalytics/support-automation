@@ -1,0 +1,7 @@
+requests
+beautifulsoup4
+lxml
+sentence-transformers
+supabase
+python-dotenv
+ 
