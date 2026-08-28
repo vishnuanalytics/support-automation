@@ -66,7 +66,7 @@ schema, not as production logic.
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Flow-definition schema (`flows`/`flow_nodes`/`flow_edges`), RLS, tenant isolation | **Complete** — migrated, seeded, verified in Supabase |
-| 1 | Zapier docs RAG ingestion: sitemap scrape → content-hash diff → chunk → embed → Supabase + Neo4j, daily via cron | **Effectively done (2026-08-28)** — `004`+`005` schema live. `scraper.py` run: 401 docs / 3568 chunks / 920 links in Supabase, 0 failures; `fastembed` embeddings. `neo4j_sync.py` run against Aura: 401 Doc + 25 stub nodes, 63 Section, 396 IN_SECTION / 56 SUBSECTION_OF / 920 LINKS_TO. Retrieval eval set (`eval/`, 48 Q): dense baseline hit@3 1.00 / MRR@10 0.94. **Only open item:** commit + push so `.github/workflows/daily-sync.yml` activates (Supabase + Neo4j repo secrets already added by the user). |
+| 1 | Zapier docs RAG ingestion: sitemap scrape → content-hash diff → chunk → embed → Supabase + Neo4j, daily via cron | **Complete (2026-08-28)** — `004`+`005` schema live. `scraper.py`: 401 docs / 3568 chunks / 920 links in Supabase, `fastembed` embeddings. `neo4j_sync.py` against Aura: 401 Doc + 25 stub nodes, 63 Section, 396 IN_SECTION / 56 SUBSECTION_OF / 920 LINKS_TO. Retrieval eval (`eval/`, 48 Q): dense baseline hit@3 1.00 / MRR@10 0.94. Committed + pushed (`6d56f42`); `.github/workflows/daily-sync.yml` cron **live and verified green** (run 33195499360 — remote incremental no-op: scrape `skipped: 401`, Neo4j idempotent). |
 | 2 | Config-driven LangGraph interpreter: reads a flow row from Supabase, builds a real `StateGraph`, single hand-seeded flow | Not started |
 | 3 | Salesforce field write-back (case module/region/account/contact) from the classify node's output; Chatter-mention as the "ask human" mechanism | Not started |
 | 4 | Multi-tenant/multi-flow: prove several different flow configs run correctly | Not started (schema already supports it — `tenant_id`/`flow_id` built in from Phase 0) |
@@ -104,7 +104,7 @@ Files already delivered: `001_flow_schema.sql`, `002_rls_and_constraints.sql`,
 `003_seed_example_flow.sql`, `flow_support_example.json` (7-node/6-edge
 Support-team reference flow), `validate_flow.py`.
 
-## Phase 1 — Zapier docs RAG ingestion (functionally complete 2026-08-28; pending commit/push)
+## Phase 1 — Zapier docs RAG ingestion (complete, verified 2026-08-28)
 
 Goal: scrape `docs.zapier.com`, detect new/changed/deleted pages daily, keep
 Supabase (content + vectors) and Neo4j (relations) in sync.
@@ -177,14 +177,24 @@ joinable):
   Sparse / RRF / graph / rerank strategies are Phase 2 — `run_eval.py` has
   the extension point noted.
 
-**Still open in Phase 1:**
-- **Commit + push** so `.github/workflows/daily-sync.yml` lands on the
-  default branch and the daily cron / manual dispatch becomes available.
-  This is the only thing between here and Phase 1 fully closed.
-- Minor: `scraper.py` builds the `.md` URL as `url.rstrip("/") + ".md"`,
-  which for the bare `https://docs.zapier.com` root resolves the host
-  `docs.zapier.com.md` (one warning, recovers via HTML fallback). Harmless;
-  guard if it ever matters.
+**Phase 1 closed.** Committed `6d56f42`, pushed to `main`. The
+`Daily docs sync` workflow (id 344797351) is active — daily `0 3 * * *`
+plus manual dispatch — and its first cloud run (33195499360) went green
+after a corrected `NEO4J_PASSWORD` secret: scrape `skipped: 401`
+(incremental no-op), Neo4j re-synced idempotently. Six repo secrets set:
+`SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `NEO4J_URI`, `NEO4J_USERNAME`,
+`NEO4J_PASSWORD`, `NEO4J_DATABASE`.
+
+Known minor debt (not blocking):
+- `scraper.py` builds the `.md` URL as `url.rstrip("/") + ".md"`, which for
+  the bare `https://docs.zapier.com` root resolves the host
+  `docs.zapier.com.md` (one warning per run, recovers via HTML fallback).
+- Neo4j has 25 stub Doc nodes (link targets outside the sitemap, e.g.
+  `partner-solutions/workflow-api/intro` @52 inbound links). Expected;
+  they fill in if those URLs ever enter the sitemap.
+- `.mcp.json` hardcodes `NEO4J_DATABASE: "neo4j"` (wrong for this Aura
+  instance) and the `neo4j` MCP server needs `uvx` on PATH — the local MCP
+  server doesn't connect. Doesn't affect the pipeline.
 
 Files delivered: `004_docs_ingestion_schema.sql`, `005_docs_rag_metadata.sql`,
 `scraper.py`, `neo4j_sync.py`, `.mcp.json` (Neo4j Cypher MCP config),
@@ -211,27 +221,28 @@ Files delivered: `004_docs_ingestion_schema.sql`, `005_docs_rag_metadata.sql`,
 
 ## Immediate next step
 
-Phase 1 is functionally complete as of 2026-08-28 — scrape, embed, Neo4j
-graph, and the retrieval eval baseline all ran green (see the Phase 1
-section for numbers). Everything so far is **uncommitted on `main`**.
+Phase 1 is **complete and verified** (2026-08-28) — scrape, embeddings
+(`fastembed`), Neo4j graph, retrieval eval baseline, and the daily GitHub
+Actions cron are all live and green. Nothing outstanding there.
 
-1. Commit the Phase 1 changeset (code + this file together) and push, so
-   `.github/workflows/daily-sync.yml` reaches the default branch and the
-   daily cron / manual `workflow_dispatch` turns on. Repo secrets are
-   already set by the user. `git status` before this step:
-   modified `scraper.py` `neo4j_sync.py` `requirements.txt` `CLAUDE.md`
-   `PROJECT_SCOPE.md`; new `005_docs_rag_metadata.sql` `.mcp.json`
-   `.github/` `eval/`.
-2. After the first Actions run, confirm it was a no-op incremental
-   (0 new / 0 changed) — proves the incremental path works on a fresh
-   runner.
+**Start Phase 2: the config-driven LangGraph interpreter.**
 
-Then **Phase 2** (config-driven LangGraph interpreter) is next. The full
-retrieval pipeline (hybrid dense+sparse → RRF → Neo4j graph-expansion →
-cross-encoder rerank → feed top rerank score into `confidence_gate`) is
-part of Phase 2 — designed, not built. See the RAG-method notes. Extend
-`eval/run_eval.py` with the sparse/hybrid strategies at that point and
-compare against the dense baseline recorded above.
+1. Add migration `006` only if the interpreter needs new columns — first
+   check whether the Phase 0 `flows` / `flow_nodes` / `flow_edges` schema
+   already carries everything (it was designed to). Reuse `validate_flow.py`
+   for referential-integrity + cycle checks before building a graph.
+2. Build the type registry (`type` string → handler fn) and the
+   `StateGraph` builder that reads one `flows` row + its nodes/edges from
+   Supabase. Hand-seed a single flow (extend `003_seed_example_flow.sql`
+   pattern / `flow_support_example.json`), not production logic.
+3. Retrieval is a Phase 2 node: hybrid dense+sparse → RRF → Neo4j
+   graph-expansion → cross-encoder rerank → feed top rerank score into
+   `confidence_gate`. Designed, not built — see the RAG-method notes.
+   When building it, add the SQL retrieval functions (`match_doc_chunks`,
+   hybrid) and extend `eval/run_eval.py` with sparse/hybrid strategies to
+   compare against the dense baseline (hit@3 1.00 / MRR@10 0.94).
+
+Default to Groq for any LLM calls (classification, draft generation).
 
 ## Known issues / debt
 
