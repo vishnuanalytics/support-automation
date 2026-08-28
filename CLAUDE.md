@@ -47,8 +47,9 @@ later-phase work while an earlier phase is still open** — specifically:
   external source (see `zapier_docs.status` / `missed_runs` pattern) —
   external sources can fail transiently; don't let one bad scrape wipe
   content.
-- **Free/local tooling by default.** Local embeddings via
-  `sentence-transformers`, not a paid embedding API. For LLM calls in
+- **Free/local tooling by default.** Local embeddings via `fastembed`
+  (quantised ONNX `bge-small-en-v1.5`, CPU-only, no torch), not a paid
+  embedding API. For LLM calls in
   code, default to Groq (`llama-3.3-70b-versatile` or
   `llama-3.1-8b-instant`) over Anthropic/OpenAI APIs unless a step
   specifically needs something Groq can't do.

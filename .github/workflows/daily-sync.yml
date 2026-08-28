@@ -1,0 +1,53 @@
+name: Daily docs sync
+
+# Runs the Phase 1 ingestion on GitHub's runners so it never touches a
+# local machine. Incremental: after the first full load, each run only
+# re-embeds pages whose content-hash changed (usually a handful), so a
+# run is cheap and well inside the free tier.
+#
+# Requires these repo secrets (Settings -> Secrets and variables -> Actions):
+#   SUPABASE_URL            https://mjohgmivnxfwkqmlojqs.supabase.co
+#   SUPABASE_SERVICE_KEY    service_role key (Project Settings -> API)
+#   NEO4J_URI               neo4j+s://<id>.databases.neo4j.io
+#   NEO4J_USERNAME          Aura instance username
+#   NEO4J_PASSWORD          Aura instance password
+#   NEO4J_DATABASE          Aura DB name (some instances != "neo4j")
+
+on:
+  schedule:
+    - cron: "0 3 * * *"      # 03:00 UTC daily
+  workflow_dispatch: {}       # manual "Run workflow" button
+
+concurrency:
+  group: daily-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Scrape docs.zapier.com -> Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python scraper.py
+
+      - name: Sync graph -> Neo4j
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          NEO4J_URI: ${{ secrets.NEO4J_URI }}
+          NEO4J_USERNAME: ${{ secrets.NEO4J_USERNAME }}
+          NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
+          NEO4J_DATABASE: ${{ secrets.NEO4J_DATABASE }}
+        run: python neo4j_sync.py

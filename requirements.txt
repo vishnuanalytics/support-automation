@@ -1,7 +1,9 @@
 requests
 beautifulsoup4
 lxml
-sentence-transformers
+trafilatura
+fastembed
 supabase
+neo4j
 python-dotenv
  

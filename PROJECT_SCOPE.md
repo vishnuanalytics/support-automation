@@ -37,8 +37,21 @@ schema, not as production logic.
 ## Tooling / cost constraints
 
 - Prefer **free/local tooling** wherever it doesn't compromise the design:
-  local embeddings via `sentence-transformers` (`all-MiniLM-L6-v2`, 384-dim),
-  not a paid embedding API.
+  local embeddings, not a paid embedding API.
+  Model: **`BAAI/bge-small-en-v1.5`** (384-dim, 512-token window). Changed
+  from `all-MiniLM-L6-v2` on 2026-08-28 — MiniLM truncates input at ~256
+  word-pieces, so the ~400-token chunks were half-embedded. Same 384-dim, so
+  no schema change; reversible by swapping `EMBED_MODEL` in `scraper.py` and
+  re-embedding.
+- Embeddings run via **`fastembed`** (quantised ONNX, CPU-only, no torch) —
+  swapped in from `sentence-transformers` on 2026-08-28 to keep an old
+  laptop usable: ~15× smaller install, 2–4× faster on CPU. Same model, same
+  384-dim, L2-normalised output; verified cosine ~1.0 vs the
+  `sentence-transformers` build, so the swap needed **no re-embed and no
+  migration** — the ~3.5k vectors already in `doc_chunks` stay valid.
+- The recurring ingestion is meant to run on **GitHub Actions**
+  (`.github/workflows/daily-sync.yml`), not a local machine — see cron note
+  in Phase 1. Incremental runs only re-embed changed pages.
 - For LLM calls in code (draft generation, classification), **default to
   Groq** (`llama-3.3-70b-versatile` or `llama-3.1-8b-instant`) over
   Anthropic/OpenAI APIs, unless a step specifically needs a capability Groq
@@ -53,7 +66,7 @@ schema, not as production logic.
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Flow-definition schema (`flows`/`flow_nodes`/`flow_edges`), RLS, tenant isolation | **Complete** — migrated, seeded, verified in Supabase |
-| 1 | Zapier docs RAG ingestion: sitemap scrape → content-hash diff → chunk → embed → Supabase + Neo4j, daily via cron | **In progress** — scraper + schema written, not yet run against live Supabase; Neo4j sync not yet written |
+| 1 | Zapier docs RAG ingestion: sitemap scrape → content-hash diff → chunk → embed → Supabase + Neo4j, daily via cron | **Effectively done (2026-08-28)** — `004`+`005` schema live. `scraper.py` run: 401 docs / 3568 chunks / 920 links in Supabase, 0 failures; `fastembed` embeddings. `neo4j_sync.py` run against Aura: 401 Doc + 25 stub nodes, 63 Section, 396 IN_SECTION / 56 SUBSECTION_OF / 920 LINKS_TO. Retrieval eval set (`eval/`, 48 Q): dense baseline hit@3 1.00 / MRR@10 0.94. **Only open item:** commit + push so `.github/workflows/daily-sync.yml` activates (Supabase + Neo4j repo secrets already added by the user). |
 | 2 | Config-driven LangGraph interpreter: reads a flow row from Supabase, builds a real `StateGraph`, single hand-seeded flow | Not started |
 | 3 | Salesforce field write-back (case module/region/account/contact) from the classify node's output; Chatter-mention as the "ask human" mechanism | Not started |
 | 4 | Multi-tenant/multi-flow: prove several different flow configs run correctly | Not started (schema already supports it — `tenant_id`/`flow_id` built in from Phase 0) |
@@ -91,41 +104,92 @@ Files already delivered: `001_flow_schema.sql`, `002_rls_and_constraints.sql`,
 `003_seed_example_flow.sql`, `flow_support_example.json` (7-node/6-edge
 Support-team reference flow), `validate_flow.py`.
 
-## Phase 1 — Zapier docs RAG ingestion (in progress)
+## Phase 1 — Zapier docs RAG ingestion (functionally complete 2026-08-28; pending commit/push)
 
 Goal: scrape `docs.zapier.com`, detect new/changed/deleted pages daily, keep
 Supabase (content + vectors) and Neo4j (relations) in sync.
 
-Tables (separate migration, `004_docs_ingestion_schema.sql`):
-- **`zapier_docs`**(url pk, title, content_hash, raw_text, last_seen_at,
-  last_changed_at, status[`active`|`stale`|`deleted`], missed_runs int)
-- **`doc_chunks`**(chunk_id pk, doc_url fk, chunk_index, chunk_text,
-  embedding vector(384))
+Schema:
+- `004_docs_ingestion_schema.sql` — **`zapier_docs`**(url pk, title,
+  content_hash, raw_text [now stores Markdown], last_seen_at, last_changed_at,
+  status[`active`|`stale`|`deleted`], missed_runs) and **`doc_chunks`**
+  (chunk_id pk, doc_url fk, chunk_index, chunk_text, embedding vector(384)).
+- `005_docs_rag_metadata.sql` — adds `doc_chunks.heading_path` /
+  `chunk_type` / `token_count` / `section` / `fts` (generated tsvector +
+  GIN, for the lexical half of hybrid retrieval); an HNSW index on
+  `embedding`; the **`doc_links`**(source_url fk, target_url, anchor_text,
+  first_seen_at, last_seen_at, missed_runs, status) table with the same
+  soft-delete pattern; and explicit `select`-for-`authenticated` RLS
+  policies on all three docs tables (they hold public Zapier docs, not
+  tenant data — writes stay service-role only).
+- Both applied and verified against project `mjohgmivnxfwkqmlojqs` on
+  2026-08-28. (Applied via the SQL editor / MCP — `supabase_migrations` is
+  empty, so there is no CLI migration baseline.)
 
-Diff logic (already written in `scraper.py`):
-1. Pull `https://docs.zapier.com/sitemap.xml` for the current URL list.
-2. Per URL: fetch, strip nav/script/style, hash the cleaned text
-   (SHA-256). New hash vs. stored hash decides insert / re-embed / no-op.
-3. A URL that's in the DB but missing from today's sitemap is **not**
-   deleted immediately — `missed_runs` increments, and only after 3
-   consecutive misses does it flip to `status = 'deleted'`. This protects
-   against a transient scrape/sitemap failure wiping content.
-4. Chunking is naive fixed-size with overlap (1200 chars, 150 overlap) —
-   fine for a PoC, revisit if retrieval quality suffers.
+Ingestion logic (`scraper.py`, rewritten 2026-08-28):
+1. Pull `sitemap.xml` → `{url: lastmod}`.
+2. Fetch `<url>.md` (docs.zapier.com is Mintlify — every page has a clean
+   Markdown twin), but only when the URL is new or its `lastmod` is newer
+   than the stored `last_changed_at`. HTML + `trafilatura` is the fallback.
+3. Hash the normalised Markdown (SHA-256): new / changed → re-chunk +
+   re-embed + re-capture links; unchanged → bump `last_seen_at`.
+4. **Structure-aware chunking**: split on Markdown headings, keep fenced
+   code and tables whole, prepend a `> {breadcrumb} — {H1 / H2 / H3}`
+   context line to every chunk. ~400-token target. Embed with
+   `bge-small-en-v1.5` via `fastembed` (quantised ONNX, CPU, no torch),
+   L2-normalised.
+5. Same-host links → `doc_links` (feeds Neo4j `LINKS_TO`).
+6. Soft-delete unchanged: a URL or link missing from the sitemap/page gets
+   `missed_runs += 1`, `deleted` after 3 misses.
 
-**Not yet done in Phase 1:**
-- Running `004_docs_ingestion_schema.sql` against the live Supabase project.
-- Running `scraper.py` end-to-end for the first time (untested against the
-  live site — network access wasn't available to test this from the
-  design session).
-- Scheduling it via cron for actual daily execution.
-- **Neo4j sync is not written yet.** Needs: a node per doc, edges for
-  doc→doc relations (e.g. hyperlinks within a doc's content, shared
-  category/breadcrumb), keyed on the same `url` so Supabase and Neo4j stay
-  joinable. This is the next concrete piece of Phase 1 work.
+Neo4j (`neo4j_sync.py`): reads `zapier_docs` + `doc_links` from Supabase and
+builds, all keyed on `url` (same PK as Supabase, so the stores stay
+joinable):
+- `(:Doc {url, title, status, content_hash, last_changed_at, synced_at})`,
+  soft-delete status mirrored.
+- `(:Section {path})` from URL path prefixes; `(:Doc)-[:IN_SECTION]->`
+  deepest section; `(:Section)-[:SUBSECTION_OF]->` parent.
+- `(:Doc)-[:LINKS_TO]->(:Doc)` from `doc_links` (rebuilt each run;
+  not-yet-ingested targets become stub Doc nodes).
 
-Files already delivered: `004_docs_ingestion_schema.sql`, `scraper.py`,
-`requirements.txt`.
+**Done in Phase 1 (2026-08-28):**
+- `.env` created (gitignored) with `SUPABASE_URL` + `SUPABASE_SERVICE_KEY`.
+- First live `scraper.py` run against `docs.zapier.com`: sitemap 401 URLs
+  → 401 `zapier_docs` (all `active`), 3568 `doc_chunks` (0 null embeddings,
+  avg ~297 tok, types prose/code/table), 920 `doc_links`. 0 failures.
+- Embeddings swapped `sentence-transformers` → `fastembed` (see tooling
+  note). No re-embed / migration.
+- Neo4j: user provisioned an **Aura Free** instance (creds in `.env`;
+  non-standard — username *and* DB name are the instance id, not `neo4j`).
+  `neo4j_sync.py` patched to read `NEO4J_DATABASE` from env (was hardcoded
+  `"neo4j"`) and to split the two-pattern `MATCH`es (cartesian-product
+  notice). First run on 2026-08-28, idempotent on re-run: **401 Doc + 25
+  stub** nodes, **63 Section**, **396 IN_SECTION / 56 SUBSECTION_OF / 920
+  LINKS_TO**. (Most-linked target is `partner-solutions/workflow-api/intro`
+  @52 — a stub; it's linked heavily but not in the sitemap.)
+- `.github/workflows/daily-sync.yml` — scrape + Neo4j steps both wired;
+  needs 6 repo secrets (SUPABASE_URL/SERVICE_KEY, NEO4J_URI/USERNAME/
+  PASSWORD/DATABASE). User reports the secrets are added.
+- Retrieval eval set: `eval/qrels.jsonl` (48 hand-written questions → gold
+  doc URLs, spanning every section) + `eval/run_eval.py` (dense pgvector
+  ranking in numpy, no DB function needed). **Dense-only baseline
+  (2026-08-28):** hit@1 0.896, hit@3 1.000, hit@5 1.000, MRR@10 0.944.
+  Sparse / RRF / graph / rerank strategies are Phase 2 — `run_eval.py` has
+  the extension point noted.
+
+**Still open in Phase 1:**
+- **Commit + push** so `.github/workflows/daily-sync.yml` lands on the
+  default branch and the daily cron / manual dispatch becomes available.
+  This is the only thing between here and Phase 1 fully closed.
+- Minor: `scraper.py` builds the `.md` URL as `url.rstrip("/") + ".md"`,
+  which for the bare `https://docs.zapier.com` root resolves the host
+  `docs.zapier.com.md` (one warning, recovers via HTML fallback). Harmless;
+  guard if it ever matters.
+
+Files delivered: `004_docs_ingestion_schema.sql`, `005_docs_rag_metadata.sql`,
+`scraper.py`, `neo4j_sync.py`, `.mcp.json` (Neo4j Cypher MCP config),
+`requirements.txt`, `.github/workflows/daily-sync.yml`, `.env` (gitignored),
+`eval/qrels.jsonl`, `eval/run_eval.py`, `eval/README.md`.
 
 ## Working conventions for whichever model picks this up
 
@@ -147,8 +211,36 @@ Files already delivered: `004_docs_ingestion_schema.sql`, `scraper.py`,
 
 ## Immediate next step
 
-Finish Phase 1: run `004_docs_ingestion_schema.sql`, run `scraper.py`
-against the live Supabase project and fix whatever breaks (it hasn't been
-tested against the real site yet), then write the Neo4j sync piece, then set
-up the cron schedule. After that, Phase 2 (the LangGraph interpreter) is
-next.
+Phase 1 is functionally complete as of 2026-08-28 — scrape, embed, Neo4j
+graph, and the retrieval eval baseline all ran green (see the Phase 1
+section for numbers). Everything so far is **uncommitted on `main`**.
+
+1. Commit the Phase 1 changeset (code + this file together) and push, so
+   `.github/workflows/daily-sync.yml` reaches the default branch and the
+   daily cron / manual `workflow_dispatch` turns on. Repo secrets are
+   already set by the user. `git status` before this step:
+   modified `scraper.py` `neo4j_sync.py` `requirements.txt` `CLAUDE.md`
+   `PROJECT_SCOPE.md`; new `005_docs_rag_metadata.sql` `.mcp.json`
+   `.github/` `eval/`.
+2. After the first Actions run, confirm it was a no-op incremental
+   (0 new / 0 changed) — proves the incremental path works on a fresh
+   runner.
+
+Then **Phase 2** (config-driven LangGraph interpreter) is next. The full
+retrieval pipeline (hybrid dense+sparse → RRF → Neo4j graph-expansion →
+cross-encoder rerank → feed top rerank score into `confidence_gate`) is
+part of Phase 2 — designed, not built. See the RAG-method notes. Extend
+`eval/run_eval.py` with the sparse/hybrid strategies at that point and
+compare against the dense baseline recorded above.
+
+## Known issues / debt
+
+- `tenant_members` has RLS enabled with **no policy** (Supabase advisor
+  `rls_enabled_no_policy`). The `flows` RLS policies sub-select from
+  `tenant_members`, so under a normal authenticated session that sub-select
+  returns nothing and a user can't see their own flows. Works today only
+  because everything runs as service-role. Fix before Phase 2 wires a real
+  auth'd client — add a policy letting a user read their own membership
+  rows.
+- `vector` extension lives in `public` (advisor `extension_in_public`).
+  Cosmetic for now; move to an `extensions` schema if it's ever a concern.
