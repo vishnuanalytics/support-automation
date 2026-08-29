@@ -43,6 +43,7 @@ from interpreter.builder import build_graph  # noqa: E402
 from interpreter.flows.validate_flow import Flow, check_flow  # noqa: E402
 from interpreter.loader import FlowInvalid, FlowNotFound, load_flow  # noqa: E402
 from interpreter.registry import known_types  # noqa: E402
+from interpreter.runs import record_run  # noqa: E402
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 ANON_KEY = os.environ.get("SUPABASE_ANON_KEY") or os.environ["SUPABASE_SERVICE_KEY"]
@@ -273,7 +274,11 @@ def run_flow(flow_id: str, body: RunIn, c: Caller = Depends(caller)) -> dict:
         final = build_graph(flow).invoke({"case": body.case, "trace": []})
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"run failed: {type(e).__name__}: {e}")
+
+    run_id = record_run(flow, final, case=body.case, source="api", sb=_service)
+
     return {
+        "run_id": run_id,
         "trace": final.get("trace", []),
         "outcome": final.get("outcome"),
         "tier": final.get("tier"),
@@ -287,3 +292,53 @@ def run_flow(flow_id: str, body: RunIn, c: Caller = Depends(caller)) -> dict:
             for r in final.get("retrieval", [])
         ],
     }
+
+
+# ── runs (Phase 6 observability) ──────────────────────────────────────
+@app.get("/api/runs/stats")
+def runs_stats(c: Caller = Depends(caller)) -> dict:
+    rows = (
+        c.sb.table("runs")
+        .select("outcome, tier, team, confidence, created_at")
+        .order("created_at", desc=True)
+        .limit(500)
+        .execute().data
+        or []
+    )
+    by_outcome: dict[str, int] = {}
+    by_tier: dict[str, int] = {}
+    low = 0
+    for r in rows:
+        by_outcome[r.get("outcome") or "?"] = by_outcome.get(r.get("outcome") or "?", 0) + 1
+        by_tier[r.get("tier") or "?"] = by_tier.get(r.get("tier") or "?", 0) + 1
+        if (r.get("confidence") is not None) and float(r["confidence"]) < 0.4:
+            low += 1
+    return {"total": len(rows), "by_outcome": by_outcome, "by_tier": by_tier, "low_confidence": low}
+
+
+@app.get("/api/runs")
+def list_runs(
+    flow_id: str | None = None,
+    outcome: str | None = None,
+    limit: int = 60,
+    c: Caller = Depends(caller),
+) -> list[dict]:
+    q = (
+        c.sb.table("runs")
+        .select("run_id, flow_id, team, tier, region, outcome, confidence, subject, source, created_at")
+        .order("created_at", desc=True)
+        .limit(min(max(limit, 1), 200))
+    )
+    if flow_id:
+        q = q.eq("flow_id", flow_id)
+    if outcome:
+        q = q.eq("outcome", outcome)
+    return q.execute().data or []
+
+
+@app.get("/api/runs/{run_id}")
+def get_run(run_id: str, c: Caller = Depends(caller)) -> dict:
+    rows = c.sb.table("runs").select("*").eq("run_id", run_id).execute().data or []
+    if not rows:
+        raise HTTPException(404, "run not found")
+    return rows[0]

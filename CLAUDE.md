@@ -9,7 +9,7 @@ file is the operating rules for how to work in it.
 
 ```
 docs/            PROJECT_SCOPE.md (the real memory), SALESFORCE_SETUP.md
-db/migrations/   001_*.sql .. NNN_*.sql   (sequential, single-concern)
+db/migrations/   001_*.sql .. 010_*.sql   (sequential, single-concern)
 ingestion/       Phase 1 — scraper.py, neo4j_sync.py, eval/
 interpreter/     Phase 2-4 — the config-driven LangGraph interpreter
   flows/         validate_flow.py, flow_support_example.json

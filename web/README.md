@@ -39,3 +39,16 @@ member of (`tenant_members`) — RLS, enforced by your session token.
 - **status toggle** — draft ⇄ published (saved with the flow).
 - **Run a case** (right, below the inspector) — `POST /flows/{id}/run`;
   shows the trace, outcome, gate, Salesforce writeback, and retrieved docs.
+  Every run is also persisted.
+
+## Runs view (Phase 6)
+
+The **Runs** tab (sidebar toggle) is the observability surface:
+
+- stat tiles — total runs, count per outcome, per tier, and a
+  low-confidence (`< 0.4`) count.
+- a filterable table (all / auto_reply / ask_human / handover) of recent
+  runs across every tenant you belong to, RLS-scoped.
+- click a run → the **why**: each `trace` step (expandable to its `data`),
+  the gate arithmetic (`retrieval · draft → score vs threshold → PASS/FAIL`),
+  the retrieved docs, and the Salesforce writeback.

@@ -1,5 +1,13 @@
 import { supabase } from "./supabase";
-import type { Flow, FlowMeta, NodeTypesResp, RunResult } from "./types";
+import type {
+  Flow,
+  FlowMeta,
+  NodeTypesResp,
+  RunDetail,
+  RunResult,
+  RunRow,
+  RunStats,
+} from "./types";
 
 const BASE = (import.meta.env.VITE_API_BASE as string) || ""; // "" -> vite proxy
 
@@ -54,4 +62,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ case: caseJson }),
     }),
+
+  runStats: () => req<RunStats>("/runs/stats"),
+  listRuns: (q: { flow_id?: string; outcome?: string; limit?: number } = {}) => {
+    const p = new URLSearchParams();
+    if (q.flow_id) p.set("flow_id", q.flow_id);
+    if (q.outcome) p.set("outcome", q.outcome);
+    if (q.limit) p.set("limit", String(q.limit));
+    const qs = p.toString();
+    return req<RunRow[]>(`/runs${qs ? `?${qs}` : ""}`);
+  },
+  getRun: (id: string) => req<RunDetail>(`/runs/${id}`),
 };

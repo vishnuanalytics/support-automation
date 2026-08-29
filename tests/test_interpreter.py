@@ -17,6 +17,7 @@ from interpreter import conditions, salesforce
 from interpreter.builder import FlowBuildError, FlowRoutingError, build_graph
 from interpreter.flows.validate_flow import Flow, check_flow
 from interpreter.registry import h_ask_human, h_sf_writeback, register
+from interpreter.runs import build_row
 
 # hermetic: a populated .env (SF creds, GROQ key) must not turn these into
 # live calls. The imports above run load_dotenv() (via scraper.py), so clear
@@ -242,6 +243,31 @@ def test_ask_human_without_sf_id_just_records_channel():
     state = {"case": {}, "confidence": 0.3, "draft": "try this"}
     outcome = h_ask_human(state, {"_node_id": "ah", "channel": "salesforce_chatter"})["outcome"]
     assert "chatter" not in outcome
+
+
+# --------------------------------------------------------------------------
+# Phase 6 — runs.build_row (offline shaping; no DB)
+# --------------------------------------------------------------------------
+def test_build_row_shapes_a_runs_record():
+    flow = {"flow_id": "f1", "tenant_id": "t1", "team": "support"}
+    final = {
+        "tier": "premium", "region": "EMEA", "confidence": 0.32,
+        "confidence_gate": {"pass": False, "threshold": 0.45, "score": 0.32},
+        "outcome": {"action": "ask_human", "channel": "salesforce_chatter"},
+        "trace": [{"node_id": "g", "type": "confidence_gate", "summary": "FAIL", "data": {}}],
+        "retrieval": [
+            {"doc_url": "https://x/a", "heading_path": "A", "rerank_score": 7.1, "chunk_text": "big"},
+        ],
+        "sf_writeback": {"target": None, "status": "no sf_id on case"},
+    }
+    row = build_row(flow, final, case={"case_id": "C-1", "subject": "hi"}, source="cli")
+    assert row["flow_id"] == "f1" and row["tenant_id"] == "t1" and row["team"] == "support"
+    assert row["source"] == "cli" and row["case_id"] == "C-1" and row["subject"] == "hi"
+    assert row["outcome"] == "ask_human" and row["tier"] == "premium"
+    assert row["confidence"] == 0.32 and row["gate"]["threshold"] == 0.45
+    # retrieval is slimmed — no chunk_text
+    assert row["retrieval"] == [{"doc_url": "https://x/a", "heading_path": "A", "rerank_score": 7.1}]
+    assert "chunk_text" not in row["retrieval"][0]
 
 
 # --------------------------------------------------------------------------
