@@ -111,7 +111,22 @@ def complete(
     if prov == "anthropic":
         return _anthropic_complete(system, user, model, max_tokens, json_object)
 
-    # groq (OpenAI-compatible chat completions)
+    return _groq_complete(system, user, model, max_tokens, temperature, json_object)
+
+
+# cap on how long we'll sit blocked on a single rate-limited Groq call
+GROQ_MAX_BACKOFF_S = float(os.environ.get("GROQ_MAX_BACKOFF_S", "35"))
+
+
+def _retry_after_seconds(err: Any) -> float:
+    """Pull the wait hint out of a Groq 429 ('try again in 11.25s'), capped."""
+    m = re.search(r"try again in ([\d.]+)s", str(err))
+    secs = float(m.group(1)) + 0.5 if m else 2.0
+    return min(secs, GROQ_MAX_BACKOFF_S)
+
+
+def _groq_call(model: str, system: str, user: str, max_tokens: int,
+               temperature: float, *, response_format: bool) -> Any:
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": [
@@ -121,15 +136,97 @@ def complete(
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
-    if json_object:
+    # gpt-oss reasoning models burn completion budget on hidden reasoning
+    # tokens; drafting / triage don't need deep reasoning and the extra
+    # tokens are what push JSON replies past max_tokens into a truncated
+    # (invalid) object. Keep it low.
+    if model.startswith("openai/gpt-oss"):
+        kwargs["reasoning_effort"] = "low"
+    if response_format:
         kwargs["response_format"] = {"type": "json_object"}
-    resp = _groq().chat.completions.create(**kwargs)
-    u = getattr(resp, "usage", None)
-    last_usage = (
-        {"prompt": u.prompt_tokens, "completion": u.completion_tokens, "total": u.total_tokens}
-        if u else None
-    )
-    return resp.choices[0].message.content or ""
+
+    try:
+        from groq import RateLimitError
+    except Exception:  # noqa: BLE001
+        RateLimitError = ()  # type: ignore[assignment]
+
+    import time as _time
+    for attempt in range(3):
+        try:
+            return _groq().chat.completions.create(**kwargs)
+        except RateLimitError as e:  # type: ignore[misc]
+            if attempt == 2:
+                raise
+            _time.sleep(_retry_after_seconds(e))
+
+
+def _groq_complete(system: str, user: str, model: str, max_tokens: int,
+                   temperature: float, json_object: bool) -> str:
+    global last_usage
+    try:
+        from groq import BadRequestError
+    except Exception:  # noqa: BLE001
+        BadRequestError = ()  # type: ignore[assignment]
+
+    def _record(resp: Any) -> str:
+        global last_usage
+        u = getattr(resp, "usage", None)
+        last_usage = (
+            {"prompt": u.prompt_tokens, "completion": u.completion_tokens,
+             "total": u.total_tokens}
+            if u else None
+        )
+        return resp.choices[0].message.content or ""
+
+    try:
+        return _record(_groq_call(model, system, user, max_tokens, temperature,
+                                  response_format=json_object))
+    except BadRequestError as e:  # type: ignore[misc]
+        code = getattr(e, "code", None) or ""
+        body = getattr(e, "body", None) or {}
+        if not json_object or ("json_validate_failed" not in str(code)
+                               and "json_validate_failed" not in str(body)):
+            raise
+        # Groq's server-side JSON grammar rejected a (usually truncated)
+        # object. Salvage the partial if it parses, else retry once free-form
+        # with more headroom — a truncated free-form reply still comes back
+        # 200 and _safe_json can recover the leading object.
+        partial = ""
+        try:
+            partial = body.get("error", {}).get("failed_generation", "") or ""
+        except AttributeError:
+            pass
+        if partial:
+            salvaged = _coerce_json(partial)
+            if salvaged is not None:
+                last_usage = None
+                return salvaged
+        resp = _groq_call(
+            model,
+            system + "\n\nReturn ONLY the JSON object — no prose, no code fences.",
+            user,
+            max(max_tokens, 1024),
+            temperature,
+            response_format=False,
+        )
+        return _record(resp)
+
+
+def _coerce_json(s: str) -> str | None:
+    """Return `s` (or its leading {...} span) if it parses as JSON, else None."""
+    import json as _json
+    import re as _re
+
+    span = _re.search(r"\{.*\}", s or "", _re.S)
+    for candidate in (s, span.group(0) if span else None):
+        if not candidate:
+            continue
+        try:
+            _json.loads(candidate)
+            return candidate
+        except Exception:  # noqa: BLE001
+            continue
+    return None
 
 
 def _anthropic_complete(system: str, user: str, model: str, max_tokens: int,
