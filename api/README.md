@@ -13,7 +13,9 @@ service-role client is used only for the interpreter's own machinery
 ## Run
 
 ```bash
-uvicorn api.main:app --reload           # :8000
+uvicorn api.main:app --reload           # :8000  — the HTTP API
+python -m api.worker                     # the job worker (drains the `jobs` queue)
+python -m api.worker --once              # ... or drain-and-exit (cron / tests)
 ```
 Needs `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `SUPABASE_ANON_KEY` in `.env`.
 `WEB_ORIGINS` (comma-sep) overrides the CORS allow-list (default
@@ -33,7 +35,9 @@ Needs `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `SUPABASE_ANON_KEY` in `.env`.
 | `POST /flows/{id}/publish` | snapshot the draft → new `flow_versions` row, point `published_version` at it. `422` if the draft is invalid. |
 | `POST /flows/{id}/rollback` | body `{version}` — restore the draft from that snapshot and re-publish it |
 | `POST /flows/{id}/validate` | `{valid, errors}` for a posted flow dict, no write |
-| `POST /flows/{id}/run` | body `{case}` → loads the **published snapshot**, compiles + `invoke`s → `{run_id, …}`; persists a `runs` row incl. `flow_version` |
+| `POST /flows/{id}/run` | **synchronous** (the editor's "try a case") — loads the **published snapshot**, `invoke`s → `{run_id, …}`; persists a `runs` row incl. `flow_version`. Optional `Idempotency-Key` header → a run with that `(flow_id, key)` already recorded is returned as `{run_id, idempotent_replay: true}` without re-running. |
+| `POST /flows/{id}/enqueue` | **async** (the Salesforce trigger) — body `{case, idempotency_key?}` → `202 {job_id}` (or `{deduped: true}`). A worker executes it. |
+| `GET /jobs/{job_id}` | `{status, attempts, result, error}` — `result.run_id` once `done` |
 | `GET /runs/stats` | `{total, by_outcome, by_tier, low_confidence}` over the last 500 visible runs |
 | `GET /runs?flow_id=&outcome=&limit=` | RLS-scoped list, newest first |
 | `GET /runs/{run_id}` | full run — `trace`, `gate`, `retrieval`, `sf_writeback`, `case_payload` (the "why") |

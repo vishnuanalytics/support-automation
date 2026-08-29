@@ -11,6 +11,8 @@ import os
 import pathlib
 import sys
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from interpreter import conditions, groundedness, salesforce
@@ -19,15 +21,24 @@ from interpreter.flows.validate_flow import Flow, check_flow
 from interpreter.registry import _norm_tier, h_ask_human, h_confidence_gate, h_sf_writeback, register
 from interpreter.runs import build_row
 
-# hermetic: a populated .env (SF creds, GROQ key) must not turn these into
-# live calls. The imports above run load_dotenv() (via scraper.py), so clear
-# the SF vars *after* importing and reset the cached client.
-for _k in ("SF_USERNAME", "SF_PASSWORD", "SF_SECURITY_TOKEN",
-           "SF_CONSUMER_KEY", "SF_CONSUMER_SECRET",
-           "SF_PRIVATE_KEY", "SF_PRIVATE_KEY_FILE"):
+_HERMETIC = ("SF_USERNAME", "SF_PASSWORD", "SF_SECURITY_TOKEN", "SF_CONSUMER_KEY",
+             "SF_CONSUMER_SECRET", "SF_PRIVATE_KEY", "SF_PRIVATE_KEY_FILE", "GROQ_API_KEY")
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_env(monkeypatch):
+    """A populated .env (or another test module's load_dotenv) must not turn
+    these unit tests into live SF/LLM calls. Runs before every test here."""
+    for k in _HERMETIC:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(salesforce, "_client_obj", None, raising=False)
+    assert not salesforce.available()
+
+
+# also clear at import time for the `python -m tests.test_interpreter` path
+for _k in _HERMETIC:
     os.environ.pop(_k, None)
 salesforce._client_obj = None
-assert not salesforce.available(), "SF creds leaked into the offline test env"
 
 
 # --------------------------------------------------------------------------
