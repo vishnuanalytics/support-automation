@@ -26,6 +26,28 @@ Handler = Callable[[CaseState, dict], dict]
 
 _REGISTRY: dict[str, Handler] = {}
 
+# A single doc chunk can be ~27k chars; five of them concatenated blow past
+# a hosted model's per-request token ceiling (Groq free tier: 8k TPM ->
+# hard 413). Cap what actually goes into a prompt.
+CTX_PER_CHUNK = 1800
+CTX_TOTAL = 7000
+
+
+def _context_block(retrieval: list[dict], *, max_chunks: int = 5,
+                   per_chunk: int = CTX_PER_CHUNK, total: int = CTX_TOTAL,
+                   with_urls: bool = True) -> str:
+    parts: list[str] = []
+    used = 0
+    for i, r in enumerate(retrieval[:max_chunks]):
+        text = (r.get("chunk_text") or "")[:per_chunk]
+        if used + len(text) > total:
+            text = text[: max(0, total - used)]
+        if not text:
+            break
+        parts.append(f"[{i+1}] {r.get('doc_url','')}\n{text}" if with_urls else text)
+        used += len(text)
+    return "\n\n---\n\n".join(parts)
+
 
 def register(type_name: str) -> Callable[[Handler], Handler]:
     def deco(fn: Handler) -> Handler:
@@ -236,9 +258,7 @@ def h_sf_writeback(state: CaseState, config: dict) -> dict:
 def h_draft(state: CaseState, config: dict) -> dict:
     case = state.get("case", {})
     retrieval = state.get("retrieval", [])
-    context = "\n\n---\n\n".join(
-        f"[{i+1}] {r['doc_url']}\n{r['chunk_text']}" for i, r in enumerate(retrieval[:5])
-    ) or "(no retrieved context)"
+    context = _context_block(retrieval) or "(no retrieved context)"
     body = f"Subject: {case.get('subject','')}\n\n{case.get('body','')}".strip()
 
     raw = llm.complete(

@@ -45,7 +45,19 @@ def _lexical(draft: str, chunks: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _judge(draft: str, chunks: list[dict[str, Any]]) -> dict[str, Any]:
-    context = "\n\n---\n\n".join(c.get("chunk_text", "") for c in chunks[:6]) or "(none)"
+    # cap each chunk / the total — a lone 27k-char chunk otherwise blows the
+    # judge model's per-request token limit (mirrors registry._context_block).
+    used = 0
+    _parts = []
+    for c in chunks[:6]:
+        t = (c.get("chunk_text", "") or "")[:1800]
+        if used + len(t) > 7000:
+            t = t[: max(0, 7000 - used)]
+        if not t:
+            break
+        _parts.append(t)
+        used += len(t)
+    context = "\n\n---\n\n".join(_parts) or "(none)"
     raw = llm.complete(
         system=(
             "You check whether a support reply is grounded in the given docs. "

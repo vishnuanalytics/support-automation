@@ -380,6 +380,26 @@ def test_llm_recovers_from_groq_json_validate_failed(monkeypatch):
     assert calls["n"] == 2   # first (JSON) 400'd, free-form retry recovered
 
 
+def test_context_block_caps_oversized_chunks():
+    from interpreter.registry import CTX_TOTAL, _context_block
+
+    huge = [{"doc_url": f"u{i}", "chunk_text": "x" * 30000} for i in range(5)]
+    block = _context_block(huge)
+    # total payload stays bounded regardless of raw chunk size
+    assert len(block) <= CTX_TOTAL + 5 * 40   # + a little for the [n] url headers
+    assert block.startswith("[1] u0")
+
+
+def test_retry_after_seconds_parses_groq_hint():
+    from interpreter import llm
+
+    msg = ("Rate limit reached ... Please try again in 11.2575s. Need more tokens?")
+    assert 11.0 < llm._retry_after_seconds(msg) <= 12.5
+    # no hint -> small default; everything capped at GROQ_MAX_BACKOFF_S
+    assert llm._retry_after_seconds("boom") == 2.0
+    assert llm._retry_after_seconds("try again in 999s") == llm.GROQ_MAX_BACKOFF_S
+
+
 # --------------------------------------------------------------------------
 # Phase 12 — source scoping (cross-tenant isolation)
 # --------------------------------------------------------------------------

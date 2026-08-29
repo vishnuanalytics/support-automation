@@ -114,6 +114,17 @@ def complete(
     return _groq_complete(system, user, model, max_tokens, temperature, json_object)
 
 
+# cap on how long we'll sit blocked on a single rate-limited Groq call
+GROQ_MAX_BACKOFF_S = float(os.environ.get("GROQ_MAX_BACKOFF_S", "35"))
+
+
+def _retry_after_seconds(err: Any) -> float:
+    """Pull the wait hint out of a Groq 429 ('try again in 11.25s'), capped."""
+    m = re.search(r"try again in ([\d.]+)s", str(err))
+    secs = float(m.group(1)) + 0.5 if m else 2.0
+    return min(secs, GROQ_MAX_BACKOFF_S)
+
+
 def _groq_call(model: str, system: str, user: str, max_tokens: int,
                temperature: float, *, response_format: bool) -> Any:
     kwargs: dict[str, Any] = {
@@ -133,7 +144,20 @@ def _groq_call(model: str, system: str, user: str, max_tokens: int,
         kwargs["reasoning_effort"] = "low"
     if response_format:
         kwargs["response_format"] = {"type": "json_object"}
-    return _groq().chat.completions.create(**kwargs)
+
+    try:
+        from groq import RateLimitError
+    except Exception:  # noqa: BLE001
+        RateLimitError = ()  # type: ignore[assignment]
+
+    import time as _time
+    for attempt in range(3):
+        try:
+            return _groq().chat.completions.create(**kwargs)
+        except RateLimitError as e:  # type: ignore[misc]
+            if attempt == 2:
+                raise
+            _time.sleep(_retry_after_seconds(e))
 
 
 def _groq_complete(system: str, user: str, model: str, max_tokens: int,
