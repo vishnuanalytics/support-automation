@@ -32,12 +32,17 @@ def load_flow(
     team: str | None = None,
     status: str = "published",
     sb=None,
+    validate: bool = True,
 ) -> dict[str, Any]:
     """
     Fetch a flow by `flow_id`, or by `(tenant_id, team, status)` (defaults to
     the single published flow for that team -- guaranteed unique by the
     `uq_one_published_flow_per_team` index). Returns the flow as a dict:
     {flow_id, tenant_id, team, name, version, status, nodes:[...], edges:[...]}.
+
+    `sb` may be a user-scoped Supabase client (RLS applies). `validate=False`
+    skips the structural check -- the editor needs to load a work-in-progress
+    flow even while it's temporarily invalid.
     """
     sb = sb or get_supabase()
 
@@ -104,15 +109,16 @@ def load_flow(
         ],
     }
 
-    parsed = Flow.model_validate(flow_dict)
-    # The interpreter runs arbitrary flows (a CSM / offboarding flow needn't
-    # have a confidence_gate), so only the hard checks apply here: referential
-    # integrity, no orphans, no cycles. EXPECTED_TYPES is a "does this look
-    # like the canonical support flow" convention kept for validate_flow.py's
-    # CLI on flow_support_example.json.
-    errors = check_flow(parsed, require_expected_types=False)
-    if errors:
-        raise FlowInvalid(errors)
+    if validate:
+        parsed = Flow.model_validate(flow_dict)
+        # The interpreter runs arbitrary flows (a CSM / offboarding flow needn't
+        # have a confidence_gate), so only the hard checks apply here:
+        # referential integrity, no orphans, no cycles. EXPECTED_TYPES is a
+        # "does this look like the canonical support flow" convention kept for
+        # validate_flow.py's CLI on flow_support_example.json.
+        errors = check_flow(parsed, require_expected_types=False)
+        if errors:
+            raise FlowInvalid(errors)
 
     return flow_dict
 

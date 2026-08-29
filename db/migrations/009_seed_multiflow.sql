@@ -21,7 +21,7 @@
 -- respectively -- three behaviours, zero code differences.
 --
 -- Auth users are created out of band (like 4ddf2413 was, via signup): the
--- synthetic tenant-B owner b2b20000-0000-4000-8000-000000000002 was inserted
+-- synthetic tenant-B owner 57c26330-cb98-475a-875f-8f8a925672fd was inserted
 -- into auth.users via the SQL editor. This migration only seeds tenant_members
 -- + flows, matching 003's pattern.
 
@@ -31,7 +31,7 @@ where flow_id = '11111111-1111-1111-1111-111111111111';
 
 -- ── tenant B membership ────────────────────────────────────────────────
 insert into tenant_members (user_id, tenant_id, role) values
-  ('b2b20000-0000-4000-8000-000000000002', '22222222-2222-2222-2222-222222222222', 'owner')
+  ('57c26330-cb98-475a-875f-8f8a925672fd', '22222222-2222-2222-2222-222222222222', 'owner')
 on conflict (user_id, tenant_id) do nothing;
 
 -- ── B) tenant-B support flow: human-review-first ───────────────────────

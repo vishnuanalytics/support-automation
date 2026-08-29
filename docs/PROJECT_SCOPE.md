@@ -282,8 +282,8 @@ Default to Groq for any LLM calls (classification, draft generation).
   simulated JWTs see only their tenant's flows. The interpreter itself still
   runs as service-role (`scraper.get_supabase`); a real auth'd client is a
   Phase 5 concern.
-- Phase 4 added a **synthetic auth user** `b2b20000-0000-4000-8000-000000000002`
-  (`tenant-b-owner@example.test`) directly in `auth.users` via the SQL editor,
+- Phase 4 added a **synthetic auth user** `57c26330-cb98-475a-875f-8f8a925672fd`
+  (`globex-owner@example.test`) directly in `auth.users` via the SQL editor,
   so `009` could seed its `tenant_members` row (FK to `auth.users`). Not a
   real login. Same out-of-band pattern as `4ddf2413` (created via signup).
 - `009` seeds `Account.Tier__c` values as `basic/premium/enterprise`; the
