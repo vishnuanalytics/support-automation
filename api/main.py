@@ -256,6 +256,12 @@ def save_flow(flow_id: str, body: FlowIn, c: Caller = Depends(caller)) -> dict:
     return load_flow(flow_id=flow_id, sb=c.sb, validate=False)
 
 
+@app.delete("/api/flows/{flow_id}", status_code=204)
+def delete_flow(flow_id: str, c: Caller = Depends(caller)) -> None:
+    _require_visible(c, flow_id)
+    c.sb.table("flows").delete().eq("flow_id", flow_id).execute()  # cascades nodes/edges
+
+
 @app.post("/api/flows/{flow_id}/run")
 def run_flow(flow_id: str, body: RunIn, c: Caller = Depends(caller)) -> dict:
     _require_visible(c, flow_id)                       # RLS gate
