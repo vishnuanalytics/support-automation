@@ -46,6 +46,14 @@ def test_kb_endpoints_need_a_token():
     assert client.post("/api/kb/collections", json={"name": "x"}).status_code == 401
 
 
+def test_google_status_needs_a_token_but_callback_is_public():
+    assert client.get("/api/integrations/google/status").status_code == 401
+    assert client.get("/api/integrations/google/authorize").status_code == 401
+    # the OAuth callback has no bearer (the browser follows a Google redirect)
+    r = client.get("/api/integrations/google/callback?error=access_denied")
+    assert r.status_code == 200 and "failed" in r.text
+
+
 def test_flows_requires_a_bearer_token():
     assert client.get("/api/flows").status_code == 401
     assert client.get("/api/flows", headers={"Authorization": "Basic xyz"}).status_code == 401

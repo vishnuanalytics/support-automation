@@ -89,18 +89,65 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
   const [entries, setEntries] = useState<KbEntryRow[]>([]);
   const [openId, setOpenId] = useState<string | "new" | null>(null);
 
+  const [gApi, setGApi] = useState<{ configured: boolean; connected: boolean }>({
+    configured: false,
+    connected: false,
+  });
+
   const load = useCallback(async () => {
     setEntries(await api.kb.listEntries(col.source_id));
   }, [col.source_id]);
 
+  const loadGoogle = useCallback(async () => {
+    try {
+      const s = await api.google.status();
+      setGApi({ configured: s.configured, connected: !!s.connected[col.tenant_id] });
+    } catch {
+      setGApi({ configured: false, connected: false });
+    }
+  }, [col.tenant_id]);
+
   useEffect(() => {
     void load();
-  }, [load]);
+    void loadGoogle();
+  }, [load, loadGoogle]);
 
   async function removeCollection() {
     if (!confirm(`archive collection "${col.name}" and all its entries?`)) return;
     await api.kb.deleteCollection(col.source_id);
     onChange();
+  }
+
+  async function connectGoogle() {
+    const { url } = await api.google.authorize(col.tenant_id);
+    const w = window.open(url, "google-oauth", "width=520,height=640");
+    const timer = setInterval(() => {
+      if (w?.closed) {
+        clearInterval(timer);
+        void loadGoogle();
+      }
+    }, 800);
+  }
+
+  async function linkGdoc() {
+    const u = prompt("Google Doc URL")?.trim();
+    if (!u) return;
+    try {
+      await api.kb.linkGdoc(col.source_id, u);
+      void load();
+      onChange();
+    } catch (e) {
+      alert(e instanceof ApiError ? String(e.detail) : String(e));
+    }
+  }
+
+  async function resync(entryId: string) {
+    try {
+      await api.kb.resyncGdoc(entryId);
+      void load();
+    } catch (e) {
+      alert(e instanceof ApiError ? String(e.detail) : String(e));
+    }
   }
 
   return (
@@ -112,6 +159,12 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
         </div>
         <div className="row">
           <button onClick={() => setOpenId("new")}>＋ entry</button>
+          {gApi.configured &&
+            (gApi.connected ? (
+              <button onClick={linkGdoc}>＋ Google Doc</button>
+            ) : (
+              <button onClick={connectGoogle}>Connect Google</button>
+            ))}
           <button className="err" onClick={removeCollection}>archive collection</button>
         </div>
       </div>
@@ -141,14 +194,29 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
           {entries.map((e) => (
             <Fragment key={e.entry_id}>
               <tr>
-                <td>{e.title}</td>
-                <td className="muted">{e.chunk_count}</td>
-                <td className="muted">{new Date(e.updated_at).toLocaleString()}</td>
                 <td>
+                  {e.origin === "gdoc" && <span title={e.gdoc_url ?? "Google Doc"}>🔗 </span>}
+                  {e.title}
+                  {e.sync_error && (
+                    <span className="err" style={{ fontSize: 11 }}> · sync error</span>
+                  )}
+                </td>
+                <td className="muted">{e.chunk_count}</td>
+                <td className="muted">
+                  {e.origin === "gdoc" && e.synced_at
+                    ? `synced ${new Date(e.synced_at).toLocaleString()}`
+                    : new Date(e.updated_at).toLocaleString()}
+                </td>
+                <td className="row" style={{ gap: 4 }}>
+                  {e.origin === "gdoc" && (
+                    <button onClick={() => resync(e.entry_id)} title="re-fetch from Google">
+                      re-sync
+                    </button>
+                  )}
                   <button
                     onClick={() => setOpenId(openId === e.entry_id ? null : e.entry_id)}
                   >
-                    {openId === e.entry_id ? "close" : "edit"}
+                    {openId === e.entry_id ? "close" : e.origin === "gdoc" ? "view" : "edit"}
                   </button>
                 </td>
               </tr>
@@ -229,20 +297,37 @@ function EntryEditor({
     onDone();
   }
 
+  const readOnly = entry?.origin === "gdoc";
+
   return (
     <div className="col" style={{ gap: 8, border: "1px solid var(--border)", padding: 10, borderRadius: 6 }}>
+      {readOnly && (
+        <div className="muted" style={{ fontSize: 12 }}>
+          🔗 synced from{" "}
+          <a href={entry?.gdoc_url ?? "#"} target="_blank" rel="noreferrer">Google Doc</a>{" "}
+          — edit the doc, then “re-sync”. {entry?.sync_error && (
+            <span className="err">last sync failed: {entry.sync_error}</span>
+          )}
+        </div>
+      )}
       <div className="field">
         <label>title</label>
-        <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Refund approval limits" />
+        <input
+          value={title}
+          disabled={readOnly}
+          onChange={(e) => setTitle(e.target.value)}
+          placeholder="Refund approval limits"
+        />
       </div>
       <div className="field">
         <label>body (markdown — the bot reads this as authoritative)</label>
         <textarea
           rows={14}
           value={body}
+          readOnly={readOnly}
           onChange={(e) => setBody(e.target.value)}
           placeholder={"# Refund approval limits\n\n- < $200: auto-approve\n- $200–$2000: team lead\n- > $2000: manager sign-off"}
-          style={{ fontFamily: "ui-monospace, monospace", fontSize: 13 }}
+          style={{ fontFamily: "ui-monospace, monospace", fontSize: 13, opacity: readOnly ? 0.75 : 1 }}
         />
       </div>
       {entry && (
@@ -252,10 +337,12 @@ function EntryEditor({
       )}
       {err && <div className="err" style={{ fontSize: 12 }}>{err}</div>}
       <div className="row">
-        <button className="primary" onClick={save} disabled={busy || !title.trim()}>
-          {busy ? "saving…" : "save"}
-        </button>
-        <button onClick={onCancel}>cancel</button>
+        {!readOnly && (
+          <button className="primary" onClick={save} disabled={busy || !title.trim()}>
+            {busy ? "saving…" : "save"}
+          </button>
+        )}
+        <button onClick={onCancel}>{readOnly ? "close" : "cancel"}</button>
         <div style={{ flex: 1 }} />
         {entryId && <button className="err" onClick={archive}>archive</button>}
       </div>

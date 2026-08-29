@@ -26,7 +26,8 @@ from interpreter.registry import (
 from interpreter.runs import build_row
 
 _HERMETIC = ("SF_USERNAME", "SF_PASSWORD", "SF_SECURITY_TOKEN", "SF_CONSUMER_KEY",
-             "SF_CONSUMER_SECRET", "SF_PRIVATE_KEY", "SF_PRIVATE_KEY_FILE", "GROQ_API_KEY")
+             "SF_CONSUMER_SECRET", "SF_PRIVATE_KEY", "SF_PRIVATE_KEY_FILE", "GROQ_API_KEY",
+             "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET")
 
 
 @pytest.fixture(autouse=True)
@@ -499,6 +500,57 @@ def test_draft_folds_internal_kb_as_authoritative(monkeypatch):
     # public docs still included, but after the internal block
     assert captured["user"].index("Internal runbook") < captured["user"].index("Public documentation")
     assert out["trace"][0]["data"]["used_internal_kb"] is True
+
+
+# --------------------------------------------------------------------------
+# Phase 15 — Google Docs connector (pure bits)
+# --------------------------------------------------------------------------
+def test_gdrive_parse_doc_id():
+    from interpreter import gdrive
+
+    assert gdrive.parse_doc_id(
+        "https://docs.google.com/document/d/1AbCdEf_ghIJKlmno-pQRস/edit#heading=x".replace("স", "s")
+    ) == "1AbCdEf_ghIJKlmno-pQRs"
+    assert gdrive.parse_doc_id("1AbCdEf_ghIJKlmno-pQRstuvWXyz012345") == "1AbCdEf_ghIJKlmno-pQRstuvWXyz012345"
+    with pytest.raises(ValueError):
+        gdrive.parse_doc_id("https://example.com/not-a-doc")
+
+
+def test_gdrive_available_false_without_creds():
+    from interpreter import gdrive
+
+    assert gdrive.available() is False
+    with pytest.raises(RuntimeError):
+        gdrive.authorize_url("http://localhost/cb", "state123")
+
+
+def test_gdrive_docs_json_to_markdown():
+    from interpreter import gdrive
+
+    def para(text, style="NORMAL_TEXT", bullet=False):
+        p = {"elements": [{"textRun": {"content": text}}],
+             "paragraphStyle": {"namedStyleType": style}}
+        if bullet:
+            p["bullet"] = {"listId": "x"}
+        return {"paragraph": p}
+
+    doc = {"body": {"content": [
+        para("Refund policy", "HEADING_1"),
+        para("Thresholds below.\n"),
+        para("Under $200 auto\n", bullet=True),
+        para("Over $2000 manager\n", bullet=True),
+        {"table": {"tableRows": [
+            {"tableCells": [
+                {"content": [para("tier\n")]},
+                {"content": [para("limit\n")]},
+            ]},
+        ]}},
+    ]}}
+    md = gdrive.docs_json_to_markdown(doc)
+    assert "# Refund policy" in md
+    assert "- Under $200 auto" in md and "- Over $2000 manager" in md
+    assert "| tier | limit |" in md
+    assert "\n\n\n" not in md   # collapsed blank runs
 
 
 def test_retry_after_seconds_parses_groq_hint():

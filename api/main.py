@@ -26,11 +26,13 @@ Run:  uvicorn api.main:app --reload
 from __future__ import annotations
 
 import os
+import secrets
 import uuid
 from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client
@@ -45,6 +47,7 @@ from interpreter.loader import (  # noqa: E402
 from interpreter import jobs  # noqa: E402
 from interpreter.registry import known_types  # noqa: E402
 from interpreter.runs import record_run  # noqa: E402
+from interpreter import gdrive  # noqa: E402
 from ingestion.sources.kb_common import delete_entry as _kb_delete, embed_entry as _kb_embed  # noqa: E402
 
 import hashlib  # noqa: E402
@@ -692,6 +695,8 @@ def kb_get_entry(eid: str, c: Caller = Depends(caller)) -> dict:
 def kb_update_entry(eid: str, body: KbEntryPatch, c: Caller = Depends(caller)) -> dict:
     rate_limit(c.user_id, "kb_write", 60)
     entry = _kb_entry(c, eid)
+    if entry.get("origin") == "gdoc" and body.body_md is not None:
+        raise HTTPException(409, "this entry is synced from Google Docs — edit the doc, then re-sync")
     col = _kb_collection(c, entry["source_id"])
     patch: dict[str, Any] = {"updated_by": c.user_id}
     if body.title is not None:
@@ -732,3 +737,112 @@ def _kb_after_write(entry: dict, col: dict, c: Caller, *, force: bool = True,
                   "collection_name": col["name"]},
                  dedupe_key=f"embed:{entry['entry_id']}", sb=_service)
     return {**entry, "embed_status": "queued"}
+
+
+# ── Phase 15: Google Docs connector ──────────────────────────────────
+GOOGLE_REDIRECT_URI = os.environ.get(
+    "GOOGLE_REDIRECT_URI", "http://localhost:8000/api/integrations/google/callback"
+)
+# short-lived OAuth state: nonce -> (expires_at, user_id, tenant_id)
+_oauth_state: dict[str, tuple[float, str, str]] = {}
+
+
+class GdocLinkIn(BaseModel):
+    doc_url: str
+    tenant_id: str | None = None
+
+
+@app.get("/api/integrations/google/status")
+def google_status(c: Caller = Depends(caller)) -> dict:
+    tenants = [r["tenant_id"] for r in
+               (c.sb.table("tenant_members").select("tenant_id").execute().data or [])]
+    return {
+        "configured": gdrive.available(),
+        "connected": {t: gdrive.connected(t, _service) for t in tenants},
+    }
+
+
+@app.get("/api/integrations/google/authorize")
+def google_authorize(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    if not gdrive.available():
+        raise HTTPException(503, "Google is not configured on this server")
+    tid = _caller_tenant(c, tenant_id)
+    nonce = secrets.token_urlsafe(24)
+    _oauth_state[nonce] = (time.time() + 600, c.user_id, tid)
+    return {"url": gdrive.authorize_url(GOOGLE_REDIRECT_URI, nonce)}
+
+
+@app.get("/api/integrations/google/callback")
+def google_callback(code: str = "", state: str = "", error: str = "") -> HTMLResponse:
+    def page(msg: str) -> HTMLResponse:
+        return HTMLResponse(
+            f"<!doctype html><meta charset=utf-8><p>{msg}</p>"
+            "<script>setTimeout(()=>window.close(),1500)</script>"
+        )
+    if error:
+        return page(f"Google authorisation failed: {error}")
+    hit = _oauth_state.pop(state, None)
+    if not hit or hit[0] < time.time():
+        return page("This authorisation link has expired — try again.")
+    _, _user_id, tenant_id = hit
+    try:
+        tok = gdrive.exchange_code(code, GOOGLE_REDIRECT_URI)
+    except Exception as e:  # noqa: BLE001
+        return page(f"Could not complete Google sign-in: {e}")
+    _service.table("tenant_integrations").upsert({
+        "tenant_id": tenant_id, "kind": "google",
+        "secret": {"refresh_token": tok["refresh_token"], "scope": tok.get("scope")},
+    }).execute()
+    return page("Google connected. You can close this window.")
+
+
+@app.post("/api/kb/collections/{sid}/gdoc", status_code=201)
+def kb_link_gdoc(sid: str, body: GdocLinkIn, c: Caller = Depends(caller)) -> dict:
+    rate_limit(c.user_id, "kb_write", 60)
+    col = _kb_collection(c, sid)
+    if not gdrive.connected(col["tenant_id"], _service):
+        raise HTTPException(400, "connect Google for this tenant first")
+    try:
+        doc_id = gdrive.parse_doc_id(body.doc_url)
+        fetched = gdrive.fetch_doc(col["tenant_id"], doc_id, _service)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"Google fetch failed: {e}")
+
+    existing = (c.sb.table("kb_entries").select("entry_id")
+                .eq("source_id", sid).eq("gdoc_id", doc_id).neq("status", "archived")
+                .execute().data or [])
+    row = {
+        "source_id": sid, "tenant_id": col["tenant_id"], "title": fetched["title"],
+        "body_md": fetched["markdown"], "origin": "gdoc", "gdoc_id": doc_id,
+        "gdoc_url": body.doc_url.strip(), "gdoc_modified": fetched["modified_time"],
+        "synced_at": _now_iso(), "sync_error": None,
+        "created_by": c.user_id, "updated_by": c.user_id,
+    }
+    if existing:
+        eid = existing[0]["entry_id"]
+        entry = c.sb.table("kb_entries").update(row).eq("entry_id", eid).execute().data[0]
+    else:
+        entry = c.sb.table("kb_entries").insert(row).execute().data[0]
+    return _kb_after_write(entry, col, c)
+
+
+@app.post("/api/kb/entries/{eid}/resync")
+def kb_resync_gdoc(eid: str, c: Caller = Depends(caller)) -> dict:
+    rate_limit(c.user_id, "kb_write", 60)
+    entry = _kb_entry(c, eid)
+    if entry.get("origin") != "gdoc":
+        raise HTTPException(400, "not a Google-linked entry")
+    col = _kb_collection(c, entry["source_id"])
+    try:
+        fetched = gdrive.fetch_doc(col["tenant_id"], entry["gdoc_id"], _service)
+    except Exception as e:  # noqa: BLE001
+        c.sb.table("kb_entries").update({"sync_error": str(e)[:500]}).eq("entry_id", eid).execute()
+        raise HTTPException(502, f"Google fetch failed: {e}")
+    updated = c.sb.table("kb_entries").update({
+        "title": fetched["title"], "body_md": fetched["markdown"],
+        "gdoc_modified": fetched["modified_time"], "synced_at": _now_iso(),
+        "sync_error": None, "updated_by": c.user_id,
+    }).eq("entry_id", eid).execute().data[0]
+    return _kb_after_write(updated, col, c)

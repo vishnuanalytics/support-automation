@@ -3,6 +3,7 @@ import type {
   Flow,
   FlowMeta,
   FlowVersion,
+  GoogleStatus,
   KbCollection,
   KbEntry,
   KbEntryRow,
@@ -90,6 +91,16 @@ export const api = {
     updateEntry: (id: string, b: { title?: string; body_md?: string }) =>
       req<KbEntry>(`/kb/entries/${id}`, { method: "PATCH", body: JSON.stringify(b) }),
     deleteEntry: (id: string) => req<void>(`/kb/entries/${id}`, { method: "DELETE" }),
+    linkGdoc: (id: string, doc_url: string) =>
+      req<KbEntry>(`/kb/collections/${id}/gdoc`, { method: "POST", body: JSON.stringify({ doc_url }) }),
+    resyncGdoc: (entryId: string) =>
+      req<KbEntry>(`/kb/entries/${entryId}/resync`, { method: "POST" }),
+  },
+
+  google: {
+    status: () => req<GoogleStatus>("/integrations/google/status"),
+    authorize: (tenant_id: string) =>
+      req<{ url: string }>(`/integrations/google/authorize?tenant_id=${tenant_id}`),
   },
 
   runStats: () => req<RunStats>("/runs/stats"),
