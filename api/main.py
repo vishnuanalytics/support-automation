@@ -44,6 +44,7 @@ from interpreter.flows.validate_flow import Flow, check_flow  # noqa: E402
 from interpreter.loader import (  # noqa: E402
     FlowInvalid, FlowNotFound, definition_hash as flow_definition_hash, load_flow,
 )
+from interpreter import jobs  # noqa: E402
 from interpreter.registry import known_types  # noqa: E402
 from interpreter.runs import record_run  # noqa: E402
 
@@ -328,8 +329,23 @@ def delete_flow(flow_id: str, c: Caller = Depends(caller)) -> None:
 
 
 @app.post("/api/flows/{flow_id}/run")
-def run_flow(flow_id: str, body: RunIn, c: Caller = Depends(caller)) -> dict:
+def run_flow(
+    flow_id: str,
+    body: RunIn,
+    c: Caller = Depends(caller),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict:
     _require_visible(c, flow_id)                       # RLS gate
+
+    if idempotency_key:
+        dup = (
+            _service.table("runs").select("run_id")
+            .eq("flow_id", flow_id).eq("idempotency_key", idempotency_key)
+            .execute().data
+        )
+        if dup:
+            return {"run_id": dup[0]["run_id"], "idempotent_replay": True}
+
     try:
         flow = load_flow(flow_id=flow_id, sb=_service, validate=True)
     except FlowInvalid as e:
@@ -339,7 +355,8 @@ def run_flow(flow_id: str, body: RunIn, c: Caller = Depends(caller)) -> dict:
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"run failed: {type(e).__name__}: {e}")
 
-    run_id = record_run(flow, final, case=body.case, source="api", sb=_service)
+    run_id = record_run(flow, final, case=body.case, source="api",
+                        idempotency_key=idempotency_key, sb=_service)
 
     return {
         "run_id": run_id,
@@ -356,6 +373,45 @@ def run_flow(flow_id: str, body: RunIn, c: Caller = Depends(caller)) -> dict:
             for r in final.get("retrieval", [])
         ],
     }
+
+
+class EnqueueIn(BaseModel):
+    case: dict[str, Any]
+    idempotency_key: str | None = None
+
+
+@app.post("/api/flows/{flow_id}/enqueue", status_code=202)
+def enqueue_run(flow_id: str, body: EnqueueIn, c: Caller = Depends(caller)) -> dict:
+    """Queue a run for the worker (async path — used by the Salesforce trigger).
+    Returns immediately. `GET /jobs/{job_id}` for status; the result carries the
+    `run_id`."""
+    _require_visible(c, flow_id)
+    job_id = jobs.enqueue(
+        "run_flow",
+        {"flow_id": flow_id, "case": body.case, "idempotency_key": body.idempotency_key},
+        dedupe_key=body.idempotency_key,
+        sb=_service,
+    )
+    if job_id is None:
+        return {"job_id": None, "deduped": True}
+    return {"job_id": job_id}
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: str, c: Caller = Depends(caller)) -> dict:
+    rows = (
+        _service.table("jobs")
+        .select("job_id, kind, status, attempts, payload, result, error, created_at, updated_at")
+        .eq("job_id", job_id).execute().data
+    )
+    if not rows:
+        raise HTTPException(404, "job not found")
+    job = rows[0]
+    fid = (job.get("payload") or {}).get("flow_id")
+    if fid:
+        _require_visible(c, fid)          # only see jobs for flows in your tenant
+    job.pop("payload", None)
+    return job
 
 
 # ── runs (Phase 6 observability) ──────────────────────────────────────

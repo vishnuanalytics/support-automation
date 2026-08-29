@@ -24,7 +24,8 @@ def _slim_retrieval(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def build_row(flow: dict, final: dict, *, case: dict, source: str) -> dict[str, Any]:
+def build_row(flow: dict, final: dict, *, case: dict, source: str,
+              idempotency_key: str | None = None) -> dict[str, Any]:
     outcome = final.get("outcome") or {}
     case_id = case.get("case_id") or case.get("sf_id") or case.get("id")
     return {
@@ -44,15 +45,18 @@ def build_row(flow: dict, final: dict, *, case: dict, source: str) -> dict[str, 
         "retrieval": _slim_retrieval(final.get("retrieval")),
         "sf_writeback": final.get("sf_writeback"),
         "case_payload": case,
+        "idempotency_key": idempotency_key,
     }
 
 
-def record_run(flow: dict, final: dict, *, case: dict, source: str = "api", sb=None) -> str | None:
+def record_run(flow: dict, final: dict, *, case: dict, source: str = "api",
+               idempotency_key: str | None = None, sb=None) -> str | None:
     if os.environ.get("RUNS_DISABLED"):
         return None
     try:
         sb = sb or get_supabase()
-        res = sb.table("runs").insert(build_row(flow, final, case=case, source=source)).execute()
+        row = build_row(flow, final, case=case, source=source, idempotency_key=idempotency_key)
+        res = sb.table("runs").insert(row).execute()
         return res.data[0]["run_id"] if res.data else None
     except Exception as e:  # noqa: BLE001 -- never fail the run over telemetry
         log.warning("record_run failed: %s", e)
