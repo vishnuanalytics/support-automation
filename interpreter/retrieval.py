@@ -32,7 +32,7 @@ import sys
 from typing import Any
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from scraper import get_embedder, get_supabase  # noqa: E402  reuse client + model
+from ingestion.scraper import get_embedder, get_supabase  # noqa: E402  reuse client + model
 
 # bge-small-en-v1.5: prepend to queries only (matches eval/run_eval.py).
 QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages: "
@@ -114,7 +114,7 @@ def graph_expand(
     if not seed_doc_urls or not os.environ.get("NEO4J_URI"):
         return []
     try:
-        from neo4j_sync import get_neo4j_driver
+        from ingestion.neo4j_sync import get_neo4j_driver
 
         driver = get_neo4j_driver()
         db = os.environ.get("NEO4J_DATABASE", "neo4j")

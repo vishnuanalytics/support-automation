@@ -7,7 +7,7 @@
 --
 -- Expected (with the 009 seed):
 --   4ddf2413… (Acme  member) -> 2 flows: support + offboarding, tenant 0000…
---   b2b20000… (Globex member) -> 1 flow:  support, tenant 2222…  + only its 8 nodes
+--   57c26330… (Globex member) -> 1 flow:  support, tenant 2222…  + only its 8 nodes
 --   99999999… (no membership) -> 0 flows / 0 nodes / 0 edges / 0 memberships
 --   (service role / postgres) -> all 3 flows (BYPASSRLS)
 
@@ -25,7 +25,7 @@ rollback;
 begin;
   set local role authenticated;
   select set_config('request.jwt.claims',
-    '{"sub":"b2b20000-0000-4000-8000-000000000002","role":"authenticated"}', true);
+    '{"sub":"57c26330-cb98-475a-875f-8f8a925672fd","role":"authenticated"}', true);
   select 'globex user' as who,
          string_agg(team || '/' || left(tenant_id::text, 8), ', ' order by team) as flows,
          (select count(*) from flow_nodes) as visible_nodes

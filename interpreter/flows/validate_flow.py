@@ -1,6 +1,9 @@
 """
 Validates a flow-definition JSON against the Phase 0 schema shape.
-Run: python validate_flow.py flow_support_example.json
+Run: python interpreter/flows/validate_flow.py interpreter/flows/flow_support_example.json
+
+`check_flow()` here is also imported by interpreter.loader (one validator,
+not two) — the CLI keeps the strict EXPECTED_TYPES check, the loader doesn't.
 """
 
 import sys

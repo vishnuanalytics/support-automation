@@ -16,9 +16,9 @@ retrieval tuning against.
 ## Run
 
 ```
-python eval/run_eval.py                     # dense baseline (default)
-python eval/run_eval.py --strategy hybrid
-python eval/run_eval.py --strategy all      # all four, side by side
+python -m ingestion.eval.run_eval                     # dense baseline (default)
+python -m ingestion.eval.run_eval --strategy hybrid
+python -m ingestion.eval.run_eval --strategy all      # all four, side by side
 ```
 Needs `.env` (`SUPABASE_URL`, `SUPABASE_SERVICE_KEY`). `sparse` / `hybrid` /
 `hybrid_rerank` call the `007` SQL functions; `hybrid_rerank` also loads the

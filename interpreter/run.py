@@ -2,10 +2,10 @@
 CLI: load a flow from Supabase, compile it, run a support case through it.
 
     python -m interpreter.run --flow 11111111-1111-1111-1111-111111111111 \
-        --case cases/basic_howto.json
+        --case interpreter/cases/basic_howto.json
 
     python -m interpreter.run --tenant 00000000-0000-0000-0000-000000000000 \
-        --team support --status draft --case cases/enterprise_bug.json
+        --team support --status draft --case interpreter/cases/enterprise_bug.json
 
     python -m interpreter.run --flow <id> --describe        # just print the wiring
 

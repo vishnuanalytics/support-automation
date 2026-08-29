@@ -15,8 +15,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from interpreter import conditions, salesforce
 from interpreter.builder import FlowBuildError, FlowRoutingError, build_graph
+from interpreter.flows.validate_flow import Flow, check_flow
 from interpreter.registry import h_ask_human, h_sf_writeback, register
-from validate_flow import Flow, check_flow
 
 # hermetic: a populated .env (SF creds, GROQ key) must not turn these into
 # live calls. The imports above run load_dotenv() (via scraper.py), so clear
