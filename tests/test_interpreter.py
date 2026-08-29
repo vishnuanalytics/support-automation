@@ -7,15 +7,26 @@ Covers: safe condition eval, flow validation, and graph wiring/routing.
 
 from __future__ import annotations
 
+import os
 import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from interpreter import conditions
+from interpreter import conditions, salesforce
 from interpreter.builder import FlowBuildError, FlowRoutingError, build_graph
 from interpreter.registry import h_ask_human, h_sf_writeback, register
 from validate_flow import Flow, check_flow
+
+# hermetic: a populated .env (SF creds, GROQ key) must not turn these into
+# live calls. The imports above run load_dotenv() (via scraper.py), so clear
+# the SF vars *after* importing and reset the cached client.
+for _k in ("SF_USERNAME", "SF_PASSWORD", "SF_SECURITY_TOKEN",
+           "SF_CONSUMER_KEY", "SF_CONSUMER_SECRET",
+           "SF_PRIVATE_KEY", "SF_PRIVATE_KEY_FILE"):
+    os.environ.pop(_k, None)
+salesforce._client_obj = None
+assert not salesforce.available(), "SF creds leaked into the offline test env"
 
 
 # --------------------------------------------------------------------------
