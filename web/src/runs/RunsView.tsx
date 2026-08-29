@@ -31,6 +31,15 @@ export function RunsView() {
               <Tile key={k} label={k} value={v} />
             ))}
             <Tile label="low-confidence" value={stats.low_confidence} warn />
+            {stats.draft_acceptance != null && (
+              <div className="tile">
+                <div className="v">{Math.round(stats.draft_acceptance * 100)}%</div>
+                <div className="l">draft kept</div>
+              </div>
+            )}
+            {(stats.by_human_action?.pending ?? 0) > 0 && (
+              <Tile label="awaiting human" value={stats.by_human_action.pending} />
+            )}
           </div>
         )}
 
@@ -56,6 +65,7 @@ export function RunsView() {
               <th>tier</th>
               <th>outcome</th>
               <th>conf.</th>
+              <th>human</th>
               <th>subject</th>
             </tr>
           </thead>
@@ -75,14 +85,21 @@ export function RunsView() {
                 <td className={(r.confidence ?? 1) < 0.4 ? "err" : ""}>
                   {r.confidence?.toFixed(3) ?? "—"}
                 </td>
-                <td className="muted" style={{ maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                <td className="muted">
+                  {r.human_action
+                    ? r.human_action === "pending"
+                      ? "…"
+                      : `${r.human_action}${r.edit_distance != null ? ` (${r.edit_distance.toFixed(2)})` : ""}`
+                    : "—"}
+                </td>
+                <td className="muted" style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {r.subject ?? ""}
                 </td>
               </tr>
             ))}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={6} className="muted">
+                <td colSpan={7} className="muted">
                   no runs — run a flow from the editor or `python -m interpreter.run`
                 </td>
               </tr>
@@ -159,6 +176,30 @@ function Detail({ run }: { run: RunDetail }) {
         <div className="muted" style={{ fontSize: 12 }}>
           salesforce: {JSON.stringify(run.sf_writeback)}
         </div>
+      )}
+
+      {run.human_action && run.human_action !== "pending" && (
+        <>
+          <h5>human resolution</h5>
+          <div className="banner ok">
+            <strong>{run.human_action}</strong>
+            {run.edit_distance != null ? ` · edit distance ${run.edit_distance.toFixed(2)}` : ""}
+          </div>
+          {run.draft && (
+            <details className="trace-step">
+              <summary>bot draft vs. what the human sent</summary>
+              <div style={{ fontSize: 12 }}>
+                <div className="muted">draft</div>
+                <pre style={{ whiteSpace: "pre-wrap" }}>{run.draft}</pre>
+                <div className="muted">sent</div>
+                <pre style={{ whiteSpace: "pre-wrap" }}>{run.human_reply ?? "(none)"}</pre>
+              </div>
+            </details>
+          )}
+        </>
+      )}
+      {run.human_action === "pending" && (
+        <div className="muted" style={{ fontSize: 12 }}>awaiting human resolution…</div>
       )}
     </div>
   );

@@ -84,7 +84,9 @@ export interface RunRow {
   outcome: string | null;
   confidence: number | null;
   subject: string | null;
-  source: "api" | "cli";
+  source: "api" | "cli" | "worker";
+  human_action: string | null;
+  edit_distance: number | null;
   created_at: string;
 }
 
@@ -94,6 +96,8 @@ export interface RunDetail extends RunRow {
   retrieval: Retrieved[];
   sf_writeback: Record<string, unknown> | null;
   case_payload: Record<string, unknown> | null;
+  draft: string | null;
+  human_reply: string | null;
 }
 
 export interface RunStats {
@@ -101,4 +105,6 @@ export interface RunStats {
   by_outcome: Record<string, number>;
   by_tier: Record<string, number>;
   low_confidence: number;
+  by_human_action: Record<string, number>;
+  draft_acceptance: number | null;
 }

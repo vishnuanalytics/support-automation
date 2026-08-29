@@ -45,3 +45,12 @@ Needs `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `SUPABASE_ANON_KEY` in `.env`.
 New nodes/edges get client-generated UUIDs so `PUT` is a clean upsert.
 `run` loads the flow with the service role (retrieval needs full read) but
 first checks the caller can see it under RLS.
+
+## Feedback loop (Phase 11)
+
+A run that ends in `ask_human`/`handover` on a real Case is stamped
+`human_action = pending` and `record_run` schedules a delayed
+`check_resolution` job. The worker then reads the Case's outbound reply
+(EmailMessage / CaseComment) and diffs it against `runs.draft` →
+`human_action` (`sent_as_is`/`edited`/`rewrote`/`no_reply`) + `edit_distance`.
+`/runs/stats` reports `draft_acceptance` and `by_human_action`.

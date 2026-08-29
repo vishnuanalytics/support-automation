@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from ingestion.scraper import get_supabase  # noqa: E402
-from interpreter import jobs  # noqa: E402
+from interpreter import feedback, jobs, salesforce  # noqa: E402
 from interpreter.builder import build_graph  # noqa: E402
 from interpreter.loader import load_flow  # noqa: E402
 from interpreter.runs import record_run  # noqa: E402
@@ -49,7 +49,33 @@ def _run_flow(payload: dict, sb) -> dict:
     return {"run_id": run_id, "outcome": (final.get("outcome") or {}).get("action")}
 
 
-HANDLERS = {"run_flow": _run_flow}
+def _check_resolution(payload: dict, sb) -> dict:
+    """Phase 11 — what did the human do with the draft?"""
+    run_id = payload["run_id"]
+    rows = sb.table("runs").select("case_payload, draft").eq("run_id", run_id).execute().data
+    if not rows:
+        return {"run_id": run_id, "skipped": "run gone"}
+    case = rows[0].get("case_payload") or {}
+    case_id = case.get("sf_id") or case.get("id")
+    draft = rows[0].get("draft") or ""
+
+    reply = None
+    if case_id and salesforce.available():
+        reply = feedback.fetch_human_reply(salesforce._client(), case_id)
+    action, dist = feedback.classify_edit(draft, reply or "")
+    if reply is None:
+        dist = None
+
+    sb.table("runs").update({
+        "human_action": action,
+        "human_reply": (reply or "")[:8000] or None,
+        "edit_distance": dist,
+        "feedback_checked_at": "now()",
+    }).eq("run_id", run_id).execute()
+    return {"run_id": run_id, "human_action": action, "edit_distance": dist}
+
+
+HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution}
 
 
 def process_one(sb) -> bool:

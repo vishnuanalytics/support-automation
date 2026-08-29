@@ -67,7 +67,7 @@ Reorganised 2026-08-29 (Phase 5). Modules run from the repo root:
 
 ```
 docs/            this file, SALESFORCE_SETUP.md
-db/migrations/   001_*.sql .. 013_*.sql   (was repo root)
+db/migrations/   001_*.sql .. 014_*.sql   (was repo root)
 ingestion/       scraper.py, neo4j_sync.py, eval/         → python -m ingestion.scraper
 interpreter/     builder/loader/registry/conditions/retrieval/llm/salesforce/run
   flows/         validate_flow.py, flow_support_example.json
@@ -104,7 +104,7 @@ from the 2026-08-29 self-review; still sequential (do 7 before 10, etc.).**
 | 8 | **Flow versioning & safe writes.** Immutable versions, `runs.flow_version`, transactional save, optimistic concurrency. | **Complete (2026-08-29)** — migration `012`: **`flow_versions`** (immutable `nodes`/`edges`/`name`/`definition_hash`/`created_by` snapshot, RLS like the flow tables), `flows.published_version`, `runs.flow_version`; **`replace_flow_graph(flow_id, nodes, edges)`** plpgsql fn — one transactional delete+insert; backfilled v1 for the 3 published flows. `flow_nodes`/`flow_edges` stay the editable **draft**; a **run executes the published snapshot** (`loader.load_flow` reads `flow_versions` for `status="published"`, `flow_nodes/edges` for `status="draft"`) and records `flow_version`. `interpreter/loader.definition_hash()` (order-independent sha256). API: `PUT` → `replace_flow_graph` RPC + **409** if `body.version` ≠ current (bumped every save); `POST /flows/{id}/publish` (snapshot → version), `/rollback` (restore draft + re-publish), `GET /versions`. Web: `published vN` pill, `draft rev` token, **Publish** button, rollback `<select>`, 409 → auto-reload banner. Full lifecycle verified (create→PUT→stale-409→publish→edit→publish v2→run records v2→rollback restores draft). 24 offline + 7 integration pytest green; web `tsc`+vitest+build green. |
 | 9 | **Test coverage & CI.** pytest, `test_api.py`, web smoke tests, de-brittle `test_multiflow`, `ci.yml`. | **Complete (2026-08-29)** — `pytest` (`pytest.ini` with an `integration` marker; repo-root `conftest.py` for `sys.path`). **`tests/test_api.py`** — offline: `/health`, `/node-types`, 401 without a bearer token, `_structural_errors` (dangling edge / unknown type / cycle / clean). integration (real Globex token, skipped without `SUPABASE_ANON_KEY`): RLS-scoped list, cross-tenant 404, PUT→422, run→`run_id`. `test_multiflow` rewritten as pytest + de-brittled — asserts a **structural fact per flow** (gate present/absent → routing) + the **cross-tenant invariant** (`a.action != b.action`, `a.threshold < b.threshold`), not exact score-paths. **`web`**: `vitest` on `graph.ts` (RF round-trip, dagre layout, conditional-edge mapping, uuid) — 5 tests. **`.github/workflows/ci.yml`** — job `python`: `pytest -m "not integration"` (**24 pass**, 0.9s); job `web`: `tsc -b` + `vitest run` + `vite build`. On push + PR to `main`. `pytest` + `httpx` added to `requirements.txt`. |
 | 10 | **Event-driven pipeline.** SF trigger → task queue → async run → idempotency. | **Complete (2026-08-29)** — migration `013`: **`jobs`** table + **`claim_job()`** (`FOR UPDATE SKIP LOCKED`), a partial-unique `(kind, dedupe_key)` so a redelivered Case never double-enqueues; `runs.idempotency_key` + unique `(flow_id, idempotency_key)`. **`api/worker.py`** — `python -m api.worker [--once]`, dispatches `run_flow` (loads the published snapshot, invokes, records `source="worker"`); a run already recorded for `(flow_id, key)` is a no-op success. `interpreter/jobs.py` (enqueue / claim / complete / fail-with-retry). API: `POST /flows/{id}/enqueue` → `202 {job_id}`, `GET /jobs/{id}`; `POST /run` honours an `Idempotency-Key` header (returns the prior `run_id`). **`ingestion/sf_case_watch.py`** — polls `Case WHERE Status='New' AND LastModifiedDate >= now-Nmin`, enqueues one job per Case keyed on the Case Id (lookback can overlap; job dedupe handles it); `--once` for cron. Kept `POST /run` **synchronous** for the editor. 14 integration tests (incl. `test_queue.py`: dedupe, worker executes + records, no double-run). Persistent worker / trigger cron aren't deployed here — code + `--once` verified. |
-| 11 | **Human-in-the-loop feedback.** After `ask_human`, capture what the human actually did — a follow-up job diffs the Case's real sent reply against the bot draft (`human_action`, `edit_distance` on the run). Surface "drafts needed heavy editing 60% of the time for billing" in the Runs view. Feed accepted drafts into the Phase 7 golden set / few-shot pool. | Planned |
+| 11 | **Human-in-the-loop feedback.** Capture the human's resolution after ask_human/handover; feed accepted drafts to the eval golden set. | **Complete (2026-08-29)** — migration `014`: `runs` += `draft`, `human_action` (`pending\|sent_as_is\|edited\|rewrote\|no_reply`), `human_reply`, `edit_distance`, `feedback_checked_at`. A run that goes to a human on a real Case is stamped `pending` and `record_run` schedules a delayed **`check_resolution`** job (`FEEDBACK_DELAY_MIN`, default 20). `interpreter/feedback.py`: `fetch_human_reply` (latest outbound `EmailMessage`, else `CaseComment`) + `classify_edit` (`SequenceMatcher` ratio → bucket + `edit_distance`). Worker handles `check_resolution`. API `/runs/stats` gains `draft_acceptance` + `by_human_action`; `/runs` + detail carry `human_action`/`edit_distance`/`human_reply`. Web Runs view: "draft kept %" + "awaiting human" tiles, a `human` column, and a bot-draft-vs-sent diff in the detail. `scripts/harvest_feedback.py` dumps kept-draft runs as candidate `eval/e2e/` cases. **Verified live**: seeded Case → handover (`pending`) → posted an outbound EmailMessage → `check_resolution` scored the run (`edited`, `edit_distance`, `feedback_checked_at`). 26 offline + 15 integration pytest green. |
 | 12 | **Real multi-tenancy.** A `sources` table (tenant_id, kind, config) so the `retrieve` node names which source(s) to hit; per-source ingestion instead of the hardcoded global `doc_chunks`. A `tenant_integrations` table — per-tenant Salesforce / Slack / KB credentials (encrypted) — that the interpreter resolves connections from. A **second concrete KB source** for one tenant (e.g. a Markdown/Notion export) so multi-tenancy is real, not cosmetic. Defensive `tenant_id` assertions on every service-role write path. | Planned |
 | 13 | **Security & hardening.** Verify the Supabase JWT **signature** in the `caller` dependency (JWKS / shared secret) instead of decoding unverified. Rate-limit `/run` (it triggers real SF writes / Chatter). `/security-review` pass over the accumulated API + web surface. Make `sop_conflicts.py` actually fire — give one seed flow a divergent `retrieve` config (section filter) so it demonstrates a real catch. | Planned |
 
@@ -390,7 +390,7 @@ below are indicative — take the next free number when you build it.
 
 ## Immediate next step
 
-**Phases 0–9 complete** (0–6 MVP; 7–9 hardening). Migrations through `013` applied. 24 offline pytest
+**Phases 0–11 complete** (0–6 MVP; 7–13 hardening). Migrations through `014` applied. 26 offline pytest
 tests + `tests/test_multiflow.py` green. External calls (Groq, Salesforce)
 run real when creds are in `.env`, else deterministic dry-run.
 
@@ -406,10 +406,11 @@ cd web && npm install && npm run dev                  # editor + Runs view :5173
 Editor login: `gundamvishnu7@gmail.com` → tenant Acme; `globex-owner@example.test`
 (pw `editor-test-pw-8891`) → tenant Globex.
 
-**Next: Phase 11 — Human-in-the-loop feedback** (build order **… → 10 →
-11 → 12 → 13**). After `ask_human`, capture what the human actually did
-(edited / rewrote / sent) and feed accepted drafts into the eval golden
-set. Phases 11–13 detailed in "Hardening roadmap".
+**Next: Phase 12 — Real multi-tenancy** (build order **… → 11 → 12 →
+13**). A `sources` table + per-source ingestion (retire the hardcoded
+global `doc_chunks`), `tenant_integrations` (per-tenant SF/Slack creds), a
+real 2nd KB source for one tenant, write-path `tenant_id` assertions.
+Phases 12–13 detailed in "Hardening roadmap".
 
 A Phase 7 follow-up worth doing early: add an **intent → `ask_human` edge**
 to the Acme flow so commercial/legal cases (`e11` SOC2, `e12` Partner API)
@@ -515,9 +516,14 @@ From the 2026-08-29 self-review. Each is intentional MVP scope, not a bug:
   no always-on host here so the worker + trigger cron aren't deployed (code
   + `--once` verified); `POST /run` stays synchronous for the editor;
   `jobs.fail` retry is fixed-interval, not exponential-backoff.
-- `ask_human` is fire-and-forget — the human's actual resolution (edited /
-  rejected / rewrote the draft), the single best training signal, is
-  dropped. **→ Phase 11.**
+- ~~`ask_human` is fire-and-forget — the human's resolution is dropped.~~
+  **Phase 11:** delayed `check_resolution` job diffs the Case's outbound
+  reply against `runs.draft` → `human_action` / `edit_distance`; Runs view
+  shows a "draft kept %"; `scripts/harvest_feedback.py` -> golden cases.
+  *Residual:* the diff is lexical (`SequenceMatcher`), not semantic; no
+  UI to correct a mis-bucketed resolution; few-shot pool from accepted
+  drafts is `harvest_feedback.py` output, not yet wired into the `draft`
+  node.
 - **Multi-tenancy is real for reads only.** One global Zapier-docs corpus
   for every tenant; `retrieve` is hardcoded to `doc_chunks`; one Salesforce
   org; all writes are service-role with no `tenant_id` backstop. The
