@@ -487,6 +487,15 @@ Default to Groq for any LLM calls (classification, draft generation).
 
 ### Design debt — addressed by the hardening roadmap (phases 7–13)
 
+- **LLM providers:** `interpreter/llm.py` now routes by model id — Groq
+  (`llama-*`, default) or **Anthropic** (`claude-opus-5` / `sonnet-5` /
+  `haiku-4-5`, opt-in). Set `ANTHROPIC_API_KEY` + optionally
+  `LLM_DEFAULT_MODEL` / `LLM_FAST_MODEL` in `.env` to use Claude for
+  `draft` / `classify` / the groundedness + SOP judges. Routing +
+  stub-fallback are unit-tested; a **live Claude call is unverified**
+  (no key in this environment). Sampling params (`temperature` etc.)
+  are not sent on the Claude path — rejected by the Claude 5 family.
+
 From the 2026-08-29 self-review. Each is intentional MVP scope, not a bug:
 
 - ~~The `confidence_gate` score is uncalibrated; no groundedness check;
