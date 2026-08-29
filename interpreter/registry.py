@@ -14,6 +14,7 @@ handler also appends exactly one `trace` entry.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Callable
 
 from . import groundedness, llm, salesforce
@@ -298,6 +299,10 @@ def h_draft(state: CaseState, config: dict) -> dict:
     }
 
 
+def _slug_tokens(s: str) -> set[str]:
+    return {t for t in re.split(r"[^a-z0-9]+", (s or "").lower()) if t}
+
+
 @register("confidence_gate")
 def h_confidence_gate(state: CaseState, config: dict) -> dict:
     tier = state.get("tier", "basic")
@@ -307,12 +312,43 @@ def h_confidence_gate(state: CaseState, config: dict) -> dict:
     retr = float(state.get("retrieval_score", 0.0))
     drft = float(state.get("draft_confidence", 0.0))
     grnd = float((state.get("groundedness") or {}).get("score", 0.0))
-    w = float(config.get("retrieval_weight", 0.5))
-    gw = float(config.get("groundedness_weight", 0.0))   # 0 -> unchanged from Phase 2
 
-    base = w * retr + (1.0 - w) * drft
-    score = round((1.0 - gw) * base + gw * grnd, 4)
+    weights = config.get("weights")
+    if weights:
+        # explicit 3-way blend (Phase 7 recalibration). The real LLM's
+        # self-graded `draft` confidence sits ~0.95 on everything, so it's
+        # weighted low here; `retrieval` + `groundedness` carry the score.
+        wr = float(weights.get("retrieval", 0.0))
+        wd = float(weights.get("draft", 0.0))
+        wg = float(weights.get("groundedness", 0.0))
+        tot = (wr + wd + wg) or 1.0
+        wr, wd, wg = wr / tot, wd / tot, wg / tot
+        score = round(wr * retr + wd * drft + wg * grnd, 4)
+    else:
+        # legacy 2-knob formula (Phase 2 / the 011 calibration)
+        w = float(config.get("retrieval_weight", 0.5))
+        gw = float(config.get("groundedness_weight", 0.0))
+        wr, wd, wg = w * (1 - gw), (1 - w) * (1 - gw), gw
+        base = w * retr + (1.0 - w) * drft
+        score = round((1.0 - gw) * base + gw * grnd, 4)
+
     passed = score >= threshold
+
+    # Topic-level escalation: billing / refunds / pricing / legal / account
+    # access / data-export requests are never a docs answer — hand to a human
+    # no matter how confident the draft or how good the (wrong-topic)
+    # retrieval looks. Matched on shared slug tokens, so "refund-request"
+    # hits "refund" but "export-step-howto" does not hit "data-export".
+    # Static list here = the Phase 7 down payment on Phase 16's rule engine.
+    escalate = config.get("escalate_topics", [])
+    topic = str((state.get("classification") or {}).get("topic", ""))
+    ttok = _slug_tokens(topic)
+    forced = next(
+        (e for e in escalate
+         if _slug_tokens(e) and _slug_tokens(e) <= ttok), None
+    )
+    if forced:
+        passed = False
 
     gate = {
         "pass": passed,
@@ -322,14 +358,19 @@ def h_confidence_gate(state: CaseState, config: dict) -> dict:
         "retrieval_score": round(retr, 4),
         "draft_confidence": round(drft, 4),
         "groundedness": round(grnd, 4),
-        "groundedness_weight": gw,
+        "weights": {"retrieval": round(wr, 3), "draft": round(wd, 3),
+                    "groundedness": round(wg, 3)},
     }
+    if forced:
+        gate["forced_escalation"] = f"topic '{topic}' ~ '{forced}'"
+    reason = (f"forced escalate ({gate['forced_escalation']})" if forced
+              else f"score={score:.3f} vs threshold={threshold:.2f} ({tier})")
     return {
         "confidence": score,
         "confidence_gate": gate,
         **_trace(
             config["_node_id"], "confidence_gate",
-            f"score={score:.3f} vs threshold={threshold:.2f} ({tier}) -> {'PASS' if passed else 'FAIL'}",
+            f"{reason} -> {'PASS' if passed else 'FAIL'}",
             gate,
         ),
     }

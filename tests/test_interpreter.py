@@ -313,6 +313,46 @@ def test_confidence_gate_groundedness_weight_pulls_score_down():
     assert with_w["score"] == 0.45 and with_w["pass"] is False
 
 
+def test_confidence_gate_explicit_weights_downweight_overconfident_draft():
+    # real-LLM shape: draft self-confidence pinned high, retrieval found ~nothing
+    state = {"tier": "premium", "retrieval_score": 0.02, "draft_confidence": 0.99,
+             "groundedness": {"score": 0.75},
+             "classification": {"topic": "product-usage"}}
+    cfg = {"_node_id": "g", "tier_overrides": {"premium": 0.55},
+           "weights": {"retrieval": 0.55, "draft": 0.1, "groundedness": 0.35}}
+    g = h_confidence_gate(state, cfg)["confidence_gate"]
+    # 0.55*0.02 + 0.1*0.99 + 0.35*0.75 = 0.0110 + 0.099 + 0.2625 = 0.3725
+    assert g["score"] == 0.3725 and g["pass"] is False
+    # the legacy 0.5/0.5 blend would have passed it (~0.5+)
+    legacy = h_confidence_gate(state, {**cfg, "weights": None,
+                                       "retrieval_weight": 0.5})["confidence_gate"]
+    assert legacy["score"] > g["score"]
+
+
+def test_confidence_gate_escalate_topics_forces_a_human():
+    base = {"tier": "premium", "retrieval_score": 1.0, "draft_confidence": 0.99,
+            "groundedness": {"score": 1.0}}
+    cfg = {"_node_id": "g", "tier_overrides": {"premium": 0.55},
+           "weights": {"retrieval": 0.6, "draft": 0.1, "groundedness": 0.3},
+           "escalate_topics": ["billing", "refund", "pricing", "account-access"]}
+
+    refund = h_confidence_gate({**base, "classification": {"topic": "refund-request"}},
+                               cfg)["confidence_gate"]
+    assert refund["score"] >= 0.55 and refund["pass"] is False  # score high, still escalated
+    assert "forced_escalation" in refund
+
+    # a genuine how-to topic is untouched
+    howto = h_confidence_gate({**base, "classification": {"topic": "webhook-trigger"}},
+                              cfg)["confidence_gate"]
+    assert howto["pass"] is True and "forced_escalation" not in howto
+
+    # partial word doesn't trip it: 'export-step' must not match 'data-export'
+    cfg2 = {**cfg, "escalate_topics": ["data-export"]}
+    ok = h_confidence_gate({**base, "classification": {"topic": "export-step-howto"}},
+                           cfg2)["confidence_gate"]
+    assert ok["pass"] is True
+
+
 # --------------------------------------------------------------------------
 # llm provider routing (Groq + Anthropic)
 # --------------------------------------------------------------------------

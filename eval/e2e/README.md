@@ -80,6 +80,35 @@ the answer is "a human owns this." Fixing them needs an **intent →
 `ask_human` edge** (commercial/legal), a flow-authoring change, not a
 threshold — a Phase 7 follow-up.
 
+### 2026-08-29 — real-LLM recalibration (`019_recalibrate_gate.sql`)
+
+The `011` numbers above were measured against the **deterministic LLM
+stub**. Re-run with a real Groq draft, `draft_confidence` sits ~0.93–0.99
+on everything, so the 0.5/0.5 retrieval/draft blend under-escalated: acc
+**0.636**, auto-send P **0.556** (10/18) — 8 premium `ask_human` cases
+auto-answered.
+
+`019` changes the Acme gate to (a) an explicit blend
+`weights={retrieval .55, draft .1, groundedness .35}` and (b)
+`escalate_topics` — billing / refund / pricing / legal / account-access /
+data-export / partner-api / cancellation intents force `ask_human`
+regardless of score (matched on shared slug tokens; the static
+precursor to Phase 16's rule engine).
+
+| (real Groq draft) | 011 blend → 019 |
+|---|---|
+| action accuracy | 0.636 → **1.000** |
+| auto-send precision | 0.556 → **1.000** (10/10) |
+| escalation precision | 1.000 → **1.000** (12/12) |
+| coverage | 0.818 → 0.455 |
+
+Coverage 0.455 = 10/22, which is the **ceiling** for this set (8 cases are
+gold `ask_human`, 4 are gold `handover`); the bot now auto-answers exactly
+the 10 that should be and nothing else. The **threshold sweep printed by
+`run_e2e.py` is stale** — it re-derives decisions with the legacy 1-D
+blend and ignores `weights` / `escalate_topics`; read the per-run lines,
+not the sweep, until it's rewritten.
+
 ## Extending
 
 Add cases as real ones surface (e.g. from `runs` where a human heavily
