@@ -95,6 +95,19 @@ daily-sync.yml` now calls `python -m ingestion.scraper` / `.neo4j_sync`.
 | 5 | React Flow UI reading/writing the same flow schema — drag nodes, edit thresholds, toggle auto-send, pause per team/condition | **Complete (2026-08-29)** — repo reorganised (`db/migrations/`, `docs/`, `ingestion/`, `interpreter/flows/`+`cases/`, `api/`, `web/`; imports + CI updated; `README.md` + `.env.example` added). **`api/`** — thin FastAPI over `interpreter/`: `GET/POST /flows`, `GET/PUT/DELETE /flows/{id}`, `POST /flows/{id}/{validate,run}`, `GET /node-types`. Every request carries the caller's Supabase token; flow reads/writes go through an RLS-scoped client, service role only for the interpreter's own machinery. `loader.load_flow` gains `validate=False`. **`web/`** — Vite + React + `@xyflow/react` + Supabase Auth: flow list per tenant, dagre-laid-out canvas, node palette (per registered type), drag-connect / delete, inspector (label + `config` JSON + friendly per-tier threshold form for `confidence_gate`, edge `condition.if`), Validate (shows refs/orphan/cycle errors), Save (422 on invalid), draft⇄published toggle, and a Run panel (trace + outcome + retrieval). `npm run build` + `tsc` clean; API verified end-to-end (RLS list/get/create/save/invalid-422/validate/run/cross-tenant-404) against the live project. Phase 4's bare synthetic user replaced with a real GoTrue account (`globex-owner@example.test` / `57c26330…`). |
 | 6 | Observability: manager reporting on low-confidence cases, per-case "why did the bot respond this way" chat, conflicting-SOP detection across teams | **Complete (2026-08-29)** — migration `010` adds a **`runs`** table (flow_id, tenant, team, source, tier/outcome/confidence, `gate`/`trace`/`retrieval`/`sf_writeback`/`case_payload` jsonb), tenant-scoped RLS like the flow tables. `interpreter/runs.py` `record_run()` (best-effort — never breaks the run; `RUNS_DISABLED=1` to skip) wired into `interpreter.run` (`--no-record` to opt out) and `POST /flows/{id}/run` (returns `run_id`). API: `GET /runs`, `GET /runs/{id}`, `GET /runs/stats`. Web: a **Runs** tab — stat tiles (per outcome / per tier / low-confidence), filterable table, and a per-run detail showing the trace steps + gate math + retrieved docs = the "why". `scripts/sop_conflicts.py` probes each team's `retrieve` config across a fixed topic set and flags where teams surface different top docs (Groq-judged for actual contradiction when a key is present, reported unjudged otherwise). 14/14 offline tests green; runs API verified end-to-end (record from CLI + API, list/stats/detail, RLS-scoped). |
 
+**Phases 0–6 = the MVP (complete). Phases 7–13 = hardening — the roadmap
+from the 2026-08-29 self-review; still sequential (do 7 before 10, etc.).**
+
+| Phase | Scope | Status |
+|---|---|---|
+| 7 | **Evaluation & calibration.** End-to-end action eval (cases → gold action + rubric-scored draft); calibrate the confidence gate against it and report *auto-send precision* / *escalation precision*, not just retrieval hit@k; add a draft **groundedness / faithfulness** check feeding the gate; a harder qrels set that actually separates dense / hybrid / +rerank / +graph; per-node **latency + token** accounting in the trace; fix the **fail-open tier** (unknown → strictest bar). | Planned |
+| 8 | **Flow versioning & safe writes.** Immutable flow versions — editing a `published` flow forks a new `draft` version; publishing swaps the pointer; rollback. `runs` records the exact `flow_version` (or a definition hash) → every run reproducible. Move the editor's multi-statement flow save into one transactional Postgres RPC; optimistic concurrency (client sends the loaded `version`, server 409s if it moved). | Planned |
+| 9 | **Test coverage & CI.** Adopt `pytest`. `tests/test_api.py` — FastAPI `TestClient` + seeded test tenant: 401 without token, RLS scoping, PUT 422 paths, `run` → `run_id`, cross-tenant 404. Minimal web smoke tests (Vitest/Playwright). De-brittle `test_multiflow` — assert the *relative* invariant (Acme auto_reply vs Globex ask_human on identical input) + structural ones, not score-dependent absolute paths. `ci.yml` running py tests + `web` build/tsc, gating merges. | Planned |
+| 10 | **Event-driven pipeline.** A Salesforce trigger — CDC / Platform Event subscriber, or a polling worker on new `Case`s — that **enqueues** runs (this is the missing half of "automation": today a person runs the flow). A task queue (`arq` / Postgres-backed); `POST /run` enqueues and returns `run_id` immediately; UI polls / subscribes via Supabase Realtime on the `runs` row. **Idempotency**: unique `(flow_id, case_id)` within a window / an idempotency key; terminal handlers (`auto_reply`, `sf_writeback`, `ask_human`) no-op if a completed run for that case exists. | Planned |
+| 11 | **Human-in-the-loop feedback.** After `ask_human`, capture what the human actually did — a follow-up job diffs the Case's real sent reply against the bot draft (`human_action`, `edit_distance` on the run). Surface "drafts needed heavy editing 60% of the time for billing" in the Runs view. Feed accepted drafts into the Phase 7 golden set / few-shot pool. | Planned |
+| 12 | **Real multi-tenancy.** A `sources` table (tenant_id, kind, config) so the `retrieve` node names which source(s) to hit; per-source ingestion instead of the hardcoded global `doc_chunks`. A `tenant_integrations` table — per-tenant Salesforce / Slack / KB credentials (encrypted) — that the interpreter resolves connections from. A **second concrete KB source** for one tenant (e.g. a Markdown/Notion export) so multi-tenancy is real, not cosmetic. Defensive `tenant_id` assertions on every service-role write path. | Planned |
+| 13 | **Security & hardening.** Verify the Supabase JWT **signature** in the `caller` dependency (JWKS / shared secret) instead of decoding unverified. Rate-limit `/run` (it triggers real SF writes / Chatter). `/security-review` pass over the accumulated API + web surface. Make `sop_conflicts.py` actually fire — give one seed flow a divergent `retrieve` config (section filter) so it demonstrates a real catch. | Planned |
+
 ## Phase 0 — schema (complete)
 
 Tables (Supabase/Postgres):
@@ -241,6 +254,140 @@ Files delivered: `004_docs_ingestion_schema.sql`, `005_docs_rag_metadata.sql`,
   hard deletes for anything ingested from an external source, since
   external sources can have transient failures.
 
+## Hardening roadmap (phases 7–13) — detail
+
+From the 2026-08-29 self-review. Each phase is a small, verifiable chunk;
+keep the "same interpreter, more capability" discipline. Migration numbers
+below are indicative — take the next free number when you build it.
+
+### Phase 7 — Evaluation & calibration
+
+- `eval/e2e/` — 30–50 cases, each with `{gold_action, notes}` and a rubric
+  for the draft. `run_e2e.py` runs each through the **real** pipeline
+  (`build_graph().invoke`) and reports: auto-send **precision** (of cases
+  the bot auto-replied, how many drafts were sendable), escalation
+  **precision** (of `ask_human`/`handover`, how many actually needed a
+  human), and a mean rubric score (LLM-judge with a fixed rubric).
+- Calibrate `confidence_gate`: is `retrieval_score` monotonic with
+  answerability on the e2e set? Pick thresholds from a precision target
+  ("auto-sends ≥ 95% acceptable") and report the coverage that buys.
+  Consider Platt/isotonic on the combined score.
+- `interpreter/groundedness.py` — claim-extract the draft, check each claim
+  is entailed by a retrieved chunk (small model or Groq judge); expose
+  `groundedness` in state; let `confidence_gate.config` weight it in.
+- `eval/qrels_hard.jsonl` — multi-hop / keyword-heavy / near-duplicate-pair
+  questions that separate dense vs hybrid vs +rerank vs **+graph** (the
+  graph stage is currently unmeasured). Update `eval/README.md`.
+- Timing + tokens: each handler already returns a `trace` entry — add
+  `elapsed_ms`, and `tokens_in/out` when `llm.available()`. `record_run`
+  stores totals; `GET /runs/stats` surfaces p50/p95 latency + token/run.
+- Fix fail-open tier: `registry._norm_tier` unknown → `"enterprise"` (or an
+  explicit `"unknown"` tier with the strictest override) + a warn log.
+- Verify: `run_e2e.py` prints the precision/coverage table; a regression
+  guard in CI that auto-send precision doesn't drop below a floor.
+
+### Phase 8 — Flow versioning & safe writes
+
+- Migration: either a `flow_versions` table (immutable snapshot of
+  nodes+edges+meta per version) or version-scoped `flow_nodes`/`flow_edges`
+  with a `flows.published_version` pointer. Editing a `published` flow in
+  the UI forks `version+1` as `draft`; **Publish** flips the pointer;
+  **Rollback** re-points to an older version.
+- `runs` gains `flow_version` (+ `flow_hash`). Every run is reproducible;
+  every definition change is auditable (`who`/`when` via `created_by`).
+- `replace_flow_graph(flow_id, version, nodes jsonb, edges jsonb)` Postgres
+  function, `SECURITY INVOKER`, one transaction — `api` calls it via RPC
+  instead of the current delete/delete/upsert/upsert sequence.
+- Optimistic concurrency: `PUT /flows/{id}` body carries the loaded
+  `version`; server 409s if it moved. UI shows "reload — someone else
+  saved".
+- Verify: `test_api.py` covers fork-on-edit, publish swap, rollback, and
+  the 409; a run's `flow_version` matches the definition it executed.
+
+### Phase 9 — Test coverage & CI
+
+- Move `tests/` to `pytest` (keep the plain-`python -m` entry working).
+- `tests/test_api.py` — `fastapi.testclient.TestClient`, a seeded test
+  tenant + a minted/stubbed token: 401 without a token, `GET /flows`
+  RLS-scoped, `PUT` 422 on refs/orphan/cycle/unknown-type, `run` returns a
+  `run_id` and records, cross-tenant `GET` → 404, `DELETE` cascade.
+- `web`: Vitest for `graph.ts` (dict↔RF, dagre), one Playwright smoke
+  (stubbed auth → load flow → add node → Save).
+- De-brittle `test_multiflow`: assert `a.outcome != b.outcome` on identical
+  input + the structural facts (offboarding always `handover`), not the
+  exact score-path; optionally pin a frozen corpus snapshot for it.
+- `.github/workflows/ci.yml` — `pip install -r requirements.txt`,
+  `pytest`, `cd web && npm ci && npm run build && npx tsc -b`. Required
+  check on PRs to `main`.
+
+### Phase 10 — Event-driven pipeline
+
+- Trigger: `ingestion/sf_case_watch.py` — a Salesforce **Change Data
+  Capture** / Platform Event subscriber (or a polling worker on
+  `Case WHERE Status='New' AND <no run yet>`) that, per new Case, resolves
+  the tenant's published `support` flow and enqueues a run. Runs on GitHub
+  Actions cron or a small always-on worker.
+- Queue: `arq` (Redis) or a Postgres-backed `jobs` table + `SELECT … FOR
+  UPDATE SKIP LOCKED` worker. `POST /flows/{id}/run` **enqueues** and
+  returns `{run_id, status:"queued"}` immediately; a worker executes and
+  updates the `runs` row; the web Run panel + Runs view subscribe via
+  Supabase Realtime on `runs`.
+- Idempotency: unique partial index on `runs(flow_id, case_id)` for
+  non-failed runs within a window / an `Idempotency-Key` header;
+  `auto_reply` / `sf_writeback` / `ask_human` check for a prior completed
+  run for the case and no-op.
+- Verify: fire the same Case twice → one run, one Chatter post; kill the
+  worker mid-run → the job is retried, not lost.
+
+### Phase 11 — Human-in-the-loop feedback
+
+- After `ask_human`, a follow-up job (or the Phase 10 worker on a delay)
+  reads the Case's actual outbound reply and computes `human_action`
+  (`sent_as_is` / `edited` / `rewrote` / `no_reply`) and `edit_distance`
+  vs the bot draft; stored on the `runs` row (or a `run_feedback` table).
+- Runs view: "draft acceptance rate" per team / topic / tier over time;
+  a list of the worst-edited drafts.
+- Accepted drafts flow into `eval/e2e/` as new gold cases and into a
+  few-shot pool the `draft` node can sample from (config-gated).
+- Verify: seed a Case, `ask_human`, edit the reply in SF, run the job →
+  the `runs` row shows `edited` + a plausible distance.
+
+### Phase 12 — Real multi-tenancy
+
+- Migration: `sources` (source_id, tenant_id, kind `zapier_docs|markdown|
+  notion|gdrive|slack`, config jsonb, status), RLS via `tenant_members`.
+  `doc_chunks` / `zapier_docs` gain `source_id` (backfill the existing rows
+  to a "zapier-public" source shared by all tenants). `retrieve` node
+  `config.sources` names which to search; `retrieval.hybrid_retrieve`
+  filters by `source_id`.
+- Ingestion becomes per-source: `ingestion/sources/<kind>.py` with a common
+  `fetch → chunk → embed → upsert(source_id)` shape; the daily workflow
+  loops over active sources.
+- `tenant_integrations` (tenant_id, kind, secret jsonb — encrypted via
+  Supabase Vault / pgsodium). `interpreter/salesforce.py` and future Slack
+  resolve creds from here keyed by the flow's `tenant_id` instead of `.env`.
+- A real second source: ingest a small Markdown SOP set for the Globex
+  tenant; a Globex flow retrieves from `[globex-sop, zapier-public]`.
+- Defensive: every service-role write (`record_run`, `sf_writeback`,
+  flow save) asserts the row's `tenant_id` matches the flow's.
+- Verify: Acme and Globex retrieve different top docs for the same query
+  because they point at different sources; `sop_conflicts.py` now has real
+  divergence to find.
+
+### Phase 13 — Security & hardening
+
+- `api`: verify the Supabase JWT signature in `caller` (fetch JWKS or use
+  the project JWT secret) — currently the `sub` is decoded unverified and
+  used for logging; RLS is the only real gate. Reject expired/forged.
+- Rate-limit `POST /flows/{id}/run` and `/runs` (per user + per tenant) —
+  `run` has real external side effects.
+- Run `/security-review` over the accumulated `api/` + `web/` diff; address
+  findings. Re-check CORS, error verbosity, and that no endpoint leaks
+  cross-tenant data via error messages.
+- `sop_conflicts.py`: once Phase 12 gives divergent per-team retrieval,
+  confirm it surfaces a real conflict and Groq-judges it; add it to CI as
+  a non-blocking report.
+
 ## Immediate next step
 
 **All six phases (0–6) are complete.** Migrations through `010` applied to
@@ -260,14 +407,22 @@ cd web && npm install && npm run dev                  # editor + Runs view :5173
 Editor login: a Supabase account. `gundamvishnu7@gmail.com` → tenant Acme;
 `globex-owner@example.test` (pw `editor-test-pw-8891`) → tenant Globex.
 
-**No open phase.** Natural next increments if the project continues:
-- give `sop_conflicts.py` divergent per-team retrieval (section filters on
-  the `retrieve` node) so it actually surfaces conflicts on this corpus;
-- a Groq key in `.env` to move classify/draft off the stub;
-- deploy: the daily ingestion already runs on GitHub Actions; the `api/` +
-  `web/` would need hosting (Fly/Render + Vercel/Netlify) and
-  `WEB_ORIGINS` / `VITE_*` set for the deployed URLs;
-- `runs` retention / a scheduled rollup for the stats endpoint as volume grows.
+**Next: Phase 7 — Evaluation & calibration** (see "Hardening roadmap"
+above). It's the highest-signal fix: it turns "I wired up RAG + LangGraph"
+into "I measured the auto-send decision and tuned it." Concretely, start
+with `eval/e2e/` — 30–50 cases with a gold action, run through the real
+pipeline, report auto-send precision / escalation precision / rubric score
+— then calibrate `confidence_gate` against that and fix the fail-open tier
+in `registry._norm_tier`.
+
+Order for the rest: **7 → 9 → 8 → 10 → 11 → 12 → 13** is a reasonable
+build order (get the eval + CI safety net in before the bigger structural
+changes in 8/10/12). Phases 8–13 detailed in "Hardening roadmap".
+
+Quick wins available any time (not blocking a phase):
+- a Groq key in `.env` moves `classify`/`draft` off the stub;
+- deploy: ingestion already runs on GitHub Actions; `api/` + `web/` need
+  hosting (Fly/Render + Vercel/Netlify) with `WEB_ORIGINS` / `VITE_*` set.
 
 Default to Groq for any LLM calls (classification, draft generation).
 
@@ -304,8 +459,9 @@ Default to Groq for any LLM calls (classification, draft generation).
   (mapped via `_TIER_ALIASES`); the LLM only fills `topic`/`urgency`/
   `summary`. From Salesforce (`--sf-case`) that value is `Account.Tier__c`
   if the org has it, else the standard `Account.Type` picklist — whose
-  values aren't `basic/premium/enterprise`, so tier falls back to `basic`.
-  Add a `Tier__c` picklist on Account for a faithful demo (`SALESFORCE_SETUP.md`).
+  values aren't `basic/premium/enterprise`, so tier falls back to `basic`
+  (the *most permissive* bar — fail-open). **→ Phase 7** changes the
+  fallback to the strictest tier + a warn.
 - Phase 3 SF integration is **live-verified** against a real Developer
   Edition org ("speed", `orgfarm-8f5f468eb6-dev-ed`) via the **JWT bearer
   flow**. That org has SOAP login *and* the OAuth username-password flow
@@ -318,8 +474,8 @@ Default to Groq for any LLM calls (classification, draft generation).
   post); set `ask_human.config.mention_id` to a real User/Group Id for an
   actual @mention.
 - `sf_writeback` appends the `[triage] …` block to `Description` every run,
-  so re-running the same Case grows the field. Fine for the demo; a real
-  build would use a dedicated field or a dedupe marker.
+  so re-running the same Case grows the field. **→ Phase 10** (idempotency:
+  a completed run for the case makes the terminal handlers no-op).
 - Seeded `region` is a country ("United States" / "United Kingdom") not a
   region code — the org has State & Country picklists, so `BillingCountry`
   must be a real country; `get_case` reads it straight back into
@@ -328,3 +484,38 @@ Default to Groq for any LLM calls (classification, draft generation).
 - `Account.Tier__c` is a `Text(40)` custom field created by
   `scripts/sf_create_fields.py`; `get_case` prefers it over the standard
   `Account.Type` picklist for `classify`'s tier.
+
+### Design debt — addressed by the hardening roadmap (phases 7–13)
+
+From the 2026-08-29 self-review. Each is intentional MVP scope, not a bug:
+
+- The `confidence_gate` score (`w·retrieval_score + (1−w)·draft_confidence`)
+  is **uncalibrated** — `retrieval_score` is a squashed cross-encoder logit,
+  `draft_confidence` is LLM self-report; no eval proves the gate separates
+  good auto-replies from bad. No **groundedness** check on the draft. The
+  **graph-expansion** retrieval stage is unmeasured. **→ Phase 7.**
+- Flows are **mutated in place**; `version` is decorative; `runs` doesn't
+  record which flow version produced a result — no reproducibility, no
+  rollback, no change audit. `PUT /flows/{id}` is 4 non-transactional
+  PostgREST calls (half-write on failure) with no optimistic concurrency.
+  **→ Phase 8.**
+- **No committed tests for `api/` or `web/`**; no CI runs the suite on
+  push. `test_multiflow` asserts score-dependent absolute paths (brittle vs
+  the daily re-ingest). The offline suite is a hand-rolled runner, not
+  `pytest`. **→ Phase 9.**
+- **Nothing triggers the flow** — a person runs it. Runs execute
+  synchronously inside the request (embed + rerank + LLM + SF writes block a
+  worker). No **idempotency** — a redelivered Case → duplicate auto-reply +
+  Chatter post. **→ Phase 10.**
+- `ask_human` is fire-and-forget — the human's actual resolution (edited /
+  rejected / rewrote the draft), the single best training signal, is
+  dropped. **→ Phase 11.**
+- **Multi-tenancy is real for reads only.** One global Zapier-docs corpus
+  for every tenant; `retrieve` is hardcoded to `doc_chunks`; one Salesforce
+  org; all writes are service-role with no `tenant_id` backstop. The
+  "Google Sheet / Slack / Docs source" from the project pitch is unbuilt.
+  **→ Phase 12.**
+- `api`'s `caller` **decodes the JWT without verifying its signature** (RLS
+  is the only real gate). No rate limiting on `/run`, which has real
+  external side effects. No security review of the Phase 5/6 surface.
+  `sop_conflicts.py` finds nothing on the current seed data. **→ Phase 13.**

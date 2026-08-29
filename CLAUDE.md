@@ -24,24 +24,23 @@ Run modules from the repo root: `python -m ingestion.scraper`,
 
 ## Don't build ahead
 
-This project is being built in explicit, sequenced phases (see
-`PROJECT_SCOPE.md` for the current phase table). **Do not jump ahead into
-later-phase work while an earlier phase is still open** — specifically:
+This project is built in explicit, sequenced phases (see
+`docs/PROJECT_SCOPE.md` for the phase table). **Phases 0–6 (the MVP) are
+complete.** Phases **7–13 are the hardening roadmap** — still sequential.
+**Do not jump ahead into a later phase while an earlier one is still open:**
 
-- Do not start on the rule engine / LangGraph interpreter (Phase 2) while
-  Phase 1 (Zapier docs ingestion) isn't finished and verified.
-- Do not start on the visual/no-code workflow designer (Phase 5, React
-  Flow UI) under any circumstances until Phases 0–4 are complete and
-  verified. This is the most common way this kind of project scope-creeps
-  into an unfinished mess — resist it even if it looks like "just a quick
-  prototype."
-- If a task naturally surfaces something that belongs to a later phase,
-  note it in your response and stop there — do not implement it
-  preemptively.
+- The recommended build order is **7 → 9 → 8 → 10 → 11 → 12 → 13** (eval +
+  CI safety net before the structural changes in 8/10/12). Don't start
+  Phase 10 (event-driven pipeline / queue) before Phase 7's eval exists and
+  Phase 9's CI is gating.
+- Don't expand scope mid-phase. Each roadmap phase is a small, verifiable
+  chunk — land it and its verification before moving on.
+- If a task surfaces something that belongs to a later phase, note it in
+  your response and stop there — don't implement it preemptively.
 
 ## Before making changes
 
-1. Read `PROJECT_SCOPE.md` in full.
+1. Read `docs/PROJECT_SCOPE.md` in full.
 2. State your understanding of the current phase and what's already
    done, and wait for confirmation before proceeding, if this is the
    start of a new session.
