@@ -144,3 +144,31 @@ export interface GoogleStatus {
   configured: boolean;
   connected: Record<string, boolean>; // tenant_id -> connected
 }
+
+export interface PolicyRule {
+  rule_id: string;
+  tenant_id: string;
+  team: string;
+  name: string;
+  priority: number;
+  when: Record<string, unknown>;
+  then: Record<string, unknown>;
+  status: "active" | "disabled";
+  updated_at: string;
+}
+
+export interface ActionRequest {
+  id: string;
+  tenant_id: string;
+  run_id: string | null;
+  rule_name: string | null;
+  kind: string;
+  payload: Record<string, unknown>;
+  status: "pending" | "approved" | "rejected" | "expired" | "done" | "error";
+  slack_channel: string | null;
+  decided_by: string | null;
+  decided_at: string | null;
+  result: Record<string, unknown> | null;
+  error: string | null;
+  created_at: string;
+}

@@ -6,12 +6,13 @@ import { FlowList } from "./flows/FlowList";
 import { FlowEditor } from "./flows/FlowEditor";
 import { RunsView } from "./runs/RunsView";
 import { KnowledgeView } from "./kb/KnowledgeView";
+import { RulesView } from "./rules/RulesView";
 
 export function App() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
   const [flowId, setFlowId] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
-  const [view, setView] = useState<"editor" | "runs" | "knowledge">("editor");
+  const [view, setView] = useState<"editor" | "runs" | "knowledge" | "rules">("editor");
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
@@ -36,6 +37,9 @@ export function App() {
             <button className={view === "knowledge" ? "primary" : ""} onClick={() => setView("knowledge")}>
               Knowledge
             </button>
+            <button className={view === "rules" ? "primary" : ""} onClick={() => setView("rules")}>
+              Rules
+            </button>
           </div>
           <button onClick={() => supabase.auth.signOut()} title={session.user.email ?? ""}>
             sign out
@@ -59,9 +63,17 @@ export function App() {
             in a flow consults a collection at a checkpoint
           </div>
         )}
+        {view === "rules" && (
+          <div className="muted">
+            structured <code>when → then</code> rules a <code>policy_gate</code> node
+            evaluates; <code>task</code> outcomes route through Slack approval
+          </div>
+        )}
       </div>
       <div className="editor">
-        {view === "knowledge" ? (
+        {view === "rules" ? (
+          <RulesView />
+        ) : view === "knowledge" ? (
           <KnowledgeView />
         ) : view === "runs" ? (
           <RunsView />

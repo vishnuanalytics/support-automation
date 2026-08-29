@@ -3,10 +3,12 @@ import type {
   Flow,
   FlowMeta,
   FlowVersion,
+  ActionRequest,
   GoogleStatus,
   KbCollection,
   KbEntry,
   KbEntryRow,
+  PolicyRule,
   NodeTypesResp,
   RunDetail,
   RunResult,
@@ -102,6 +104,24 @@ export const api = {
     authorize: (tenant_id: string) =>
       req<{ url: string }>(`/integrations/google/authorize?tenant_id=${tenant_id}`),
   },
+
+  slack: {
+    status: () => req<GoogleStatus>("/integrations/slack/status"),
+    authorize: (tenant_id: string) =>
+      req<{ url: string }>(`/integrations/slack/authorize?tenant_id=${tenant_id}`),
+  },
+
+  rules: {
+    list: (team?: string) =>
+      req<PolicyRule[]>(`/rules${team ? `?team=${encodeURIComponent(team)}` : ""}`),
+    create: (b: Partial<PolicyRule> & { team: string; name: string }) =>
+      req<PolicyRule>("/rules", { method: "POST", body: JSON.stringify(b) }),
+    update: (id: string, b: Partial<PolicyRule>) =>
+      req<PolicyRule>(`/rules/${id}`, { method: "PATCH", body: JSON.stringify(b) }),
+    remove: (id: string) => req<void>(`/rules/${id}`, { method: "DELETE" }),
+  },
+
+  actionRequests: (limit = 50) => req<ActionRequest[]>(`/action-requests?limit=${limit}`),
 
   runStats: () => req<RunStats>("/runs/stats"),
   listRuns: (q: { flow_id?: string; outcome?: string; limit?: number } = {}) => {
