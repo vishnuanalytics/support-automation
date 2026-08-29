@@ -26,12 +26,22 @@ export interface FlowMeta {
   name: string;
   status: "draft" | "published" | "archived";
   version: number;
+  published_version: number | null;
   updated_at?: string;
 }
 
 export interface Flow extends FlowMeta {
+  flow_version?: number | null;
   nodes: FlowNode[];
   edges: FlowEdge[];
+}
+
+export interface FlowVersion {
+  version: number;
+  name: string;
+  definition_hash: string;
+  created_by: string | null;
+  created_at: string;
 }
 
 export interface NodeTypesResp {

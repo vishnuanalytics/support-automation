@@ -41,7 +41,9 @@ load_dotenv()
 
 from interpreter.builder import build_graph  # noqa: E402
 from interpreter.flows.validate_flow import Flow, check_flow  # noqa: E402
-from interpreter.loader import FlowInvalid, FlowNotFound, load_flow  # noqa: E402
+from interpreter.loader import (  # noqa: E402
+    FlowInvalid, FlowNotFound, definition_hash as flow_definition_hash, load_flow,
+)
 from interpreter.registry import known_types  # noqa: E402
 from interpreter.runs import record_run  # noqa: E402
 
@@ -187,7 +189,7 @@ def node_types() -> dict:
 def list_flows(c: Caller = Depends(caller)) -> list[dict]:
     rows = (
         c.sb.table("flows")
-        .select("flow_id, tenant_id, team, name, status, version, updated_at")
+        .select("flow_id, tenant_id, team, name, status, version, published_version, updated_at")
         .order("tenant_id").order("team").execute().data
         or []
     )
@@ -209,11 +211,14 @@ def create_flow(body: FlowCreate, c: Caller = Depends(caller)) -> dict:
 
 @app.get("/api/flows/{flow_id}")
 def get_flow(flow_id: str, c: Caller = Depends(caller)) -> dict:
-    _require_visible(c, flow_id)
+    """The editable working draft (flow_nodes/flow_edges) + version pointers."""
+    meta = _require_visible(c, flow_id)
     try:
-        return load_flow(flow_id=flow_id, sb=c.sb, validate=False)
+        d = load_flow(flow_id=flow_id, sb=c.sb, status="draft", validate=False)
     except FlowNotFound:
         raise HTTPException(404, "flow not found")
+    d["published_version"] = meta.get("published_version")
+    return d
 
 
 @app.post("/api/flows/{flow_id}/validate")
@@ -225,36 +230,95 @@ def validate_flow_ep(flow_id: str, body: FlowIn, c: Caller = Depends(caller)) ->
 
 @app.put("/api/flows/{flow_id}")
 def save_flow(flow_id: str, body: FlowIn, c: Caller = Depends(caller)) -> dict:
+    """Save the working draft — one transactional RPC. Optimistic concurrency:
+    `body.version` must match the flow's current `version` or it's a 409."""
     meta = _require_visible(c, flow_id)
-    fd = _flow_dict(meta, body)
-    errs = _structural_errors(fd)
+    if body.version != meta["version"]:
+        raise HTTPException(409, {
+            "message": "flow changed since you loaded it — reload",
+            "your_version": body.version, "current_version": meta["version"],
+        })
+    errs = _structural_errors(_flow_dict(meta, body))
     if errs:
         raise HTTPException(422, {"errors": errs})
 
-    have_nodes = {r["node_id"] for r in
-                  c.sb.table("flow_nodes").select("node_id").eq("flow_id", flow_id).execute().data or []}
-    have_edges = {r["edge_id"] for r in
-                  c.sb.table("flow_edges").select("edge_id").eq("flow_id", flow_id).execute().data or []}
-    want_nodes = {n.node_id for n in body.nodes}
-    want_edges = {e.edge_id for e in body.edges}
-
-    for eid in have_edges - want_edges:
-        c.sb.table("flow_edges").delete().eq("edge_id", eid).execute()
-    for nid in have_nodes - want_nodes:
-        c.sb.table("flow_nodes").delete().eq("node_id", nid).execute()
-    if body.nodes:
-        c.sb.table("flow_nodes").upsert(
-            [{"flow_id": flow_id, **n.model_dump()} for n in body.nodes]
-        ).execute()
-    if body.edges:
-        c.sb.table("flow_edges").upsert(
-            [{"flow_id": flow_id, **e.model_dump()} for e in body.edges]
-        ).execute()
+    c.sb.rpc("replace_flow_graph", {
+        "p_flow_id": flow_id,
+        "p_nodes": [n.model_dump() for n in body.nodes],
+        "p_edges": [e.model_dump() for e in body.edges],
+    }).execute()
+    new_version = meta["version"] + 1
+    status = body.status if body.status in ("draft", "archived") else meta["status"]
     c.sb.table("flows").update(
-        {"name": body.name, "status": body.status, "version": body.version}
+        {"name": body.name, "status": status, "version": new_version}
     ).eq("flow_id", flow_id).execute()
 
-    return load_flow(flow_id=flow_id, sb=c.sb, validate=False)
+    out = load_flow(flow_id=flow_id, sb=c.sb, status="draft", validate=False)
+    out["published_version"] = meta.get("published_version")
+    return out
+
+
+@app.get("/api/flows/{flow_id}/versions")
+def list_versions(flow_id: str, c: Caller = Depends(caller)) -> list[dict]:
+    _require_visible(c, flow_id)
+    return (
+        c.sb.table("flow_versions")
+        .select("version, name, definition_hash, created_by, created_at")
+        .eq("flow_id", flow_id).order("version", desc=True).execute().data
+        or []
+    )
+
+
+@app.post("/api/flows/{flow_id}/publish")
+def publish_flow(flow_id: str, c: Caller = Depends(caller)) -> dict:
+    """Snapshot the current draft into an immutable flow_versions row and
+    point `published_version` at it."""
+    meta = _require_visible(c, flow_id)
+    draft = load_flow(flow_id=flow_id, sb=c.sb, status="draft", validate=False)
+    errs = _structural_errors(draft)
+    if errs:
+        raise HTTPException(422, {"errors": errs})
+
+    prev = (
+        c.sb.table("flow_versions").select("version")
+        .eq("flow_id", flow_id).order("version", desc=True).limit(1).execute().data
+    )
+    version = (prev[0]["version"] + 1) if prev else 1
+    c.sb.table("flow_versions").insert({
+        "flow_id": flow_id, "version": version, "name": draft["name"],
+        "nodes": draft["nodes"], "edges": draft["edges"],
+        "definition_hash": flow_definition_hash(draft["nodes"], draft["edges"]),
+        "created_by": c.user_id,
+    }).execute()
+    c.sb.table("flows").update({
+        "status": "published", "published_version": version,
+        "version": meta["version"] + 1,
+    }).eq("flow_id", flow_id).execute()
+    return {"published_version": version}
+
+
+class RollbackIn(BaseModel):
+    version: int
+
+
+@app.post("/api/flows/{flow_id}/rollback")
+def rollback_flow(flow_id: str, body: RollbackIn, c: Caller = Depends(caller)) -> dict:
+    """Restore the working draft from an old snapshot and re-publish it."""
+    meta = _require_visible(c, flow_id)
+    snap = (
+        c.sb.table("flow_versions").select("version, nodes, edges")
+        .eq("flow_id", flow_id).eq("version", body.version).execute().data
+    )
+    if not snap:
+        raise HTTPException(404, f"no version {body.version}")
+    c.sb.rpc("replace_flow_graph", {
+        "p_flow_id": flow_id,
+        "p_nodes": snap[0]["nodes"], "p_edges": snap[0]["edges"],
+    }).execute()
+    c.sb.table("flows").update({
+        "published_version": body.version, "version": meta["version"] + 1,
+    }).eq("flow_id", flow_id).execute()
+    return {"published_version": body.version}
 
 
 @app.delete("/api/flows/{flow_id}", status_code=204)

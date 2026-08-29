@@ -4,7 +4,7 @@ import { layout, toFlowPayload, toReactFlow, uuid } from "./graph";
 
 const flow: Flow = {
   flow_id: "f", tenant_id: "t", team: "support", name: "n",
-  status: "draft", version: 1,
+  status: "draft", version: 1, published_version: null,
   nodes: [
     { node_id: "r", type: "retrieve", label: "R", position_x: null, position_y: null, config: { top_k: 3 } },
     { node_id: "g", type: "confidence_gate", label: "G", position_x: null, position_y: null, config: {} },

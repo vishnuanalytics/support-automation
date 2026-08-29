@@ -140,3 +140,64 @@ def test_run_returns_a_run_id(auth_headers):
     body = r.json()
     assert r.status_code == 200 and body["run_id"] and body["outcome"]["action"] in (
         "auto_reply", "ask_human", "handover")
+
+
+@pytest.fixture
+def scratch_flow(auth_headers):
+    """A throwaway 3-node flow in the Globex tenant; deleted after the test."""
+    from supabase import create_client
+
+    fid = client.post("/api/flows", headers=auth_headers, json={
+        "tenant_id": "22222222-2222-2222-2222-222222222222", "team": "csm",
+        "name": "pytest-scratch", "status": "draft"}).json()["flow_id"]
+    r, cl, hd = (str(uuid.uuid4()) for _ in range(3))
+    body = {"name": "pytest-scratch", "status": "draft", "version": 1,
+            "nodes": [{"node_id": r, "type": "retrieve", "config": {}},
+                      {"node_id": cl, "type": "classify", "config": {}},
+                      {"node_id": hd, "type": "handover", "config": {}}],
+            "edges": [{"edge_id": str(uuid.uuid4()), "source_node_id": r, "target_node_id": cl, "condition": {}},
+                      {"edge_id": str(uuid.uuid4()), "source_node_id": cl, "target_node_id": hd, "condition": {}}]}
+    assert client.put(f"/api/flows/{fid}", headers=auth_headers, json=body).status_code == 200
+    yield fid, body
+    create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"]) \
+        .table("flows").delete().eq("flow_id", fid).execute()
+
+
+@pytest.mark.integration
+def test_stale_put_is_409(scratch_flow, auth_headers):
+    fid, body = scratch_flow
+    # body.version is still 1, but the earlier PUT bumped it to 2
+    r = client.put(f"/api/flows/{fid}", headers=auth_headers, json={**body, "version": 1})
+    assert r.status_code == 409 and "current_version" in str(r.json())
+
+
+@pytest.mark.integration
+def test_publish_snapshots_and_run_records_the_version(scratch_flow, auth_headers):
+    fid, _ = scratch_flow
+    pv = client.post(f"/api/flows/{fid}/publish", headers=auth_headers).json()["published_version"]
+    assert pv == 1
+    versions = client.get(f"/api/flows/{fid}/versions", headers=auth_headers).json()
+    assert versions[0]["version"] == 1 and len(versions[0]["definition_hash"]) == 64
+
+    run = client.post(f"/api/flows/{fid}/run", headers=auth_headers,
+                      json={"case": {"subject": "x", "body": "y", "account": {"customer_type": "premium"}}}).json()
+    from supabase import create_client
+    row = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"]) \
+        .table("runs").select("flow_version").eq("run_id", run["run_id"]).execute().data[0]
+    assert row["flow_version"] == 1
+
+
+@pytest.mark.integration
+def test_rollback_restores_the_draft(scratch_flow, auth_headers):
+    fid, body = scratch_flow
+    client.post(f"/api/flows/{fid}/publish", headers=auth_headers)          # v1
+    g = client.get(f"/api/flows/{fid}", headers=auth_headers).json()
+    edited = {**body, "version": g["version"],
+              "nodes": [{**n, "label": "EDITED"} for n in body["nodes"]]}
+    client.put(f"/api/flows/{fid}", headers=auth_headers, json=edited)
+    client.post(f"/api/flows/{fid}/publish", headers=auth_headers)          # v2
+
+    client.post(f"/api/flows/{fid}/rollback", headers=auth_headers, json={"version": 1})
+    g = client.get(f"/api/flows/{fid}", headers=auth_headers).json()
+    assert all(n.get("label") != "EDITED" for n in g["nodes"])
+    assert g["published_version"] == 1

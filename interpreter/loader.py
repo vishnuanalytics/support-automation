@@ -6,6 +6,8 @@ validator (`validate_flow.check_flow`) before anyone tries to build a graph.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import pathlib
 import sys
 from typing import Any
@@ -13,6 +15,25 @@ from typing import Any
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from ingestion.scraper import get_supabase  # noqa: E402  reuse the service-role client
 from interpreter.flows.validate_flow import Flow, check_flow  # noqa: E402  one validator, not two
+
+
+def definition_hash(nodes: list[dict], edges: list[dict]) -> str:
+    """Stable sha256 of a flow's graph — order-independent, ignores positions."""
+    def norm_node(n: dict) -> dict:
+        return {"node_id": n["node_id"], "type": n["type"], "label": n.get("label"),
+                "config": n.get("config") or {}}
+
+    def norm_edge(e: dict) -> dict:
+        return {"edge_id": e["edge_id"], "source_node_id": e["source_node_id"],
+                "target_node_id": e["target_node_id"], "condition": e.get("condition") or {}}
+
+    payload = {
+        "nodes": sorted((norm_node(n) for n in nodes), key=lambda x: x["node_id"]),
+        "edges": sorted((norm_edge(e) for e in edges), key=lambda x: x["edge_id"]),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 class FlowNotFound(LookupError):
@@ -25,24 +46,56 @@ class FlowInvalid(ValueError):
         super().__init__("flow failed validation:\n  - " + "\n  - ".join(errors))
 
 
+def _draft_graph(sb, fid: str) -> tuple[list[dict], list[dict]]:
+    """The live, editable graph (flow_nodes / flow_edges)."""
+    nodes = (
+        sb.table("flow_nodes")
+        .select("node_id, type, label, position_x, position_y, config")
+        .eq("flow_id", fid).execute().data or []
+    )
+    edges = (
+        sb.table("flow_edges")
+        .select("edge_id, source_node_id, target_node_id, condition")
+        .eq("flow_id", fid).execute().data or []
+    )
+    return nodes, edges
+
+
+def _version_graph(sb, fid: str, version: int) -> tuple[list[dict], list[dict], int]:
+    """An immutable published snapshot (flow_versions)."""
+    rows = (
+        sb.table("flow_versions").select("version, nodes, edges")
+        .eq("flow_id", fid).eq("version", version).execute().data or []
+    )
+    if not rows:
+        raise FlowNotFound(f"flow {fid} has no version {version}")
+    r = rows[0]
+    return r["nodes"] or [], r["edges"] or [], r["version"]
+
+
 def load_flow(
     flow_id: str | None = None,
     *,
     tenant_id: str | None = None,
     team: str | None = None,
     status: str = "published",
+    version: int | None = None,
     sb=None,
     validate: bool = True,
 ) -> dict[str, Any]:
     """
-    Fetch a flow by `flow_id`, or by `(tenant_id, team, status)` (defaults to
-    the single published flow for that team -- guaranteed unique by the
-    `uq_one_published_flow_per_team` index). Returns the flow as a dict:
-    {flow_id, tenant_id, team, name, version, status, nodes:[...], edges:[...]}.
+    Fetch a flow by `flow_id`, or by `(tenant_id, team, status)`. Returns
+    {flow_id, tenant_id, team, name, version, status, flow_version, nodes, edges}.
 
-    `sb` may be a user-scoped Supabase client (RLS applies). `validate=False`
-    skips the structural check -- the editor needs to load a work-in-progress
-    flow even while it's temporarily invalid.
+    Which graph:
+      * status="published" (default) -> the immutable snapshot at
+        `flows.published_version` (or an explicit `version=`). This is what a
+        run executes.
+      * status="draft" (or a published flow with no published_version) -> the
+        live `flow_nodes`/`flow_edges` working draft (what the editor edits).
+
+    `sb` may be a user-scoped client (RLS applies). `validate=False` skips the
+    structural check (the editor loads work-in-progress flows).
     """
     sb = sb or get_supabase()
 
@@ -63,22 +116,13 @@ def load_flow(
     row = rows[0]
     fid = row["flow_id"]
 
-    nodes = (
-        sb.table("flow_nodes")
-        .select("node_id, type, label, position_x, position_y, config")
-        .eq("flow_id", fid)
-        .execute()
-        .data
-        or []
-    )
-    edges = (
-        sb.table("flow_edges")
-        .select("edge_id, source_node_id, target_node_id, condition")
-        .eq("flow_id", fid)
-        .execute()
-        .data
-        or []
-    )
+    want_version = version if version is not None else row.get("published_version")
+    use_snapshot = status != "draft" and want_version is not None
+    if use_snapshot:
+        nodes, edges, flow_version = _version_graph(sb, fid, want_version)
+    else:
+        nodes, edges = _draft_graph(sb, fid)
+        flow_version = None
 
     flow_dict: dict[str, Any] = {
         "flow_id": fid,
@@ -87,6 +131,7 @@ def load_flow(
         "name": row["name"],
         "version": row["version"],
         "status": row["status"],
+        "flow_version": flow_version,
         "nodes": [
             {
                 "node_id": n["node_id"],

@@ -48,6 +48,7 @@ function Inner({ flowId, onSaved, onDeleted }: {
   const [banner, setBanner] = useState<Banner | null>(null);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [versions, setVersions] = useState<{ version: number; created_at: string }[]>([]);
 
   const nodeTypes = useMemo(() => ({ flowNode: NodeCard }), []);
   const mark = useCallback(() => setDirty(true), []);
@@ -55,6 +56,7 @@ function Inner({ flowId, onSaved, onDeleted }: {
   useEffect(() => {
     let alive = true;
     api.nodeTypes().then((t) => alive && setTypes(t));
+    api.listVersions(flowId).then((v) => alive && setVersions(v)).catch(() => {});
     api
       .getFlow(flowId)
       .then((f) => {
@@ -148,17 +150,63 @@ function Inner({ flowId, onSaved, onDeleted }: {
     setBusy(false);
   }
 
+  async function reload() {
+    const f = await api.getFlow(flowId);
+    setFlow(f);
+    const { nodes: n, edges: e } = toReactFlow(f);
+    setNodes(n);
+    setEdges(e);
+    setConfigById(Object.fromEntries(f.nodes.map((x) => [x.node_id, x.config ?? {}])));
+    setDirty(false);
+  }
+
   async function doSave() {
     setBusy(true);
     try {
       const f = await api.saveFlow(flowId, payload());
       setFlow(f);
       setDirty(false);
-      setBanner({ kind: "ok", text: "saved" });
+      setBanner({ kind: "ok", text: `saved · draft v${f.version}` });
       onSaved();
     } catch (e) {
       const ae = e as ApiError;
-      setBanner({ kind: "err", text: ae.errors ? "save blocked" : ae.message, list: ae.errors ?? undefined });
+      if (ae.status === 409) {
+        await reload();
+        setBanner({ kind: "err", text: "someone else saved this flow — reloaded their version" });
+      } else {
+        setBanner({ kind: "err", text: ae.errors ? "save blocked" : ae.message, list: ae.errors ?? undefined });
+      }
+    }
+    setBusy(false);
+  }
+
+  async function doPublish() {
+    if (dirty && !confirm("Save first, then publish the draft?")) return;
+    setBusy(true);
+    try {
+      if (dirty) await api.saveFlow(flowId, payload());
+      const { published_version } = await api.publishFlow(flowId);
+      await reload();
+      setVersions(await api.listVersions(flowId));
+      setBanner({ kind: "ok", text: `published v${published_version}` });
+      onSaved();
+    } catch (e) {
+      const ae = e as ApiError;
+      setBanner({ kind: "err", text: ae.errors ? "can't publish — flow is invalid" : ae.message, list: ae.errors ?? undefined });
+    }
+    setBusy(false);
+  }
+
+  async function doRollback(v: number) {
+    if (!confirm(`Roll back the draft + published pointer to v${v}?`)) return;
+    setBusy(true);
+    try {
+      await api.rollbackFlow(flowId, v);
+      await reload();
+      setBanner({ kind: "ok", text: `rolled back to v${v}` });
+      onSaved();
+    } catch (e) {
+      setBanner({ kind: "err", text: (e as ApiError).message });
     }
     setBusy(false);
   }
@@ -189,22 +237,36 @@ function Inner({ flowId, onSaved, onDeleted }: {
             mark();
           }}
         />
-        <button
-          className={`pill ${flow.status}`}
-          onClick={() => {
-            setFlow({ ...flow, status: flow.status === "published" ? "draft" : "published" });
-            mark();
-          }}
-          title="toggle draft / published"
+        <span
+          className={`pill ${flow.published_version ? "published" : "draft"}`}
+          title="what a run executes"
         >
-          {flow.status}
-        </button>
-        <span className="muted">v{flow.version}</span>
+          {flow.published_version ? `published v${flow.published_version}` : "unpublished"}
+        </span>
+        <span className="muted" title="draft revision (optimistic-concurrency token)">
+          draft rev {flow.version}
+        </span>
+        {versions.length > 0 && (
+          <select
+            value=""
+            onChange={(e) => e.target.value && doRollback(Number(e.target.value))}
+            title="roll back to a published version"
+            style={{ width: "auto" }}
+          >
+            <option value="">rollback…</option>
+            {versions.map((v) => (
+              <option key={v.version} value={v.version}>
+                v{v.version} · {new Date(v.created_at).toLocaleDateString()}
+              </option>
+            ))}
+          </select>
+        )}
         <div style={{ flex: 1 }} />
         {dirty && <span className="muted" title="unsaved changes">●</span>}
         <button onClick={() => setNodes((ns) => layout(ns, edges))}>Re-layout</button>
         <button onClick={doValidate} disabled={busy}>Validate</button>
-        <button className="primary" onClick={doSave} disabled={busy || !dirty}>Save</button>
+        <button className="primary" onClick={doSave} disabled={busy || !dirty}>Save draft</button>
+        <button onClick={doPublish} disabled={busy}>Publish</button>
         <button className="err" onClick={doDelete}>Delete</button>
       </div>
 

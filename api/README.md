@@ -27,10 +27,13 @@ Needs `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `SUPABASE_ANON_KEY` in `.env`.
 | `GET /node-types` | `{types:[…], defaults:{type:{…}}}` — palette |
 | `GET /flows` | list, RLS-scoped to the caller's tenants |
 | `POST /flows` | create `{tenant_id, team, name, status?}` → `{flow_id}` |
-| `GET /flows/{id}` | full flow (nodes + edges), unvalidated |
-| `PUT /flows/{id}` | save `{name,status,version,nodes,edges}`; `422 {errors}` if it fails refs/orphans/cycles/unknown-type; reconciles rows (delete removed, upsert rest) |
+| `GET /flows/{id}` | the editable **working draft** (flow_nodes/edges) + `published_version` |
+| `PUT /flows/{id}` | save the draft — one transactional RPC (`replace_flow_graph`). `409` if `body.version` ≠ the flow's current `version` (optimistic concurrency; bumped every save). `422 {errors}` on refs/orphans/cycles/unknown-type. Publishing is `/publish`, not a status change here. |
+| `GET /flows/{id}/versions` | immutable published snapshots (`flow_versions`) — version, name, `definition_hash`, `created_by/at` |
+| `POST /flows/{id}/publish` | snapshot the draft → new `flow_versions` row, point `published_version` at it. `422` if the draft is invalid. |
+| `POST /flows/{id}/rollback` | body `{version}` — restore the draft from that snapshot and re-publish it |
 | `POST /flows/{id}/validate` | `{valid, errors}` for a posted flow dict, no write |
-| `POST /flows/{id}/run` | body `{case}` → compile + `invoke` → `{run_id, trace, outcome, tier, confidence, confidence_gate, sf_writeback, retrieval, query}`; also persists a `runs` row |
+| `POST /flows/{id}/run` | body `{case}` → loads the **published snapshot**, compiles + `invoke`s → `{run_id, …}`; persists a `runs` row incl. `flow_version` |
 | `GET /runs/stats` | `{total, by_outcome, by_tier, low_confidence}` over the last 500 visible runs |
 | `GET /runs?flow_id=&outcome=&limit=` | RLS-scoped list, newest first |
 | `GET /runs/{run_id}` | full run — `trace`, `gate`, `retrieval`, `sf_writeback`, `case_payload` (the "why") |
