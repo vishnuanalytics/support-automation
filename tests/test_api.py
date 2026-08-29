@@ -1,0 +1,142 @@
+"""
+API tests. The offline set (no marker) needs no env or network — dummy
+SUPABASE_* vars are set before importing api.main so module import succeeds.
+The `integration` set mints a real Supabase token for the Globex tenant and
+exercises RLS / PUT-422 / run against the live project; skipped without
+SUPABASE_ANON_KEY.
+
+    pytest tests/test_api.py                     # all (needs .env for the integration ones)
+    pytest tests/test_api.py -m "not integration"   # offline only (CI)
+"""
+
+from __future__ import annotations
+
+import os
+import uuid
+
+import pytest
+from dotenv import load_dotenv
+
+load_dotenv()  # real creds locally -> integration tests run; absent in CI -> they skip
+os.environ.setdefault("SUPABASE_URL", "https://example.supabase.co")
+os.environ.setdefault("SUPABASE_SERVICE_KEY", "test-service-key")
+os.environ.setdefault("SUPABASE_ANON_KEY", "test-anon-key")
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+from api.main import _structural_errors, app  # noqa: E402
+
+client = TestClient(app)
+
+
+# ── offline ────────────────────────────────────────────────────────────
+def test_health_ok():
+    assert client.get("/api/health").json() == {"ok": True}
+
+
+def test_node_types_lists_the_registry():
+    body = client.get("/api/node-types").json()
+    assert "confidence_gate" in body["types"] and "retrieve" in body["types"]
+    assert "confidence_gate" in body["defaults"]
+
+
+def test_flows_requires_a_bearer_token():
+    assert client.get("/api/flows").status_code == 401
+    assert client.get("/api/flows", headers={"Authorization": "Basic xyz"}).status_code == 401
+
+
+@pytest.mark.parametrize("flow, expect_substr", [
+    (  # dangling edge
+        {"flow_id": "f", "tenant_id": "t", "team": "support", "name": "n",
+         "version": 1, "status": "draft",
+         "nodes": [{"node_id": "a", "type": "retrieve", "config": {}}],
+         "edges": [{"edge_id": "e", "source_node_id": "a", "target_node_id": "ghost", "condition": {}}]},
+        "ghost",
+    ),
+    (  # unknown node type
+        {"flow_id": "f", "tenant_id": "t", "team": "support", "name": "n",
+         "version": 1, "status": "draft",
+         "nodes": [{"node_id": "a", "type": "totally_made_up", "config": {}},
+                   {"node_id": "b", "type": "draft", "config": {}}],
+         "edges": [{"edge_id": "e", "source_node_id": "a", "target_node_id": "b", "condition": {}}]},
+        "unknown node type",
+    ),
+    (  # cycle
+        {"flow_id": "f", "tenant_id": "t", "team": "support", "name": "n",
+         "version": 1, "status": "draft",
+         "nodes": [{"node_id": "a", "type": "retrieve", "config": {}},
+                   {"node_id": "b", "type": "classify", "config": {}}],
+         "edges": [{"edge_id": "e1", "source_node_id": "a", "target_node_id": "b", "condition": {}},
+                   {"edge_id": "e2", "source_node_id": "b", "target_node_id": "a", "condition": {}}]},
+        "cycle",
+    ),
+])
+def test_structural_errors_catches_bad_graphs(flow, expect_substr):
+    errs = _structural_errors(flow)
+    assert any(expect_substr in e for e in errs), errs
+
+
+def test_structural_errors_passes_a_linear_flow():
+    flow = {
+        "flow_id": "f", "tenant_id": "t", "team": "support", "name": "n",
+        "version": 1, "status": "draft",
+        "nodes": [{"node_id": "a", "type": "retrieve", "config": {}},
+                  {"node_id": "b", "type": "classify", "config": {}},
+                  {"node_id": "c", "type": "draft", "config": {}},
+                  {"node_id": "d", "type": "handover", "config": {}}],
+        "edges": [{"edge_id": "e1", "source_node_id": "a", "target_node_id": "b", "condition": {}},
+                  {"edge_id": "e2", "source_node_id": "b", "target_node_id": "c", "condition": {}},
+                  {"edge_id": "e3", "source_node_id": "c", "target_node_id": "d", "condition": {}}],
+    }
+    assert _structural_errors(flow) == []
+
+
+# ── integration (live Supabase) ────────────────────────────────────────
+GLOBEX_FLOW = "a2a2a2a2-2222-4222-8222-222222222222"
+ACME_FLOW = "11111111-1111-1111-1111-111111111111"
+
+
+@pytest.fixture(scope="module")
+def auth_headers():
+    if os.environ.get("SUPABASE_ANON_KEY", "test-anon-key") == "test-anon-key":
+        pytest.skip("no real SUPABASE_ANON_KEY — integration tests skipped")
+    from supabase import create_client
+
+    sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_ANON_KEY"])
+    sess = sb.auth.sign_in_with_password(
+        {"email": "globex-owner@example.test", "password": "editor-test-pw-8891"}
+    )
+    return {"Authorization": f"Bearer {sess.session.access_token}"}
+
+
+@pytest.mark.integration
+def test_list_flows_is_rls_scoped(auth_headers):
+    rows = client.get("/api/flows", headers=auth_headers).json()
+    assert rows and all(r["tenant_id"] == "22222222-2222-2222-2222-222222222222" for r in rows)
+
+
+@pytest.mark.integration
+def test_cross_tenant_get_is_404(auth_headers):
+    assert client.get(f"/api/flows/{ACME_FLOW}", headers=auth_headers).status_code == 404
+
+
+@pytest.mark.integration
+def test_put_invalid_flow_is_422(auth_headers):
+    flow = client.get(f"/api/flows/{GLOBEX_FLOW}", headers=auth_headers).json()
+    flow["edges"].append({
+        "edge_id": str(uuid.uuid4()),
+        "source_node_id": flow["nodes"][0]["node_id"], "target_node_id": "ghost", "condition": {},
+    })
+    r = client.put(f"/api/flows/{GLOBEX_FLOW}", headers=auth_headers, json=flow)
+    assert r.status_code == 422 and "ghost" in str(r.json())
+
+
+@pytest.mark.integration
+def test_run_returns_a_run_id(auth_headers):
+    r = client.post(f"/api/flows/{GLOBEX_FLOW}/run", headers=auth_headers,
+                    json={"case": {"case_id": "PYTEST", "subject": "webhook help",
+                                   "body": "how do I test a webhook",
+                                   "account": {"customer_type": "premium"}}})
+    body = r.json()
+    assert r.status_code == 200 and body["run_id"] and body["outcome"]["action"] in (
+        "auto_reply", "ask_human", "handover")
