@@ -38,7 +38,9 @@ from interpreter.loader import list_flows, load_flow  # noqa: E402
 ACME = "00000000-0000-0000-0000-000000000000"
 GLOBEX = "22222222-2222-2222-2222-222222222222"
 
-CASE = json.loads((pathlib.Path(__file__).resolve().parents[1] / "cases" / "basic_howto.json").read_text())
+CASE = json.loads(
+    (pathlib.Path(__file__).resolve().parents[1] / "interpreter" / "cases" / "basic_howto.json").read_text()
+)
 
 EXPECT = [
     (ACME, "support", "auto_reply"),

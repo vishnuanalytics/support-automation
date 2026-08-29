@@ -1,9 +1,26 @@
 # CLAUDE.md
 
 Instructions for Claude Code working in this repository. Read this
-alongside `PROJECT_SCOPE.md` before making changes — `PROJECT_SCOPE.md`
-has the full architecture and phase history; this file is the operating
-rules for how to work in it.
+alongside `docs/PROJECT_SCOPE.md` before making changes —
+`docs/PROJECT_SCOPE.md` has the full architecture and phase history; this
+file is the operating rules for how to work in it.
+
+## Repository layout
+
+```
+docs/            PROJECT_SCOPE.md (the real memory), SALESFORCE_SETUP.md
+db/migrations/   001_*.sql .. NNN_*.sql   (sequential, single-concern)
+ingestion/       Phase 1 — scraper.py, neo4j_sync.py, eval/
+interpreter/     Phase 2-4 — the config-driven LangGraph interpreter
+  flows/         validate_flow.py, flow_support_example.json
+  cases/         sample support cases
+api/             Phase 5 — FastAPI backend (reuses interpreter/)
+web/             Phase 5 — React Flow editor
+scripts/         one-off ops helpers (SF field setup, seed data, RLS check)
+tests/           test_interpreter.py (offline), test_multiflow.py (integration)
+```
+Run modules from the repo root: `python -m ingestion.scraper`,
+`python -m interpreter.run …`, `python -m ingestion.eval.run_eval`.
 
 ## Don't build ahead
 
@@ -35,10 +52,10 @@ later-phase work while an earlier phase is still open** — specifically:
 
 - **Migrations are sequential and single-concern.** New migration =
   next number (`005_...sql`, etc.), scoped to one thing, matching the
-  pattern of `001_flow_schema.sql` through `004_docs_ingestion_schema.sql`.
+  pattern of `db/migrations/001_flow_schema.sql` through `004_docs_ingestion_schema.sql`.
 - **Multi-tenancy is not optional.** Any new table holding tenant-scoped
   data needs RLS via `tenant_members`, following
-  `002_rls_and_constraints.sql`'s pattern. Don't defer this "for later."
+  `db/migrations/002_rls_and_constraints.sql`'s pattern. Don't defer this "for later."
 - **Node types in the flow schema are generic strings, not an enum.**
   Behavior comes from `config` jsonb plus a type-registry lookup in the
   interpreter (once it exists). Don't add a fixed `CHECK` constraint or
@@ -54,8 +71,8 @@ later-phase work while an earlier phase is still open** — specifically:
   `llama-3.1-8b-instant`) over Anthropic/OpenAI APIs unless a step
   specifically needs something Groq can't do.
 - **Validate before you trust a flow JSON.** Reuse/extend
-  `validate_flow.py` (referential integrity + cycle detection) rather
-  than writing a second validator.
+  `interpreter/flows/validate_flow.py` (referential integrity + cycle
+  detection) rather than writing a second validator.
 
 ## Keep PROJECT_SCOPE.md current — this is the project's real memory
 

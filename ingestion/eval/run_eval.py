@@ -32,8 +32,8 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from scraper import get_embedder, get_supabase  # noqa: E402  reuse client + model
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+from ingestion.scraper import get_embedder, get_supabase  # noqa: E402  reuse client + model
 
 QRELS_PATH = pathlib.Path(__file__).with_name("qrels.jsonl")
 # bge-small-en-v1.5: prepend this to queries only (not passages) for s2p retrieval.

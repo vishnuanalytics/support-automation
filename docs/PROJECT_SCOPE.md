@@ -61,6 +61,28 @@ schema, not as production logic.
 - No paid Salesforce/HubSpot tier — using a personal Salesforce Developer
   Edition org.
 
+## Repository layout
+
+Reorganised 2026-08-29 (Phase 5). Modules run from the repo root:
+
+```
+docs/            this file, SALESFORCE_SETUP.md
+db/migrations/   001_*.sql .. 009_*.sql   (was repo root)
+ingestion/       scraper.py, neo4j_sync.py, eval/         → python -m ingestion.scraper
+interpreter/     builder/loader/registry/conditions/retrieval/llm/salesforce/run
+  flows/         validate_flow.py, flow_support_example.json
+  cases/         *.json sample cases
+api/             FastAPI backend (Phase 5)                 → uvicorn api.main:app
+web/             React + React Flow editor (Phase 5)       → cd web && npm run dev
+scripts/         sf_create_fields.py, sf_seed_cases.py, rls_check.sql
+tests/           test_interpreter.py (offline), test_multiflow.py (integration)
+```
+
+Import rule after the move: `ingestion` and `interpreter` are packages;
+intra-repo imports use the package path (`from ingestion.scraper import …`,
+`from interpreter.flows.validate_flow import …`). `.github/workflows/
+daily-sync.yml` now calls `python -m ingestion.scraper` / `.neo4j_sync`.
+
 ## Phase plan and status
 
 | Phase | Scope | Status |

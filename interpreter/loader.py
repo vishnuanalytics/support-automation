@@ -11,8 +11,8 @@ import sys
 from typing import Any
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from scraper import get_supabase  # noqa: E402  reuse the service-role client
-from validate_flow import Flow, check_flow  # noqa: E402  one validator, not two
+from ingestion.scraper import get_supabase  # noqa: E402  reuse the service-role client
+from interpreter.flows.validate_flow import Flow, check_flow  # noqa: E402  one validator, not two
 
 
 class FlowNotFound(LookupError):

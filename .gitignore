@@ -1,7 +1,15 @@
 .env
+.env.*
+!.env.example
 venv/
 __pycache__/
 *.pyc
 *.log
 *:Zone.Identifier
 sf_jwt/
+
+# web (Phase 5)
+web/node_modules/
+web/dist/
+web/.env
+web/.env.local

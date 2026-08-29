@@ -40,7 +40,7 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python scraper.py
+        run: python -m ingestion.scraper
 
       - name: Sync graph -> Neo4j
         env:
@@ -50,4 +50,4 @@ jobs:
           NEO4J_USERNAME: ${{ secrets.NEO4J_USERNAME }}
           NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
           NEO4J_DATABASE: ${{ secrets.NEO4J_DATABASE }}
-        run: python neo4j_sync.py
+        run: python -m ingestion.neo4j_sync

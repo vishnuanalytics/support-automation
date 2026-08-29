@@ -25,7 +25,7 @@ python -m interpreter.run --flow 11111111-1111-1111-1111-111111111111
 
 # a specific case file
 python -m interpreter.run --flow 11111111-1111-1111-1111-111111111111 \
-    --case cases/enterprise_bug.json
+    --case interpreter/cases/enterprise_bug.json
 
 # select by team instead of id (uses the unique published flow for that team)
 python -m interpreter.run --tenant 00000000-0000-0000-0000-000000000000 \
@@ -44,8 +44,8 @@ LLM call to the real API — nothing else changes.
 
 ## The flow it runs
 
-Phase 0's Support flow (`003_seed_example_flow.sql`), + the `sf_writeback`
-node added in Phase 3 (`008_seed_sf_writeback_node.sql`):
+Phase 0's Support flow (`db/migrations/003_seed_example_flow.sql`), + the `sf_writeback`
+node added in Phase 3 (`db/migrations/008_seed_sf_writeback_node.sql`):
 
 ```
 retrieve → classify → sf_writeback → draft → confidence_gate ─┬─ [pass & tier≠enterprise]  → auto_reply
@@ -58,7 +58,7 @@ retrieve → classify → sf_writeback → draft → confidence_gate ─┬─ [
 `Description`) onto the Salesforce Case named by `case.sf_id`. `ask_human`
 with `channel: salesforce_chatter` posts a Chatter @mention on that Case.
 Both no-op cleanly when there's no `sf_id`, and dry-run (log intent) when
-there are no SF creds — see `../SALESFORCE_SETUP.md`.
+there are no SF creds — see `../docs/SALESFORCE_SETUP.md`.
 
 `confidence_gate` score = `retrieval_weight·retrieval_score + (1−retrieval_weight)·draft_confidence`,
 compared against a **per-tier** threshold

@@ -1,12 +1,21 @@
+# ingestion (Phase 1)
 requests
 beautifulsoup4
 lxml
 trafilatura
 fastembed
-supabase
 neo4j
+
+# shared
+supabase
 python-dotenv
 numpy
+
+# interpreter (Phase 2-4)
 langgraph
 groq
 simple-salesforce
+
+# api (Phase 5)
+fastapi
+uvicorn[standard]
