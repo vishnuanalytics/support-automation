@@ -27,14 +27,16 @@ Run modules from the repo root: `python -m ingestion.scraper`,
 This project is built in explicit, sequenced phases (see
 `docs/PROJECT_SCOPE.md` for the phase table). **Phases 0–13 are built and
 complete** (0–6 the MVP, 7–13 the hardening roadmap; the Phase 7 gate
-re-calibration for real-LLM output landed in `019`). **Phases 14–16
-(self-serve knowledge & internal actions) are planned — spec in
+re-calibration for real-LLM output landed in `019`). **Phase 14
+(self-serve internal KB) is built; Phases 15–16 (Google Docs sync;
+structured policy rules + Slack-approved actions) are planned — spec in
 `PROJECT_SCOPE.md`, no code yet** — still sequential.
 **Do not jump ahead into a later phase while an earlier one is still open:**
 
-- Open work, in order: **Phase 14 → 15 → 16**. Don't start 15 before
-  14's `kb_lookup` node runs end-to-end; Phase 16's `policy_gate`
-  supersedes `019`'s static `escalate_topics` list.
+- Open work, in order: **Phase 15 → 16** (Phase 14, self-serve internal
+  KB, is built — migrations `022`/`023`, `kb_lookup` node, Knowledge
+  tab). Phase 16's `policy_gate` supersedes `019`'s static
+  `escalate_topics` list.
 - The hardening roadmap (7–13) was built in order **7 → 9 → 8 → 10 → 11 →
   12 → 13** (eval + CI safety net before the structural changes in
   8/10/12).

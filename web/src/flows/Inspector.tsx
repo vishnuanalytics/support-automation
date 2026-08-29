@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import { api } from "../api";
+import type { KbCollection } from "../types";
 import type { RFEdge, RFNode } from "./graph";
 
 export function NodeInspector({
@@ -26,6 +28,10 @@ export function NodeInspector({
 
       {node.data.nodeType === "confidence_gate" && (
         <GateForm config={config} onConfig={onConfig} />
+      )}
+
+      {node.data.nodeType === "kb_lookup" && (
+        <KbLookupForm config={config} onConfig={onConfig} />
       )}
 
       <JsonField label="config (jsonb)" value={config} onChange={onConfig} />
@@ -77,6 +83,72 @@ function GateForm({
           type="number" step="0.1" min="0" max="1"
           value={num(config.retrieval_weight, 0.5)}
           onChange={(e) => set({ retrieval_weight: parseFloat(e.target.value) })}
+        />
+      </div>
+    </div>
+  );
+}
+
+function KbLookupForm({
+  config,
+  onConfig,
+}: {
+  config: Record<string, unknown>;
+  onConfig: (v: Record<string, unknown>) => void;
+}) {
+  const [cols, setCols] = useState<KbCollection[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  const selected = (config.collections as string[]) || [];
+  const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
+
+  useEffect(() => {
+    api.kb
+      .listCollections()
+      .then(setCols)
+      .catch((e) => setErr(String(e)));
+  }, []);
+
+  const toggle = (name: string) =>
+    set({
+      collections: selected.includes(name)
+        ? selected.filter((n) => n !== name)
+        : [...selected, name],
+    });
+
+  return (
+    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+      <label>collections to consult</label>
+      {err && <div className="err" style={{ fontSize: 11 }}>{err}</div>}
+      {cols.length === 0 && !err && (
+        <div className="muted" style={{ fontSize: 11 }}>
+          no collections yet — add some in the Knowledge tab
+        </div>
+      )}
+      {cols.map((c) => (
+        <label key={c.source_id} className="row" style={{ gap: 6 }}>
+          <input
+            type="checkbox"
+            style={{ width: "auto" }}
+            checked={selected.includes(c.name)}
+            onChange={() => toggle(c.name)}
+          />
+          {c.name} <span className="muted">({c.entry_count})</span>
+        </label>
+      ))}
+      <div className="row" style={{ marginTop: 6 }}>
+        <span className="muted" style={{ width: 90 }}>top_k</span>
+        <input
+          type="number" min="1" max="10"
+          value={typeof config.top_k === "number" ? config.top_k : 4}
+          onChange={(e) => set({ top_k: parseInt(e.target.value, 10) })}
+        />
+      </div>
+      <div className="field">
+        <label>query (optional — {"{{case.subject}}"} etc.; default = case text)</label>
+        <input
+          value={typeof config.query === "string" ? config.query : ""}
+          placeholder="{{case.subject}} {{case.body}}"
+          onChange={(e) => set({ query: e.target.value || undefined })}
         />
       </div>
     </div>

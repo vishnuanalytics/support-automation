@@ -108,3 +108,29 @@ export interface RunStats {
   by_human_action: Record<string, number>;
   draft_acceptance: number | null;
 }
+
+export interface KbCollection {
+  source_id: string;
+  name: string;
+  description: string | null;
+  tenant_id: string;
+  entry_count: number;
+  created_at?: string;
+}
+
+export interface KbEntryRow {
+  entry_id: string;
+  title: string;
+  status: string;
+  chunk_count: number;
+  embedded_at: string | null;
+  updated_at: string;
+  updated_by: string | null;
+}
+
+export interface KbEntry extends KbEntryRow {
+  source_id: string;
+  tenant_id: string;
+  body_md: string;
+  embed_hash: string | null;
+}

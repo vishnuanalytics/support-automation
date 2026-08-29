@@ -110,15 +110,14 @@ from the 2026-08-29 self-review; still sequential (do 7 before 10, etc.).**
 | 12 | **Real multi-tenancy.** `sources` + per-source ingestion; `tenant_integrations`; a real 2nd KB source; write-path scoping. | **Complete (2026-08-29)** — migration `015`: **`sources`** (tenant_id NULL = shared), `doc_chunks`/`zapier_docs` gain `source_id` (backfilled to a shared `zapier-public` source), the 3 `match_doc_chunks*` fns gain an optional `p_source_ids uuid[]` filter (old signatures dropped to avoid overload ambiguity). **`tenant_integrations`** (per-tenant SF/Slack creds). `interpreter/retrieval.resolve_sources(names, sb, tenant_id)` — a flow only ever reaches **shared + its own tenant's** sources; naming another tenant's source falls back to its legitimate scope (**no cross-tenant KB leak** — verified). `retrieve` node `config.kb_sources`; `hybrid_retrieve(kb_sources, tenant_id)`; `state.tenant_id` threaded from the flow at `invoke`. `interpreter/salesforce.client_for(tenant_id)` resolves creds from `tenant_integrations`, else env. **`ingestion/sources/markdown_source.py`** + a real **`globex-sop`** source (4 SOP docs / 8 chunks, tenant Globex) with *deliberately different* guidance (webhooks Business-only, annual+true-up billing, no self-serve export) — migration `016` points the Globex flow's retrieve at `["globex-sop", "zapier-public"]`. `scripts/sop_conflicts.py` now probes per (tenant, team). 27 offline + 15 integration pytest green. |
 | 13 | **Security & hardening.** Verify tokens, rate-limit, `/security-review`, `sop_conflicts` fires. | **Complete (2026-08-29)** — `api`'s `caller` now **verifies** the bearer token via `GET {SUPABASE_URL}/auth/v1/user` (authoritative signature/expiry/revocation check, 60 s cache) instead of a base64 decode of the payload; a tampered token → 401 (tested). Per-user in-process `rate_limit()` — `/run` 20/min, `/enqueue` 120/min → 429. `/security-review` run over the API+web diff → **no HIGH/MEDIUM findings** (the change is a net auth improvement). `scripts/sop_conflicts.py` already **fires** since Phase 12 (5 real Globex-SOP-vs-public divergences). 28 offline + 17 integration pytest green. *Residual:* rate-limit state is per-process (fine for one uvicorn worker; needs Redis behind a load balancer); token cache honours a revoked session for ≤60 s. |
 
-**Phases 14–16 = self-serve knowledge & internal actions — planned, not
-built (added 2026-08-29 from a scoping conversation). Sequential: 14 → 15
-→ 16. Do not start 15 before 14's `kb_lookup` node runs end-to-end; do not
-start 16 before the Phase 7 gate re-calibration (see "Immediate next
-step") lands, since 16's `policy_gate` builds on that work.**
+**Phases 14–16 = self-serve knowledge & internal actions (added 2026-08-29
+from a scoping conversation). Sequential: 14 → 15 → 16. Phase 14 is
+BUILT; 15 and 16 are planned. Do not start 16 before its `policy_gate`
+groundwork — the Phase 7 recalibration — which is done (`019`).**
 
 | Phase | Scope | Status |
 |---|---|---|
-| 14 | **Internal knowledge base (unstructured), self-serve.** Per-team named collections; entries authored in-app (markdown editor) or uploaded (`.md`/`.txt`/`.pdf`/`.docx`); chunked + embedded locally, scoped to the tenant. New `kb_lookup` node the flow author drops at a checkpoint — consulted **only when the run reaches it**, feeds `draft` as authoritative context above the public docs. | **Planned** — detail below. No Google Docs yet (Phase 15). |
+| 14 | **Internal knowledge base (unstructured), self-serve.** Per-team named collections; entries authored in-app (markdown editor); chunked + embedded locally, scoped to the tenant. New `kb_lookup` node the flow author drops at a checkpoint — consulted **only when the run reaches it**, feeds `draft` as authoritative context above the public docs. | **Built (2026-08-29)** — migrations `022` (`kb_entries` + `sources` internal_kb RLS) + `023` (a `kb_lookup` checkpoint on the Globex flow's billing branch). `ingestion/sources/kb_common.embed_entry` (shared with `markdown_source`). `registry.h_kb_lookup` (templated `{{state.path}}` query, tenant-scoped collections, `use_graph=False` → `state.internal_kb`); `h_draft` folds an internal hit in above the public docs + counts it toward groundedness. API: `/api/kb/collections` + `/entries` CRUD (RLS-scoped, `kb_write` rate-limit, inline embed ≤8 KB else an `embed_kb_entry` job); `api/worker` handles it. Web: a **Knowledge** tab (collections → entries → markdown editor) + a `kb_lookup` Inspector form (collection multi-select + `top_k` + query). `scripts/seed_kb_demo.py` seeds `globex-billing-runbook`. 38 offline + KB integration tests green; Globex flow recompiles with the checkpoint. File upload (`.pdf`/`.docx` via `pypdf`/`python-docx`) is a noted follow-on; end-to-end billing-branch run pending a Groq daily-quota reset. |
 | 15 | **Google Drive / Docs connector.** Per-tenant Google OAuth (tokens in `tenant_integrations`, flagged for encryption); link a Google Doc to a collection; a scheduled job re-exports + re-embeds on `modifiedTime` change to keep it in sync; unlink = soft-delete its chunks. Adds a `gdoc` source kind alongside Phase 14's `internal_kb` collections. | **Planned** — detail below. |
 | 16 | **Structured policy rules + internal task actions.** Per-team rule store (`when → then`), edited via a form (JSON predicate, never code). New `policy_gate` node (deterministic routing override: force `ask_human` / auto-approve) and `task_dispatch` node (side-effecting, via the job queue). On an action match: post to **Slack** with Approve/Reject buttons to the person/team the rule names → on approval the bot opens a **GitHub issue** and tags the team. Slack + GitHub creds per tenant. | **Planned** — detail below. |
 
@@ -619,11 +618,12 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**Phases 0–13 built and complete.** Migrations through `021` applied. 34 offline pytest
-tests + `tests/test_multiflow.py` green. External calls (Groq, Salesforce)
-run real when creds are in `.env`, else deterministic dry-run.
-**Phases 14–16 (self-serve knowledge & internal actions) are planned —
-spec above, no code yet.**
+**Phases 0–13 + Phase 14 built.** Migrations through `023` applied. 38 offline pytest
+tests + `tests/test_multiflow.py` green (the latter needs Groq quota).
+External calls (Groq, Salesforce) run real when creds are in `.env`, else
+deterministic dry-run. **Phase 14 (self-serve internal KB) is built; 15
+(Google Docs sync) and 16 (structured policy rules + Slack-approved
+actions) are planned — spec above, no code yet.**
 
 **2026-08-29 — Groq key added; LLM path now runs real.** Fallout fixed
 (migrations `017`/`018`, `interpreter/llm.py`, `registry._context_block`):
@@ -663,10 +663,14 @@ Editor login: `gundamvishnu7@gmail.com` → tenant Acme; `globex-owner@example.t
 gate re-calibration for real-LLM output is done (`019`).** Open work, in
 order:
 
-1. **Phase 14 → 15 → 16** — self-serve knowledge & internal actions, spec
-   in "Self-serve knowledge & internal actions (phases 14–16) — detail".
-   Sequential; 14 first. (Phase 16's `policy_gate` supersedes `019`'s
+1. **Phase 15 → 16** — Google Docs sync, then structured policy rules +
+   Slack-approved internal actions. Spec in "Self-serve knowledge &
+   internal actions (phases 14–16) — detail". **Phase 14 (self-serve
+   internal KB) is built.** (Phase 16's `policy_gate` supersedes `019`'s
    static `escalate_topics` list.)
+   - Phase 14 loose ends: file upload (`.pdf`/`.docx`); an `eval/e2e`
+     case that only passes when the internal entry is consulted; run the
+     Globex billing branch end-to-end once Groq daily quota resets.
 2. Small eval-tooling follow-up: `run_e2e.py`'s threshold sweep still
    uses the legacy 1-D blend — rewrite it to sweep the new `weights` /
    honour `escalate_topics`, or drop it. Headline metrics (per-run) are
