@@ -281,6 +281,17 @@ def _stub(system: str, user: str, *, json_object: bool) -> str:
 
 def _stub_fields(system: str, user: str) -> dict[str, Any]:
     """Heuristic values for the keys classify / draft ask for."""
+    # Phase 17 `clarify` node — asks for {questions, missing}.
+    if "questions whose answers" in system:
+        return {
+            "_stub": True,
+            "questions": [
+                "Which product or plan is this about, and what exactly are you trying to do?",
+                "What is the exact error message or unexpected behaviour you see?",
+                "What have you already tried?",
+            ],
+            "missing": ["product/plan", "exact error", "steps tried"],
+        }
     urgency = "high" if _URGENT.search(user) else "normal"
     if _BILLING.search(user):
         topic = "billing"

@@ -643,6 +643,227 @@ def h_handover(state: CaseState, config: dict) -> dict:
     }
 
 
+@register("identify")
+def h_identify(state: CaseState, config: dict) -> dict:
+    """Phase 17b — resolve who the sender is before triage: an exact CRM
+    contact/lead by email, else the email **domain → an Account** (a
+    colleague of an existing customer), else unknown. Writes `state.sender`;
+    downstream nodes/edges branch on it. Pass-through (no routing of its
+    own). Degrades to `match='none'` with no Salesforce creds.
+
+    config: {email_field="contact.email", domain_match=true,
+             free_email_domains?, create_lead_if_missing=false}
+    """
+    nid = config["_node_id"]
+    case = state.get("case", {})
+    paths = [config.get("email_field", "contact.email"),
+             "from", "supplied_email", "email", "contact.email"]
+    email = ""
+    for p in paths:
+        v = _dig(case, p)
+        if isinstance(v, str) and "@" in v:
+            email = v
+            break
+
+    sender = salesforce.identify_sender(
+        email,
+        free_domains=config.get("free_email_domains"),
+        domain_match=bool(config.get("domain_match", True)),
+        create_lead=bool(config.get("create_lead_if_missing", False)),
+        tenant_id=state.get("tenant_id"),
+    )
+    acct = f" / account '{sender['account_name']}'" if sender.get("account_matched") else ""
+    summary = f"{email or '(no email)'} → {sender['match']}{acct}"
+    return {"sender": sender, **_trace(nid, "identify", summary, sender)}
+
+
+@register("clarify")
+def h_clarify(state: CaseState, config: dict) -> dict:
+    """Low-confidence recovery (Phase 17). The knowledge base didn't cover
+    the case and the topic isn't a forced human escalation — so instead of
+    a blind handoff, produce the *specific* questions whose answers would
+    let the bot resolve it on the next round, and surface them (to a human
+    to send for now; `auto_send` customer-facing delivery is a later
+    chunk). The customer's reply comes back as a new case. Terminal.
+
+    config: {max_questions=3, auto_send=false, channel="email",
+             model=FAST_MODEL, max_tokens=350, mention_id?}
+    """
+    nid = config["_node_id"]
+    case = state.get("case", {})
+    sf_id = case.get("sf_id") or case.get("id")
+    max_q = max(1, int(config.get("max_questions", 3)))
+    channel = config.get("channel", "email")
+
+    # Phase 17d: how many times have we already gone back to this customer?
+    # Past `max_rounds` (default 2) we stop asking and hand to a human.
+    max_rounds = max(1, int(config.get("max_rounds", 2)))
+    case_key = case.get("case_id") or sf_id
+    prior_rounds = 0
+    if case_key:
+        try:
+            from ingestion.scraper import get_supabase
+
+            sb = config.get("_sb") or get_supabase()
+            rows = (sb.table("runs").select("clarify_round")
+                    .eq("case_id", str(case_key)).eq("outcome", "need_info")
+                    .execute().data or [])
+            prior_rounds = max((int(r.get("clarify_round") or 1) for r in rows), default=0)
+        except Exception as e:  # noqa: BLE001 — best-effort; treat as round 1
+            log.warning("clarify: prior-round lookup failed: %s", e)
+    clarify_round = prior_rounds + 1
+    exhausted = clarify_round > max_rounds
+
+    # Phase 17b: if an `identify` node ran and the sender isn't a known
+    # contact, also ask them to confirm who they are.
+    sender = state.get("sender") or {}
+    ask_identity = bool(sender) and not sender.get("known") and (
+        sender.get("match") in (None, "", "none") or sender.get("account_matched")
+    )
+    account_hint = sender.get("account_name") if sender.get("account_matched") else None
+    if ask_identity and account_hint:
+        identity_line = (
+            f"\n\nThe sender is not a known contact, but their email domain matches the "
+            f"account '{account_hint}'. Also ask them to confirm they're with '{account_hint}' "
+            f"and to share an identifying reference (workspace / order / ticket ID)."
+        )
+    elif ask_identity:
+        identity_line = (
+            "\n\nThe sender is not in our records. Also ask which company / account "
+            "they're with and for an identifying reference (workspace / order / ticket ID)."
+        )
+    else:
+        identity_line = ""
+
+    body = f"Subject: {case.get('subject', '')}\n\n{case.get('body', '')}".strip()
+    context = _context_block(state.get("retrieval") or []) or "(nothing relevant retrieved)"
+    unsupported = (state.get("groundedness") or {}).get("unsupported") or []
+
+    raw = llm.complete(
+        system=(
+            "A support bot could not confidently answer a customer's message from its "
+            "knowledge base. Write the SHORTEST list of specific questions whose answers "
+            "would let it resolve the issue — concrete details only (exact error text, "
+            "product / plan, IDs, what they have already tried). Never ask for something "
+            "the message already states. "
+            f'Return JSON {{"questions": [string], "missing": [string]}} '
+            f"with at most {max_q} questions." + identity_line
+        ),
+        user=(
+            f"# Customer message\n{body or '(empty)'}\n\n"
+            f"# What the knowledge base had\n{context}"
+            + (
+                "\n\n# Draft claims we could not ground\n- " + "\n- ".join(unsupported[:5])
+                if unsupported else ""
+            )
+        ),
+        model=config.get("model", llm.FAST_MODEL),
+        json_object=True,
+        max_tokens=int(config.get("max_tokens", 350)),
+    )
+    parsed = _safe_json(raw)
+    questions = [
+        q.strip() for q in (parsed.get("questions") or [])
+        if isinstance(q, str) and q.strip()
+    ][:max_q]
+    if not questions:
+        questions = [
+            "Could you share more detail about what you're trying to do, including "
+            "any exact error message and the steps you've already tried?"
+        ]
+    missing = [m for m in (parsed.get("missing") or []) if isinstance(m, str)]
+    numbered = "\n".join(f"{i + 1}. {q}" for i, q in enumerate(questions))
+
+    # exhausted -> stop asking the customer; hand to a human with the gaps.
+    auto_send = bool(config.get("auto_send", False)) and not exhausted
+    recipient = (
+        (sender.get("email") if sender else None)
+        or (case.get("contact") or {}).get("email")
+        or case.get("from")
+    )
+
+    delivery: dict | None = None       # {sent|posted, via, ...}
+    if auto_send and sf_id:
+        customer_msg = (
+            "Thanks for reaching out. To help you with this, could you share:\n\n"
+            + numbered + "\n\nOnce we have that we'll follow up."
+        )
+        delivery = salesforce.send_case_reply(
+            sf_id, customer_msg, to_email=recipient,
+            subject=config.get("subject", "We need a bit more information"),
+            tenant_id=state.get("tenant_id"),
+        )
+    elif sf_id:
+        note = (
+            (f"Asked the customer for more detail {prior_rounds}× already and it's "
+             f"still unclear — a human should take this over. Outstanding:\n\n"
+             if exhausted else
+             "Support bot could not answer this from the knowledge base and needs more "
+             "information from the customer. Suggested questions to send:\n\n")
+            + numbered
+        )
+        delivery = salesforce.post_chatter(
+            sf_id, note, mention_id=config.get("mention_id"),
+            tenant_id=state.get("tenant_id"),
+        )
+
+    auto_sent = bool(auto_send and delivery and delivery.get("sent"))
+    posted_internal = bool(not auto_send and delivery and not delivery.get("dry_run"))
+    clarification = {
+        "questions": questions,
+        "missing": missing,
+        "channel": channel,
+        "auto_send": auto_send,
+        "auto_sent": auto_sent,
+        "posted": posted_internal,
+        "delivery": delivery,
+        "ask_identity": ask_identity,
+        "account_hint": account_hint,
+        "round": clarify_round,
+        "max_rounds": max_rounds,
+        "exhausted": exhausted,
+    }
+    outcome = {
+        "action": "ask_human" if exhausted else "need_info",
+        "reason": "clarify_exhausted" if exhausted else "kb_insufficient",
+        "questions": questions,
+        "missing": missing,
+        "channel": channel,
+        "confidence": state.get("confidence"),
+        "sent_to_customer": auto_sent,
+        "awaiting_customer": auto_sent,
+        "clarify_round": clarify_round,
+    }
+    if delivery:
+        outcome["delivery"] = delivery
+    rnd = f"round {clarify_round}/{max_rounds}"
+    if exhausted:
+        where = (f"{rnd} — exhausted, handing to a human"
+                 + (f" (Chatter {'posted' if posted_internal else 'dry-run'} on Case {sf_id})"
+                    if sf_id else ""))
+    elif not sf_id:
+        where = f"{rnd} — no sf_id, questions in trace only"
+    elif auto_send:
+        via = (delivery or {}).get("via", "?")
+        where = f"{rnd} — {'sent to customer' if auto_sent else 'send failed'} via {via} (Case {sf_id})"
+    else:
+        where = f"{rnd} — Chatter {'posted' if posted_internal else 'dry-run'} on Case {sf_id}"
+    return {
+        "clarification": clarification,
+        "outcome": outcome,
+        "clarify_round": clarify_round,
+        **_trace(
+            nid, "clarify",
+            f"{len(questions)} question(s) for the customer — {where}"
+            + (" (+ identity)" if ask_identity else ""),
+            {"questions": questions, "missing": missing, "channel": channel,
+             "auto_sent": auto_sent, "posted": posted_internal, "round": clarify_round,
+             "exhausted": exhausted, "ask_identity": ask_identity,
+             "account_hint": account_hint},
+        ),
+    }
+
+
 def _safe_json(s: str) -> dict:
     import json
     import re

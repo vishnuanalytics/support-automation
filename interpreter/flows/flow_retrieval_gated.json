@@ -3,15 +3,21 @@
   "tenant_id": "00000000-0000-0000-0000-000000000000",
   "team": "support-triage",
   "name": "Support — retrieval-gated triage",
-  "version": 1,
+  "version": 3,
   "status": "draft",
-  "_doc": "Routes on the CONFIDENCE OF THE RETRIEVED CONTEXT first: only draft a reply when the docs actually cover the case. retrieve -> classify -> retrieval_gate: (docs cover it) draft -> answer_gate -> auto_reply | ask_human ; (docs thin) ask_human ; (enterprise) handover.",
+  "_doc": "Routes on the CONFIDENCE OF THE RETRIEVED CONTEXT first: only draft a reply when the docs actually cover the case. retrieve -> identify (resolve the sender: contact / email-domain->account / unknown, Phase 17b) -> classify -> retrieval_gate: (docs cover it) draft -> answer_gate -> auto_reply | ask_human ; (docs thin, escalation topic) ask_human ; (docs thin, benign topic) clarify -> ask the customer for the missing details, plus who they are if unknown (Phase 17) ; (enterprise) handover.",
   "nodes": [
     {
       "node_id": "retrieve",
       "type": "retrieve",
       "label": "Retrieve KB context",
       "config": { "source": ["supabase"], "top_k": 5, "use_rerank": true }
+    },
+    {
+      "node_id": "identify",
+      "type": "identify",
+      "label": "Resolve the sender (contact / domain → account)",
+      "config": { "email_field": "contact.email", "domain_match": true, "create_lead_if_missing": false }
     },
     {
       "node_id": "classify",
@@ -54,6 +60,12 @@
       "config": { "channel": "salesforce_chatter", "reason": "docs_thin_or_answer_unsure" }
     },
     {
+      "node_id": "clarify",
+      "type": "clarify",
+      "label": "Ask the customer for missing details",
+      "config": { "max_questions": 3, "auto_send": false, "channel": "email" }
+    },
+    {
       "node_id": "handover",
       "type": "handover",
       "label": "Full handover (enterprise)",
@@ -61,7 +73,8 @@
     }
   ],
   "edges": [
-    { "source_node_id": "retrieve", "target_node_id": "classify", "condition": {} },
+    { "source_node_id": "retrieve", "target_node_id": "identify", "condition": {} },
+    { "source_node_id": "identify", "target_node_id": "classify", "condition": {} },
     { "source_node_id": "classify", "target_node_id": "retrieval_gate", "condition": {} },
 
     {
@@ -77,7 +90,12 @@
     {
       "source_node_id": "retrieval_gate",
       "target_node_id": "ask_human",
-      "condition": { "if": "not confidence_gate.pass and tier != 'enterprise'" }
+      "condition": { "if": "not confidence_gate.pass and tier != 'enterprise' and confidence_gate.forced_escalation" }
+    },
+    {
+      "source_node_id": "retrieval_gate",
+      "target_node_id": "clarify",
+      "condition": { "if": "not confidence_gate.pass and tier != 'enterprise' and not confidence_gate.forced_escalation" }
     },
 
     { "source_node_id": "draft", "target_node_id": "answer_gate", "condition": {} },

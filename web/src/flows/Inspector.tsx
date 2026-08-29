@@ -38,6 +38,14 @@ export function NodeInspector({
         <ExtractForm config={config} onConfig={onConfig} />
       )}
 
+      {node.data.nodeType === "clarify" && (
+        <ClarifyForm config={config} onConfig={onConfig} />
+      )}
+
+      {node.data.nodeType === "identify" && (
+        <IdentifyForm config={config} onConfig={onConfig} />
+      )}
+
       {(node.data.nodeType === "policy_gate" || node.data.nodeType === "task_dispatch") && (
         <div className="muted" style={{ fontSize: 11, borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
           {node.data.nodeType === "policy_gate"
@@ -145,6 +153,117 @@ function ExtractForm({
         </div>
       ))}
       <button onClick={() => setFields({ ...fields, "": "" })}>＋ field</button>
+    </div>
+  );
+}
+
+function ClarifyForm({
+  config,
+  onConfig,
+}: {
+  config: Record<string, unknown>;
+  onConfig: (v: Record<string, unknown>) => void;
+}) {
+  const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
+  const maxQ = typeof config.max_questions === "number" ? config.max_questions : 3;
+  const autoSend = config.auto_send === true;
+
+  return (
+    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+      <div className="muted" style={{ fontSize: 11 }}>
+        low-confidence recovery: asks the customer for the missing details
+        (their reply comes back as a new case). Terminal.
+      </div>
+      <div className="row" style={{ marginTop: 6 }}>
+        <span className="muted" style={{ width: 110 }}>max questions</span>
+        <input
+          type="number" min="1" max="5"
+          value={maxQ}
+          onChange={(e) => set({ max_questions: parseInt(e.target.value, 10) || 1 })}
+        />
+      </div>
+      <div className="row">
+        <span className="muted" style={{ width: 110 }}>channel</span>
+        <input
+          value={typeof config.channel === "string" ? config.channel : "email"}
+          onChange={(e) => set({ channel: e.target.value })}
+        />
+      </div>
+      <label className="row" style={{ gap: 6, marginTop: 4 }}>
+        <input
+          type="checkbox"
+          style={{ width: "auto" }}
+          checked={autoSend}
+          onChange={(e) => set({ auto_send: e.target.checked })}
+        />
+        auto-send to the customer
+      </label>
+      <div className="muted" style={{ fontSize: 11 }}>
+        {autoSend
+          ? "emails the questions to the customer (falls back to a public case comment); run is marked awaiting_customer."
+          : "off: posts the questions to Chatter for an agent to send."}
+      </div>
+    </div>
+  );
+}
+
+function IdentifyForm({
+  config,
+  onConfig,
+}: {
+  config: Record<string, unknown>;
+  onConfig: (v: Record<string, unknown>) => void;
+}) {
+  const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
+  const domainMatch = config.domain_match !== false;
+  const freeList = Array.isArray(config.free_email_domains)
+    ? (config.free_email_domains as string[]).join("\n")
+    : "";
+
+  return (
+    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+      <div className="muted" style={{ fontSize: 11 }}>
+        resolves the sender against Salesforce → <code>state.sender</code>{" "}
+        (exact contact / email-domain → account / unknown). Pass-through.
+      </div>
+      <div className="row" style={{ marginTop: 6 }}>
+        <span className="muted" style={{ width: 110 }}>email field</span>
+        <input
+          value={typeof config.email_field === "string" ? config.email_field : "contact.email"}
+          placeholder="contact.email"
+          onChange={(e) => set({ email_field: e.target.value })}
+        />
+      </div>
+      <label className="row" style={{ gap: 6, marginTop: 4 }}>
+        <input
+          type="checkbox"
+          style={{ width: "auto" }}
+          checked={domainMatch}
+          onChange={(e) => set({ domain_match: e.target.checked })}
+        />
+        match email domain → account
+      </label>
+      <label className="row" style={{ gap: 6 }}>
+        <input
+          type="checkbox"
+          style={{ width: "auto" }}
+          checked={config.create_lead_if_missing === true}
+          onChange={(e) => set({ create_lead_if_missing: e.target.checked })}
+        />
+        create a Lead when nothing matched
+      </label>
+      <div className="field" style={{ marginTop: 6 }}>
+        <label>free-mail domains to skip (one per line — blank = built-in list)</label>
+        <textarea
+          rows={3}
+          value={freeList}
+          placeholder={"gmail.com\nyahoo.com"}
+          onChange={(e) => {
+            const arr = e.target.value.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+            set({ free_email_domains: arr.length ? arr : undefined });
+          }}
+        />
+      </div>
     </div>
   );
 }
