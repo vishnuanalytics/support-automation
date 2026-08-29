@@ -100,7 +100,7 @@ from the 2026-08-29 self-review; still sequential (do 7 before 10, etc.).**
 
 | Phase | Scope | Status |
 |---|---|---|
-| 7 | **Evaluation & calibration.** End-to-end action eval (cases → gold action + rubric-scored draft); calibrate the confidence gate against it and report *auto-send precision* / *escalation precision*, not just retrieval hit@k; add a draft **groundedness / faithfulness** check feeding the gate; a harder qrels set that actually separates dense / hybrid / +rerank / +graph; per-node **latency + token** accounting in the trace; fix the **fail-open tier** (unknown → strictest bar). | Planned |
+| 7 | **Evaluation & calibration.** End-to-end action eval; calibrate the gate; report *auto-send / escalation precision*; draft groundedness check; harder qrels; latency+token accounting; fix fail-open tier. | **Complete (2026-08-29)** — `eval/e2e/` (22 hand-labelled cases → gold action) runs the real pipeline and reports auto-send / escalation precision + a threshold sweep. Baseline: acc 0.864, auto-send P **0.769** (3/13 unsafe), escalation P 1.00. `interpreter/groundedness.py` (Groq judge / lexical fallback) → `state["groundedness"]`; `confidence_gate` gains `groundedness_weight` (default 0 = unchanged). `builder._make_node` stamps `elapsed_ms`; `llm.last_usage` + handlers record `tokens`. `registry._norm_tier` unknown → **`enterprise`** (strictest) + warn, was `basic`. **`011_calibrate_gate.sql`**: Acme gate → threshold 0.5 / per-tier {.5,.55,.6} / groundedness_weight 0.2 → **acc 0.909, auto-send P 0.833, escalation P 1.00** (2 residual — SOC2 / Partner-API — need an intent edge, noted). `qrels_hard.jsonl` (10 Q) + `run_eval.py --qrels hard`. 17/17 offline tests; `test_multiflow` green with the new gate. Migration applied via SQL editor (MCP `apply_migration` timed out); `011_*.sql` is canonical. |
 | 8 | **Flow versioning & safe writes.** Immutable flow versions — editing a `published` flow forks a new `draft` version; publishing swaps the pointer; rollback. `runs` records the exact `flow_version` (or a definition hash) → every run reproducible. Move the editor's multi-statement flow save into one transactional Postgres RPC; optimistic concurrency (client sends the loaded `version`, server 409s if it moved). | Planned |
 | 9 | **Test coverage & CI.** Adopt `pytest`. `tests/test_api.py` — FastAPI `TestClient` + seeded test tenant: 401 without token, RLS scoping, PUT 422 paths, `run` → `run_id`, cross-tenant 404. Minimal web smoke tests (Vitest/Playwright). De-brittle `test_multiflow` — assert the *relative* invariant (Acme auto_reply vs Globex ask_human on identical input) + structural ones, not score-dependent absolute paths. `ci.yml` running py tests + `web` build/tsc, gating merges. | Planned |
 | 10 | **Event-driven pipeline.** A Salesforce trigger — CDC / Platform Event subscriber, or a polling worker on new `Case`s — that **enqueues** runs (this is the missing half of "automation": today a person runs the flow). A task queue (`arq` / Postgres-backed); `POST /run` enqueues and returns `run_id` immediately; UI polls / subscribes via Supabase Realtime on the `runs` row. **Idempotency**: unique `(flow_id, case_id)` within a window / an idempotency key; terminal handlers (`auto_reply`, `sf_writeback`, `ask_human`) no-op if a completed run for that case exists. | Planned |
@@ -390,10 +390,9 @@ below are indicative — take the next free number when you build it.
 
 ## Immediate next step
 
-**All six phases (0–6) are complete.** Migrations through `010` applied to
-`mjohgmivnxfwkqmlojqs`. 14/14 offline tests + `tests/test_multiflow.py`
-green. External calls (Groq, Salesforce) run real when creds are in `.env`,
-else deterministic dry-run.
+**Phases 0–7 complete.** Migrations through `011` applied. 17/17 offline
+tests + `tests/test_multiflow.py` green. External calls (Groq, Salesforce)
+run real when creds are in `.env`, else deterministic dry-run.
 
 Run the whole thing:
 ```
@@ -407,17 +406,14 @@ cd web && npm install && npm run dev                  # editor + Runs view :5173
 Editor login: a Supabase account. `gundamvishnu7@gmail.com` → tenant Acme;
 `globex-owner@example.test` (pw `editor-test-pw-8891`) → tenant Globex.
 
-**Next: Phase 7 — Evaluation & calibration** (see "Hardening roadmap"
-above). It's the highest-signal fix: it turns "I wired up RAG + LangGraph"
-into "I measured the auto-send decision and tuned it." Concretely, start
-with `eval/e2e/` — 30–50 cases with a gold action, run through the real
-pipeline, report auto-send precision / escalation precision / rubric score
-— then calibrate `confidence_gate` against that and fix the fail-open tier
-in `registry._norm_tier`.
+**Next: Phase 9 — Test coverage & CI** (build order **7 → 9 → 8 → 10 → 11
+→ 12 → 13** — get the CI safety net in before the structural changes). Then
+Phase 8 (flow versioning). Phases 8–13 detailed in "Hardening roadmap".
 
-Order for the rest: **7 → 9 → 8 → 10 → 11 → 12 → 13** is a reasonable
-build order (get the eval + CI safety net in before the bigger structural
-changes in 8/10/12). Phases 8–13 detailed in "Hardening roadmap".
+A Phase 7 follow-up worth doing early: add an **intent → `ask_human` edge**
+to the Acme flow so commercial/legal cases (`e11` SOC2, `e12` Partner API)
+route to a human regardless of retrieval confidence — the 2 residual e2e
+misses.
 
 Quick wins available any time (not blocking a phase):
 - a Groq key in `.env` moves `classify`/`draft` off the stub;
@@ -459,9 +455,10 @@ Default to Groq for any LLM calls (classification, draft generation).
   (mapped via `_TIER_ALIASES`); the LLM only fills `topic`/`urgency`/
   `summary`. From Salesforce (`--sf-case`) that value is `Account.Tier__c`
   if the org has it, else the standard `Account.Type` picklist — whose
-  values aren't `basic/premium/enterprise`, so tier falls back to `basic`
-  (the *most permissive* bar — fail-open). **→ Phase 7** changes the
-  fallback to the strictest tier + a warn.
+  values aren't `basic/premium/enterprise`, so tier used to fall back to
+  `basic` (the *most permissive* bar). **Fixed in Phase 7** —
+  `_norm_tier` now returns `enterprise` (strictest) + a warn on an
+  unrecognised value.
 - Phase 3 SF integration is **live-verified** against a real Developer
   Edition org ("speed", `orgfarm-8f5f468eb6-dev-ed`) via the **JWT bearer
   flow**. That org has SOAP login *and* the OAuth username-password flow
@@ -489,11 +486,14 @@ Default to Groq for any LLM calls (classification, draft generation).
 
 From the 2026-08-29 self-review. Each is intentional MVP scope, not a bug:
 
-- The `confidence_gate` score (`w·retrieval_score + (1−w)·draft_confidence`)
-  is **uncalibrated** — `retrieval_score` is a squashed cross-encoder logit,
-  `draft_confidence` is LLM self-report; no eval proves the gate separates
-  good auto-replies from bad. No **groundedness** check on the draft. The
-  **graph-expansion** retrieval stage is unmeasured. **→ Phase 7.**
+- ~~The `confidence_gate` score is uncalibrated; no groundedness check;
+  graph-expansion unmeasured.~~ **Phase 7:** `eval/e2e/` measures auto-send /
+  escalation precision, `011` calibrated the Acme gate (auto-send P
+  0.77→0.83), `groundedness.py` feeds the gate. *Residual:* 2 e2e cases
+  (SOC2 / Partner-API) are relevant-but-not-a-doc-answer — need an intent →
+  `ask_human` edge (flow-authoring follow-up). Graph-expansion now has
+  `qrels_hard.jsonl` to score against but the run isn't wired into a
+  regression floor yet.
 - Flows are **mutated in place**; `version` is decorative; `runs` doesn't
   record which flow version produced a result — no reproducibility, no
   rollback, no change audit. `PUT /flows/{id}` is 4 non-transactional

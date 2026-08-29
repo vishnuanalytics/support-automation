@@ -19,7 +19,13 @@ retrieval tuning against.
 python -m ingestion.eval.run_eval                     # dense baseline (default)
 python -m ingestion.eval.run_eval --strategy hybrid
 python -m ingestion.eval.run_eval --strategy all      # all four, side by side
+python -m ingestion.eval.run_eval --strategy all --qrels hard   # the harder set
 ```
+`--qrels base` (default, `qrels.jsonl`, 48 Q) or `--qrels hard`
+(`qrels_hard.jsonl`, 10 Q — near-duplicate doc pairs, error-string /
+keyword queries, version-lifecycle nuances — Phase 7; the set where dense
+alone is *not* expected to be at ceiling).
+
 Needs `.env` (`SUPABASE_URL`, `SUPABASE_SERVICE_KEY`). `sparse` / `hybrid` /
 `hybrid_rerank` call the `007` SQL functions; `hybrid_rerank` also loads the
 local `ms-marco-MiniLM-L-6-v2` cross-encoder (`--strategy all` ≈ 6 min on
@@ -54,9 +60,26 @@ the interpreter uses because it degrades gracefully as the corpus grows
 noisier and as queries get more keyword-shaped (error strings, API names,
 version numbers) — none of which this 400-doc eval set exercises.
 
+## Hard set (`--qrels hard`, 10 Q, Phase 7)
+
+Paraphrase-heavy / keyword / near-duplicate-pair questions — the set where
+dense is **not** at ceiling:
+
+| strategy | hit@1 | hit@5 | MRR@10 |
+|---|---|---|---|
+| dense | 0.10 | 0.50 | 0.267 |
+| sparse | 0.00 | 0.00 | 0.000 |
+| hybrid | 0.10 | 0.50 | 0.267 |
+| hybrid + rerank | 0.20 | **0.60** | 0.285 |
+
+Rerank now buys a real hit@5 gain (0.50 → 0.60). 5/10 still miss at any k —
+some of those are genuinely hard retrieval, some are likely stale gold URLs
+in `qrels_hard.jsonl` that need checking against the live corpus (a real
+Phase 7 iterates the gold set). This is the harness the graph-expansion
+stage should be scored against next.
+
 ## Not covered yet
 
-Neo4j graph-expansion is wired in `interpreter/retrieval.py` but not scored
-here (it adds recall, not top-1 precision, so it barely moves these metrics
-on a corpus where dense is already at ceiling). A larger / noisier qrels set
-that actually separates the strategies would be the next eval investment.
+Neo4j graph-expansion is wired in `interpreter/retrieval.py` but still not
+scored — run the hard set with a graph vs no-graph toggle and compare
+recall. Wire an auto-send-precision floor from `eval/e2e/` into CI (Phase 9).

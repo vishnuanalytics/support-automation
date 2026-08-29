@@ -40,8 +40,10 @@
       "type": "confidence_gate",
       "label": "Confidence gate",
       "config": {
-        "default_threshold": 0.35,
-        "tier_overrides": { "basic": 0.35, "premium": 0.45, "enterprise": 0.6 }
+        "default_threshold": 0.5,
+        "tier_overrides": { "basic": 0.5, "premium": 0.55, "enterprise": 0.6 },
+        "retrieval_weight": 0.5,
+        "groundedness_weight": 0.2
       }
     },
     {

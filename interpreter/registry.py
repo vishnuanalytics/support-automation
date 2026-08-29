@@ -13,11 +13,14 @@ handler also appends exactly one `trace` entry.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable
 
-from . import llm, salesforce
+from . import groundedness, llm, salesforce
 from .retrieval import hybrid_retrieve
 from .state import CaseState
+
+log = logging.getLogger("interpreter.registry")
 
 Handler = Callable[[CaseState, dict], dict]
 
@@ -64,10 +67,17 @@ _TIER_ALIASES = {
     "premium": "premium", "professional": "premium", "pro": "premium", "team": "premium",
     "enterprise": "enterprise", "business": "enterprise", "company": "enterprise",
 }
+# fail *closed*: an unrecognised tier gets the strictest confidence bar, not
+# the most permissive one. (Phase 7 — was defaulting to "basic".)
+STRICTEST_TIER = "enterprise"
 
 
 def _norm_tier(raw: Any) -> str:
-    return _TIER_ALIASES.get(str(raw or "").strip().lower(), "basic")
+    key = str(raw or "").strip().lower()
+    if key in _TIER_ALIASES:
+        return _TIER_ALIASES[key]
+    log.warning("unknown customer tier %r -> treating as %r (strictest)", raw, STRICTEST_TIER)
+    return STRICTEST_TIER
 
 
 def _trace(node_id: str, type_: str, msg: str, data: dict[str, Any] | None = None) -> dict:
@@ -138,7 +148,7 @@ def h_classify(state: CaseState, config: dict) -> dict:
         **_trace(
             config["_node_id"], "classify",
             f"tier={tier} region={region} urgency={classification['urgency']} topic={classification['topic']}",
-            classification,
+            {**classification, "tokens": llm.last_usage},
         ),
     }
 
@@ -239,6 +249,7 @@ def h_draft(state: CaseState, config: dict) -> dict:
         json_object=True,
         max_tokens=int(config.get("max_tokens", 500)),
     )
+    tokens = llm.last_usage
     parsed = _safe_json(raw)
     reply = parsed.get("reply") or parsed.get("draft") or raw
     try:
@@ -247,13 +258,18 @@ def h_draft(state: CaseState, config: dict) -> dict:
         model_conf = 0.5
     model_conf = max(0.0, min(1.0, model_conf))
 
+    grounded = groundedness.check(reply, retrieval[:5])
+
     return {
         "draft": reply,
         "draft_confidence": round(model_conf, 4),
+        "groundedness": grounded,
         **_trace(
             config["_node_id"], "draft",
-            f"{len(reply)} chars, model_confidence={model_conf:.2f}, sources={len(retrieval[:5])}",
-            {"draft_confidence": model_conf, "chars": len(reply)},
+            f"{len(reply)} chars, model_confidence={model_conf:.2f}, "
+            f"groundedness={grounded['score']:.2f} ({grounded['backend']}), sources={len(retrieval[:5])}",
+            {"draft_confidence": model_conf, "chars": len(reply),
+             "groundedness": grounded, "tokens": tokens},
         ),
     }
 
@@ -266,8 +282,12 @@ def h_confidence_gate(state: CaseState, config: dict) -> dict:
 
     retr = float(state.get("retrieval_score", 0.0))
     drft = float(state.get("draft_confidence", 0.0))
+    grnd = float((state.get("groundedness") or {}).get("score", 0.0))
     w = float(config.get("retrieval_weight", 0.5))
-    score = round(w * retr + (1.0 - w) * drft, 4)
+    gw = float(config.get("groundedness_weight", 0.0))   # 0 -> unchanged from Phase 2
+
+    base = w * retr + (1.0 - w) * drft
+    score = round((1.0 - gw) * base + gw * grnd, 4)
     passed = score >= threshold
 
     gate = {
@@ -277,6 +297,8 @@ def h_confidence_gate(state: CaseState, config: dict) -> dict:
         "tier": tier,
         "retrieval_score": round(retr, 4),
         "draft_confidence": round(drft, 4),
+        "groundedness": round(grnd, 4),
+        "groundedness_weight": gw,
     }
     return {
         "confidence": score,

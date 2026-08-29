@@ -42,6 +42,12 @@ def available() -> bool:
     return bool(os.environ.get("GROQ_API_KEY"))
 
 
+# usage of the most recent complete() call: {"prompt", "completion", "total"}
+# or None for a stub call. Handlers read this straight after calling complete()
+# so the run's trace/record can total tokens (Phase 7).
+last_usage: dict[str, int] | None = None
+
+
 def _client():
     global _groq_client
     if _groq_client is None:
@@ -64,12 +70,14 @@ def complete(
     One-shot completion. Returns the assistant text (a JSON string when
     `json_object=True`). Falls back to a deterministic stub with no key.
     """
+    global last_usage
     if model not in FREE_MODELS:
         raise ValueError(
             f"model {model!r} is not in the free roster {sorted(FREE_MODELS)}"
         )
 
     if not available():
+        last_usage = None
         return _stub(system, user, json_object=json_object)
 
     kwargs: dict[str, Any] = {
@@ -84,6 +92,11 @@ def complete(
     if json_object:
         kwargs["response_format"] = {"type": "json_object"}
     resp = _client().chat.completions.create(**kwargs)
+    u = getattr(resp, "usage", None)
+    last_usage = (
+        {"prompt": u.prompt_tokens, "completion": u.completion_tokens, "total": u.total_tokens}
+        if u else None
+    )
     return resp.choices[0].message.content or ""
 
 

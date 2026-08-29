@@ -17,6 +17,7 @@ The flow is guaranteed acyclic and referentially sound before we get here
 
 from __future__ import annotations
 
+import time
 from typing import Any, Callable
 
 from langgraph.graph import END, StateGraph
@@ -52,7 +53,15 @@ def _context(state: CaseState) -> dict[str, Any]:
 
 def _make_node(handler: Callable, config: dict) -> Callable[[CaseState], dict]:
     def _node(state: CaseState) -> dict:
-        return handler(state, config)
+        t0 = time.perf_counter()
+        out = handler(state, config)
+        elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
+        # stamp timing (and any token usage the handler recorded) onto this
+        # node's trace entry — Phase 7 latency/token accounting.
+        for entry in out.get("trace", []):
+            entry.setdefault("data", {})
+            entry["data"]["elapsed_ms"] = elapsed_ms
+        return out
     return _node
 
 
