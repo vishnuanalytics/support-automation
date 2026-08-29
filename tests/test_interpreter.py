@@ -341,6 +341,45 @@ def test_llm_provider_routing_and_stub_fallback(monkeypatch):
         llm.complete("s", "u", model="gpt-4o")   # not in the roster
 
 
+def test_llm_recovers_from_groq_json_validate_failed(monkeypatch):
+    """Groq 400s a truncated JSON reply with code `json_validate_failed`.
+    complete() must not propagate it — salvage the partial or retry free-form."""
+    from interpreter import llm
+
+    class _BadRequestError(Exception):
+        def __init__(self, body):
+            super().__init__(str(body))
+            self.code = body["error"]["code"]
+            self.body = body
+
+    monkeypatch.setattr(llm, "_groq_complete", llm._groq_complete)  # keep real
+    monkeypatch.setenv("GROQ_API_KEY", "x")
+    import groq
+    monkeypatch.setattr(groq, "BadRequestError", _BadRequestError, raising=False)
+
+    calls = {"n": 0}
+
+    def fake_call(model, system, user, max_tokens, temperature, *, response_format):
+        calls["n"] += 1
+        if response_format:
+            raise _BadRequestError({"error": {
+                "code": "json_validate_failed",
+                "failed_generation": '{"reply": "do the thing", "confidence": 0.7',  # truncated
+            }})
+        # free-form retry path (not reached here — partial salvages first)
+        return type("R", (), {"choices": [type("C", (), {"message": type(
+            "M", (), {"content": '{"reply": "retry", "confidence": 0.5}'})()})()],
+            "usage": None})()
+
+    monkeypatch.setattr(llm, "_groq_call", fake_call)
+    out = llm.complete("sys", "user", model="openai/gpt-oss-120b",
+                       json_object=True, max_tokens=200)
+    import json as _j
+    parsed = _j.loads(out)
+    assert parsed["reply"] and "confidence" in parsed
+    assert calls["n"] == 2   # first (JSON) 400'd, free-form retry recovered
+
+
 # --------------------------------------------------------------------------
 # Phase 12 — source scoping (cross-tenant isolation)
 # --------------------------------------------------------------------------

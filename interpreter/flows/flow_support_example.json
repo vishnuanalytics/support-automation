@@ -33,7 +33,7 @@
       "node_id": "draft_1",
       "type": "draft",
       "label": "Draft reply",
-      "config": { "model": "openai/gpt-oss-120b", "max_tokens": 500 }
+      "config": { "model": "openai/gpt-oss-120b", "max_tokens": 900 }
     },
     {
       "node_id": "gate_1",

@@ -71,7 +71,7 @@ NODE_DEFAULTS: dict[str, dict[str, Any]] = {
         "value_maps": {"Priority": {"critical": "High", "high": "High", "normal": "Medium", "low": "Low"}},
         "append": {"Description": "summary"},
     },
-    "draft": {"model": "openai/gpt-oss-120b", "max_tokens": 500},
+    "draft": {"model": "openai/gpt-oss-120b", "max_tokens": 900},
     "confidence_gate": {
         "default_threshold": 0.35,
         "tier_overrides": {"basic": 0.35, "premium": 0.45, "enterprise": 0.6},
