@@ -43,7 +43,7 @@ def _run_flow(payload: dict, sb) -> dict:
             return {"run_id": dup[0]["run_id"], "idempotent_skip": True}
 
     flow = load_flow(flow_id=flow_id, sb=sb, status="published", validate=True)
-    final = build_graph(flow).invoke({"case": case, "trace": []})
+    final = build_graph(flow).invoke({"case": case, "tenant_id": flow["tenant_id"], "trace": []})
     run_id = record_run(flow, final, case=case, source="worker", sb=sb,
                         idempotency_key=key)
     return {"run_id": run_id, "outcome": (final.get("outcome") or {}).get("action")}

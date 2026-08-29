@@ -91,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
     print(describe_graph(flow))
     print(f"\nrunning case {case.get('case_id', '?')}: {case.get('subject', '')!r}\n")
 
-    final = graph.invoke({"case": case, "trace": []})
+    final = graph.invoke({"case": case, "tenant_id": flow["tenant_id"], "trace": []})
 
     if not args.no_record:
         from .runs import record_run

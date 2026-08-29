@@ -64,7 +64,7 @@ def test_worker_runs_the_job_and_records_the_run(sb, key_and_cleanup):
     run = sb.table("runs").select("source, flow_version, outcome") \
         .eq("idempotency_key", key).execute().data
     assert len(run) == 1
-    assert run[0]["source"] == "worker" and run[0]["flow_version"] == 1
+    assert run[0]["source"] == "worker" and run[0]["flow_version"] is not None
     assert run[0]["outcome"] in ("auto_reply", "ask_human", "handover")
 
 

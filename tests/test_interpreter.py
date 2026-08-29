@@ -314,6 +314,37 @@ def test_confidence_gate_groundedness_weight_pulls_score_down():
 
 
 # --------------------------------------------------------------------------
+# Phase 12 — source scoping (cross-tenant isolation)
+# --------------------------------------------------------------------------
+class _FakeSources:
+    """Minimal stub of the supabase query builder for `sources`."""
+    _ROWS = [
+        {"source_id": "s-public", "name": "zapier-public", "tenant_id": None},
+        {"source_id": "s-globex", "name": "globex-sop", "tenant_id": "GLOBEX"},
+        {"source_id": "s-acme", "name": "acme-kb", "tenant_id": "ACME"},
+    ]
+
+    def table(self, _): return self
+    def select(self, *_): return self
+    def eq(self, *_): return self
+    def execute(self):
+        return type("R", (), {"data": list(self._ROWS)})()
+
+
+def test_resolve_sources_never_leaks_another_tenants_kb():
+    from interpreter.retrieval import resolve_sources
+    sb = _FakeSources()
+    # Acme flow, no names -> shared + acme only
+    assert set(resolve_sources(None, sb, "ACME")) == {"s-public", "s-acme"}
+    # Globex flow naming its own + shared
+    assert set(resolve_sources(["globex-sop", "zapier-public"], sb, "GLOBEX")) == {"s-globex", "s-public"}
+    # Acme flow *naming* globex-sop -> falls back to Acme's legitimate scope, no leak
+    assert "s-globex" not in resolve_sources(["globex-sop"], sb, "ACME")
+    # no tenant -> shared only
+    assert resolve_sources(None, sb, None) == ["s-public"]
+
+
+# --------------------------------------------------------------------------
 # Phase 11 — feedback.classify_edit
 # --------------------------------------------------------------------------
 def test_classify_edit_buckets():

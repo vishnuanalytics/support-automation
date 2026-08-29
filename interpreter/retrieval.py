@@ -58,21 +58,45 @@ def embed_query(text: str) -> list[float]:
 # --------------------------------------------------------------------------
 # Individual stages
 # --------------------------------------------------------------------------
-def dense_search(sb, query_embedding: list[float], k: int) -> list[dict[str, Any]]:
-    rows = sb.rpc(
-        "match_doc_chunks",
-        {"query_embedding": query_embedding, "match_count": k},
-    ).execute().data or []
+def resolve_sources(names: list[str] | None, sb, tenant_id: str | None = None) -> list[str] | None:
+    """
+    Map a `retrieve` node's `kb_sources` to source_ids, scoped so a flow can
+    only ever reach **shared** sources + **its own tenant's** — never another
+    tenant's private KB.
+
+      names given  -> those names, intersected with (shared | this tenant)
+      names None   -> all (shared | this tenant) sources
+      no tenant_id -> shared sources only (admin/eval callers pass source_ids
+                      directly if they want everything)
+    """
+    rows = sb.table("sources").select("source_id, name, tenant_id").eq("status", "active").execute().data or []
+    visible = [r for r in rows if r["tenant_id"] is None or r["tenant_id"] == tenant_id]
+    if names:
+        named = [r for r in visible if r["name"] in names]
+        if named:
+            visible = named
+        # else: the flow named source(s) it can't see -> fall back to its own
+        # legitimate scope (shared + own), never widen, never return nothing.
+    return [r["source_id"] for r in visible] or None
+
+
+def dense_search(sb, query_embedding: list[float], k: int,
+                 source_ids: list[str] | None = None) -> list[dict[str, Any]]:
+    args = {"query_embedding": query_embedding, "match_count": k}
+    if source_ids:
+        args["p_source_ids"] = source_ids
+    rows = sb.rpc("match_doc_chunks", args).execute().data or []
     for r in rows:
         r["_dense_sim"] = r.get("similarity")
     return rows
 
 
-def sparse_search(sb, query_text: str, k: int) -> list[dict[str, Any]]:
-    rows = sb.rpc(
-        "match_doc_chunks_fts",
-        {"query_text": query_text, "match_count": k},
-    ).execute().data or []
+def sparse_search(sb, query_text: str, k: int,
+                  source_ids: list[str] | None = None) -> list[dict[str, Any]]:
+    args = {"query_text": query_text, "match_count": k}
+    if source_ids:
+        args["p_source_ids"] = source_ids
+    rows = sb.rpc("match_doc_chunks_fts", args).execute().data or []
     for r in rows:
         r["_fts_rank"] = r.get("rank")
     return rows
@@ -185,15 +209,18 @@ def hybrid_retrieve(
     use_sparse: bool = True,
     use_graph: bool = True,
     use_rerank: bool = True,
+    kb_sources: list[str] | None = None,   # source *names* (Phase 12)
+    tenant_id: str | None = None,          # scopes which sources are reachable
     sb=None,
 ) -> tuple[list[dict[str, Any]], float]:
     """Run the pipeline. Returns (top_k results, top_score in 0..1)."""
     sb = sb or get_supabase()
     qvec = embed_query(query)
+    source_ids = resolve_sources(kb_sources, sb, tenant_id) if (kb_sources or tenant_id) else None
 
-    runs = [dense_search(sb, qvec, dense_k)]
+    runs = [dense_search(sb, qvec, dense_k, source_ids)]
     if use_sparse:
-        runs.append(sparse_search(sb, query, sparse_k))
+        runs.append(sparse_search(sb, query, sparse_k, source_ids))
     fused = rrf_fuse(runs)
 
     if use_graph:
