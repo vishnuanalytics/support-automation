@@ -45,6 +45,13 @@ from interpreter.loader import (  # noqa: E402
 from interpreter import jobs  # noqa: E402
 from interpreter.registry import known_types  # noqa: E402
 from interpreter.runs import record_run  # noqa: E402
+from ingestion.sources.kb_common import delete_entry as _kb_delete, embed_entry as _kb_embed  # noqa: E402
+
+import hashlib  # noqa: E402
+
+# markdown bodies below this size are chunked + embedded inline in the
+# request; larger ones are handed to the worker (`embed_kb_entry` job).
+KB_INLINE_EMBED_MAX = 8192
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 ANON_KEY = os.environ.get("SUPABASE_ANON_KEY") or os.environ["SUPABASE_SERVICE_KEY"]
@@ -71,6 +78,8 @@ NODE_DEFAULTS: dict[str, dict[str, Any]] = {
         "value_maps": {"Priority": {"critical": "High", "high": "High", "normal": "Medium", "low": "Low"}},
         "append": {"Description": "summary"},
     },
+    "kb_lookup": {"collections": [], "top_k": 4, "use_rerank": True,
+                  "min_score": 0.0, "out_key": "internal_kb"},
     "draft": {"model": "openai/gpt-oss-120b", "max_tokens": 900},
     "confidence_gate": {
         "default_threshold": 0.5,
@@ -184,6 +193,27 @@ class FlowCreate(BaseModel):
 
 class RunIn(BaseModel):
     case: dict[str, Any]
+
+
+class KbCollectionIn(BaseModel):
+    name: str
+    description: str | None = None
+    tenant_id: str | None = None      # required only if the caller is in >1 tenant
+
+
+class KbCollectionPatch(BaseModel):
+    name: str | None = None
+    description: str | None = None
+
+
+class KbEntryIn(BaseModel):
+    title: str
+    body_md: str = ""
+
+
+class KbEntryPatch(BaseModel):
+    title: str | None = None
+    body_md: str | None = None
 
 
 # ── helpers ────────────────────────────────────────────────────────────
@@ -515,3 +545,190 @@ def get_run(run_id: str, c: Caller = Depends(caller)) -> dict:
     if not rows:
         raise HTTPException(404, "run not found")
     return rows[0]
+
+
+# ── Phase 14: self-serve internal knowledge base ──────────────────────
+def _caller_tenant(c: Caller, explicit: str | None) -> str:
+    """RLS lets a member read only their own tenant_members rows."""
+    mine = [r["tenant_id"] for r in
+            (c.sb.table("tenant_members").select("tenant_id").execute().data or [])]
+    if explicit:
+        if explicit not in mine:
+            raise HTTPException(403, "not a member of that tenant")
+        return explicit
+    if len(mine) == 1:
+        return mine[0]
+    raise HTTPException(400, "tenant_id required (you belong to several tenants)")
+
+
+def _kb_collection(c: Caller, sid: str) -> dict:
+    rows = (c.sb.table("sources").select("*")
+            .eq("source_id", sid).eq("kind", "internal_kb").execute().data or [])
+    if not rows:
+        raise HTTPException(404, "collection not found or not visible to you")
+    return rows[0]
+
+
+def _kb_entry(c: Caller, eid: str) -> dict:
+    rows = (c.sb.table("kb_entries").select("*")
+            .eq("entry_id", eid).neq("status", "archived").execute().data or [])
+    if not rows:
+        raise HTTPException(404, "entry not found or not visible to you")
+    return rows[0]
+
+
+def _kb_url(sid: str, eid: str) -> str:
+    return f"kb://{sid}/{eid}"
+
+
+def _kb_embed_now(entry: dict, collection_name: str) -> dict:
+    """Chunk + embed one entry's markdown into the shared content tables
+    (service role) and stamp the kb_entries row. Returns the updated row."""
+    url = _kb_url(entry["source_id"], entry["entry_id"])
+    n = _kb_embed(_service, source_id=entry["source_id"], url=url,
+                  title=entry["title"], body_md=entry["body_md"] or "",
+                  section=collection_name)
+    patch = {
+        "chunk_count": n,
+        "embed_hash": hashlib.md5((entry["body_md"] or "").encode()).hexdigest(),
+        "embedded_at": _now_iso(),
+    }
+    _service.table("kb_entries").update(patch).eq("entry_id", entry["entry_id"]).execute()
+    return {**entry, **patch}
+
+
+def _now_iso() -> str:
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+@app.get("/api/kb/collections")
+def kb_list_collections(c: Caller = Depends(caller)) -> list[dict]:
+    cols = (c.sb.table("sources").select("*")
+            .eq("kind", "internal_kb").neq("status", "archived").execute().data or [])
+    out = []
+    for s in cols:
+        entries = (c.sb.table("kb_entries").select("entry_id, status")
+                   .eq("source_id", s["source_id"]).execute().data or [])
+        active = [e for e in entries if e["status"] == "active"]
+        out.append({
+            "source_id": s["source_id"], "name": s["name"],
+            "description": (s.get("config") or {}).get("description"),
+            "tenant_id": s["tenant_id"], "entry_count": len(active),
+            "created_at": s.get("created_at"),
+        })
+    return out
+
+
+@app.post("/api/kb/collections", status_code=201)
+def kb_create_collection(body: KbCollectionIn, c: Caller = Depends(caller)) -> dict:
+    rate_limit(c.user_id, "kb_write", 60)
+    tenant_id = _caller_tenant(c, body.tenant_id)
+    row = {
+        "kind": "internal_kb", "tenant_id": tenant_id, "name": body.name,
+        "config": {"description": body.description} if body.description else {},
+    }
+    try:
+        created = c.sb.table("sources").insert(row).execute().data[0]
+    except Exception as e:  # noqa: BLE001  (unique (tenant_id, name) etc.)
+        raise HTTPException(409, f"could not create collection: {e}")
+    return created
+
+
+@app.patch("/api/kb/collections/{sid}")
+def kb_update_collection(sid: str, body: KbCollectionPatch, c: Caller = Depends(caller)) -> dict:
+    rate_limit(c.user_id, "kb_write", 60)
+    col = _kb_collection(c, sid)
+    patch: dict[str, Any] = {}
+    if body.name is not None:
+        patch["name"] = body.name
+    if body.description is not None:
+        patch["config"] = {**(col.get("config") or {}), "description": body.description}
+    if not patch:
+        return col
+    return c.sb.table("sources").update(patch).eq("source_id", sid).execute().data[0]
+
+
+@app.delete("/api/kb/collections/{sid}", status_code=204)
+def kb_delete_collection(sid: str, c: Caller = Depends(caller)) -> None:
+    rate_limit(c.user_id, "kb_write", 60)
+    _kb_collection(c, sid)                     # RLS gate
+    c.sb.table("sources").update({"status": "archived"}).eq("source_id", sid).execute()
+    entries = (c.sb.table("kb_entries").select("entry_id")
+               .eq("source_id", sid).eq("status", "active").execute().data or [])
+    for e in entries:
+        c.sb.table("kb_entries").update({"status": "archived"}).eq("entry_id", e["entry_id"]).execute()
+        _kb_delete(_service, url=_kb_url(sid, e["entry_id"]))
+
+
+@app.get("/api/kb/collections/{sid}/entries")
+def kb_list_entries(sid: str, c: Caller = Depends(caller)) -> list[dict]:
+    _kb_collection(c, sid)
+    rows = (c.sb.table("kb_entries")
+            .select("entry_id, title, status, chunk_count, embedded_at, updated_at, updated_by")
+            .eq("source_id", sid).neq("status", "archived")
+            .order("updated_at", desc=True).execute().data or [])
+    return rows
+
+
+@app.post("/api/kb/collections/{sid}/entries", status_code=201)
+def kb_create_entry(sid: str, body: KbEntryIn, c: Caller = Depends(caller)) -> dict:
+    rate_limit(c.user_id, "kb_write", 60)
+    col = _kb_collection(c, sid)
+    row = {
+        "source_id": sid, "tenant_id": col["tenant_id"], "title": body.title,
+        "body_md": body.body_md, "created_by": c.user_id, "updated_by": c.user_id,
+    }
+    entry = c.sb.table("kb_entries").insert(row).execute().data[0]
+    return _kb_after_write(entry, col, c)
+
+
+@app.get("/api/kb/entries/{eid}")
+def kb_get_entry(eid: str, c: Caller = Depends(caller)) -> dict:
+    return _kb_entry(c, eid)
+
+
+@app.patch("/api/kb/entries/{eid}")
+def kb_update_entry(eid: str, body: KbEntryPatch, c: Caller = Depends(caller)) -> dict:
+    rate_limit(c.user_id, "kb_write", 60)
+    entry = _kb_entry(c, eid)
+    col = _kb_collection(c, entry["source_id"])
+    patch: dict[str, Any] = {"updated_by": c.user_id}
+    if body.title is not None:
+        patch["title"] = body.title
+    if body.body_md is not None:
+        patch["body_md"] = body.body_md
+    updated = c.sb.table("kb_entries").update(patch).eq("entry_id", eid).execute().data[0]
+    body_changed = body.body_md is not None and (
+        hashlib.md5((body.body_md or "").encode()).hexdigest() != (entry.get("embed_hash") or "")
+    )
+    return _kb_after_write(updated, col, c, force=body_changed, title_only=not body_changed)
+
+
+@app.delete("/api/kb/entries/{eid}", status_code=204)
+def kb_delete_entry(eid: str, c: Caller = Depends(caller)) -> None:
+    rate_limit(c.user_id, "kb_write", 60)
+    entry = _kb_entry(c, eid)
+    c.sb.table("kb_entries").update({"status": "archived", "updated_by": c.user_id}) \
+        .eq("entry_id", eid).execute()
+    _kb_delete(_service, url=_kb_url(entry["source_id"], eid))
+
+
+def _kb_after_write(entry: dict, col: dict, c: Caller, *, force: bool = True,
+                    title_only: bool = False) -> dict:
+    """Embed the entry now (small) or hand it to the worker (large).
+    `title_only` PATCHes just re-stamp the doc title without re-chunking."""
+    body = entry.get("body_md") or ""
+    if title_only:
+        _service.table("zapier_docs").update({"title": entry["title"]}) \
+            .eq("url", _kb_url(entry["source_id"], entry["entry_id"])).execute()
+        return entry
+    if not force:
+        return entry
+    if len(body) <= KB_INLINE_EMBED_MAX:
+        return _kb_embed_now(entry, col["name"])
+    jobs.enqueue("embed_kb_entry",
+                 {"entry_id": entry["entry_id"], "source_id": entry["source_id"],
+                  "collection_name": col["name"]},
+                 dedupe_key=f"embed:{entry['entry_id']}", sb=_service)
+    return {**entry, "embed_status": "queued"}

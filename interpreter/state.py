@@ -35,6 +35,10 @@ class CaseState(TypedDict, total=False):
     region: str
     classification: dict[str, Any]    # {topic, urgency, summary, ...}
 
+    # written by a `kb_lookup` node when the flow routes through one (Phase 14):
+    # {checked: bool, collections: [str], score: float, matches: [chunk dicts]}
+    internal_kb: dict[str, Any]
+
     sf_writeback: dict[str, Any]      # {target, written, skipped, dry_run, ...} from the sf_writeback node
 
     draft: str                 # proposed reply text
