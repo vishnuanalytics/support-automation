@@ -82,6 +82,17 @@ def test_flow_create_no_longer_requires_a_tenant_id():
     assert client.post("/api/flows", json={"team": "support", "name": "n"}).status_code == 401
 
 
+def test_team_endpoints_need_a_token():
+    """Phase 18c — invitations / members are auth-only."""
+    from api.main import InviteIn
+
+    InviteIn(email="a@b.com")   # defaults role='viewer'
+    for path in ("/api/members", "/api/invitations"):
+        assert client.get(path).status_code == 401
+    assert client.post("/api/invitations", json={"email": "a@b.com"}).status_code == 401
+    assert client.post("/api/invitations/accept").status_code == 401
+
+
 @pytest.mark.parametrize("flow, expect_substr", [
     (  # dangling edge
         {"flow_id": "f", "tenant_id": "t", "team": "support", "name": "n",
@@ -262,6 +273,48 @@ def test_viewer_can_read_but_not_write(globex_as_viewer, auth_headers):
     assert client.delete(f"/api/flows/{fid}", headers=auth_headers).status_code == 403
     assert client.post("/api/rules", headers=auth_headers,
                        json={"team": "csm", "name": "nope"}).status_code == 403
+
+
+@pytest.mark.integration
+def test_members_lists_the_caller_with_role(auth_headers):
+    rows = client.get("/api/members", headers=auth_headers).json()
+    me = next(r for r in rows if r["is_you"])
+    assert me["role"] == "owner" and "email" in me
+
+
+@pytest.mark.integration
+def test_accept_invitations_noop_when_none_pending(auth_headers):
+    assert client.post("/api/invitations/accept", headers=auth_headers).json() == {"accepted": 0}
+
+
+@pytest.mark.integration
+def test_invitation_create_list_revoke(auth_headers):
+    email = f"pytest-{uuid.uuid4().hex[:8]}@example.test"
+    inv = client.post("/api/invitations", headers=auth_headers,
+                      json={"email": email, "role": "viewer"})
+    assert inv.status_code == 201
+    iid = inv.json()["invite_id"]
+    pend = [i for i in client.get("/api/invitations", headers=auth_headers).json()
+            if i["status"] == "pending"]
+    assert any(i["invite_id"] == iid and i["email"] == email for i in pend)
+    assert client.delete(f"/api/invitations/{iid}", headers=auth_headers).status_code == 204
+    still = [i for i in client.get("/api/invitations", headers=auth_headers).json()
+             if i["invite_id"] == iid and i["status"] == "pending"]
+    assert not still
+
+
+@pytest.mark.integration
+def test_invalid_invite_role_is_400(auth_headers):
+    r = client.post("/api/invitations", headers=auth_headers,
+                    json={"email": "x@example.test", "role": "owner"})
+    assert r.status_code == 400
+
+
+@pytest.mark.integration
+def test_non_owner_cannot_invite_or_list_members(globex_as_viewer, auth_headers):
+    assert client.get("/api/members", headers=auth_headers).status_code == 403
+    assert client.post("/api/invitations", headers=auth_headers,
+                       json={"email": "x@example.test", "role": "viewer"}).status_code == 403
 
 
 @pytest.fixture

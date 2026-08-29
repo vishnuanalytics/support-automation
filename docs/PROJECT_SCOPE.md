@@ -144,7 +144,7 @@ sign-in button. Build + verify one chunk at a time.**
 |---|---|---|
 | 18a | **One-click New flow.** `＋ New flow` no longer prompts for a `tenant_id` — the API infers it from the caller's membership. | **Built + live-verified (2026-08-29).** `FlowCreate.tenant_id` now optional; `create_flow` calls the existing `_caller_tenant(c, None)` (single membership → that tenant; several → 400 asking for one; not-a-member → 403). New `GET /api/tenants` → `[{tenant_id, role}]` for the caller (the UI's tenant picker / prompt-skip). Web: `api.listTenants()`; `FlowList.newFlow()` drops the uuid prompt, keeps team (default `support`) + name. **Verify:** 72 offline pytest green (+1 — `FlowCreate` valid without `tenant_id`, `/tenants` 401 without a token) + 2 integration; web tsc/vitest green. **Live e2e**: `GET /api/tenants` → `[{"00000000-…","owner"}]`; `POST /api/flows {team,name}` (no tenant_id) → 201, flow landed in `00000000-…`. |
 | 18b | Roles `owner`/`editor`/`viewer` on `tenant_members` (col exists). Migration `032`: split RLS on `flows`/`flow_nodes`/`flow_edges`/`flow_versions`/`policy_rules`/KB tables — SELECT any member, write only `owner\|editor`. Web hides Save/Publish/New/Delete for `viewer`. | **Built + live-verified (2026-08-29).** **Migration `032`** (applied): `public.is_tenant_member(tid)` / `is_tenant_editor(tid)` SQL helpers; every editable tenant-scoped table (`flows`, `flow_nodes`, `flow_edges`, `flow_versions`, `policy_rules`, `kb_entries`, `sources` internal_kb) drops its single `ALL` policy for a **member SELECT** + **editor `owner\|editor` write** pair (mirrors `002`). API: `_require_editor(c, tenant_id)` pre-check on every flows / rules / KB write endpoint → a clean `403 "your access is view-only"` (RLS + the SECURITY INVOKER `replace_flow_graph` RPC are the real backstop). Web: `App.tsx` reads the caller's role from `GET /api/tenants` (max of memberships) → `canEdit`; `FlowList` hides ＋ New flow, `FlowEditor` hides Save / Publish / Delete / Re-layout / rollback / the node palette and shows a **view-only** pill, for `viewer`. **Verify:** 72 offline pytest green + 3 integration (18a's 2 + `test_viewer_can_read_but_not_write`: Globex owner demoted to `viewer` → PUT / POST / publish / DELETE / rules all `403`, reads still work); web tsc + vitest (5) + build green. |
-| 18c | `tenant_invitations (id, tenant_id, email, role, invited_by, status, created_at, accepted_at)` + RLS. API `POST/GET/DELETE /api/invitations` (owner) + auto-claim on `auth.users` insert (trigger matches email → `tenant_members` row with the invited role). Web: a **Team** panel. No email infra — an invite pre-authorises an address + role. | Planned. |
+| 18c | `tenant_invitations` + RLS. API `POST/GET/DELETE /api/invitations` (owner) + `POST /api/invitations/accept` (the web calls it on sign-in — matches the verified email → `tenant_members` row with the invited role). Web: a **Team** panel. No email infra — an invite pre-authorises an address + role. | **Built + live-verified (2026-08-29).** **Migration `033`** (applied): `tenant_invitations (invite_id, tenant_id, email citext, role ['editor'\|'viewer'], status ['pending'\|'accepted'\|'revoked'], invited_by, created_at, accepted_at)`, partial-unique on `(tenant_id,email) where status='pending'`; RLS — a tenant `owner` manages its rows, an invitee `select`s their own pending ones (`lower(email)=auth.jwt()->>'email'`). API: `Caller.email` (from the verified token); `_require_owner`; `GET/POST/DELETE /api/invitations`, `POST /api/invitations/accept` (idempotent, service-role — claims every pending invite for the caller's email → membership with the invited role), `GET /api/members` + `DELETE /api/members/{uid}` (owner-only, can't drop yourself or the last owner; emails via the Auth admin API). Web: `App.tsx` calls `acceptInvitations()` before `listTenants()`, shows a **Team** nav (owners) + a "no workspace — ask an owner to invite <email>" screen when `memberships==0`. `team/TeamView.tsx` — invite form (email + can-view/can-edit), members list (remove), pending invites (revoke). **Verify:** 73 offline pytest + 8 integration (18a×2, 18b×1, 18c×5 — invite/list/revoke, `accept` no-op, bad role → 400, non-owner → 403, members lists caller); web tsc/vitest/build green. **Live e2e (two real users)**: globex-owner invites `gundamvishnu7@gmail.com` `viewer` → gundamvishnu7 `POST /accept` → `{accepted:1}` → now a member of tenant `2222` as `viewer` → `POST /flows` there → `403`. |
 | 18d | **Continue with Google** button on `Login.tsx` (`supabase.auth.signInWithOAuth`). New-user-no-invite screen. Needs the Supabase dashboard Google provider + a Google OAuth web client redirect (`…supabase.co/auth/v1/callback`) — operator steps, not code. | Planned. |
 
 ## Phase 0 — schema (complete)
@@ -644,10 +644,10 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**Phases 0–17 complete; Phase 18 (team access) open — 18a + 18b done,
-18c–d planned.** Migrations `001`–`032` applied. 72 offline pytest tests
-(+ 3 integration for 18a/b) + web tsc/vitest/build + `tests/test_multiflow.py`
-(needs Groq quota).
+**Phases 0–17 complete; Phase 18 (team access) open — 18a + 18b + 18c
+done, 18d (Google sign-in button) planned.** Migrations `001`–`033`
+applied. 73 offline pytest tests (+ 8 integration for 18a–c) + web
+tsc/vitest/build + `tests/test_multiflow.py` (needs Groq quota).
 Every external integration has now been exercised end-to-end against a
 real account: **Salesforce** (Phase 3, JWT), **Google Docs** (Phase 15,
 OAuth → link → sync), **Slack + GitHub** (Phase 16, offboarding case →
@@ -723,32 +723,34 @@ automatically (today the re-enqueue works, the round count is by
 
 Phase 17 (a–d) is committed + merged to `main` (PR #2, `20bdeda`).
 
-### Resume here — Phase 18c (invitations)
+### Resume here — Phase 18d (Google sign-in button)
 
-18a + 18b are done + merged/committed. **18b uncommitted** (about to
-be): `api/main.py`, `db/migrations/032_role_gated_rls.sql`,
-`web/src/App.tsx`, `web/src/flows/{FlowList,FlowEditor}.tsx`,
-`tests/test_api.py`, this file. Migration `032` already applied.
+18a + 18b + 18c are done. 18a/18b merged (PRs #3, #4); **18b + 18c
+uncommitted** (about to be) — `api/main.py`,
+`db/migrations/032_role_gated_rls.sql` + `033_tenant_invitations.sql`,
+`web/src/{App.tsx,api.ts,types.ts}`,
+`web/src/flows/{FlowList,FlowEditor}.tsx`,
+`web/src/team/TeamView.tsx`, `tests/test_api.py`, this file. Migrations
+`032`+`033` already applied.
 
-**18c** — `tenant_invitations (id uuid pk, tenant_id, email citext,
-role, invited_by, status ['pending'|'accepted'|'revoked'], created_at,
-accepted_at)`, RLS: a tenant owner manages its rows; an invitee may
-`select` their own by `lower(email) = auth.jwt()->>'email'`. API (owner
-only): `POST /api/invitations {email, role}`, `GET /api/invitations`,
-`DELETE /api/invitations/{id}`. Auto-claim: a trigger on `auth.users`
-insert (or a `POST /api/invitations/accept` the web calls right after
-first sign-in) that matches the new user's email to a `pending` invite →
-inserts the `tenant_members` row with the invited role, marks the invite
-`accepted`. Web: a **Team** panel (owner) — invite form (email + role),
-member list with role, revoke; a "no workspace yet — ask an owner to
-invite <your email>" screen when a signed-in user has zero memberships.
-No email infra: the invite just pre-authorises an address + role.
+**18d** — the sign-in layer. A **Continue with Google** button on
+`web/src/auth/Login.tsx`:
+`supabase.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: window.location.origin } })`.
+Nothing else in code changes — a Google user with a matching pending
+invite is picked up by the `acceptInvitations()` call `App.tsx` already
+makes on sign-in; one with no invite hits the "no workspace" screen.
 
-Then **18d** — a **Continue with Google** button on `Login.tsx`
-(`supabase.auth.signInWithOAuth({ provider: 'google' })`); needs the
-Supabase dashboard Google provider enabled + a Google OAuth web client
-with `https://mjohgmivnxfwkqmlojqs.supabase.co/auth/v1/callback` as a
-redirect URI (operator steps, not code).
+**Operator steps (not code) — do these first or the button 400s:**
+1. Google Cloud console (project `root-anvil-303306` or new) → the OAuth
+   **web** client → Authorized redirect URIs, add
+   `https://mjohgmivnxfwkqmlojqs.supabase.co/auth/v1/callback`;
+   Authorized JS origins `http://localhost:5173`.
+2. Supabase dashboard → Authentication → Providers → **Google** →
+   enable, paste that client's ID + secret.
+3. Supabase → Authentication → URL Configuration → Site URL +
+   Redirect URLs: `http://localhost:5173`.
+
+That finishes Phase 18.
 
 Standing context (unchanged):
 

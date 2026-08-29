@@ -8,13 +8,17 @@ import { FlowEditor } from "./flows/FlowEditor";
 import { RunsView } from "./runs/RunsView";
 import { KnowledgeView } from "./kb/KnowledgeView";
 import { RulesView } from "./rules/RulesView";
+import { TeamView } from "./team/TeamView";
+
+type View = "editor" | "runs" | "knowledge" | "rules" | "team";
 
 export function App() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
   const [role, setRole] = useState<string | null>(null);
+  const [memberships, setMemberships] = useState<number | null>(null);
   const [flowId, setFlowId] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
-  const [view, setView] = useState<"editor" | "runs" | "knowledge" | "rules">("editor");
+  const [view, setView] = useState<View>("editor");
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
@@ -25,21 +29,42 @@ export function App() {
   useEffect(() => {
     if (!session) return;
     const rank: Record<string, number> = { owner: 3, editor: 2, viewer: 1 };
-    api
-      .listTenants()
-      .then((rows) => {
-        const best = rows
-          .map((r) => r.role)
-          .sort((a, b) => (rank[b] ?? 0) - (rank[a] ?? 0))[0];
-        setRole(best ?? null);
-      })
-      .catch(() => setRole(null));
+    // claim any pending invites for this email first, then read memberships
+    api.acceptInvitations().catch(() => {}).finally(() => {
+      api
+        .listTenants()
+        .then((rows) => {
+          setMemberships(rows.length);
+          const best = rows
+            .map((r) => r.role)
+            .sort((a, b) => (rank[b] ?? 0) - (rank[a] ?? 0))[0];
+          setRole(best ?? null);
+        })
+        .catch(() => {
+          setMemberships(0);
+          setRole(null);
+        });
+    });
   }, [session]);
 
   const canEdit = role === "owner" || role === "editor";
+  const isOwner = role === "owner";
 
   if (session === undefined) return <div style={{ padding: 20 }}>…</div>;
   if (session === null) return <Login />;
+
+  if (memberships === 0) {
+    return (
+      <div className="login col">
+        <h1>No workspace yet</h1>
+        <p className="muted">
+          You're signed in as <strong>{session.user.email}</strong> but not a
+          member of any workspace. Ask an owner to invite this email address.
+        </p>
+        <button onClick={() => supabase.auth.signOut()}>sign out</button>
+      </div>
+    );
+  }
 
   return (
     <div className="shell">
@@ -58,6 +83,11 @@ export function App() {
             <button className={view === "rules" ? "primary" : ""} onClick={() => setView("rules")}>
               Rules
             </button>
+            {isOwner && (
+              <button className={view === "team" ? "primary" : ""} onClick={() => setView("team")}>
+                Team
+              </button>
+            )}
           </div>
           <div className="row" style={{ gap: 6 }}>
             {role && !canEdit && (
@@ -95,7 +125,9 @@ export function App() {
         )}
       </div>
       <div className={view === "editor" && flowId ? "editor" : "pane"}>
-        {view === "rules" ? (
+        {view === "team" ? (
+          <TeamView />
+        ) : view === "rules" ? (
           <RulesView />
         ) : view === "knowledge" ? (
           <KnowledgeView />

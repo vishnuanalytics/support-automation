@@ -5,9 +5,11 @@ import type {
   FlowVersion,
   ActionRequest,
   GoogleStatus,
+  Invitation,
   KbCollection,
   KbEntry,
   KbEntryRow,
+  Member,
   PolicyRule,
   NodeTypesResp,
   RunDetail,
@@ -110,6 +112,18 @@ export const api = {
     status: () => req<GoogleStatus>("/integrations/slack/status"),
     authorize: (tenant_id: string) =>
       req<{ url: string }>(`/integrations/slack/authorize?tenant_id=${tenant_id}`),
+  },
+
+  acceptInvitations: () =>
+    req<{ accepted: number }>("/invitations/accept", { method: "POST" }),
+  team: {
+    members: () => req<Member[]>("/members"),
+    removeMember: (userId: string) =>
+      req<void>(`/members/${userId}`, { method: "DELETE" }),
+    invitations: () => req<Invitation[]>("/invitations"),
+    invite: (b: { email: string; role: "editor" | "viewer" }) =>
+      req<Invitation>("/invitations", { method: "POST", body: JSON.stringify(b) }),
+    revoke: (id: string) => req<void>(`/invitations/${id}`, { method: "DELETE" }),
   },
 
   rules: {

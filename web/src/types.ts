@@ -172,3 +172,21 @@ export interface ActionRequest {
   error: string | null;
   created_at: string;
 }
+
+export interface Member {
+  user_id: string;
+  role: "owner" | "editor" | "viewer";
+  email: string;
+  is_you: boolean;
+}
+
+export interface Invitation {
+  invite_id: string;
+  tenant_id: string;
+  email: string;
+  role: "editor" | "viewer";
+  status: "pending" | "accepted" | "revoked";
+  invited_by: string | null;
+  created_at: string;
+  accepted_at: string | null;
+}

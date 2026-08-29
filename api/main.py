@@ -105,16 +105,16 @@ import time  # noqa: E402
 
 import httpx  # noqa: E402
 
-_token_cache: dict[str, tuple[float, str]] = {}   # token -> (expires_at, user_id)
+_token_cache: dict[str, tuple[float, str, str | None]] = {}   # token -> (expires_at, user_id, email)
 
 
-def _verify_token(token: str) -> str:
+def _verify_token(token: str) -> tuple[str, str | None]:
     """Authoritative check — ask Supabase Auth. Verifies signature, expiry and
-    revocation without needing the JWT secret. Cached 60s."""
+    revocation without needing the JWT secret. Cached 60s. Returns (user_id, email)."""
     now = time.time()
     hit = _token_cache.get(token)
     if hit and hit[0] > now:
-        return hit[1]
+        return hit[1], hit[2]
     try:
         r = httpx.get(
             f"{SUPABASE_URL}/auth/v1/user",
@@ -125,22 +125,24 @@ def _verify_token(token: str) -> str:
         raise HTTPException(503, f"auth check failed: {e}")
     if r.status_code != 200:
         raise HTTPException(401, "invalid or expired token")
-    uid = r.json().get("id")
+    body = r.json()
+    uid = body.get("id")
     if not uid:
         raise HTTPException(401, "token has no subject")
-    _token_cache[token] = (now + 60, uid)
+    email = (body.get("email") or "").lower() or None
+    _token_cache[token] = (now + 60, uid, email)
     # opportunistic cache prune
     if len(_token_cache) > 500:
-        for k, (exp, _) in list(_token_cache.items()):
+        for k, (exp, *_rest) in list(_token_cache.items()):
             if exp <= now:
                 _token_cache.pop(k, None)
-    return uid
+    return uid, email
 
 
 class Caller:
     def __init__(self, token: str):
         self.token = token
-        self.user_id = _verify_token(token)
+        self.user_id, self.email = _verify_token(token)
         self.sb = create_client(SUPABASE_URL, ANON_KEY)
         self.sb.postgrest.auth(token)          # RLS applies to this client
 
@@ -252,15 +254,26 @@ def _require_visible(c: Caller, flow_id: str) -> dict:
     return rows[0]
 
 
+def _member_role(c: Caller, tenant_id: str) -> str | None:
+    rows = (c.sb.table("tenant_members").select("role")
+            .eq("user_id", c.user_id).eq("tenant_id", tenant_id).execute().data or [])
+    return rows[0].get("role") if rows else None
+
+
 def _require_editor(c: Caller, tenant_id: str) -> None:
     """Phase 18b — a clean 403 for view-only members before a write.
     RLS is the real backstop; this just avoids a raw Postgres error string."""
-    rows = (c.sb.table("tenant_members").select("role")
-            .eq("user_id", c.user_id).eq("tenant_id", tenant_id).execute().data or [])
-    if not rows:
+    role = _member_role(c, tenant_id)
+    if role is None:
         raise HTTPException(403, "not a member of that tenant")
-    if rows[0].get("role") not in ("owner", "editor"):
+    if role not in ("owner", "editor"):
         raise HTTPException(403, "your access is view-only")
+
+
+def _require_owner(c: Caller, tenant_id: str) -> None:
+    """Phase 18c — only an owner manages members / invitations."""
+    if _member_role(c, tenant_id) != "owner":
+        raise HTTPException(403, "only a workspace owner can do that")
 
 
 # ── endpoints ──────────────────────────────────────────────────────────
@@ -291,6 +304,109 @@ def list_tenants(c: Caller = Depends(caller)) -> list[dict]:
     for a new flow (or skip the prompt when there's exactly one)."""
     return (c.sb.table("tenant_members").select("tenant_id, role")
             .eq("user_id", c.user_id).execute().data or [])
+
+
+# ── Phase 18c: team invitations ──────────────────────────────────────
+class InviteIn(BaseModel):
+    email: str
+    role: str = "viewer"          # 'editor' | 'viewer' (never 'owner' via invite)
+    tenant_id: str | None = None
+
+
+def _emails_for(user_ids: list[str]) -> dict[str, str]:
+    """Best-effort user_id -> email via the Auth admin API (service role)."""
+    out: dict[str, str] = {}
+    for uid in set(user_ids):
+        try:
+            u = _service.auth.admin.get_user_by_id(uid)
+            out[uid] = getattr(u.user, "email", None) or ""
+        except Exception:  # noqa: BLE001
+            out[uid] = ""
+    return out
+
+
+@app.get("/api/members")
+def list_members(tenant_id: str | None = None, c: Caller = Depends(caller)) -> list[dict]:
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    rows = (_service.table("tenant_members").select("user_id, role")
+            .eq("tenant_id", tid).execute().data or [])
+    emails = _emails_for([r["user_id"] for r in rows])
+    return [{**r, "email": emails.get(r["user_id"], ""), "is_you": r["user_id"] == c.user_id}
+            for r in rows]
+
+
+@app.delete("/api/members/{user_id}", status_code=204)
+def remove_member(user_id: str, tenant_id: str | None = None, c: Caller = Depends(caller)) -> None:
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    if user_id == c.user_id:
+        raise HTTPException(400, "you can't remove yourself")
+    owners = (_service.table("tenant_members").select("user_id")
+              .eq("tenant_id", tid).eq("role", "owner").execute().data or [])
+    if len(owners) <= 1 and any(o["user_id"] == user_id for o in owners):
+        raise HTTPException(400, "can't remove the last owner")
+    _service.table("tenant_members").delete() \
+        .eq("tenant_id", tid).eq("user_id", user_id).execute()
+
+
+@app.get("/api/invitations")
+def list_invitations(c: Caller = Depends(caller)) -> list[dict]:
+    """RLS: an owner sees their tenant's rows; an invitee sees their own pending ones."""
+    return (c.sb.table("tenant_invitations").select("*")
+            .order("created_at", desc=True).execute().data or [])
+
+
+@app.post("/api/invitations", status_code=201)
+def create_invitation(body: InviteIn, c: Caller = Depends(caller)) -> dict:
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    role = body.role.strip().lower()
+    if role not in ("editor", "viewer"):
+        raise HTTPException(400, "role must be 'editor' or 'viewer'")
+    email = body.email.strip().lower()
+    if "@" not in email:
+        raise HTTPException(400, "a real email is required")
+    try:
+        return c.sb.table("tenant_invitations").insert({
+            "tenant_id": tid, "email": email, "role": role, "invited_by": c.user_id,
+        }).execute().data[0]
+    except Exception as e:  # noqa: BLE001  — dup pending invite, etc.
+        raise HTTPException(409, f"could not invite {email}: {e}")
+
+
+@app.delete("/api/invitations/{invite_id}", status_code=204)
+def revoke_invitation(invite_id: str, c: Caller = Depends(caller)) -> None:
+    cur = (c.sb.table("tenant_invitations").select("tenant_id")
+           .eq("invite_id", invite_id).execute().data)
+    if cur:
+        _require_owner(c, cur[0]["tenant_id"])
+    c.sb.table("tenant_invitations").update({"status": "revoked"}) \
+        .eq("invite_id", invite_id).execute()
+
+
+@app.post("/api/invitations/accept")
+def accept_invitations(c: Caller = Depends(caller)) -> dict:
+    """Claim every pending invite for the caller's email. Idempotent — the web
+    calls this on each sign-in, so invites made after signup are picked up too."""
+    if not c.email:
+        return {"accepted": 0}
+    pend = (_service.table("tenant_invitations").select("*")
+            .eq("email", c.email).eq("status", "pending").execute().data or [])
+    n = 0
+    for inv in pend:
+        already = (_service.table("tenant_members").select("user_id")
+                   .eq("tenant_id", inv["tenant_id"]).eq("user_id", c.user_id)
+                   .execute().data)
+        if not already:
+            _service.table("tenant_members").insert({
+                "tenant_id": inv["tenant_id"], "user_id": c.user_id, "role": inv["role"],
+            }).execute()
+            n += 1
+        _service.table("tenant_invitations").update({
+            "status": "accepted", "accepted_at": _now_iso(),
+        }).eq("invite_id", inv["invite_id"]).execute()
+    return {"accepted": n}
 
 
 @app.post("/api/flows", status_code=201)
