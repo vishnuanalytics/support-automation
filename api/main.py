@@ -25,8 +25,6 @@ Run:  uvicorn api.main:app --reload
 
 from __future__ import annotations
 
-import base64
-import json
 import os
 import uuid
 from typing import Any
@@ -86,27 +84,68 @@ NODE_DEFAULTS: dict[str, dict[str, Any]] = {
 
 
 # ── auth ───────────────────────────────────────────────────────────────
+import time  # noqa: E402
+
+import httpx  # noqa: E402
+
+_token_cache: dict[str, tuple[float, str]] = {}   # token -> (expires_at, user_id)
+
+
+def _verify_token(token: str) -> str:
+    """Authoritative check — ask Supabase Auth. Verifies signature, expiry and
+    revocation without needing the JWT secret. Cached 60s."""
+    now = time.time()
+    hit = _token_cache.get(token)
+    if hit and hit[0] > now:
+        return hit[1]
+    try:
+        r = httpx.get(
+            f"{SUPABASE_URL}/auth/v1/user",
+            headers={"Authorization": f"Bearer {token}", "apikey": ANON_KEY},
+            timeout=5,
+        )
+    except httpx.HTTPError as e:
+        raise HTTPException(503, f"auth check failed: {e}")
+    if r.status_code != 200:
+        raise HTTPException(401, "invalid or expired token")
+    uid = r.json().get("id")
+    if not uid:
+        raise HTTPException(401, "token has no subject")
+    _token_cache[token] = (now + 60, uid)
+    # opportunistic cache prune
+    if len(_token_cache) > 500:
+        for k, (exp, _) in list(_token_cache.items()):
+            if exp <= now:
+                _token_cache.pop(k, None)
+    return uid
+
+
 class Caller:
     def __init__(self, token: str):
         self.token = token
-        self.user_id = _jwt_sub(token)
+        self.user_id = _verify_token(token)
         self.sb = create_client(SUPABASE_URL, ANON_KEY)
         self.sb.postgrest.auth(token)          # RLS applies to this client
-
-
-def _jwt_sub(token: str) -> str | None:
-    try:
-        payload = token.split(".")[1]
-        payload += "=" * (-len(payload) % 4)
-        return json.loads(base64.urlsafe_b64decode(payload)).get("sub")
-    except Exception:  # noqa: BLE001
-        return None
 
 
 def caller(authorization: str = Header(default="")) -> Caller:
     if not authorization.lower().startswith("bearer "):
         raise HTTPException(401, "missing bearer token")
     return Caller(authorization.split(" ", 1)[1].strip())
+
+
+# ── rate limiting (per user, in-process token bucket) ──────────────────
+_rate: dict[str, list[float]] = {}
+
+
+def rate_limit(user_id: str, bucket: str, limit: int, window: float = 60.0) -> None:
+    now = time.time()
+    key = f"{user_id}:{bucket}"
+    hits = [t for t in _rate.get(key, []) if now - t < window]
+    if len(hits) >= limit:
+        raise HTTPException(429, f"rate limit: {limit} {bucket}/{int(window)}s")
+    hits.append(now)
+    _rate[key] = hits
 
 
 # ── models ─────────────────────────────────────────────────────────────
@@ -335,6 +374,7 @@ def run_flow(
     c: Caller = Depends(caller),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict:
+    rate_limit(c.user_id, "run", 20)
     _require_visible(c, flow_id)                       # RLS gate
 
     if idempotency_key:
@@ -385,6 +425,7 @@ def enqueue_run(flow_id: str, body: EnqueueIn, c: Caller = Depends(caller)) -> d
     """Queue a run for the worker (async path — used by the Salesforce trigger).
     Returns immediately. `GET /jobs/{job_id}` for status; the result carries the
     `run_id`."""
+    rate_limit(c.user_id, "enqueue", 120)
     _require_visible(c, flow_id)
     job_id = jobs.enqueue(
         "run_flow",
