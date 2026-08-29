@@ -110,9 +110,33 @@ def auth_headers():
 
 
 @pytest.mark.integration
+def test_a_forged_token_is_rejected(auth_headers):
+    # tamper with the real token's payload — signature no longer matches
+    good = auth_headers["Authorization"].split(" ", 1)[1]
+    bad = good[:-6] + "AAAAAA"
+    r = client.get("/api/flows", headers={"Authorization": f"Bearer {bad}"})
+    assert r.status_code == 401
+
+
+@pytest.mark.integration
 def test_list_flows_is_rls_scoped(auth_headers):
     rows = client.get("/api/flows", headers=auth_headers).json()
     assert rows and all(r["tenant_id"] == "22222222-2222-2222-2222-222222222222" for r in rows)
+
+
+def test_rate_limit_trips_after_the_budget():
+    import pytest as _pt
+    from fastapi import HTTPException
+
+    from api.main import _rate, rate_limit
+    _rate.clear()
+    for _ in range(5):
+        rate_limit("u1", "run", 5, window=60)     # 5 allowed
+    with _pt.raises(HTTPException) as ei:
+        rate_limit("u1", "run", 5, window=60)     # 6th -> 429
+    assert ei.value.status_code == 429
+    rate_limit("u2", "run", 5, window=60)          # a different user is unaffected
+    _rate.clear()
 
 
 @pytest.mark.integration
