@@ -44,9 +44,12 @@ cd web && npm install && npm run dev      # editor on :5173
 
 ## Status
 
-All 14 phases (0–13) complete — see `docs/PROJECT_SCOPE.md` for what each
-delivered and how it was verified. Migrations `001`–`016` applied; daily
-ingestion runs on GitHub Actions; 14 offline tests + an integration test.
+Phases 0–13 built and complete — see `docs/PROJECT_SCOPE.md` for what each
+delivered and how it was verified. Migrations `001`–`018` applied; daily
+ingestion runs on GitHub Actions; 32 offline tests + integration tests.
+Phases 14–16 (self-serve knowledge base, Google Docs sync, structured
+policy rules + Slack-approved internal actions) are planned — full spec in
+`docs/PROJECT_SCOPE.md`, no code yet.
 
 ## Cost stance
 

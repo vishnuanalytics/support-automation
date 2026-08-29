@@ -25,14 +25,20 @@ Run modules from the repo root: `python -m ingestion.scraper`,
 ## Don't build ahead
 
 This project is built in explicit, sequenced phases (see
-`docs/PROJECT_SCOPE.md` for the phase table). **Phases 0–6 (the MVP) are
-complete.** Phases **7–13 are the hardening roadmap** — still sequential.
+`docs/PROJECT_SCOPE.md` for the phase table). **Phases 0–13 are built and
+complete** (0–6 the MVP, 7–13 the hardening roadmap). **Phases 14–16
+(self-serve knowledge & internal actions) are planned — spec in
+`PROJECT_SCOPE.md`, no code yet** — still sequential.
 **Do not jump ahead into a later phase while an earlier one is still open:**
 
-- The recommended build order is **7 → 9 → 8 → 10 → 11 → 12 → 13** (eval +
-  CI safety net before the structural changes in 8/10/12). Don't start
-  Phase 10 (event-driven pipeline / queue) before Phase 7's eval exists and
-  Phase 9's CI is gating.
+- Open work, in order: **Phase 7 gate re-calibration** (see
+  `PROJECT_SCOPE.md` "Immediate next step") → **Phase 14 → 15 → 16**.
+  Don't start 15 before 14's `kb_lookup` node runs end-to-end; don't
+  start 16 before the Phase 7 re-calibration lands (16's `policy_gate`
+  builds on it).
+- The hardening roadmap (7–13) was built in order **7 → 9 → 8 → 10 → 11 →
+  12 → 13** (eval + CI safety net before the structural changes in
+  8/10/12).
 - Don't expand scope mid-phase. Each roadmap phase is a small, verifiable
   chunk — land it and its verification before moving on.
 - If a task surfaces something that belongs to a later phase, note it in

@@ -110,6 +110,18 @@ from the 2026-08-29 self-review; still sequential (do 7 before 10, etc.).**
 | 12 | **Real multi-tenancy.** `sources` + per-source ingestion; `tenant_integrations`; a real 2nd KB source; write-path scoping. | **Complete (2026-08-29)** — migration `015`: **`sources`** (tenant_id NULL = shared), `doc_chunks`/`zapier_docs` gain `source_id` (backfilled to a shared `zapier-public` source), the 3 `match_doc_chunks*` fns gain an optional `p_source_ids uuid[]` filter (old signatures dropped to avoid overload ambiguity). **`tenant_integrations`** (per-tenant SF/Slack creds). `interpreter/retrieval.resolve_sources(names, sb, tenant_id)` — a flow only ever reaches **shared + its own tenant's** sources; naming another tenant's source falls back to its legitimate scope (**no cross-tenant KB leak** — verified). `retrieve` node `config.kb_sources`; `hybrid_retrieve(kb_sources, tenant_id)`; `state.tenant_id` threaded from the flow at `invoke`. `interpreter/salesforce.client_for(tenant_id)` resolves creds from `tenant_integrations`, else env. **`ingestion/sources/markdown_source.py`** + a real **`globex-sop`** source (4 SOP docs / 8 chunks, tenant Globex) with *deliberately different* guidance (webhooks Business-only, annual+true-up billing, no self-serve export) — migration `016` points the Globex flow's retrieve at `["globex-sop", "zapier-public"]`. `scripts/sop_conflicts.py` now probes per (tenant, team). 27 offline + 15 integration pytest green. |
 | 13 | **Security & hardening.** Verify tokens, rate-limit, `/security-review`, `sop_conflicts` fires. | **Complete (2026-08-29)** — `api`'s `caller` now **verifies** the bearer token via `GET {SUPABASE_URL}/auth/v1/user` (authoritative signature/expiry/revocation check, 60 s cache) instead of a base64 decode of the payload; a tampered token → 401 (tested). Per-user in-process `rate_limit()` — `/run` 20/min, `/enqueue` 120/min → 429. `/security-review` run over the API+web diff → **no HIGH/MEDIUM findings** (the change is a net auth improvement). `scripts/sop_conflicts.py` already **fires** since Phase 12 (5 real Globex-SOP-vs-public divergences). 28 offline + 17 integration pytest green. *Residual:* rate-limit state is per-process (fine for one uvicorn worker; needs Redis behind a load balancer); token cache honours a revoked session for ≤60 s. |
 
+**Phases 14–16 = self-serve knowledge & internal actions — planned, not
+built (added 2026-08-29 from a scoping conversation). Sequential: 14 → 15
+→ 16. Do not start 15 before 14's `kb_lookup` node runs end-to-end; do not
+start 16 before the Phase 7 gate re-calibration (see "Immediate next
+step") lands, since 16's `policy_gate` builds on that work.**
+
+| Phase | Scope | Status |
+|---|---|---|
+| 14 | **Internal knowledge base (unstructured), self-serve.** Per-team named collections; entries authored in-app (markdown editor) or uploaded (`.md`/`.txt`/`.pdf`/`.docx`); chunked + embedded locally, scoped to the tenant. New `kb_lookup` node the flow author drops at a checkpoint — consulted **only when the run reaches it**, feeds `draft` as authoritative context above the public docs. | **Planned** — detail below. No Google Docs yet (Phase 15). |
+| 15 | **Google Drive / Docs connector.** Per-tenant Google OAuth (tokens in `tenant_integrations`, flagged for encryption); link a Google Doc to a collection; a scheduled job re-exports + re-embeds on `modifiedTime` change to keep it in sync; unlink = soft-delete its chunks. Adds a `gdoc` source kind alongside Phase 14's `internal_kb` collections. | **Planned** — detail below. |
+| 16 | **Structured policy rules + internal task actions.** Per-team rule store (`when → then`), edited via a form (JSON predicate, never code). New `policy_gate` node (deterministic routing override: force `ask_human` / auto-approve) and `task_dispatch` node (side-effecting, via the job queue). On an action match: post to **Slack** with Approve/Reject buttons to the person/team the rule names → on approval the bot opens a **GitHub issue** and tags the team. Slack + GitHub creds per tenant. | **Planned** — detail below. |
+
 ## Phase 0 — schema (complete)
 
 Tables (Supabase/Postgres):
@@ -390,11 +402,225 @@ below are indicative — take the next free number when you build it.
   confirm it surfaces a real conflict and Groq-judges it; add it to CI as
   a non-blocking report.
 
+## Self-serve knowledge & internal actions (phases 14–16) — detail
+
+Added 2026-08-29 from a scoping conversation. Problem statement, in the
+user's words: *"if the bot wants to check an internal workflow or
+configuration where the internal team can check & update … not a single
+document upload or Google Doc link for all teams … give an option to
+users, they can add at any point … if the agentic flow reaches there &
+checks the information, give that one, otherwise ignore it."*
+
+Two distinct needs came out of that:
+
+1. **Unstructured** — team-authored SOPs / runbooks / config notes the
+   **draft LLM reads** as authoritative context. Changes *what the reply
+   says*. → Phases 14 (in-app + upload) and 15 (Google Docs, kept synced).
+2. **Structured** — UI-defined **rules that change what the bot does**:
+   override routing, or fire an internal task (with a human approving in
+   Slack first) such as opening a GitHub issue and tagging a team. →
+   Phase 16.
+
+Design decisions already settled in that conversation:
+
+- Knowledge is **per tenant**, organised as **many named collections**
+  (not one flat KB) — each `kb_lookup` node picks which collection(s).
+- Editors are **existing `tenant_members`** (the same people who use the
+  flow editor) — no new role. Support agents / managers do **not** log
+  into this platform; they live in Salesforce + Slack, so Phase 16
+  approvals happen **in Slack**, not on a dashboard.
+- Google Docs use a **per-tenant Google OAuth** connection and are **kept
+  in sync**, not imported once.
+- Free tooling: **GitHub Issues** for tasks, **Slack** for approvals
+  (both have adequate free tiers). Alternatives noted but not chosen:
+  GitLab/Linear/Jira for tasks; Discord/Telegram/Teams/email or an
+  in-app `internal_tasks` table for approvals.
+- A rule's inputs come from the **case text + classification/extraction**
+  (e.g. "reports for FY 2024" → an `extract` node pulls
+  `entities.report_period`), **not** a live lookup into an internal
+  system. Rules evaluate against `state` fields only.
+
+### Phase 14 — Internal knowledge base (unstructured), self-serve
+
+- **Migration `019_knowledge_base.sql`:**
+  - A collection = a row in **`sources`** with `kind='internal_kb'` and
+    `tenant_id` set (reuses Phase 12 scoping + `resolve_sources`
+    unchanged). `sources` gains an insert/update/delete RLS policy for
+    `kind='internal_kb'` scoped via `tenant_members` (today it's
+    select-only).
+  - **`kb_entries`** — the editable source of truth: `entry_id uuid pk`,
+    `source_id → sources`, `tenant_id` (denormalised for RLS), `title`,
+    `body_md`, `status` (`active|archived` — soft-delete per the
+    `zapier_docs.status` rule), `created_by/at`, `updated_by/at`,
+    `embed_hash`, `chunk_count`, `embedded_at`. Full CRUD RLS via
+    `tenant_members`.
+  - Content flows into the **existing** `zapier_docs` + `doc_chunks` on
+    save (same as `ingestion/sources/markdown_source.py` already does):
+    `zapier_docs.url = 'kb://<source_id>/<entry_id>'`, `source_id` set,
+    `raw_text = body_md`; `doc_chunks` chunked + embedded (local
+    `fastembed`, 384-dim). So retrieval needs **zero new code** —
+    `match_doc_chunks(p_source_ids := [collection ids])` already filters.
+- **Shared ingest helper:** factor `embed_entry(sb, source_id, url, title,
+  body_md)` out of `markdown_source.py` into
+  `ingestion/sources/kb_common.py` (chunk via `scraper.chunk_markdown`,
+  embed via `scraper.get_embedder`, upsert `zapier_docs`/`doc_chunks`,
+  delete stale chunks). `markdown_source.py` calls it too.
+- **Interpreter — `kb_lookup` node** (`interpreter/registry.py`):
+  `@register("kb_lookup")`. Config: `collections` (names, resolved
+  tenant-scoped like `kb_sources`), `query` (templated over `state`,
+  default = case text), `top_k`, `use_rerank`, `min_score`, `out_key`
+  (default `"internal_kb"`). Calls `hybrid_retrieve(query,
+  kb_sources=collections, tenant_id=…, use_graph=False)`; writes
+  `state[out_key] = {matches, score, checked: True}`; one `trace` entry.
+  **Runs only if the graph routes to it** — that's the "otherwise ignore
+  it" for free. `validate_flow.py` learns the type (not added to
+  `EXPECTED_TYPES`).
+- **`h_draft`** folds `state["internal_kb"]` into the prompt above the
+  public context, labelled `# Internal runbook (authoritative)`;
+  `groundedness.check` counts internal chunks as valid corpus.
+- **API** (`api/kb.py` router, RLS-scoped, `rate_limit(user, "kb_write",
+  60)`): `GET/POST /api/kb/collections`, `PATCH/DELETE
+  /api/kb/collections/{id}` (soft), `GET/POST
+  /api/kb/collections/{id}/entries`, `GET/PATCH/DELETE
+  /api/kb/entries/{id}`. Entry write: chunk+embed **inline** under a size
+  threshold (~8 KB), else enqueue a `jobs` row `kind='embed_kb_entry'`
+  and return 202. `PATCH` re-embeds only if `body_md` hash changed.
+  Uploads (`.md`/`.txt` direct; `.pdf` via `pypdf`; `.docx` via
+  `python-docx`) convert to markdown server-side, then same path.
+  Service-role client does the `zapier_docs`/`doc_chunks` write **after**
+  an RLS check that the caller can see the parent collection (mirrors the
+  interpreter's scoped-vs-service split).
+- **Worker:** `api/worker.py` gains an `embed_kb_entry` handler (reuses
+  `kb_common.embed_entry`).
+- **Web** (`web/src/kb/`): a **Knowledge** tab beside Flows / Runs.
+  `KbCollections` (list + New), `KbCollection` (entries + Add),
+  `KbEntryEditor` (title + markdown `<textarea>` + preview + upload
+  button; Save / Archive; "embedded ✓ / pending"). `Inspector.tsx`: when
+  a `kb_lookup` node is selected, a multi-select of the tenant's
+  collections bound to `config.collections`, plus `top_k` / `query` —
+  same friendly-form treatment `confidence_gate` gets. `NodeCard` +
+  palette register `kb_lookup` with an icon.
+- **Seed (`020_seed_kb_checkpoint.sql`):** a `globex-billing-runbook`
+  collection + one entry ("Refund approval limits: <$200 auto, $200–2k
+  lead, >$2k manager"), and a `kb_lookup` node on the Globex flow's
+  billing branch feeding `draft`.
+- **Verify:** unit — insert entry → chunks appear under that `source_id`
+  only → another tenant's flow can't retrieve them. Integration
+  (`test_api.py`) — create collection, add entry, entry becomes
+  retrievable via a run through a flow with a `kb_lookup` node,
+  cross-tenant `GET` → 404. An `eval/e2e` case that only gets the right
+  answer when the internal entry is consulted.
+
+### Phase 15 — Google Drive / Docs connector
+
+- **Migration `021_gdoc_sources.sql`:** `sources.kind` gains
+  `'gdoc'`; `sources.config` holds `{doc_id, doc_url, last_modified,
+  last_synced_at}`. A `gdoc_sync_state` isn't needed — `config` + the
+  `zapier_docs` rows carry it.
+- **Per-tenant Google OAuth:** one platform-level Google Cloud OAuth
+  client (`GOOGLE_CLIENT_ID/SECRET` in `.env`), scopes
+  `drive.readonly` + `documents.readonly`. `GET
+  /api/integrations/google/authorize` → consent URL; `GET
+  /api/integrations/google/callback` stores the **refresh token** in
+  `tenant_integrations (tenant_id, kind='google', secret jsonb)`
+  (flagged for Vault encryption — same open debt as the SF creds).
+- **Link a doc:** `POST /api/kb/collections/{id}/gdoc {doc_url}` → resolve
+  `doc_id`, `files.get` for `modifiedTime` + name, `documents.get` →
+  flatten to markdown, `kb_common.embed_entry` with url
+  `gdoc://<doc_id>`. One `sources` row of `kind='gdoc'` per linked doc
+  (or an entry under an `internal_kb` collection — decide at build; a
+  distinct kind keeps "synced, don't hand-edit" obvious).
+- **Sync:** `ingestion/sources/gdoc_sync.py --once` — for every active
+  `gdoc` source with a tenant Google token, compare `modifiedTime` to
+  `config.last_modified`; if newer, re-export + re-embed (replace that
+  doc's chunks), bump `config`. Add to `.github/workflows/daily-sync.yml`
+  (or its own cron). Token refresh handled by the Google client lib;
+  a revoked token → mark the source `status='error'` + surface in the UI.
+- **Unlink:** soft-delete — `status='deleted'` on the `sources` row, its
+  `doc_chunks` dropped, `zapier_docs` row kept as `status='deleted'`
+  (the `missed_runs` / soft-delete rule).
+- **Web:** in `KbCollection`, a "Link Google Doc" action (disabled until
+  the tenant has connected Google, with a "Connect Google" button that
+  runs the OAuth popup). Linked docs show a 🔗 + "synced 5 min ago",
+  read-only body.
+- **Verify:** connect a test Google account, link a doc, edit the doc,
+  run `gdoc_sync.py --once` → the collection's retrieved text changes;
+  unlink → chunks gone, flow falls back to the next source.
+
+### Phase 16 — Structured policy rules + internal task actions
+
+- **Migration `022_policy_rules.sql`:** `policy_rules` (`rule_id`,
+  `tenant_id`, `team`, `name`, `priority int`, `when jsonb`, `then jsonb`,
+  `status`, audit cols). RLS via `tenant_members`. `when` is a **JSON
+  predicate tree** (`{all|any: [...]}` of `{field, op, value}` over
+  `state` paths like `entities.report_period`, `classification.topic`,
+  `tier`) — evaluated by a small safe evaluator in
+  `interpreter/policy.py`, **never** `eval`/code strings from the UI.
+  `then` is `{type: "route", action: "ask_human"|"auto_approve"}` **or**
+  `{type: "task", task: "github_issue", repo, labels, assignees,
+  approver: {slack_channel|slack_user}, title_tmpl, body_tmpl}`.
+- **`extract` node** (`@register("extract")`): config `fields` (name →
+  description); one LLM call pulls them from the case into
+  `state["entities"]`. Cheap model (`FAST_MODEL`), JSON, stub-safe.
+  Placed before `policy_gate` when a rule needs a derived value like a
+  fiscal year.
+- **`policy_gate` node** (`@register("policy_gate")`): loads active
+  `policy_rules` for `(tenant_id, team)`, evaluates `when` in `priority`
+  order, applies the first match. `type:"route"` sets
+  `state["policy_action"]` → an edge `condition.if =
+  "policy_gate.route == 'ask_human'"` diverts the flow (deterministic —
+  independent of `draft_confidence`; this is the teeth the Phase 7 e2e
+  misses showed were missing). No match → pass through unchanged.
+- **`task_dispatch` node** (`@register("task_dispatch")`): for a matched
+  `type:"task"` rule, insert an **`action_requests`** row (`id`,
+  `run_id`, `tenant_id`, `kind`, `payload jsonb`, `status`
+  `pending|approved|rejected|expired|done`, `slack_channel`, `slack_ts`,
+  `decided_by`, `decided_at`; unique `(run_id, kind)` = idempotent) and
+  post a Slack message with **Approve / Reject** buttons to the rule's
+  approver. The flow ends on a `dispatched` outcome; the external effect
+  is **not** done inline.
+- **Slack app (platform-level, multi-workspace):** `SLACK_CLIENT_ID/
+  SECRET/SIGNING_SECRET` in `.env`. `GET
+  /api/integrations/slack/authorize` + `/callback` → per-tenant bot token
+  in `tenant_integrations (kind='slack')`. One public endpoint `POST
+  /api/integrations/slack/interactions` — verify Slack's signing
+  secret, match the `action_requests` row, set `approved`/`rejected` +
+  `decided_by`, and on approve enqueue `jobs kind='create_github_issue'`.
+  A cron expires `pending` rows older than `APPROVAL_TTL_H` (default 24)
+  and edits the Slack message to say so.
+- **GitHub integration** (`interpreter/github.py`, `client_for(tenant_id)`
+  pattern): a per-tenant token (`tenant_integrations kind='github'`, or a
+  shared `GITHUB_TOKEN` fallback). Worker `create_github_issue` handler —
+  `POST /repos/{repo}/issues` with `title`/`body`/`labels`/`assignees`
+  from `payload`, then edits the Slack message to "✅ opened
+  {owner/repo}#{n}" and writes the issue URL onto the `runs` row.
+  Idempotent on `action_requests.id`.
+- **Web:** a **Rules** tab (per team): list rules by priority, a
+  form-based editor for `when` (field/op/value rows, all/any groups) and
+  `then` (route vs task, with a repo/label/approver picker for task). A
+  read-only **Approvals** panel showing recent `action_requests` +
+  status. `Inspector` gains `policy_gate` / `task_dispatch` / `extract`
+  forms; palette + `NodeCard` register them.
+- **Seed (`023_seed_policy_demo.sql`):** a Globex rule — `when
+  entities.report_period older than 2 years`, `then task github_issue`
+  repo `globex/support-ops`, approver `#support-leads` — plus an
+  `extract` + `policy_gate` + `task_dispatch` on the Globex flow's
+  data-export branch.
+- **Verify:** unit — the JSON-predicate evaluator (all/any/ops, missing
+  field = no match, no code execution). Integration — a case matching a
+  `route` rule escalates regardless of a high stubbed `draft_confidence`;
+  a case matching a `task` rule creates a `pending` `action_requests` +
+  (stubbed Slack) message; simulate the Slack "approve" callback →
+  `jobs` row → (stubbed GitHub) issue + Slack edit; the same run
+  approved twice = one issue.
+
 ## Immediate next step
 
-**All 14 phases (0–13) complete.** Migrations through `018` applied. 32 offline pytest
+**Phases 0–13 built and complete.** Migrations through `018` applied. 32 offline pytest
 tests + `tests/test_multiflow.py` green. External calls (Groq, Salesforce)
 run real when creds are in `.env`, else deterministic dry-run.
+**Phases 14–16 (self-serve knowledge & internal actions) are planned —
+spec above, no code yet.**
 
 **2026-08-29 — Groq key added; LLM path now runs real.** Fallout fixed
 (migrations `017`/`018`, `interpreter/llm.py`, `registry._context_block`):
@@ -427,12 +653,19 @@ cd web && npm install && npm run dev                  # editor + Runs view :5173
 Editor login: `gundamvishnu7@gmail.com` → tenant Acme; `globex-owner@example.test`
 (pw `editor-test-pw-8891`) → tenant Globex.
 
-**No open phase.** The MVP (0–6) and the hardening roadmap (7–13) are both
-done. If the project continues: a Playwright end-to-end on the web; wire
-the `eval/e2e/` auto-send-precision floor into CI; deploy `api/` + `web/` +
-the worker + the `sf_case_watch` cron to real hosts; move rate-limit /
-token-cache state to Redis; encrypt `tenant_integrations.secret` with
-Supabase Vault. All are noted under "Known issues / debt".
+**The MVP (0–6) and the hardening roadmap (7–13) are built.** Open work,
+in order:
+
+1. **Phase 7 gate re-calibration** (below) — highest priority; also
+   unblocks Phase 16's `policy_gate`.
+2. **Phase 14 → 15 → 16** — self-serve knowledge & internal actions, spec
+   in "Self-serve knowledge & internal actions (phases 14–16) — detail".
+   Sequential; 14 first.
+3. Standing infra debt: Playwright e2e on the web; wire the `eval/e2e/`
+   auto-send-precision floor into CI; deploy `api/` + `web/` + the worker
+   + the `sf_case_watch` cron to real hosts; move rate-limit /
+   token-cache state to Redis; encrypt `tenant_integrations.secret` with
+   Supabase Vault. All noted under "Known issues / debt".
 
 A Phase 7 follow-up, now **higher priority** after the real-draft e2e
 re-run (acc dropped 0.909 stub → 0.636 real):
