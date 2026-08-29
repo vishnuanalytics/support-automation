@@ -118,8 +118,8 @@ groundwork — the Phase 7 recalibration — which is done (`019`).**
 | Phase | Scope | Status |
 |---|---|---|
 | 14 | **Internal knowledge base (unstructured), self-serve.** Per-team named collections; entries authored in-app (markdown editor); chunked + embedded locally, scoped to the tenant. New `kb_lookup` node the flow author drops at a checkpoint — consulted **only when the run reaches it**, feeds `draft` as authoritative context above the public docs. | **Built (2026-08-29)** — migrations `022` (`kb_entries` + `sources` internal_kb RLS) + `023` (a `kb_lookup` checkpoint on the Globex flow's billing branch). `ingestion/sources/kb_common.embed_entry` (shared with `markdown_source`). `registry.h_kb_lookup` (templated `{{state.path}}` query, tenant-scoped collections, `use_graph=False` → `state.internal_kb`); `h_draft` folds an internal hit in above the public docs + counts it toward groundedness. API: `/api/kb/collections` + `/entries` CRUD (RLS-scoped, `kb_write` rate-limit, inline embed ≤8 KB else an `embed_kb_entry` job); `api/worker` handles it. Web: a **Knowledge** tab (collections → entries → markdown editor) + a `kb_lookup` Inspector form (collection multi-select + `top_k` + query). `scripts/seed_kb_demo.py` seeds `globex-billing-runbook`. 38 offline + KB integration tests green; Globex flow recompiles with the checkpoint. File upload (`.pdf`/`.docx` via `pypdf`/`python-docx`) is a noted follow-on; end-to-end billing-branch run pending a Groq daily-quota reset. |
-| 15 | **Google Drive / Docs connector.** Per-tenant Google OAuth; link a Google Doc into a KB collection; a scheduled job re-exports + re-embeds on `modifiedTime` change. | **Built (2026-08-29), live-unverified** — a linked doc is a `kb_entries` row with `origin='gdoc'` **inside an `internal_kb` collection** (deviation from the "distinct `gdoc` source kind" sketch — keeps one retrieval path, and `kb_lookup` picks up manual + synced entries together). Migration `024` adds `origin`/`gdoc_id`/`gdoc_url`/`gdoc_modified`/`synced_at`/`sync_error` to `kb_entries`. `interpreter/gdrive.py`: OAuth (`authorize_url`/`exchange_code`, offline access), `fetch_doc` (Drive `files.get` + Docs `documents.get`), and a pure `docs_json_to_markdown` (headings/bullets/tables — unit-tested). Refresh token in `tenant_integrations (kind='google')`. API: `/api/integrations/google/{status,authorize,callback}`, `POST /api/kb/collections/{id}/gdoc`, `POST /api/kb/entries/{id}/resync`; gdoc entries reject `body_md` PATCH (409). `ingestion/sources/gdoc_sync.py --once` for the cron. Web: **Connect Google** / **＋ Google Doc** / per-entry **re-sync**, gdoc entries read-only with a 🔗. `docs/GOOGLE_SETUP.md`. 42 offline pytest green. **Not exercised end-to-end** — needs a Google Cloud OAuth client + `GOOGLE_CLIENT_ID`/`SECRET` in `.env` (like the Salesforce JWT setup). |
-| 16 | **Structured policy rules + internal task actions.** Per-team rule store (`when → then`); `policy_gate` (routing override) + `task_dispatch` (Slack-approved GitHub issue) nodes. | **Built (2026-08-29); Slack/GitHub round-trip live-unverified.** `interpreter/policy.py` — pure JSON predicate evaluator (`all`/`any`/`not` + `{field,op,value}`, ops eq/ne/in/nin/gt/gte/lt/lte/contains/icontains/exists), `first_match` by priority. Migration `025`: `policy_rules` (tenant/team-scoped, RLS) + `action_requests` (the approval queue, unique `(run_id,kind)`). Nodes: **`extract`** (LLM → `state.entities`), **`policy_gate`** (loads rules, first match → `state.policy` = {action|task}), **`task_dispatch`** (raises an `action_requests` row + posts a Slack Approve/Reject). `builder._context` exposes `policy`/`entities` to edge conditions; `runs.record_run` links the `action_requests` row to the run. `interpreter/slack.py` (OAuth, `verify_signature` (pure, tested), `post_approval`/`update_message`) + `interpreter/github.py` (`create_issue`, per-tenant token). API: `/api/rules` CRUD, `/api/action-requests`, `/api/integrations/slack/{status,authorize,callback,interactions}` (signed callback → mark approved → `create_github_issue` job). `api/worker` handler opens the issue + edits the Slack msg. `scripts/expire_approvals.py` (stale `pending` → `expired`). Web: a **Rules** tab — a recursive **`when` form builder** (nested ALL/ANY groups, NOT wrapper, field datalist, per-op value widget) + a `then` form (route action, or task repo/title/body/labels/approver) with a **JSON toggle** as the power-user fallback; plus the approval-queue table + Connect Slack. `extract`/`policy_gate`/`task_dispatch` in the palette + Inspector. Seed `026`: an Acme-offboarding rule ("data older than 2 years → GitHub ops ticket") with `extract → policy_gate → {task_dispatch\|draft}`. `docs/SLACK_SETUP.md`. 51 offline + rules-CRUD integration pytest green; web tsc/vitest/build green. **Not exercised end-to-end** — needs a Slack app (+ public interactions URL) and a GitHub token; see `docs/SLACK_SETUP.md`. |
+| 15 | **Google Drive / Docs connector.** Per-tenant Google OAuth; link a Google Doc into a KB collection; a scheduled job re-exports + re-embeds on `modifiedTime` change. | **Built + live-verified (2026-08-29)** — OAuth → Doc export → markdown → chunk → embed, tenant-scoped (a linked doc landed 2 chunks in `doc_chunks`). A linked doc is a `kb_entries` row with `origin='gdoc'` **inside an `internal_kb` collection** (deviation from the "distinct `gdoc` source kind" sketch — keeps one retrieval path, and `kb_lookup` picks up manual + synced entries together). Migration `024` adds `origin`/`gdoc_id`/`gdoc_url`/`gdoc_modified`/`synced_at`/`sync_error` to `kb_entries`. `interpreter/gdrive.py`: OAuth (`authorize_url`/`exchange_code`, offline access), `fetch_doc` (Drive `files.get` + Docs `documents.get`), and a pure `docs_json_to_markdown` (headings/bullets/tables — unit-tested). Refresh token in `tenant_integrations (kind='google')`. API: `/api/integrations/google/{status,authorize,callback}`, `POST /api/kb/collections/{id}/gdoc`, `POST /api/kb/entries/{id}/resync`; gdoc entries reject `body_md` PATCH (409). `ingestion/sources/gdoc_sync.py --once` for the cron. Web: **Connect Google** / **＋ Google Doc** / per-entry **re-sync**, gdoc entries read-only with a 🔗. `docs/GOOGLE_SETUP.md`. 42 offline pytest green. **Live-verified** against a real Google account (project `root-anvil-303306`). |
+| 16 | **Structured policy rules + internal task actions.** Per-team rule store (`when → then`); `policy_gate` (routing override) + `task_dispatch` (Slack-approved GitHub issue) nodes. | **Built + live-verified (2026-08-29).** `interpreter/policy.py` — pure JSON predicate evaluator (`all`/`any`/`not` + `{field,op,value}`, ops eq/ne/in/nin/gt/gte/lt/lte/contains/icontains/exists), `first_match` by priority. Migration `025`: `policy_rules` (tenant/team-scoped, RLS) + `action_requests` (the approval queue, unique `(run_id,kind)`). Nodes: **`extract`** (LLM → `state.entities`), **`policy_gate`** (loads rules, first match → `state.policy` = {action|task}), **`task_dispatch`** (raises an `action_requests` row + posts a Slack Approve/Reject). `builder._context` exposes `policy`/`entities` to edge conditions; `runs.record_run` links the `action_requests` row to the run. `interpreter/slack.py` (OAuth, `verify_signature` (pure, tested), `post_approval`/`update_message`) + `interpreter/github.py` (`create_issue`, per-tenant token). API: `/api/rules` CRUD, `/api/action-requests`, `/api/integrations/slack/{status,authorize,callback,interactions}` (signed callback → mark approved → `create_github_issue` job). `api/worker` handler opens the issue + edits the Slack msg. `scripts/expire_approvals.py` (stale `pending` → `expired`). Web: a **Rules** tab — a recursive **`when` form builder** (nested ALL/ANY groups, NOT wrapper, field datalist, per-op value widget) + a `then` form (route action, or task repo/title/body/labels/approver) with a **JSON toggle** as the power-user fallback; plus the approval-queue table + Connect Slack. `extract`/`policy_gate`/`task_dispatch` in the palette + Inspector. Seed `026`: an Acme-offboarding rule ("data older than 2 years → GitHub ops ticket") with `extract → policy_gate → {task_dispatch\|draft}`. `docs/SLACK_SETUP.md`. 52 offline pytest green; web tsc/vitest/build green. **Live-verified end-to-end**: offboarding case → `extract report_age_years=6` → `policy_gate` match → Slack Approve in `#support-leads` → signed callback → worker opened `vishnuanalytics/GH-Alert#2`, Slack message edited with the link. Fixes from that run: `entities`/`policy` added to `CaseState` (LangGraph drops undeclared keys — the policy chain had been inert); `jobs.claim()` now guards an all-NULL `claim_job` row (was a worker crash-loop on an empty queue); `action_request_id` promoted to a top-level state key so `record_run` links it past a later terminal node. |
 
 ## Phase 0 — schema (complete)
 
@@ -618,14 +618,16 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**All phases 0–16 built.** Migrations through `026` applied. 51 offline pytest
-tests + `tests/test_multiflow.py` (needs Groq quota). External calls
-(Groq, Salesforce) run real when creds are in `.env`, else deterministic
-dry-run. **Phases 14–16 are built; the external round-trips are
-live-unverified pending creds:** Phase 15 needs a Google OAuth client
-(`GOOGLE_CLIENT_ID`/`SECRET`); Phase 16 needs a Slack app (+ public
-`/interactions` URL) and a `GITHUB_TOKEN` — see `docs/GOOGLE_SETUP.md` /
-`docs/SLACK_SETUP.md`.
+**All phases 0–16 built and live-verified.** Migrations through `026` applied.
+52 offline pytest tests + `tests/test_multiflow.py` (needs Groq quota).
+Every external integration has now been exercised end-to-end against a
+real account: **Salesforce** (Phase 3, JWT), **Google Docs** (Phase 15,
+OAuth → link → sync), **Slack + GitHub** (Phase 16, offboarding case →
+Slack Approve → `GH-Alert#2` opened). Creds live in `.env` (gitignored);
+`docs/{SALESFORCE,GOOGLE,SLACK}_SETUP.md` cover setup.
+
+Open work is UI polish / bug-fixes surfaced during that live testing
+(tracked separately) plus the small items below.
 
 **2026-08-29 — Groq key added; LLM path now runs real.** Fallout fixed
 (migrations `017`/`018`, `interpreter/llm.py`, `registry._context_block`):
@@ -661,24 +663,18 @@ cd web && npm install && npm run dev                  # editor + Runs view :5173
 Editor login: `gundamvishnu7@gmail.com` → tenant Acme; `globex-owner@example.test`
 (pw `editor-test-pw-8891`) → tenant Globex.
 
-**All phases 0–16 are built.** No open phase. Remaining work is live
-verification of the external integrations + polish:
+**All phases 0–16 are built and live-verified.** No open phase. Remaining:
 
-1. **Live-verify the connectors** (all need creds this environment
-   doesn't have):
-   - Phase 15 Google Docs: OAuth client → `GOOGLE_CLIENT_ID`/`SECRET`,
-     connect a tenant, link a doc, `python -m
-     ingestion.sources.gdoc_sync --once` (`docs/GOOGLE_SETUP.md`).
-   - Phase 16 Slack/GitHub: a Slack app + public `/interactions` URL
-     (tunnel in dev) + `GITHUB_TOKEN`, author a `task` rule, run the
-     Acme-offboarding flow with a "data from 2019" case → Slack approve →
-     issue opens (`docs/SLACK_SETUP.md`).
-   - Phase 14 Globex billing branch end-to-end once Groq daily quota
-     resets.
-2. Polish: ~~Phase 16 `when`/`then` form builder~~ **done** (recursive
-   group/condition builder + JSON toggle); Phase 14 file upload
-   (`.pdf`/`.docx`); an `eval/e2e` case that only passes when an internal
-   KB entry is consulted.
+1. **UI bug-fixes** surfaced during live testing (the user is compiling a
+   list — triage one at a time).
+2. Polish: ~~Phase 16 `when`/`then` form builder~~ **done**; Phase 14
+   file upload (`.pdf`/`.docx`); an `eval/e2e` case that only passes when
+   an internal KB entry is consulted.
+3. Local dev servers for the demo: `uvicorn api.main:app --port 8000`,
+   `python -m api.worker`, `cd web && npm run dev`, and (for Slack
+   interactivity) `npx cloudflared tunnel --url http://localhost:8000` —
+   the tunnel URL goes in the Slack app's Redirect + Interactivity URLs
+   and in `SLACK_REDIRECT_URI`.
 3. Small eval-tooling follow-up: `run_e2e.py`'s threshold sweep still
    uses the legacy 1-D blend — rewrite it to sweep the new `weights` /
    honour `escalate_topics`, or drop it. Headline metrics (per-run) are
