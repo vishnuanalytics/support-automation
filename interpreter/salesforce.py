@@ -190,6 +190,119 @@ def get_case(case_id: str) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
+# sender identification (Phase 17b)
+# --------------------------------------------------------------------------
+# Public / free-mail domains — a match on one of these tells us nothing about
+# *which* customer the sender belongs to, so the domain -> Account step is
+# skipped for them (otherwise every gmail user collapses onto one "account").
+FREE_EMAIL_DOMAINS = {
+    "gmail.com", "googlemail.com", "yahoo.com", "yahoo.co.uk", "ymail.com",
+    "outlook.com", "hotmail.com", "hotmail.co.uk", "live.com", "msn.com",
+    "icloud.com", "me.com", "mac.com", "aol.com", "proton.me", "protonmail.com",
+    "gmx.com", "gmx.net", "mail.com", "yandex.com", "zoho.com", "pm.me",
+}
+
+
+def _soql_lit(s: str) -> str:
+    """Escape a string for use inside a SOQL single-quoted literal."""
+    return s.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def identify_sender(
+    email: str,
+    *,
+    free_domains: "set[str] | list[str] | None" = None,
+    domain_match: bool = True,
+    create_lead: bool = False,
+    tenant_id: str | None = None,
+) -> dict[str, Any]:
+    """Resolve who an inbound sender is (Phase 17b).
+
+    Order: exact Contact by email -> exact (unconverted) Lead -> the email
+    **domain -> an Account** (a colleague of an existing customer; skipped
+    for free-mail domains) -> unknown. `create_lead=True` opens a Lead when
+    nothing matched. No SF creds -> `{"match": "none", ...}` (never raises).
+
+    Returns: {email, domain, is_free_domain, known, account_matched, match
+    ("contact"|"lead"|"domain"|"lead_created"|"none"), contact_id, lead_id,
+    name, account_id, account_name, reason?}
+    """
+    email = (email or "").strip().lower()
+    domain = email.split("@", 1)[1] if "@" in email else ""
+    free = {d.lower() for d in (FREE_EMAIL_DOMAINS if free_domains is None else free_domains)}
+    is_free = domain in free
+    out: dict[str, Any] = {
+        "email": email, "domain": domain, "is_free_domain": is_free,
+        "known": False, "account_matched": False, "match": "none",
+        "contact_id": None, "lead_id": None, "name": None,
+        "account_id": None, "account_name": None,
+    }
+    if not email or "@" not in email:
+        out["reason"] = "no sender email"
+        return out
+    if not available():
+        out["reason"] = "salesforce not configured"
+        return out
+
+    sf = client_for(tenant_id)
+    lit = _soql_lit(email)
+    try:
+        rows = sf.query(
+            f"SELECT Id, Name, AccountId, Account.Name FROM Contact "
+            f"WHERE Email = '{lit}' LIMIT 1"
+        ).get("records", [])
+        if rows:
+            c = rows[0]
+            out.update(
+                known=True, match="contact", contact_id=c["Id"], name=c.get("Name"),
+                account_id=c.get("AccountId"),
+                account_name=(c.get("Account") or {}).get("Name"),
+                account_matched=bool(c.get("AccountId")),
+            )
+            return out
+
+        rows = sf.query(
+            f"SELECT Id, Name, Company FROM Lead "
+            f"WHERE Email = '{lit}' AND IsConverted = false LIMIT 1"
+        ).get("records", [])
+        if rows:
+            ld = rows[0]
+            out.update(known=True, match="lead", lead_id=ld["Id"],
+                       name=ld.get("Name"), account_name=ld.get("Company"))
+            return out
+
+        if domain_match and domain and not is_free:
+            dlit = _soql_lit(domain)
+            rows = sf.query(
+                f"SELECT AccountId, Account.Name FROM Contact "
+                f"WHERE Email LIKE '%@{dlit}' AND AccountId != null LIMIT 1"
+            ).get("records", [])
+            if rows and rows[0].get("AccountId"):
+                out.update(match="domain", account_matched=True,
+                           account_id=rows[0]["AccountId"],
+                           account_name=(rows[0].get("Account") or {}).get("Name"))
+            else:
+                rows = sf.query(
+                    f"SELECT Id, Name FROM Account WHERE Website LIKE '%{dlit}%' LIMIT 1"
+                ).get("records", [])
+                if rows:
+                    out.update(match="domain", account_matched=True,
+                               account_id=rows[0]["Id"], account_name=rows[0].get("Name"))
+
+        if create_lead and out["match"] == "none":
+            res = sf.Lead.create({
+                "LastName": (email.split("@", 1)[0] or "Unknown")[:80],
+                "Company": (domain or "Unknown")[:255],
+                "Email": email,
+            })
+            out.update(match="lead_created", lead_id=res.get("id"))
+    except Exception as e:  # noqa: BLE001 — identification is best-effort
+        log.warning("identify_sender(%s): %s", email, e)
+        out["reason"] = f"lookup error: {e}"
+    return out
+
+
+# --------------------------------------------------------------------------
 # write
 # --------------------------------------------------------------------------
 _BAD_FIELD = re.compile(r"No such column '([^']+)'|INVALID_FIELD[^A-Za-z0-9_]+([A-Za-z0-9_]+)")
@@ -298,3 +411,51 @@ def post_chatter(case_id: str, body: str, *, mention_id: str | None = None, tena
         res = sf.FeedItem.create({"ParentId": case_id, "Body": body})
         return {"posted": True, "dry_run": False, "mention_id": None,
                 "feed_element_id": res.get("id"), "mention_failed": True}
+
+
+def send_case_reply(
+    case_id: str,
+    body: str,
+    *,
+    to_email: str | None = None,
+    subject: str | None = None,
+    tenant_id: str | None = None,
+) -> dict[str, Any]:
+    """Send a customer-facing reply on a Case (Phase 17c — `clarify.auto_send`).
+
+    Tries the `emailSimple` invocable action (actually sends) when a
+    recipient address is known; otherwise (or on failure) records a public
+    `CaseComment` so an agent / the customer portal still sees it. Dry-run
+    when there are no creds — never raises.
+    """
+    subject = subject or "We need a bit more information"
+    if not available():
+        log.info("[sf dry-run] reply on Case %s to %s: %r", case_id, to_email, body)
+        return {"sent": False, "dry_run": True, "via": "dry_run", "to": to_email}
+
+    sf = client_for(tenant_id)
+    if to_email:
+        try:
+            sf.restful(
+                "actions/standard/emailSimple", method="POST",
+                data=json.dumps({"inputs": [{
+                    "emailAddresses": to_email,
+                    "emailSubject": subject,
+                    "emailBody": body,
+                    "senderType": "CurrentUser",
+                    "relatedRecordId": case_id,
+                }]}),
+            )
+            return {"sent": True, "dry_run": False, "via": "email", "to": to_email}
+        except Exception as e:  # noqa: BLE001
+            log.warning("emailSimple failed (%s); falling back to CaseComment", e)
+
+    try:
+        res = sf.CaseComment.create(
+            {"ParentId": case_id, "CommentBody": body[:4000], "IsPublished": True}
+        )
+        return {"sent": True, "dry_run": False, "via": "case_comment",
+                "comment_id": res.get("id"), "to": to_email}
+    except Exception as e:  # noqa: BLE001
+        log.warning("send_case_reply: CaseComment failed: %s", e)
+        return {"sent": False, "dry_run": False, "via": "error", "error": str(e)}

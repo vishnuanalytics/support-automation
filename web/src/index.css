@@ -68,7 +68,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .pane-empty { display: grid; place-items: center; height: 100%; }
 .toolbar { display: flex; gap: 8px; align-items: center; padding: 0 10px; border-bottom: 1px solid var(--border); background: var(--panel); }
 .workarea { display: grid; grid-template-columns: 1fr 360px; min-height: 0; }
-.canvas-wrap { position: relative; min-width: 0; }
+.canvas-wrap { position: relative; min-width: 0; overflow: hidden; }
 .inspector { border-left: 1px solid var(--border); background: var(--panel); padding: 12px; overflow: auto; }
 .inspector h4 { margin: 0 0 8px; }
 .field { margin-bottom: 10px; }
@@ -115,6 +115,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .runs-table tbody tr.active { background: var(--panel-2); outline: 1px solid var(--accent); }
 .pill.auto_reply { color: var(--ok); border-color: var(--ok); }
 .pill.ask_human { color: var(--warn); border-color: var(--warn); }
+.pill.need_info { color: var(--accent); border-color: var(--accent); }
 .pill.handover { color: var(--err); border-color: var(--err); }
 .run-detail h5 { margin: 10px 0 4px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
 .trace-step summary { cursor: pointer; }

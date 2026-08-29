@@ -20,8 +20,8 @@ from interpreter.builder import FlowBuildError, FlowRoutingError, build_graph
 from interpreter.flows.validate_flow import Flow, check_flow
 from interpreter import registry as _registry
 from interpreter.registry import (
-    _norm_tier, h_ask_human, h_confidence_gate, h_draft, h_extract, h_kb_lookup,
-    h_policy_gate, h_sf_writeback, h_task_dispatch, register,
+    _norm_tier, h_ask_human, h_clarify, h_confidence_gate, h_draft, h_extract,
+    h_identify, h_kb_lookup, h_policy_gate, h_sf_writeback, h_task_dispatch, register,
 )
 from interpreter.runs import build_row
 
@@ -782,6 +782,252 @@ def test_build_row_marks_pending_only_for_human_outcomes_on_real_cases():
     assert build_row(flow, ask, case={"case_id": "synthetic"}, source="api")["human_action"] is None
     auto = {"outcome": {"action": "auto_reply"}, "trace": [], "draft": "d"}
     assert build_row(flow, auto, case={"sf_id": "500X"}, source="api")["human_action"] is None
+
+
+# --------------------------------------------------------------------------
+# Phase 17a — clarify node (low-confidence recovery)
+# --------------------------------------------------------------------------
+def test_clarify_offline_produces_questions_without_sf_id():
+    # hermetic fixture clears GROQ_API_KEY -> llm stub path
+    state = {"case": {"subject": "It broke", "body": "help"},
+             "retrieval": [], "confidence": 0.12}
+    out = h_clarify(state, {"_node_id": "c", "max_questions": 3})
+    assert out["outcome"]["action"] == "need_info"
+    assert out["outcome"]["reason"] == "kb_insufficient"
+    assert 1 <= len(out["clarification"]["questions"]) <= 3
+    assert out["clarification"]["posted"] is False
+    assert "chatter" not in out["outcome"]
+    assert out["trace"][0]["type"] == "clarify"
+
+
+def test_clarify_falls_back_to_one_question_when_model_returns_nothing(monkeypatch):
+    from interpreter import llm
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: "{}")
+    out = h_clarify({"case": {"body": "x"}}, {"_node_id": "c"})
+    assert len(out["clarification"]["questions"]) == 1
+    assert out["outcome"]["action"] == "need_info"
+
+
+def test_clarify_respects_max_questions(monkeypatch):
+    from interpreter import llm
+    monkeypatch.setattr(
+        llm, "complete",
+        lambda *a, **k: '{"questions": ["a?", "b?", "c?", "d?", "e?"], "missing": ["x"]}',
+    )
+    out = h_clarify({"case": {"body": "x"}}, {"_node_id": "c", "max_questions": 2})
+    assert out["clarification"]["questions"] == ["a?", "b?"]
+    assert out["clarification"]["missing"] == ["x"]
+
+
+def test_clarify_default_posts_chatter_dry_run_with_sf_id():
+    state = {"case": {"sf_id": "500XXXXXXXXXXXXXXX", "body": "help"}, "confidence": 0.1}
+    out = h_clarify(state, {"_node_id": "c", "channel": "email", "_sb": _FakeSB({"runs": []})})
+    assert out["outcome"]["delivery"]["dry_run"] is True
+    assert out["clarification"]["posted"] is False    # a dry-run isn't a real post
+    assert out["clarification"]["auto_sent"] is False
+    assert out["outcome"]["awaiting_customer"] is False
+    assert out["clarification"]["round"] == 1
+
+
+def test_clarify_auto_send_emails_the_customer(monkeypatch):
+    from interpreter import salesforce as sfmod
+    calls = {}
+    monkeypatch.setattr(sfmod, "send_case_reply",
+                        lambda cid, body, **kw: calls.update(cid=cid, kw=kw) or
+                        {"sent": True, "dry_run": False, "via": "email", "to": kw.get("to_email")})
+    state = {"case": {"sf_id": "500X", "contact": {"email": "cust@acme.com"}, "body": "help"},
+             "sender": {"email": "cust@acme.com", "match": "contact", "known": True},
+             "confidence": 0.1}
+    out = h_clarify(state, {"_node_id": "c", "auto_send": True, "_sb": _FakeSB({"runs": []})})
+    assert calls["cid"] == "500X" and calls["kw"]["to_email"] == "cust@acme.com"
+    assert out["clarification"]["auto_sent"] is True
+    assert out["outcome"]["sent_to_customer"] is True
+    assert out["outcome"]["awaiting_customer"] is True
+
+
+def test_clarify_round_increments_from_prior_need_info_runs():
+    sb = _FakeSB({"runs": [{"case_id": "500Z", "outcome": "need_info", "clarify_round": 1}]})
+    state = {"case": {"sf_id": "500Z", "body": "still stuck"}, "confidence": 0.1}
+    out = h_clarify(state, {"_node_id": "c", "_sb": sb})
+    assert out["clarification"]["round"] == 2
+    assert out["outcome"]["action"] == "need_info"
+    assert out["clarify_round"] == 2
+
+
+def test_clarify_exhausted_after_max_rounds_hands_to_human():
+    sb = _FakeSB({"runs": [{"case_id": "500Z", "outcome": "need_info", "clarify_round": 2}]})
+    state = {"case": {"sf_id": "500Z", "contact": {"email": "c@x.com"}, "body": "x"},
+             "confidence": 0.1}
+    out = h_clarify(state, {"_node_id": "c", "auto_send": True, "max_rounds": 2, "_sb": sb})
+    assert out["clarification"]["round"] == 3 and out["clarification"]["exhausted"] is True
+    assert out["outcome"]["action"] == "ask_human"
+    assert out["outcome"]["reason"] == "clarify_exhausted"
+    assert out["clarification"]["auto_send"] is False   # forced off once exhausted
+    assert out["outcome"]["awaiting_customer"] is False
+
+
+def test_build_row_persists_clarify_round():
+    flow = {"flow_id": "f", "tenant_id": "t", "team": "support-triage"}
+    final = {"outcome": {"action": "need_info"}, "trace": [], "clarify_round": 2}
+    assert build_row(flow, final, case={"sf_id": "500Z"}, source="api")["clarify_round"] == 2
+
+
+def test_build_row_need_info_is_recorded_but_not_pending():
+    flow = {"flow_id": "f", "tenant_id": "t", "team": "support-triage"}
+    final = {"outcome": {"action": "need_info", "questions": ["what plan?"]},
+             "trace": [], "confidence": 0.1}
+    row = build_row(flow, final, case={"sf_id": "500X"}, source="api")
+    assert row["outcome"] == "need_info"
+    assert row["human_action"] is None
+
+
+@register("_t_gate17")
+def _h_gate17(state, config):
+    case = state["case"]
+    gate = {"pass": bool(case.get("passed", False))}
+    if case.get("forced"):
+        gate["forced_escalation"] = "topic 'refund' ~ 'refund'"
+    return {"tier": case.get("tier", "basic"), "confidence_gate": gate, "trace": []}
+
+
+def _retrieval_gate_split_flow():
+    """The Phase 17a retrieval_gate fan-out: four mutually-exclusive edges."""
+    C = "not confidence_gate.pass and tier != 'enterprise'"
+    return {
+        "flow_id": "f", "tenant_id": "t", "team": "support-triage", "name": "t",
+        "version": 1, "status": "draft",
+        "nodes": [
+            {"node_id": "g", "type": "_t_gate17", "label": "g", "config": {}},
+            {"node_id": "draft", "type": "_t_end", "label": "draft", "config": {}},
+            {"node_id": "human", "type": "_t_end", "label": "ask_human", "config": {}},
+            {"node_id": "clarify", "type": "_t_end", "label": "clarify", "config": {}},
+            {"node_id": "ent", "type": "_t_end", "label": "handover", "config": {}},
+        ],
+        "edges": [
+            {"edge_id": "e1", "source_node_id": "g", "target_node_id": "ent",
+             "condition": {"if": "tier == 'enterprise'"}},
+            {"edge_id": "e2", "source_node_id": "g", "target_node_id": "draft",
+             "condition": {"if": "confidence_gate.pass and tier != 'enterprise'"}},
+            {"edge_id": "e3", "source_node_id": "g", "target_node_id": "human",
+             "condition": {"if": f"{C} and confidence_gate.forced_escalation"}},
+            {"edge_id": "e4", "source_node_id": "g", "target_node_id": "clarify",
+             "condition": {"if": f"{C} and not confidence_gate.forced_escalation"}},
+        ],
+    }
+
+
+def test_retrieval_gate_split_routes_benign_fail_to_clarify():
+    graph = build_graph(_retrieval_gate_split_flow())
+    cases = [
+        ({"tier": "basic", "passed": True}, "draft"),
+        ({"tier": "basic", "passed": False, "forced": True}, "ask_human"),
+        ({"tier": "basic", "passed": False, "forced": False}, "clarify"),
+        ({"tier": "enterprise", "passed": False}, "handover"),
+    ]
+    for case, want in cases:
+        assert graph.invoke({"case": case, "trace": []})["outcome"]["action"] == want
+
+
+# --------------------------------------------------------------------------
+# Phase 17b — identify node (sender / email-domain -> account resolution)
+# --------------------------------------------------------------------------
+class _FakeSF:
+    """Returns the queued records-lists from successive .query() calls."""
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.queries = []
+
+    def query(self, soql):
+        self.queries.append(soql)
+        return {"records": self._responses.pop(0) if self._responses else []}
+
+
+def test_identify_sender_none_without_creds():
+    s = salesforce.identify_sender("jane@acme.com")
+    assert s["match"] == "none" and s["known"] is False
+    assert s["is_free_domain"] is False and s["domain"] == "acme.com"
+    assert "not configured" in s["reason"]
+
+
+def test_identify_sender_flags_free_mail_and_missing_email():
+    assert salesforce.identify_sender("bob@gmail.com")["is_free_domain"] is True
+    empty = salesforce.identify_sender("")
+    assert empty["match"] == "none" and empty["reason"] == "no sender email"
+
+
+def test_identify_sender_exact_contact(monkeypatch):
+    fake = _FakeSF([[{"Id": "003X", "Name": "Jane Doe", "AccountId": "001X",
+                      "Account": {"Name": "Acme Inc"}}]])
+    monkeypatch.setattr(salesforce, "available", lambda: True)
+    monkeypatch.setattr(salesforce, "client_for", lambda *a, **k: fake)
+    s = salesforce.identify_sender("jane@acme.com")
+    assert s["match"] == "contact" and s["known"] is True
+    assert s["contact_id"] == "003X" and s["account_id"] == "001X"
+    assert s["account_name"] == "Acme Inc" and s["account_matched"] is True
+    assert len(fake.queries) == 1
+
+
+def test_identify_sender_domain_to_account(monkeypatch):
+    fake = _FakeSF([
+        [],                                                # exact Contact -> none
+        [],                                                # exact Lead -> none
+        [{"AccountId": "001Y", "Account": {"Name": "Globex"}}],   # by domain
+    ])
+    monkeypatch.setattr(salesforce, "available", lambda: True)
+    monkeypatch.setattr(salesforce, "client_for", lambda *a, **k: fake)
+    s = salesforce.identify_sender("newhire@globex.com")
+    assert s["match"] == "domain" and s["account_matched"] is True
+    assert s["known"] is False and s["account_id"] == "001Y"
+    assert s["account_name"] == "Globex"
+
+
+def test_identify_sender_skips_domain_step_for_free_mail(monkeypatch):
+    fake = _FakeSF([[], []])   # only the two exact-match queries should run
+    monkeypatch.setattr(salesforce, "available", lambda: True)
+    monkeypatch.setattr(salesforce, "client_for", lambda *a, **k: fake)
+    s = salesforce.identify_sender("someone@gmail.com")
+    assert s["match"] == "none" and s["is_free_domain"] is True
+    assert len(fake.queries) == 2   # no '%@gmail.com' domain query
+
+
+def test_h_identify_writes_sender_and_trace():
+    out = h_identify({"case": {"contact": {"email": "a@b.com"}}}, {"_node_id": "id"})
+    assert out["sender"]["match"] == "none"
+    assert out["sender"]["domain"] == "b.com"
+    assert out["trace"][0]["type"] == "identify"
+
+
+def test_send_case_reply_dry_run_without_creds():
+    r = salesforce.send_case_reply("500X", "1. what plan?", to_email="a@b.com")
+    assert r["sent"] is False and r["dry_run"] is True and r["via"] == "dry_run"
+
+
+def test_clarify_asks_identity_only_when_sender_unknown():
+    base = {"case": {"body": "help"}, "confidence": 0.1}
+    unknown = h_clarify({**base, "sender": {"match": "none", "known": False}},
+                        {"_node_id": "c"})
+    assert unknown["clarification"]["ask_identity"] is True
+
+    known = h_clarify({**base, "sender": {"match": "contact", "known": True}},
+                      {"_node_id": "c"})
+    assert known["clarification"]["ask_identity"] is False
+
+    domain = h_clarify({**base, "sender": {"match": "domain", "known": False,
+                                           "account_matched": True,
+                                           "account_name": "Acme Inc"}},
+                       {"_node_id": "c"})
+    assert domain["clarification"]["ask_identity"] is True
+    assert domain["clarification"]["account_hint"] == "Acme Inc"
+
+
+def test_retrieval_gated_portable_flow_compiles():
+    import json as _json
+    p = pathlib.Path(__file__).resolve().parents[1] / "interpreter/flows/flow_retrieval_gated.json"
+    flow = _json.loads(p.read_text())
+    assert check_flow(Flow.model_validate(flow), require_expected_types=False) == []
+    build_graph(flow)   # raises on a bad entry / unknown type / routing gap
+    types = {n["type"] for n in flow["nodes"]}
+    assert {"identify", "clarify"} <= types
 
 
 # --------------------------------------------------------------------------

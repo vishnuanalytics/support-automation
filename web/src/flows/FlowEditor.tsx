@@ -17,7 +17,7 @@ import { NodeCard } from "./NodeCard";
 import { EdgeInspector, NodeInspector } from "./Inspector";
 import { RunPanel } from "./RunPanel";
 
-const TERMINAL = new Set(["auto_reply", "ask_human", "handover"]);
+const TERMINAL = new Set(["auto_reply", "ask_human", "handover", "clarify"]);
 
 export function FlowEditor(props: {
   flowId: string;
@@ -77,12 +77,16 @@ function Inner({ flowId, onSaved, onDeleted }: {
 
   const onConnect = useCallback(
     (c: Connection) => {
+      const id = uuid();
       setEdges((es) =>
         addEdge(
-          { id: uuid(), source: c.source!, target: c.target!, data: { condition: {} }, label: "" },
+          { id, source: c.source!, target: c.target!, data: { condition: {} }, label: "" },
           es,
         ),
       );
+      // jump straight to the new edge so its condition ("if") form is editable
+      setSelNode(null);
+      setSelEdge(id);
       mark();
     },
     [setEdges, mark],
@@ -281,10 +285,20 @@ function Inner({ flowId, onSaved, onDeleted }: {
             onConnect={onConnect}
             onNodesDelete={onNodesDelete}
             onEdgesDelete={mark}
-            onSelectionChange={({ nodes: sn, edges: se }) => {
-              setSelNode(sn[0]?.id ?? null);
-              setSelEdge(se[0]?.id ?? null);
+            onNodeClick={(_, n) => {
+              setSelNode(n.id);
+              setSelEdge(null);
             }}
+            onEdgeClick={(_, e) => {
+              setSelEdge(e.id);
+              setSelNode(null);
+            }}
+            onPaneClick={() => {
+              setSelNode(null);
+              setSelEdge(null);
+            }}
+            edgesFocusable
+            defaultEdgeOptions={{ interactionWidth: 24 }}
             onNodeDragStop={mark}
             fitView
             proOptions={{ hideAttribution: true }}
@@ -294,7 +308,22 @@ function Inner({ flowId, onSaved, onDeleted }: {
             <MiniMap pannable zoomable />
           </ReactFlow>
 
-          <div style={{ position: "absolute", left: 10, top: 10 }} className="row">
+          <div
+            style={{
+              position: "absolute",
+              left: 10,
+              top: 10,
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 6,
+              maxWidth: 260,
+              padding: 8,
+              borderRadius: 8,
+              background: "color-mix(in srgb, var(--panel) 92%, transparent)",
+              border: "1px solid var(--border)",
+              zIndex: 5,
+            }}
+          >
             {(types?.types ?? []).map((t) => (
               <button key={t} onClick={() => addNode(t)} title={`add ${t}`}>
                 ＋ {t}

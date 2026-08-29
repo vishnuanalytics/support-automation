@@ -121,6 +121,19 @@ groundwork — the Phase 7 recalibration — which is done (`019`).**
 | 15 | **Google Drive / Docs connector.** Per-tenant Google OAuth; link a Google Doc into a KB collection; a scheduled job re-exports + re-embeds on `modifiedTime` change. | **Built + live-verified (2026-08-29)** — OAuth → Doc export → markdown → chunk → embed, tenant-scoped (a linked doc landed 2 chunks in `doc_chunks`). A linked doc is a `kb_entries` row with `origin='gdoc'` **inside an `internal_kb` collection** (deviation from the "distinct `gdoc` source kind" sketch — keeps one retrieval path, and `kb_lookup` picks up manual + synced entries together). Migration `024` adds `origin`/`gdoc_id`/`gdoc_url`/`gdoc_modified`/`synced_at`/`sync_error` to `kb_entries`. `interpreter/gdrive.py`: OAuth (`authorize_url`/`exchange_code`, offline access), `fetch_doc` (Drive `files.get` + Docs `documents.get`), and a pure `docs_json_to_markdown` (headings/bullets/tables — unit-tested). Refresh token in `tenant_integrations (kind='google')`. API: `/api/integrations/google/{status,authorize,callback}`, `POST /api/kb/collections/{id}/gdoc`, `POST /api/kb/entries/{id}/resync`; gdoc entries reject `body_md` PATCH (409). `ingestion/sources/gdoc_sync.py --once` for the cron. Web: **Connect Google** / **＋ Google Doc** / per-entry **re-sync**, gdoc entries read-only with a 🔗. `docs/GOOGLE_SETUP.md`. 42 offline pytest green. **Live-verified** against a real Google account (project `root-anvil-303306`). |
 | 16 | **Structured policy rules + internal task actions.** Per-team rule store (`when → then`); `policy_gate` (routing override) + `task_dispatch` (Slack-approved GitHub issue) nodes. | **Built + live-verified (2026-08-29).** `interpreter/policy.py` — pure JSON predicate evaluator (`all`/`any`/`not` + `{field,op,value}`, ops eq/ne/in/nin/gt/gte/lt/lte/contains/icontains/exists), `first_match` by priority. Migration `025`: `policy_rules` (tenant/team-scoped, RLS) + `action_requests` (the approval queue, unique `(run_id,kind)`). Nodes: **`extract`** (LLM → `state.entities`), **`policy_gate`** (loads rules, first match → `state.policy` = {action|task}), **`task_dispatch`** (raises an `action_requests` row + posts a Slack Approve/Reject). `builder._context` exposes `policy`/`entities` to edge conditions; `runs.record_run` links the `action_requests` row to the run. `interpreter/slack.py` (OAuth, `verify_signature` (pure, tested), `post_approval`/`update_message`) + `interpreter/github.py` (`create_issue`, per-tenant token). API: `/api/rules` CRUD, `/api/action-requests`, `/api/integrations/slack/{status,authorize,callback,interactions}` (signed callback → mark approved → `create_github_issue` job). `api/worker` handler opens the issue + edits the Slack msg. `scripts/expire_approvals.py` (stale `pending` → `expired`). Web: a **Rules** tab — a recursive **`when` form builder** (nested ALL/ANY groups, NOT wrapper, field datalist, per-op value widget) + a `then` form (route action, or task repo/title/body/labels/approver) with a **JSON toggle** as the power-user fallback; plus the approval-queue table + Connect Slack. `extract`/`policy_gate`/`task_dispatch` in the palette + Inspector. Seed `026`: an Acme-offboarding rule ("data older than 2 years → GitHub ops ticket") with `extract → policy_gate → {task_dispatch\|draft}`. `docs/SLACK_SETUP.md`. 52 offline pytest green; web tsc/vitest/build green. **Live-verified end-to-end**: offboarding case → `extract report_age_years=6` → `policy_gate` match → Slack Approve in `#support-leads` → signed callback → worker opened `vishnuanalytics/GH-Alert#2`, Slack message edited with the link. Fixes from that run: `entities`/`policy` added to `CaseState` (LangGraph drops undeclared keys — the policy chain had been inert); `jobs.claim()` now guards an all-NULL `claim_job` row (was a worker crash-loop on an empty queue); `action_request_id` promoted to a top-level state key so `record_run` links it past a later terminal node. |
 
+**Phase 17 = low-confidence recovery (added 2026-08-29 from a scoping
+conversation). Chunks: 17a `clarify` node · 17b `identify` node
+(sender / email-domain → account match) · 17c web + observability · 17d
+cross-run clarify loop. All four built + verified — Phase 17 COMPLETE
+(2026-08-29). No open phase.**
+
+| Phase | Scope | Status |
+|---|---|---|
+| 17a | **`clarify` node.** On a `confidence_gate` FAIL for a *non-escalation* topic, instead of a bare handoff, generate the specific questions whose answers would let the bot resolve the case next round (the customer's reply arrives as a new case). | **Built + live-verified (2026-08-29).** `registry.h_clarify` — from the case + retrieved context + `groundedness.unsupported`, one LLM call (`FAST_MODEL`, JSON) → `state.clarification = {questions[], missing[], channel, auto_send, posted}` and `outcome.action = "need_info"`; posts the question list to Chatter when there's an `sf_id` (dry-run without creds), else trace-only. Empty model output → one generic fallback question; `max_questions` capped. `auto_send` config knob is stored but customer-facing send is deferred to 17c. `CaseState.clarification` + `builder._context` key added (LangGraph drops undeclared keys — see Phase 16). `llm._stub_fields` gains a `clarify` branch for offline runs. **Migration `029`** (applied): adds a `clarify` node to the retrieval-gated flow (`d4d4…`, now published **v3**) and splits its retrieval_gate FAIL edge into `forced_escalation → ask_human` (unchanged) / benign `→ clarify` — the four gate conditions stay mutually exclusive, so routing is edge-order-independent. Portable copy `flow_retrieval_gated.json` updated. **Verify:** 58 offline pytest green (6 new — stub questions, fallback, `max_questions`, Chatter dry-run, `build_row` `need_info` not-pending, the 4-way routing split). **Live e2e (real Groq)**: benign unanswerable case → `retrieve→classify→confidence_gate→clarify` → `need_info` + 3 generated questions, `runs` row `outcome='need_info'` `human_action=null`; refund case → `ask_human` (forced escalation); enterprise tier → `handover`. |
+| 17b | **`identify` node.** Resolve the sender: exact Contact/Lead by email → else email **domain → Account** match (skip free-mail domains) → else unknown; optional Lead create. `clarify` reads `state.sender` and also asks who they are when unknown. | **Built + live-verified (2026-08-29).** `salesforce.identify_sender(email, *, free_domains?, domain_match, create_lead, tenant_id)` — SOQL via `client_for()` (`_soql_lit` escaping): exact `Contact` by Email → exact unconverted `Lead` → `Contact WHERE Email LIKE '%@domain'` → `Account.Website LIKE` → else `match='none'`; `FREE_EMAIL_DOMAINS` set skips the domain step; no SF creds → `match='none'` (never raises). `registry.h_identify` (`email_field` default `contact.email`, falls back to `from`/`supplied_email`) → `state.sender = {email, domain, is_free_domain, known, account_matched, match, contact_id, lead_id, name, account_id, account_name}`; pass-through. `CaseState.sender` + `builder._context` key. `h_clarify` gains `ask_identity` (`not sender.known and (match in {none} or account_matched)`) + `account_hint` → prompt line asking the sender to confirm identity / share a reference; both in `clarification` + the trace. **Migration `030`** (applied): splices `identify` into `d4d4…` as `retrieve → identify → classify` (published **v4**). Portable `flow_retrieval_gated.json` updated + a "portable flow compiles" test. **Verify:** 66 offline pytest green (8 new — none/free-mail/no-email, exact-contact, domain→account, free-mail skips domain query, `h_identify` shape, `clarify` ask_identity matrix, portable-flow compile). **Live e2e (real dev-org data)**: `rose@edge.com` → `match=contact` (Edge Communications), clarify `ask_identity=false`; `newhire@edge.com` → `match=domain` (same account), clarify asks "confirm you're with Edge Communications" + a reference ID; unknown / gmail sender → `match=none`, clarify asks which company + reference. |
+| 17c | Inspector forms for `clarify`/`identify`; palette + `NodeCard` terminal styling; `need_info` outcome pill + Runs surfacing; `clarify.auto_send` real outbound delivery. | **Built + verified (2026-08-29).** `salesforce.send_case_reply(case_id, body, *, to_email, subject, tenant_id)` — `emailSimple` invocable action when a recipient is known (actually sends), else a public `CaseComment`; dry-run without creds, never raises. `h_clarify` rewrite: `auto_send=true` + `sf_id` → `send_case_reply` (recipient from `sender.email` / `case.contact.email` / `case.from`), sets `clarification.auto_sent` + `outcome.{sent_to_customer,awaiting_customer}`; `auto_send=false` keeps the Chatter-to-an-agent path. `clarify` added to the web `TERMINAL` set (`graph.ts` + `FlowEditor.tsx`). **Inspector** (`Inspector.tsx`): `ClarifyForm` (`max_questions` / `channel` / `auto_send` toggle with an explanation) + `IdentifyForm` (`email_field`, `domain_match`, `create_lead_if_missing`, `free_email_domains` textarea). **Runs** (`RunsView.tsx`): `need_info` in the outcome filter, `.pill.need_info` (accent), and a "waiting on the customer" banner in the detail listing the questions from the `clarify` trace step (+ "identity check" / "sent" vs "for an agent to send"). **Verify:** 68 offline pytest green (+2 — `send_case_reply` dry-run, `h_clarify` auto-send emails the recipient); web tsc + vitest (5) + `vite build` green. Live e2e: unknown-sender benign case → `need_info`, `awaiting_customer=false` (auto_send off), `ask_identity=true`, 3 questions in the trace. |
+| 17d | Cross-run clarify loop: correlate runs by Case id, `clarify_round` counter, cap at 2 → then force `ask_human`. | **Built + live-verified (2026-08-29).** Migration `031`: `runs.clarify_round int`. `h_clarify` queries `runs` for prior `need_info` rows on the same `case_id` (`config._sb` injectable; best-effort — a failed lookup = round 1) → `clarify_round = prior_max + 1`; once `clarify_round > config.max_rounds` (default 2) it emits `outcome.action='ask_human'` / reason `clarify_exhausted` with the outstanding questions attached, and `auto_send` is forced off (no point asking again). `clarify_round` is a top-level `CaseState` key; `runs.build_row` persists it. **Verify:** 71 offline pytest green (+3 — round increments from prior runs, exhausted→`ask_human`, `build_row` persists the round). **Live e2e**: same `case_id` run 3× through `d4d4d4d4-…` → `need_info` (round 1) → `need_info` (round 2) → `ask_human` `clarify_exhausted` (round 3); `runs.clarify_round` = 1/2/3. |
+
 ## Phase 0 — schema (complete)
 
 Tables (Supabase/Postgres):
@@ -618,8 +631,9 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**All phases 0–16 built and live-verified.** Migrations through `026` applied.
-52 offline pytest tests + `tests/test_multiflow.py` (needs Groq quota).
+**Phases 0–17 built and verified. No open phase.** Migrations
+`001`–`031` applied. 71 offline pytest tests + web tsc/vitest/build +
+`tests/test_multiflow.py` (needs Groq quota).
 Every external integration has now been exercised end-to-end against a
 real account: **Salesforce** (Phase 3, JWT), **Google Docs** (Phase 15,
 OAuth → link → sync), **Slack + GitHub** (Phase 16, offboarding case →
@@ -663,10 +677,55 @@ cd web && npm install && npm run dev                  # editor + Runs view :5173
 Editor login: `gundamvishnu7@gmail.com` → tenant Acme; `globex-owner@example.test`
 (pw `editor-test-pw-8891`) → tenant Globex.
 
-**All phases 0–16 are built and live-verified.** No open phase. Remaining:
+**Phase 17 (low-confidence recovery) is COMPLETE — 2026-08-29.** All four
+chunks built + live-verified; migrations `029`–`031` applied. The
+retrieval-gated flow `d4d4d4d4-…` is published **v4**:
 
-1. **UI bug-fixes** surfaced during live testing (the user is compiling a
-   list — triage one at a time).
+```
+retrieve → identify → classify → confidence_gate ─┬─ pass ────────────→ draft → answer_gate → auto_reply | ask_human
+                                                   ├─ enterprise ──────→ handover
+                                                   ├─ fail + escalation topic → ask_human
+                                                   └─ fail + benign ──→ clarify   (ask the customer / their identity; round-capped → ask_human)
+```
+
+- **17a `clarify`** — LLM writes the specific missing-info questions →
+  `outcome.action='need_info'`; posts to Chatter (agent) or, with
+  `auto_send`, emails the customer.
+- **17b `identify`** — resolves the sender (exact contact / email-domain →
+  account / unknown); `clarify` asks unknown senders to confirm who they
+  are.
+- **17c** — Inspector forms for `clarify`/`identify`; `need_info` in the
+  Runs filter + pill + a "waiting on the customer" banner;
+  `salesforce.send_case_reply` (real `emailSimple` send).
+- **17d** — `runs.clarify_round`; `h_clarify` counts prior `need_info`
+  runs for the Case and after `max_rounds` (2) hands to a human
+  (`reason='clarify_exhausted'`).
+
+Follow-ups noted but **not** in scope: a routing branch that sends
+unknown senders somewhere other than `clarify`; `sf_case_watch`
+correlating the customer's reply back to the open `need_info` run
+automatically (today the re-enqueue works, the round count is by
+`case_id`).
+
+**Uncommitted from this session** (about to be committed):
+
+- **Phase 17 (a–d)** — `interpreter/{registry,state,builder,llm,salesforce,runs}.py`,
+  `interpreter/flows/flow_retrieval_gated.json`,
+  `db/migrations/029_*.sql`..`031_*.sql`, `tests/test_interpreter.py`,
+  `web/src/flows/{Inspector,FlowEditor,graph}.{tsx,ts}`,
+  `web/src/runs/RunsView.tsx`, `web/src/index.css`, this file.
+  Migrations `029`–`031` already applied to the live project.
+- **Editor UI bug-fixes** (from earlier this session) —
+  `web/src/flows/FlowEditor.tsx` (edge-selection: `onConnect` selects the
+  new edge, explicit `onNodeClick`/`onEdgeClick`/`onPaneClick`; palette
+  wraps into a bordered panel) + `web/src/index.css` (`.canvas-wrap`
+  `overflow: hidden`).
+- A **Slack-approval demo flow** built in the Acme tenant during testing
+  (data only, no repo change): flow `781cf1cc-…` (team
+  `support-approvals`) + rule `a30b7d42-…` (`entities.refund_amount`>0 →
+  Slack Approve/Reject in channel `C0BTPTFNXS8` → GitHub issue in
+  `vishnuanalytics/support-automation`). The tenant `00000000-…` Slack
+  integration row is restored in `tenant_integrations`.
 2. Polish: ~~Phase 16 `when`/`then` form builder~~ **done**; Phase 14
    file upload (`.pdf`/`.docx`); an `eval/e2e` case that only passes when
    an internal KB entry is consulted.

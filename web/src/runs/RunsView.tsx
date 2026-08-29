@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
 import type { RunDetail, RunRow, RunStats, TraceStep } from "../types";
 
-const OUTCOMES = ["", "auto_reply", "ask_human", "handover"] as const;
+const OUTCOMES = ["", "auto_reply", "ask_human", "need_info", "handover"] as const;
 
 export function RunsView() {
   const [stats, setStats] = useState<RunStats | null>(null);
@@ -137,6 +137,24 @@ function Detail({ run }: { run: RunDetail }) {
         {run.source} · {new Date(run.created_at).toLocaleString()} · tier {run.tier ?? "—"} ·{" "}
         outcome <strong>{run.outcome ?? "—"}</strong>
       </div>
+
+      {run.outcome === "need_info" && (() => {
+        const c = run.trace.find((s) => s.type === "clarify")?.data as
+          | { questions?: string[]; ask_identity?: boolean; auto_sent?: boolean }
+          | undefined;
+        const qs = c?.questions ?? [];
+        return qs.length ? (
+          <div className="banner warn">
+            waiting on the customer {c?.ask_identity ? "(+ identity check) " : ""}—{" "}
+            {c?.auto_sent ? "questions sent" : "for an agent to send"}:
+            <ol style={{ margin: "4px 0 0 18px" }}>
+              {qs.map((q, i) => (
+                <li key={i}>{q}</li>
+              ))}
+            </ol>
+          </div>
+        ) : null;
+      })()}
 
       <h5>why</h5>
       {run.trace.map((s: TraceStep, i) => (

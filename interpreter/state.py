@@ -49,6 +49,18 @@ class CaseState(TypedDict, total=False):
     # {checked: bool, collections: [str], score: float, matches: [chunk dicts]}
     internal_kb: dict[str, Any]
 
+    # written by a `clarify` node on the low-confidence recovery path (Phase 17):
+    # {questions: [str], missing: [str], channel: str, auto_send: bool, posted: bool,
+    #  round: int, exhausted: bool}
+    clarification: dict[str, Any]
+    clarify_round: int         # 1-based; how many times we've gone back to this customer (Phase 17d)
+
+    # written by an `identify` node (Phase 17b) — who is the sender:
+    # {email, domain, is_free_domain, known, account_matched,
+    #  match: 'contact'|'lead'|'domain'|'lead_created'|'none',
+    #  contact_id, lead_id, name, account_id, account_name}
+    sender: dict[str, Any]
+
     sf_writeback: dict[str, Any]      # {target, written, skipped, dry_run, ...} from the sf_writeback node
 
     draft: str                 # proposed reply text
