@@ -44,8 +44,8 @@ cd web && npm install && npm run dev      # editor on :5173
 
 ## Status
 
-All six phases complete — see `docs/PROJECT_SCOPE.md` for what each
-delivered and how it was verified. Migrations `001`–`010` applied; daily
+Phases 0–9 complete (0–6 MVP; 7–13 hardening — 7–9 done) — see `docs/PROJECT_SCOPE.md` for what each
+delivered and how it was verified. Migrations `001`–`012` applied; daily
 ingestion runs on GitHub Actions; 14 offline tests + an integration test.
 
 ## Cost stance

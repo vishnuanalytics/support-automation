@@ -29,6 +29,7 @@ def build_row(flow: dict, final: dict, *, case: dict, source: str) -> dict[str, 
     case_id = case.get("case_id") or case.get("sf_id") or case.get("id")
     return {
         "flow_id": flow["flow_id"],
+        "flow_version": flow.get("flow_version"),
         "tenant_id": flow["tenant_id"],
         "team": flow["team"],
         "source": source,

@@ -2,6 +2,7 @@ import { supabase } from "./supabase";
 import type {
   Flow,
   FlowMeta,
+  FlowVersion,
   NodeTypesResp,
   RunDetail,
   RunResult,
@@ -52,6 +53,14 @@ export const api = {
   saveFlow: (id: string, b: Partial<Flow>) =>
     req<Flow>(`/flows/${id}`, { method: "PUT", body: JSON.stringify(b) }),
   deleteFlow: (id: string) => req<string>(`/flows/${id}`, { method: "DELETE" }),
+  publishFlow: (id: string) =>
+    req<{ published_version: number }>(`/flows/${id}/publish`, { method: "POST" }),
+  listVersions: (id: string) => req<FlowVersion[]>(`/flows/${id}/versions`),
+  rollbackFlow: (id: string, version: number) =>
+    req<{ published_version: number }>(`/flows/${id}/rollback`, {
+      method: "POST",
+      body: JSON.stringify({ version }),
+    }),
   validateFlow: (id: string, b: Partial<Flow>) =>
     req<{ valid: boolean; errors: string[] }>(`/flows/${id}/validate`, {
       method: "POST",

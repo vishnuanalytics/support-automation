@@ -67,7 +67,7 @@ Reorganised 2026-08-29 (Phase 5). Modules run from the repo root:
 
 ```
 docs/            this file, SALESFORCE_SETUP.md
-db/migrations/   001_*.sql .. 010_*.sql   (was repo root)
+db/migrations/   001_*.sql .. 012_*.sql   (was repo root)
 ingestion/       scraper.py, neo4j_sync.py, eval/         → python -m ingestion.scraper
 interpreter/     builder/loader/registry/conditions/retrieval/llm/salesforce/run
   flows/         validate_flow.py, flow_support_example.json
@@ -101,7 +101,7 @@ from the 2026-08-29 self-review; still sequential (do 7 before 10, etc.).**
 | Phase | Scope | Status |
 |---|---|---|
 | 7 | **Evaluation & calibration.** End-to-end action eval; calibrate the gate; report *auto-send / escalation precision*; draft groundedness check; harder qrels; latency+token accounting; fix fail-open tier. | **Complete (2026-08-29)** — `eval/e2e/` (22 hand-labelled cases → gold action) runs the real pipeline and reports auto-send / escalation precision + a threshold sweep. Baseline: acc 0.864, auto-send P **0.769** (3/13 unsafe), escalation P 1.00. `interpreter/groundedness.py` (Groq judge / lexical fallback) → `state["groundedness"]`; `confidence_gate` gains `groundedness_weight` (default 0 = unchanged). `builder._make_node` stamps `elapsed_ms`; `llm.last_usage` + handlers record `tokens`. `registry._norm_tier` unknown → **`enterprise`** (strictest) + warn, was `basic`. **`011_calibrate_gate.sql`**: Acme gate → threshold 0.5 / per-tier {.5,.55,.6} / groundedness_weight 0.2 → **acc 0.909, auto-send P 0.833, escalation P 1.00** (2 residual — SOC2 / Partner-API — need an intent edge, noted). `qrels_hard.jsonl` (10 Q) + `run_eval.py --qrels hard`. 24 offline pytest tests; `test_multiflow` green with the new gate. Migration applied via SQL editor (MCP `apply_migration` timed out); `011_*.sql` is canonical. |
-| 8 | **Flow versioning & safe writes.** Immutable flow versions — editing a `published` flow forks a new `draft` version; publishing swaps the pointer; rollback. `runs` records the exact `flow_version` (or a definition hash) → every run reproducible. Move the editor's multi-statement flow save into one transactional Postgres RPC; optimistic concurrency (client sends the loaded `version`, server 409s if it moved). | Planned |
+| 8 | **Flow versioning & safe writes.** Immutable versions, `runs.flow_version`, transactional save, optimistic concurrency. | **Complete (2026-08-29)** — migration `012`: **`flow_versions`** (immutable `nodes`/`edges`/`name`/`definition_hash`/`created_by` snapshot, RLS like the flow tables), `flows.published_version`, `runs.flow_version`; **`replace_flow_graph(flow_id, nodes, edges)`** plpgsql fn — one transactional delete+insert; backfilled v1 for the 3 published flows. `flow_nodes`/`flow_edges` stay the editable **draft**; a **run executes the published snapshot** (`loader.load_flow` reads `flow_versions` for `status="published"`, `flow_nodes/edges` for `status="draft"`) and records `flow_version`. `interpreter/loader.definition_hash()` (order-independent sha256). API: `PUT` → `replace_flow_graph` RPC + **409** if `body.version` ≠ current (bumped every save); `POST /flows/{id}/publish` (snapshot → version), `/rollback` (restore draft + re-publish), `GET /versions`. Web: `published vN` pill, `draft rev` token, **Publish** button, rollback `<select>`, 409 → auto-reload banner. Full lifecycle verified (create→PUT→stale-409→publish→edit→publish v2→run records v2→rollback restores draft). 24 offline + 7 integration pytest green; web `tsc`+vitest+build green. |
 | 9 | **Test coverage & CI.** pytest, `test_api.py`, web smoke tests, de-brittle `test_multiflow`, `ci.yml`. | **Complete (2026-08-29)** — `pytest` (`pytest.ini` with an `integration` marker; repo-root `conftest.py` for `sys.path`). **`tests/test_api.py`** — offline: `/health`, `/node-types`, 401 without a bearer token, `_structural_errors` (dangling edge / unknown type / cycle / clean). integration (real Globex token, skipped without `SUPABASE_ANON_KEY`): RLS-scoped list, cross-tenant 404, PUT→422, run→`run_id`. `test_multiflow` rewritten as pytest + de-brittled — asserts a **structural fact per flow** (gate present/absent → routing) + the **cross-tenant invariant** (`a.action != b.action`, `a.threshold < b.threshold`), not exact score-paths. **`web`**: `vitest` on `graph.ts` (RF round-trip, dagre layout, conditional-edge mapping, uuid) — 5 tests. **`.github/workflows/ci.yml`** — job `python`: `pytest -m "not integration"` (**24 pass**, 0.9s); job `web`: `tsc -b` + `vitest run` + `vite build`. On push + PR to `main`. `pytest` + `httpx` added to `requirements.txt`. |
 | 10 | **Event-driven pipeline.** A Salesforce trigger — CDC / Platform Event subscriber, or a polling worker on new `Case`s — that **enqueues** runs (this is the missing half of "automation": today a person runs the flow). A task queue (`arq` / Postgres-backed); `POST /run` enqueues and returns `run_id` immediately; UI polls / subscribes via Supabase Realtime on the `runs` row. **Idempotency**: unique `(flow_id, case_id)` within a window / an idempotency key; terminal handlers (`auto_reply`, `sf_writeback`, `ask_human`) no-op if a completed run for that case exists. | Planned |
 | 11 | **Human-in-the-loop feedback.** After `ask_human`, capture what the human actually did — a follow-up job diffs the Case's real sent reply against the bot draft (`human_action`, `edit_distance` on the run). Surface "drafts needed heavy editing 60% of the time for billing" in the Runs view. Feed accepted drafts into the Phase 7 golden set / few-shot pool. | Planned |
@@ -390,7 +390,7 @@ below are indicative — take the next free number when you build it.
 
 ## Immediate next step
 
-**Phases 0–7, 9 complete.** Migrations through `011` applied. 24 offline pytest
+**Phases 0–9 complete** (0–6 MVP; 7–9 hardening). Migrations through `012` applied. 24 offline pytest
 tests + `tests/test_multiflow.py` green. External calls (Groq, Salesforce)
 run real when creds are in `.env`, else deterministic dry-run.
 
@@ -406,10 +406,9 @@ cd web && npm install && npm run dev                  # editor + Runs view :5173
 Editor login: `gundamvishnu7@gmail.com` → tenant Acme; `globex-owner@example.test`
 (pw `editor-test-pw-8891`) → tenant Globex.
 
-**Next: Phase 8 — Flow versioning & safe writes** (build order **7 → 9 → 8
-→ 10 → 11 → 12 → 13**). Immutable flow versions, `runs.flow_version`,
-transactional flow-save RPC, optimistic concurrency. Phases 8, 10–13
-detailed in "Hardening roadmap".
+**Next: Phase 10 — Event-driven pipeline** (build order **7 → 9 → 8 → 10
+→ 11 → 12 → 13**). Salesforce trigger → task queue → async `/run` →
+idempotency. Phases 10–13 detailed in "Hardening roadmap".
 
 A Phase 7 follow-up worth doing early: add an **intent → `ask_human` edge**
 to the Acme flow so commercial/legal cases (`e11` SOC2, `e12` Partner API)
@@ -495,11 +494,12 @@ From the 2026-08-29 self-review. Each is intentional MVP scope, not a bug:
   `ask_human` edge (flow-authoring follow-up). Graph-expansion now has
   `qrels_hard.jsonl` to score against but the run isn't wired into a
   regression floor yet.
-- Flows are **mutated in place**; `version` is decorative; `runs` doesn't
-  record which flow version produced a result — no reproducibility, no
-  rollback, no change audit. `PUT /flows/{id}` is 4 non-transactional
-  PostgREST calls (half-write on failure) with no optimistic concurrency.
-  **→ Phase 8.**
+- ~~Flows mutated in place; `version` decorative; `runs` doesn't record
+  the flow version; `PUT` non-transactional; no optimistic concurrency.~~
+  **Phase 8:** `flow_versions` snapshots, `runs.flow_version`,
+  `replace_flow_graph` RPC, 409 on stale `PUT`. *Residual:* rollback
+  re-points + restores the draft but doesn't keep a "rolled back from vN"
+  audit note; `flow_versions` has no prune/retention.
 - ~~No tests for `api/` or `web/`; no CI; brittle `test_multiflow`;
   hand-rolled runner.~~ **Phase 9:** `pytest` + `pytest.ini`,
   `tests/test_api.py` (offline + integration), `web` `vitest`,

@@ -36,7 +36,13 @@ member of (`tenant_members`) — RLS, enforced by your session token.
   unknown-type errors without saving.
 - **Save** — `PUT /flows/{id}`; 422 lists the structural errors, nothing is
   written.
-- **status toggle** — draft ⇄ published (saved with the flow).
+- **Save draft** — `PUT /flows/{id}` (transactional). A stale save (someone
+  else edited it) → `409` → the editor auto-reloads their version.
+- **Publish** — snapshots the current draft into an immutable version; runs
+  execute the published snapshot, not the live draft.
+- **rollback ▾** — restore the draft + published pointer to an older version.
+- header shows `published vN` (what runs use) and `draft rev` (the
+  concurrency token).
 - **Run a case** (right, below the inspector) — `POST /flows/{id}/run`;
   shows the trace, outcome, gate, Salesforce writeback, and retrieved docs.
   Every run is also persisted.
