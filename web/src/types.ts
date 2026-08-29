@@ -46,7 +46,14 @@ export interface TraceStep {
   data: Record<string, unknown>;
 }
 
+export interface Retrieved {
+  doc_url: string;
+  heading_path: string | null;
+  rerank_score: number | null;
+}
+
 export interface RunResult {
+  run_id?: string | null;
   trace: TraceStep[];
   outcome: Record<string, unknown> | null;
   tier?: string;
@@ -55,5 +62,33 @@ export interface RunResult {
   confidence_gate?: Record<string, unknown>;
   sf_writeback?: Record<string, unknown>;
   query?: string;
-  retrieval: { doc_url: string; heading_path: string | null; rerank_score: number | null }[];
+  retrieval: Retrieved[];
+}
+
+export interface RunRow {
+  run_id: string;
+  flow_id: string;
+  team: string;
+  tier: string | null;
+  region: string | null;
+  outcome: string | null;
+  confidence: number | null;
+  subject: string | null;
+  source: "api" | "cli";
+  created_at: string;
+}
+
+export interface RunDetail extends RunRow {
+  gate: Record<string, unknown> | null;
+  trace: TraceStep[];
+  retrieval: Retrieved[];
+  sf_writeback: Record<string, unknown> | null;
+  case_payload: Record<string, unknown> | null;
+}
+
+export interface RunStats {
+  total: number;
+  by_outcome: Record<string, number>;
+  by_tier: Record<string, number>;
+  low_confidence: number;
 }

@@ -18,9 +18,9 @@ Reference domain: Zapier's public developer docs (`docs.zapier.com`).
 | `db/migrations/` | `001…NNN` sequential, single-concern SQL |
 | `ingestion/` | Phase 1 — `scraper.py` (sitemap → chunk → embed → Supabase + pgvector), `neo4j_sync.py` (graph), `eval/` (retrieval eval) |
 | `interpreter/` | Phase 2–4 — flow loader, `StateGraph` builder, node registry, safe condition eval, hybrid retrieval, Groq + Salesforce clients (real-or-dry-run). `flows/` validator, `cases/` samples |
-| `api/` | Phase 5 — FastAPI: list/load/validate/save/run flows (reuses `interpreter/`) |
-| `web/` | Phase 5 — React + React Flow editor over the same schema, Supabase Auth + RLS |
-| `scripts/` | ops helpers — SF custom-field setup, seed data, RLS check |
+| `api/` | Phase 5–6 — FastAPI: list/load/validate/save/run flows + `runs` observability (reuses `interpreter/`) |
+| `web/` | Phase 5–6 — React + React Flow editor + a Runs view, over the same schema, Supabase Auth + RLS |
+| `scripts/` | ops helpers — SF custom-field setup, seed data, RLS check, `sop_conflicts.py` |
 | `tests/` | `test_interpreter.py` (offline), `test_multiflow.py` (integration) |
 
 ## Quickstart
@@ -44,8 +44,9 @@ cd web && npm install && npm run dev      # editor on :5173
 
 ## Status
 
-Phases 0–5 in `docs/PROJECT_SCOPE.md`. Phases 0–4 complete and verified;
-daily ingestion runs on GitHub Actions.
+All six phases complete — see `docs/PROJECT_SCOPE.md` for what each
+delivered and how it was verified. Migrations `001`–`010` applied; daily
+ingestion runs on GitHub Actions; 14 offline tests + an integration test.
 
 ## Cost stance
 

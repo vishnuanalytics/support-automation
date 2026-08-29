@@ -54,6 +54,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="pull this Salesforce Case Id and run it (needs SF creds in .env)")
     ap.add_argument("--describe", action="store_true", help="print wiring and exit")
     ap.add_argument("--list", action="store_true", help="list flows (per tenant/team) and exit")
+    ap.add_argument("--no-record", action="store_true", help="don't persist this run to the runs table")
     ap.add_argument("--json", action="store_true", help="emit final state as JSON")
     args = ap.parse_args(argv)
 
@@ -91,6 +92,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\nrunning case {case.get('case_id', '?')}: {case.get('subject', '')!r}\n")
 
     final = graph.invoke({"case": case, "trace": []})
+
+    if not args.no_record:
+        from .runs import record_run
+        rid = record_run(flow, final, case=case, source="cli")
+        if rid:
+            print(f"recorded run {rid}\n")
 
     for i, step in enumerate(final.get("trace", []), 1):
         print(f"  {i}. [{step['type']}] {step['summary']}")

@@ -30,7 +30,10 @@ Needs `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `SUPABASE_ANON_KEY` in `.env`.
 | `GET /flows/{id}` | full flow (nodes + edges), unvalidated |
 | `PUT /flows/{id}` | save `{name,status,version,nodes,edges}`; `422 {errors}` if it fails refs/orphans/cycles/unknown-type; reconciles rows (delete removed, upsert rest) |
 | `POST /flows/{id}/validate` | `{valid, errors}` for a posted flow dict, no write |
-| `POST /flows/{id}/run` | body `{case}` → compile + `invoke` → `{trace, outcome, tier, confidence, confidence_gate, sf_writeback, retrieval, query}` |
+| `POST /flows/{id}/run` | body `{case}` → compile + `invoke` → `{run_id, trace, outcome, tier, confidence, confidence_gate, sf_writeback, retrieval, query}`; also persists a `runs` row |
+| `GET /runs/stats` | `{total, by_outcome, by_tier, low_confidence}` over the last 500 visible runs |
+| `GET /runs?flow_id=&outcome=&limit=` | RLS-scoped list, newest first |
+| `GET /runs/{run_id}` | full run — `trace`, `gate`, `retrieval`, `sf_writeback`, `case_payload` (the "why") |
 
 New nodes/edges get client-generated UUIDs so `PUT` is a clean upsert.
 `run` loads the flow with the service role (retrieval needs full read) but

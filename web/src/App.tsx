@@ -4,11 +4,13 @@ import { supabase } from "./supabase";
 import { Login } from "./auth/Login";
 import { FlowList } from "./flows/FlowList";
 import { FlowEditor } from "./flows/FlowEditor";
+import { RunsView } from "./runs/RunsView";
 
 export function App() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
   const [flowId, setFlowId] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const [view, setView] = useState<"editor" | "runs">("editor");
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
@@ -23,23 +25,35 @@ export function App() {
     <div className="shell">
       <div className="sidebar col">
         <div className="row" style={{ justifyContent: "space-between" }}>
-          <strong>Flows</strong>
+          <div className="row" style={{ gap: 4 }}>
+            <button className={view === "editor" ? "primary" : ""} onClick={() => setView("editor")}>
+              Editor
+            </button>
+            <button className={view === "runs" ? "primary" : ""} onClick={() => setView("runs")}>
+              Runs
+            </button>
+          </div>
           <button onClick={() => supabase.auth.signOut()} title={session.user.email ?? ""}>
             sign out
           </button>
         </div>
-        <FlowList
-          key={reloadKey}
-          activeId={flowId}
-          onSelect={setFlowId}
-          onCreated={(id) => {
-            setReloadKey((k) => k + 1);
-            setFlowId(id);
-          }}
-        />
+        {view === "editor" && (
+          <FlowList
+            key={reloadKey}
+            activeId={flowId}
+            onSelect={setFlowId}
+            onCreated={(id) => {
+              setReloadKey((k) => k + 1);
+              setFlowId(id);
+            }}
+          />
+        )}
+        {view === "runs" && <div className="muted">observability — recent interpreter runs across your tenants</div>}
       </div>
       <div className="editor">
-        {flowId ? (
+        {view === "runs" ? (
+          <RunsView />
+        ) : flowId ? (
           <FlowEditor
             key={flowId}
             flowId={flowId}

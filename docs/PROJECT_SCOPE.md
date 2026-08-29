@@ -67,7 +67,7 @@ Reorganised 2026-08-29 (Phase 5). Modules run from the repo root:
 
 ```
 docs/            this file, SALESFORCE_SETUP.md
-db/migrations/   001_*.sql .. 009_*.sql   (was repo root)
+db/migrations/   001_*.sql .. 010_*.sql   (was repo root)
 ingestion/       scraper.py, neo4j_sync.py, eval/         → python -m ingestion.scraper
 interpreter/     builder/loader/registry/conditions/retrieval/llm/salesforce/run
   flows/         validate_flow.py, flow_support_example.json
@@ -93,7 +93,7 @@ daily-sync.yml` now calls `python -m ingestion.scraper` / `.neo4j_sync`.
 | 3 | Salesforce field write-back (case module/region/account/contact) from the classify node's output; Chatter-mention as the "ask human" mechanism | **Complete + live-verified (2026-08-29)** — `interpreter/salesforce.py`: 3 auth modes (JWT bearer / OAuth username-password / legacy SOAP), tried by which env vars are set; real when creds present, else dry-run. New `sf_writeback` node: config-driven `field_map` (`urgency`→`Priority` w/ value-map, `topic`→`Module__c`, `region`→`Region__c`, `summary` appended to `Description`), tolerant of missing fields. `ask_human` + `channel: salesforce_chatter` posts a real Chatter FeedItem (Connect API, FeedItem fallback). Migration `008` inserts `sf_writeback` (`classify → sf_writeback → draft`). `run.py --sf-case <Id>` pulls a live Case. `scripts/sf_create_fields.py` (Metadata API — creates `Case.Module__c` / `Case.Region__c` / `Account.Tier__c` + FLS) and `scripts/sf_seed_cases.py` (3 test Cases). 12/12 offline tests green. **Verified against a real Developer Edition org via JWT**: 3 seeded Cases ran end-to-end, 4/4 fields written each, Chatter FeedItem posted on the premium (ask_human) case. |
 | 4 | Multi-tenant/multi-flow: prove several different flow configs run correctly | **Complete (2026-08-29)** — migration `009` seeds 3 published flows across 2 tenants: **Acme/support** (`1111…`, lenient per-tier gate, full SF map — now `published`), **Globex/support** (`a2a2…`, NEW — strict gate `{basic .9…enterprise .99}`, minimal SF map, no graph, 8B model; same team name as Acme, different tenant → allowed by `uq_one_published_flow_per_team`), **Acme/offboarding** (`c3c3…`, NEW — different topology `retrieve→classify→draft→handover`, no gate/sf_writeback). `loader.load_flow` now validates with `require_expected_types=False` (a CSM/offboarding flow needn't have a `confidence_gate`); `list_flows()` + `run.py --list` added. `tests/test_multiflow.py`: same `basic_howto.json` case through each flow → **auto_reply / ask_human / handover** — three behaviours, zero code differences. **RLS verified** (`scripts/rls_check.sql`) with simulated JWTs: Acme user sees 2 flows, Globex user sees 1 (+ only its 8 nodes), unknown user sees 0, service role sees 3. 13/13 offline tests green. |
 | 5 | React Flow UI reading/writing the same flow schema — drag nodes, edit thresholds, toggle auto-send, pause per team/condition | **Complete (2026-08-29)** — repo reorganised (`db/migrations/`, `docs/`, `ingestion/`, `interpreter/flows/`+`cases/`, `api/`, `web/`; imports + CI updated; `README.md` + `.env.example` added). **`api/`** — thin FastAPI over `interpreter/`: `GET/POST /flows`, `GET/PUT/DELETE /flows/{id}`, `POST /flows/{id}/{validate,run}`, `GET /node-types`. Every request carries the caller's Supabase token; flow reads/writes go through an RLS-scoped client, service role only for the interpreter's own machinery. `loader.load_flow` gains `validate=False`. **`web/`** — Vite + React + `@xyflow/react` + Supabase Auth: flow list per tenant, dagre-laid-out canvas, node palette (per registered type), drag-connect / delete, inspector (label + `config` JSON + friendly per-tier threshold form for `confidence_gate`, edge `condition.if`), Validate (shows refs/orphan/cycle errors), Save (422 on invalid), draft⇄published toggle, and a Run panel (trace + outcome + retrieval). `npm run build` + `tsc` clean; API verified end-to-end (RLS list/get/create/save/invalid-422/validate/run/cross-tenant-404) against the live project. Phase 4's bare synthetic user replaced with a real GoTrue account (`globex-owner@example.test` / `57c26330…`). |
-| 6 | Observability: manager reporting on low-confidence cases, per-case "why did the bot respond this way" chat, conflicting-SOP detection across teams | Not started |
+| 6 | Observability: manager reporting on low-confidence cases, per-case "why did the bot respond this way" chat, conflicting-SOP detection across teams | **Complete (2026-08-29)** — migration `010` adds a **`runs`** table (flow_id, tenant, team, source, tier/outcome/confidence, `gate`/`trace`/`retrieval`/`sf_writeback`/`case_payload` jsonb), tenant-scoped RLS like the flow tables. `interpreter/runs.py` `record_run()` (best-effort — never breaks the run; `RUNS_DISABLED=1` to skip) wired into `interpreter.run` (`--no-record` to opt out) and `POST /flows/{id}/run` (returns `run_id`). API: `GET /runs`, `GET /runs/{id}`, `GET /runs/stats`. Web: a **Runs** tab — stat tiles (per outcome / per tier / low-confidence), filterable table, and a per-run detail showing the trace steps + gate math + retrieved docs = the "why". `scripts/sop_conflicts.py` probes each team's `retrieve` config across a fixed topic set and flags where teams surface different top docs (Groq-judged for actual contradiction when a key is present, reported unjudged otherwise). 14/14 offline tests green; runs API verified end-to-end (record from CLI + API, list/stats/detail, RLS-scoped). |
 
 ## Phase 0 — schema (complete)
 
@@ -243,29 +243,31 @@ Files delivered: `004_docs_ingestion_schema.sql`, `005_docs_rag_metadata.sql`,
 
 ## Immediate next step
 
-**Phases 0–5 are complete.** Migrations through `009` applied to
-`mjohgmivnxfwkqmlojqs`. 13/13 offline tests + `tests/test_multiflow.py`
+**All six phases (0–6) are complete.** Migrations through `010` applied to
+`mjohgmivnxfwkqmlojqs`. 14/14 offline tests + `tests/test_multiflow.py`
 green. External calls (Groq, Salesforce) run real when creds are in `.env`,
 else deterministic dry-run.
 
 Run the whole thing:
 ```
 python -m interpreter.run --list                     # 3 flows / 2 tenants
+python -m interpreter.run --flow <id> --case interpreter/cases/basic_howto.json
 python -m tests.test_multiflow                        # same case -> 3 outcomes
-uvicorn api.main:app --reload                         # editor backend :8000
-cd web && npm install && npm run dev                  # editor :5173
+python scripts/sop_conflicts.py                       # cross-team SOP divergence probe
+uvicorn api.main:app --reload                         # backend :8000
+cd web && npm install && npm run dev                  # editor + Runs view :5173
 ```
 Editor login: a Supabase account. `gundamvishnu7@gmail.com` → tenant Acme;
 `globex-owner@example.test` (pw `editor-test-pw-8891`) → tenant Globex.
 
-**Next: Phase 6 — observability.** Nothing new is built yet. Planned:
-- a `runs` table (persist each `interpreter.run` — flow_id, case ref, final
-  `trace`, outcome, confidence) so runs are queryable, not just logged.
-- manager view: low-confidence / ask_human / handover cases over time.
-- per-case "why did the bot do this" — render the stored `trace` (each node
-  already emits `{summary, data}`), plus the retrieved chunks + gate math.
-- conflicting-SOP detection: flag docs that different teams' flows retrieve
-  with contradictory guidance (needs an LLM-judge pass over `doc_chunks`).
+**No open phase.** Natural next increments if the project continues:
+- give `sop_conflicts.py` divergent per-team retrieval (section filters on
+  the `retrieve` node) so it actually surfaces conflicts on this corpus;
+- a Groq key in `.env` to move classify/draft off the stub;
+- deploy: the daily ingestion already runs on GitHub Actions; the `api/` +
+  `web/` would need hosting (Fly/Render + Vercel/Netlify) and
+  `WEB_ORIGINS` / `VITE_*` set for the deployed URLs;
+- `runs` retention / a scheduled rollup for the stats endpoint as volume grows.
 
 Default to Groq for any LLM calls (classification, draft generation).
 
