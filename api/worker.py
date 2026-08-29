@@ -21,7 +21,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import hashlib  # noqa: E402
+
 from ingestion.scraper import get_supabase  # noqa: E402
+from ingestion.sources.kb_common import embed_entry as _kb_embed  # noqa: E402
 from interpreter import feedback, jobs, salesforce  # noqa: E402
 from interpreter.builder import build_graph  # noqa: E402
 from interpreter.loader import load_flow  # noqa: E402
@@ -75,7 +78,26 @@ def _check_resolution(payload: dict, sb) -> dict:
     return {"run_id": run_id, "human_action": action, "edit_distance": dist}
 
 
-HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution}
+def _embed_kb_entry(payload: dict, sb) -> dict:
+    """Phase 14 — chunk + embed a large KB entry off the request thread."""
+    eid = payload["entry_id"]
+    rows = sb.table("kb_entries").select("*").eq("entry_id", eid).execute().data
+    if not rows or rows[0]["status"] != "active":
+        return {"entry_id": eid, "skipped": "entry gone or archived"}
+    e = rows[0]
+    url = f"kb://{e['source_id']}/{eid}"
+    n = _kb_embed(sb, source_id=e["source_id"], url=url, title=e["title"],
+                  body_md=e["body_md"] or "", section=payload.get("collection_name", ""))
+    sb.table("kb_entries").update({
+        "chunk_count": n,
+        "embed_hash": hashlib.md5((e["body_md"] or "").encode()).hexdigest(),
+        "embedded_at": "now()",
+    }).eq("entry_id", eid).execute()
+    return {"entry_id": eid, "chunks": n}
+
+
+HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
+            "embed_kb_entry": _embed_kb_entry}
 
 
 def process_one(sb) -> bool:

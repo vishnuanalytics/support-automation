@@ -5,12 +5,13 @@ import { Login } from "./auth/Login";
 import { FlowList } from "./flows/FlowList";
 import { FlowEditor } from "./flows/FlowEditor";
 import { RunsView } from "./runs/RunsView";
+import { KnowledgeView } from "./kb/KnowledgeView";
 
 export function App() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
   const [flowId, setFlowId] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
-  const [view, setView] = useState<"editor" | "runs">("editor");
+  const [view, setView] = useState<"editor" | "runs" | "knowledge">("editor");
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
@@ -32,6 +33,9 @@ export function App() {
             <button className={view === "runs" ? "primary" : ""} onClick={() => setView("runs")}>
               Runs
             </button>
+            <button className={view === "knowledge" ? "primary" : ""} onClick={() => setView("knowledge")}>
+              Knowledge
+            </button>
           </div>
           <button onClick={() => supabase.auth.signOut()} title={session.user.email ?? ""}>
             sign out
@@ -49,9 +53,17 @@ export function App() {
           />
         )}
         {view === "runs" && <div className="muted">observability — recent interpreter runs across your tenants</div>}
+        {view === "knowledge" && (
+          <div className="muted">
+            internal SOPs &amp; runbooks per team — a <code>kb_lookup</code> node
+            in a flow consults a collection at a checkpoint
+          </div>
+        )}
       </div>
       <div className="editor">
-        {view === "runs" ? (
+        {view === "knowledge" ? (
+          <KnowledgeView />
+        ) : view === "runs" ? (
           <RunsView />
         ) : flowId ? (
           <FlowEditor

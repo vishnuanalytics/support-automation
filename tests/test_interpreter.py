@@ -18,7 +18,11 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from interpreter import conditions, feedback, groundedness, salesforce
 from interpreter.builder import FlowBuildError, FlowRoutingError, build_graph
 from interpreter.flows.validate_flow import Flow, check_flow
-from interpreter.registry import _norm_tier, h_ask_human, h_confidence_gate, h_sf_writeback, register
+from interpreter import registry as _registry
+from interpreter.registry import (
+    _norm_tier, h_ask_human, h_confidence_gate, h_draft, h_kb_lookup,
+    h_sf_writeback, register,
+)
 from interpreter.runs import build_row
 
 _HERMETIC = ("SF_USERNAME", "SF_PASSWORD", "SF_SECURITY_TOKEN", "SF_CONSUMER_KEY",
@@ -428,6 +432,73 @@ def test_context_block_caps_oversized_chunks():
     # total payload stays bounded regardless of raw chunk size
     assert len(block) <= CTX_TOTAL + 5 * 40   # + a little for the [n] url headers
     assert block.startswith("[1] u0")
+
+
+# --------------------------------------------------------------------------
+# Phase 14 — kb_lookup node + draft folding internal KB
+# --------------------------------------------------------------------------
+def test_kb_lookup_scopes_to_collections_and_writes_out_key(monkeypatch):
+    seen = {}
+
+    def fake_retrieve(query, **kw):
+        seen["query"] = query
+        seen["kw"] = kw
+        return [{"doc_url": "kb://x/1", "chunk_text": "refund cap is $200"}], 0.81
+
+    monkeypatch.setattr(_registry, "hybrid_retrieve", fake_retrieve)
+    state = {"tenant_id": "T1", "case": {"subject": "refund please", "body": "help"}}
+    out = h_kb_lookup(state, {"_node_id": "k", "collections": ["billing-runbook"]})
+
+    assert seen["kw"]["kb_sources"] == ["billing-runbook"]
+    assert seen["kw"]["use_graph"] is False
+    assert seen["kw"]["tenant_id"] == "T1"
+    assert seen["query"] == "refund please help"
+    kb = out["internal_kb"]
+    assert kb["checked"] is True and kb["score"] == 0.81
+    assert kb["matches"][0]["doc_url"] == "kb://x/1"
+
+
+def test_kb_lookup_query_template_and_min_score(monkeypatch):
+    seen = {}
+
+    def fake_retrieve(query, **kw):
+        seen["query"] = query
+        return [{"doc_url": "kb://x/1", "chunk_text": "..."}], 0.2
+
+    monkeypatch.setattr(_registry, "hybrid_retrieve", fake_retrieve)
+    state = {"case": {"subject": "Broken"}, "classification": {"topic": "billing"}}
+    out = h_kb_lookup(state, {"_node_id": "k", "collections": ["c"],
+                              "query": "{{case.subject}} / {{classification.topic}}",
+                              "min_score": 0.5})
+    assert seen["query"] == "Broken / billing"
+    # below min_score -> checked, but no matches handed downstream
+    assert out["internal_kb"]["checked"] is True
+    assert out["internal_kb"]["matches"] == []
+
+
+def test_draft_folds_internal_kb_as_authoritative(monkeypatch):
+    captured = {}
+
+    def fake_complete(system, user, **kw):
+        captured["system"] = system
+        captured["user"] = user
+        return '{"reply": "Per our runbook, refunds over $200 need a lead.", "confidence": 0.9}'
+
+    monkeypatch.setattr(_registry.llm, "complete", fake_complete)
+    monkeypatch.setattr(_registry.llm, "last_usage", None, raising=False)
+    state = {
+        "case": {"subject": "refund $500", "body": "want it back"},
+        "retrieval": [{"doc_url": "https://docs/x", "chunk_text": "public refund info"}],
+        "internal_kb": {"matches": [
+            {"doc_url": "kb://billing/1", "chunk_text": "Refund cap: $200 auto, above needs a lead."}
+        ]},
+    }
+    out = h_draft(state, {"_node_id": "d", "max_tokens": 200})
+    assert "Internal runbook (authoritative" in captured["user"]
+    assert "Refund cap: $200" in captured["user"]
+    # public docs still included, but after the internal block
+    assert captured["user"].index("Internal runbook") < captured["user"].index("Public documentation")
+    assert out["trace"][0]["data"]["used_internal_kb"] is True
 
 
 def test_retry_after_seconds_parses_groq_hint():

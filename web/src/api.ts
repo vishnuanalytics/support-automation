@@ -3,6 +3,9 @@ import type {
   Flow,
   FlowMeta,
   FlowVersion,
+  KbCollection,
+  KbEntry,
+  KbEntryRow,
   NodeTypesResp,
   RunDetail,
   RunResult,
@@ -71,6 +74,23 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ case: caseJson }),
     }),
+
+  kb: {
+    listCollections: () => req<KbCollection[]>("/kb/collections"),
+    createCollection: (b: { name: string; description?: string; tenant_id?: string }) =>
+      req<{ source_id: string }>("/kb/collections", { method: "POST", body: JSON.stringify(b) }),
+    updateCollection: (id: string, b: { name?: string; description?: string }) =>
+      req<KbCollection>(`/kb/collections/${id}`, { method: "PATCH", body: JSON.stringify(b) }),
+    deleteCollection: (id: string) =>
+      req<void>(`/kb/collections/${id}`, { method: "DELETE" }),
+    listEntries: (id: string) => req<KbEntryRow[]>(`/kb/collections/${id}/entries`),
+    createEntry: (id: string, b: { title: string; body_md: string }) =>
+      req<KbEntry>(`/kb/collections/${id}/entries`, { method: "POST", body: JSON.stringify(b) }),
+    getEntry: (id: string) => req<KbEntry>(`/kb/entries/${id}`),
+    updateEntry: (id: string, b: { title?: string; body_md?: string }) =>
+      req<KbEntry>(`/kb/entries/${id}`, { method: "PATCH", body: JSON.stringify(b) }),
+    deleteEntry: (id: string) => req<void>(`/kb/entries/${id}`, { method: "DELETE" }),
+  },
 
   runStats: () => req<RunStats>("/runs/stats"),
   listRuns: (q: { flow_id?: string; outcome?: string; limit?: number } = {}) => {

@@ -24,9 +24,8 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 load_dotenv()
 
-from ingestion.scraper import (  # noqa: E402
-    breadcrumb, chunk_markdown, content_hash, get_embedder, get_supabase, normalise,
-)
+from ingestion.scraper import get_supabase, normalise  # noqa: E402
+from ingestion.sources.kb_common import embed_entry  # noqa: E402
 
 
 def _source_id(sb, name: str, tenant: str | None, kind: str) -> str:
@@ -50,28 +49,10 @@ def ingest(name: str, tenant: str | None, directory: str, kind: str = "markdown"
         url = f"sop://{name}/{f.stem}"
         md = normalise(f.read_text())
         title = md.splitlines()[0].lstrip("# ").strip() if md else f.stem
-        section, crumb = f"{name}", f"{name} > {f.stem}"
-
-        sb.table("zapier_docs").upsert({
-            "url": url, "title": title, "content_hash": content_hash(md),
-            "raw_text": md, "status": "active", "missed_runs": 0,
-            "source_id": sid,
-        }).execute()
-        sb.table("doc_chunks").delete().eq("doc_url", url).execute()
-
-        chunks = chunk_markdown(md, crumb)
-        embeddings = [v.tolist() for v in get_embedder().embed([c["chunk_text"] for c in chunks])]
-        sb.table("doc_chunks").insert([
-            {
-                "doc_url": url, "chunk_index": i, "chunk_text": c["chunk_text"],
-                "embedding": e, "heading_path": c["heading_path"],
-                "chunk_type": c["chunk_type"], "token_count": c["token_count"],
-                "section": section, "source_id": sid,
-            }
-            for i, (c, e) in enumerate(zip(chunks, embeddings))
-        ]).execute()
-        total_chunks += len(chunks)
-        print(f"  {url}: {len(chunks)} chunks")
+        n = embed_entry(sb, source_id=sid, url=url, title=title, body_md=md,
+                        section=name, crumb=f"{name} > {f.stem}")
+        total_chunks += n
+        print(f"  {url}: {n} chunks")
 
     print(f"\nsource '{name}' ({sid}): {len(files)} docs, {total_chunks} chunks")
 

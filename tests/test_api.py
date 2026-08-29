@@ -38,6 +38,12 @@ def test_node_types_lists_the_registry():
     body = client.get("/api/node-types").json()
     assert "confidence_gate" in body["types"] and "retrieve" in body["types"]
     assert "confidence_gate" in body["defaults"]
+    assert "kb_lookup" in body["types"] and body["defaults"]["kb_lookup"]["out_key"] == "internal_kb"
+
+
+def test_kb_endpoints_need_a_token():
+    assert client.get("/api/kb/collections").status_code == 401
+    assert client.post("/api/kb/collections", json={"name": "x"}).status_code == 401
 
 
 def test_flows_requires_a_bearer_token():
@@ -225,3 +231,76 @@ def test_rollback_restores_the_draft(scratch_flow, auth_headers):
     g = client.get(f"/api/flows/{fid}", headers=auth_headers).json()
     assert all(n.get("label") != "EDITED" for n in g["nodes"])
     assert g["published_version"] == 1
+
+
+# ── Phase 14: knowledge base ──────────────────────────────────────────
+GLOBEX_TENANT = "22222222-2222-2222-2222-222222222222"
+
+
+@pytest.fixture
+def kb_collection(auth_headers):
+    """A throwaway internal_kb collection in the Globex tenant."""
+    from supabase import create_client
+
+    name = f"pytest-kb-{uuid.uuid4().hex[:8]}"
+    r = client.post("/api/kb/collections", headers=auth_headers,
+                    json={"name": name, "description": "pytest"})
+    assert r.status_code == 201, r.text
+    sid = r.json()["source_id"]
+    yield sid, name
+    svc = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"])
+    svc.table("zapier_docs").delete().like("url", f"kb://{sid}/%").execute()
+    svc.table("sources").delete().eq("source_id", sid).execute()
+
+
+@pytest.mark.integration
+def test_kb_collection_shows_up_scoped(kb_collection, auth_headers):
+    sid, name = kb_collection
+    cols = client.get("/api/kb/collections", headers=auth_headers).json()
+    mine = [c for c in cols if c["source_id"] == sid]
+    assert mine and mine[0]["name"] == name and mine[0]["tenant_id"] == GLOBEX_TENANT
+    assert mine[0]["entry_count"] == 0
+
+
+@pytest.mark.integration
+def test_kb_entry_roundtrip_embeds_and_scopes(kb_collection, auth_headers):
+    sid, _ = kb_collection
+    body_md = ("# Refund policy\n\nRefunds under $200 are auto-approved. "
+               "Between $200 and $2000 a team lead must approve. Above $2000 "
+               "needs a manager sign-off and a note in the account record.\n")
+    r = client.post(f"/api/kb/collections/{sid}/entries", headers=auth_headers,
+                    json={"title": "Refund policy", "body_md": body_md})
+    assert r.status_code == 201, r.text
+    eid = r.json()["entry_id"]
+    assert r.json()["chunk_count"] >= 1
+
+    got = client.get(f"/api/kb/entries/{eid}", headers=auth_headers).json()
+    assert got["body_md"].startswith("# Refund policy")
+
+    # chunks landed under this source_id (service-role peek)
+    from supabase import create_client
+    svc = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"])
+    chunks = svc.table("doc_chunks").select("source_id").eq("source_id", sid).execute().data
+    assert len(chunks) >= 1
+
+    # retrieval scoped to the collection finds it for this tenant
+    from interpreter.retrieval import hybrid_retrieve
+    hits, score = hybrid_retrieve("what is the refund approval limit", top_k=3,
+                                  use_graph=False, kb_sources=[_kb_name(sid, auth_headers)],
+                                  tenant_id=GLOBEX_TENANT, sb=svc)
+    assert any("200" in h["chunk_text"] for h in hits)
+
+    # editing the body re-embeds (embed_hash moves)
+    r2 = client.patch(f"/api/kb/entries/{eid}", headers=auth_headers,
+                      json={"body_md": body_md + "\nEU customers: route to the DPO.\n"})
+    assert r2.status_code == 200
+
+    assert client.delete(f"/api/kb/entries/{eid}", headers=auth_headers).status_code == 204
+    assert client.get(f"/api/kb/entries/{eid}", headers=auth_headers).status_code == 404
+
+
+def _kb_name(sid, headers):
+    for c in client.get("/api/kb/collections", headers=headers).json():
+        if c["source_id"] == sid:
+            return c["name"]
+    raise AssertionError("collection vanished")

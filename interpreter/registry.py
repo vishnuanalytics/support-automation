@@ -255,6 +255,63 @@ def h_sf_writeback(state: CaseState, config: dict) -> dict:
     }
 
 
+def _render_template(tmpl: str, state: CaseState) -> str:
+    """Tiny `{{ dotted.path }}` substitution over state (Phase 14 kb_lookup
+    query). Unknown paths -> empty string. No expressions, no code."""
+    def sub(m: "re.Match[str]") -> str:
+        v = _dig(state, m.group(1).strip())
+        return "" if v is None else str(v)
+    return re.sub(r"\{\{\s*([\w.]+)\s*\}\}", sub, tmpl).strip()
+
+
+@register("kb_lookup")
+def h_kb_lookup(state: CaseState, config: dict) -> dict:
+    """Consult one or more internal KB collections *at this point in the
+    flow*. Only runs if the graph routes here — otherwise the internal
+    knowledge is never touched. Result lands in `state[out_key]` for a
+    downstream `draft` node to treat as authoritative."""
+    case = state.get("case", {})
+    collections = config.get("collections") or []
+    out_key = config.get("out_key", "internal_kb")
+
+    tmpl = config.get("query")
+    if tmpl:
+        query = _render_template(tmpl, state)
+    else:
+        query = " ".join(
+            p for p in (case.get("subject", ""), case.get("body", "")) if p
+        ).strip()
+
+    results, score = hybrid_retrieve(
+        query,
+        top_k=int(config.get("top_k", 4)),
+        use_sparse=config.get("use_sparse", True),
+        use_graph=False,                       # internal KB isn't in the graph
+        use_rerank=config.get("use_rerank", True),
+        kb_sources=collections or None,
+        tenant_id=state.get("tenant_id"),
+    )
+    min_score = float(config.get("min_score", 0.0))
+    hit = bool(results) and score >= min_score
+    payload = {
+        "checked": True,
+        "collections": collections,
+        "score": round(score, 4),
+        "matches": results if hit else [],
+    }
+    top = results[0]["doc_url"] if (hit and results) else None
+    return {
+        out_key: payload,
+        **_trace(
+            config["_node_id"], "kb_lookup",
+            f"{len(payload['matches'])} internal hit(s) from {collections or 'any'}, "
+            f"score={score:.3f}, top={top}",
+            {"score": score, "collections": collections, "hits": len(payload["matches"]),
+             "query": query[:200]},
+        ),
+    }
+
+
 @register("draft")
 def h_draft(state: CaseState, config: dict) -> dict:
     case = state.get("case", {})
@@ -262,14 +319,30 @@ def h_draft(state: CaseState, config: dict) -> dict:
     context = _context_block(retrieval) or "(no retrieved context)"
     body = f"Subject: {case.get('subject','')}\n\n{case.get('body','')}".strip()
 
+    # Phase 14: internal-runbook context from a kb_lookup node upstream wins
+    # over the public docs.
+    internal = state.get(config.get("internal_kb_key", "internal_kb")) or {}
+    internal_matches = internal.get("matches") or []
+    if internal_matches:
+        user = (
+            f"# Case\n{body}\n\n"
+            f"# Internal runbook (authoritative — follow this over the public docs)\n"
+            f"{_context_block(internal_matches)}\n\n"
+            f"# Public documentation context\n{context}"
+        )
+    else:
+        user = f"# Case\n{body}\n\n# Documentation context\n{context}"
+
     raw = llm.complete(
         system=(
-            "You are a support agent. Using ONLY the provided documentation context, "
-            "write a concise, friendly reply that resolves the customer's issue. "
+            "You are a support agent. Using ONLY the provided context, write a "
+            "concise, friendly reply that resolves the customer's issue. When an "
+            "internal runbook is provided it is authoritative — prefer it over "
+            "the public documentation. "
             "Return a JSON object: {\"reply\": string, \"confidence\": number 0..1} "
             "where confidence reflects how well the context actually answers the case."
         ),
-        user=f"# Case\n{body}\n\n# Documentation context\n{context}",
+        user=user,
         model=config.get("model", llm.DEFAULT_MODEL),
         json_object=True,
         max_tokens=int(config.get("max_tokens", 500)),
@@ -283,7 +356,7 @@ def h_draft(state: CaseState, config: dict) -> dict:
         model_conf = 0.5
     model_conf = max(0.0, min(1.0, model_conf))
 
-    grounded = groundedness.check(reply, retrieval[:5])
+    grounded = groundedness.check(reply, (internal_matches[:5] + retrieval[:5]))
 
     return {
         "draft": reply,
@@ -292,9 +365,11 @@ def h_draft(state: CaseState, config: dict) -> dict:
         **_trace(
             config["_node_id"], "draft",
             f"{len(reply)} chars, model_confidence={model_conf:.2f}, "
-            f"groundedness={grounded['score']:.2f} ({grounded['backend']}), sources={len(retrieval[:5])}",
+            f"groundedness={grounded['score']:.2f} ({grounded['backend']}), "
+            f"sources={len(retrieval[:5])}+{len(internal_matches[:5])} internal",
             {"draft_confidence": model_conf, "chars": len(reply),
-             "groundedness": grounded, "tokens": tokens},
+             "groundedness": grounded, "tokens": tokens,
+             "used_internal_kb": bool(internal_matches)},
         ),
     }
 
