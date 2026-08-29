@@ -15,8 +15,8 @@ Public surface:
     run_flow(flow_id, case)   -> CaseState  (run.py)
 """
 
-from .loader import load_flow
+from .loader import list_flows, load_flow
 from .builder import build_graph
 from .state import CaseState
 
-__all__ = ["load_flow", "build_graph", "CaseState"]
+__all__ = ["load_flow", "list_flows", "build_graph", "CaseState"]

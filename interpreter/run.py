@@ -53,8 +53,21 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--sf-case", dest="sf_case", metavar="ID",
                     help="pull this Salesforce Case Id and run it (needs SF creds in .env)")
     ap.add_argument("--describe", action="store_true", help="print wiring and exit")
+    ap.add_argument("--list", action="store_true", help="list flows (per tenant/team) and exit")
     ap.add_argument("--json", action="store_true", help="emit final state as JSON")
     args = ap.parse_args(argv)
+
+    if args.list:
+        from .loader import list_flows
+        rows = list_flows(tenant_id=args.tenant)
+        cur = None
+        for r in rows:
+            if r["tenant_id"] != cur:
+                cur = r["tenant_id"]
+                print(f"\ntenant {cur}")
+            print(f"  {r['team']:<12} {r['status']:<10} v{r['version']}  {r['name']}")
+            print(f"  {'':<12} {'':<10} {r['flow_id']}")
+        return 0
 
     if not args.flow and not (args.tenant and args.team):
         ap.error("pass --flow, or both --tenant and --team")

@@ -88,6 +88,24 @@ def test_check_flow_catches_cycle_and_dangling_edge():
     assert any("ghost" in e for e in check_flow(dangling, require_expected_types=False))
 
 
+def test_check_flow_allows_a_gateless_flow_for_the_interpreter():
+    # the Phase 4 offboarding flow: retrieve -> classify -> draft -> handover,
+    # no confidence_gate. loader.load_flow validates with
+    # require_expected_types=False, so this must be accepted.
+    nodes = [
+        {"node_id": "r", "type": "retrieve"}, {"node_id": "c", "type": "classify"},
+        {"node_id": "d", "type": "draft"}, {"node_id": "h", "type": "handover"},
+    ]
+    edges = [
+        {"source_node_id": "r", "target_node_id": "c"},
+        {"source_node_id": "c", "target_node_id": "d"},
+        {"source_node_id": "d", "target_node_id": "h"},
+    ]
+    assert check_flow(_flow(nodes, edges), require_expected_types=False) == []
+    # ...but the strict CLI check still flags the missing confidence_gate
+    assert any("confidence_gate" in e for e in check_flow(_flow(nodes, edges)))
+
+
 # --------------------------------------------------------------------------
 # builder.py — wiring + routing
 # --------------------------------------------------------------------------
