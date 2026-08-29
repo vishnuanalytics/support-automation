@@ -4,10 +4,12 @@ import type { FlowMeta } from "../types";
 
 export function FlowList({
   activeId,
+  canEdit,
   onSelect,
   onCreated,
 }: {
   activeId: string | null;
+  canEdit: boolean;
   onSelect: (id: string) => void;
   onCreated: (id: string) => void;
 }) {
@@ -41,7 +43,7 @@ export function FlowList({
 
   return (
     <div className="col">
-      <button onClick={newFlow}>＋ New flow</button>
+      {canEdit && <button onClick={newFlow}>＋ New flow</button>}
       {err && <div className="err">{err}</div>}
       {Object.entries(byTenant).map(([tenant, list]) => (
         <div key={tenant}>

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "./supabase";
+import { api } from "./api";
 import { Login } from "./auth/Login";
 import { FlowList } from "./flows/FlowList";
 import { FlowEditor } from "./flows/FlowEditor";
@@ -10,6 +11,7 @@ import { RulesView } from "./rules/RulesView";
 
 export function App() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
+  const [role, setRole] = useState<string | null>(null);
   const [flowId, setFlowId] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [view, setView] = useState<"editor" | "runs" | "knowledge" | "rules">("editor");
@@ -19,6 +21,22 @@ export function App() {
     const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
     return () => sub.subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    if (!session) return;
+    const rank: Record<string, number> = { owner: 3, editor: 2, viewer: 1 };
+    api
+      .listTenants()
+      .then((rows) => {
+        const best = rows
+          .map((r) => r.role)
+          .sort((a, b) => (rank[b] ?? 0) - (rank[a] ?? 0))[0];
+        setRole(best ?? null);
+      })
+      .catch(() => setRole(null));
+  }, [session]);
+
+  const canEdit = role === "owner" || role === "editor";
 
   if (session === undefined) return <div style={{ padding: 20 }}>…</div>;
   if (session === null) return <Login />;
@@ -41,14 +59,20 @@ export function App() {
               Rules
             </button>
           </div>
-          <button onClick={() => supabase.auth.signOut()} title={session.user.email ?? ""}>
-            sign out
-          </button>
+          <div className="row" style={{ gap: 6 }}>
+            {role && !canEdit && (
+              <span className="pill" title="your access is view-only">view-only</span>
+            )}
+            <button onClick={() => supabase.auth.signOut()} title={session.user.email ?? ""}>
+              sign out
+            </button>
+          </div>
         </div>
         {view === "editor" && (
           <FlowList
             key={reloadKey}
             activeId={flowId}
+            canEdit={canEdit}
             onSelect={setFlowId}
             onCreated={(id) => {
               setReloadKey((k) => k + 1);
@@ -81,6 +105,7 @@ export function App() {
           <FlowEditor
             key={flowId}
             flowId={flowId}
+            canEdit={canEdit}
             onSaved={() => setReloadKey((k) => k + 1)}
             onDeleted={() => {
               setFlowId(null);
