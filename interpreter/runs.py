@@ -68,15 +68,14 @@ def record_run(flow: dict, final: dict, *, case: dict, source: str = "api",
         return None
 
     # Phase 16: a task_dispatch node raised an action_requests row with no
-    # run_id (the run didn't exist yet) — link it now.
-    outcome = (final.get("outcome") or {})
-    if run_id and outcome.get("action_request_id"):
+    # run_id (the run didn't exist yet) — link it now. `action_request_id`
+    # is a top-level state key so it survives a later terminal node.
+    ar_id = final.get("action_request_id") or (final.get("outcome") or {}).get("action_request_id")
+    if run_id and ar_id:
         try:
-            sb.table("action_requests").update({"run_id": run_id}) \
-                .eq("id", outcome["action_request_id"]).execute()
+            sb.table("action_requests").update({"run_id": run_id}).eq("id", ar_id).execute()
         except Exception as e:  # noqa: BLE001
-            log.warning("could not link action_request %s to run %s: %s",
-                        outcome["action_request_id"], run_id, e)
+            log.warning("could not link action_request %s to run %s: %s", ar_id, run_id, e)
 
     # close the loop later: if this went to a human on a real Case, schedule a
     # resolution check (Phase 11). Best-effort.

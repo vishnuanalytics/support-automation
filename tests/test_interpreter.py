@@ -547,6 +547,25 @@ def test_policy_first_match_priority_and_status():
     assert policy.first_match(rules, {"tier": "basic"}) is None
 
 
+def test_jobs_claim_ignores_an_all_null_row():
+    """claim_job() (RETURNS SETOF jobs) can hand back a single all-NULL row
+    on an empty queue — that must read as 'nothing to do', not a job with
+    id 'None' (which then 400s downstream)."""
+    from interpreter import jobs
+
+    class _RPC:
+        def __init__(self, data): self._d = data
+        def execute(self): return type("R", (), {"data": self._d})()
+
+    class _SB:
+        def __init__(self, data): self._d = data
+        def rpc(self, _name): return _RPC(self._d)
+
+    assert jobs.claim(sb=_SB([])) is None
+    assert jobs.claim(sb=_SB([{"job_id": None, "kind": None}])) is None
+    assert jobs.claim(sb=_SB([{"job_id": "j1", "kind": "run_flow"}]))["kind"] == "run_flow"
+
+
 def test_slack_verify_signature():
     from interpreter import slack
 
