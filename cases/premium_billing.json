@@ -1,0 +1,7 @@
+{
+  "case_id": "CASE-1002",
+  "subject": "Unexpected charge after upgrading my plan",
+  "body": "We upgraded from the Team plan to Professional mid-cycle and were charged the full amount immediately. I expected a prorated charge. Can you explain how proration works and whether this invoice is correct?",
+  "account": { "name": "Northwind Ltd", "customer_type": "premium", "region": "EMEA" },
+  "contact": { "name": "Priya Nair", "email": "priya@northwind.example" }
+}

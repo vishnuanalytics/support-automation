@@ -67,7 +67,7 @@ schema, not as production logic.
 |---|---|---|
 | 0 | Flow-definition schema (`flows`/`flow_nodes`/`flow_edges`), RLS, tenant isolation | **Complete** — migrated, seeded, verified in Supabase |
 | 1 | Zapier docs RAG ingestion: sitemap scrape → content-hash diff → chunk → embed → Supabase + Neo4j, daily via cron | **Complete (2026-08-28)** — `004`+`005` schema live. `scraper.py`: 401 docs / 3568 chunks / 920 links in Supabase, `fastembed` embeddings. `neo4j_sync.py` against Aura: 401 Doc + 25 stub nodes, 63 Section, 396 IN_SECTION / 56 SUBSECTION_OF / 920 LINKS_TO. Retrieval eval (`eval/`, 48 Q): dense baseline hit@3 1.00 / MRR@10 0.94. Committed + pushed (`6d56f42`); `.github/workflows/daily-sync.yml` cron **live and verified green** (run 33195499360 — remote incremental no-op: scrape `skipped: 401`, Neo4j idempotent). |
-| 2 | Config-driven LangGraph interpreter: reads a flow row from Supabase, builds a real `StateGraph`, single hand-seeded flow | Not started |
+| 2 | Config-driven LangGraph interpreter: reads a flow row from Supabase, builds a real `StateGraph`, single hand-seeded flow | **Complete (2026-08-29)** — `interpreter/` package: `loader` (Supabase→dict + `validate_flow.check_flow` reuse), `builder` (dict→compiled `StateGraph`, conditional routing), `registry` (7 node handlers), `conditions` (safe AST eval of edge `if`), `retrieval` (hybrid dense+sparse→RRF→Neo4j expand→cross-encoder rerank), `llm` (Groq free-model roster + offline stub). Runs the Phase 0 seed flow end-to-end on all 3 sample cases → correct branch each (auto_reply / ask_human / handover). `006` (tenant_members RLS policy) + `007` (`match_doc_chunks` / `_fts` / `_hybrid` SQL fns) applied. 8/8 offline unit tests green. Eval: `run_eval.py --strategy all` — dense 0.944 / sparse 0.613 / hybrid 0.861 / hybrid+rerank 0.941 MRR@10 (dense at ceiling on this corpus; rerank matches it, degrades gracefully on harder ones — see `eval/README.md`). Optional follow-up: a real-Groq smoke run once a key is in `.env` (stub mode is by design). |
 | 3 | Salesforce field write-back (case module/region/account/contact) from the classify node's output; Chatter-mention as the "ask human" mechanism | Not started |
 | 4 | Multi-tenant/multi-flow: prove several different flow configs run correctly | Not started (schema already supports it — `tenant_id`/`flow_id` built in from Phase 0) |
 | 5 | React Flow UI reading/writing the same flow schema — drag nodes, edit thresholds, toggle auto-send, pause per team/condition | Not started |
@@ -221,37 +221,78 @@ Files delivered: `004_docs_ingestion_schema.sql`, `005_docs_rag_metadata.sql`,
 
 ## Immediate next step
 
-Phase 1 is **complete and verified** (2026-08-28) — scrape, embeddings
-(`fastembed`), Neo4j graph, retrieval eval baseline, and the daily GitHub
-Actions cron are all live and green. Nothing outstanding there.
+**Phase 2 is nearly done** (2026-08-29). The `interpreter/` package is built
+and verified offline; what's in the repo:
 
-**Start Phase 2: the config-driven LangGraph interpreter.**
+- `interpreter/loader.py` — `load_flow(flow_id | tenant+team)` → flow dict,
+  then `validate_flow.check_flow` (refs / orphans / cycles). No `006`-style
+  schema change was needed for the interpreter itself — Phase 0's
+  `flows`/`flow_nodes`/`flow_edges` already carried everything.
+- `interpreter/builder.py` — flow dict → compiled LangGraph `StateGraph`.
+  Entry = unique no-incoming node; terminals → `END`; a source with any
+  conditional out-edge routes via `add_conditional_edges` (first `if` that
+  evals true; empty-condition edge = `else`).
+- `interpreter/registry.py` — `type` string → handler. 7 handlers:
+  `retrieve` `classify` `draft` `confidence_gate` `auto_reply` `ask_human`
+  `handover`. `confidence_gate` score =
+  `retrieval_weight·retrieval_score + (1−w)·draft_confidence` vs the
+  per-tier threshold from node `config`.
+- `interpreter/conditions.py` — safe AST-whitelist evaluator for edge
+  `{"if": "..."}` (no `eval()`); rewrites `.pass` → `["pass"]` so the seed's
+  `confidence_gate.pass` parses.
+- `interpreter/retrieval.py` — hybrid dense (`match_doc_chunks`) + sparse
+  (`match_doc_chunks_fts`) → RRF → Neo4j `LINKS_TO` graph-expansion →
+  `fastembed` `TextCrossEncoder` (`ms-marco-MiniLM-L-6-v2`, local) rerank →
+  top squashed score feeds `confidence_gate`.
+- `interpreter/llm.py` — Groq free-model roster; **deterministic offline
+  stub when `GROQ_API_KEY` is unset** so the graph runs in CI/eval/demo.
+- `interpreter/run.py` — CLI. `cases/*.json` — 3 sample cases.
+- `tests/test_interpreter.py` — 8 offline tests (conditions, validation,
+  wiring, routing), all green.
 
-1. Add migration `006` only if the interpreter needs new columns — first
-   check whether the Phase 0 `flows` / `flow_nodes` / `flow_edges` schema
-   already carries everything (it was designed to). Reuse `validate_flow.py`
-   for referential-integrity + cycle checks before building a graph.
-2. Build the type registry (`type` string → handler fn) and the
-   `StateGraph` builder that reads one `flows` row + its nodes/edges from
-   Supabase. Hand-seed a single flow (extend `003_seed_example_flow.sql`
-   pattern / `flow_support_example.json`), not production logic.
-3. Retrieval is a Phase 2 node: hybrid dense+sparse → RRF → Neo4j
-   graph-expansion → cross-encoder rerank → feed top rerank score into
-   `confidence_gate`. Designed, not built — see the RAG-method notes.
-   When building it, add the SQL retrieval functions (`match_doc_chunks`,
-   hybrid) and extend `eval/run_eval.py` with sparse/hybrid strategies to
-   compare against the dense baseline (hit@3 1.00 / MRR@10 0.94).
+Migrations applied to `mjohgmivnxfwkqmlojqs`: **`006_tenant_members_rls`**
+(self-membership read policy — closes the `rls_enabled_no_policy` advisor)
+and **`007_retrieval_functions`** (`match_doc_chunks` / `_fts` / `_hybrid`,
+all `set search_path`). `eval/run_eval.py` gained `--strategy
+{dense,sparse,hybrid,hybrid_rerank,all}`.
+
+**Phase 2 is done and committed.** Optional: drop a `GROQ_API_KEY` in `.env`
+and re-run `python -m interpreter.run --flow 11111111-1111-1111-1111-111111111111
+--case cases/premium_billing.json` to see real drafts instead of stubs
+(routing/gating is identical either way).
+
+**Next: Phase 3 — Salesforce write-back.**
+1. Personal SF Developer Edition org (see cost constraints). `simple-salesforce`
+   or the REST API directly.
+2. `classify` output (`topic`/`urgency`/`region` + the case's tier) → write
+   back to Case fields (module/region/account/contact). This is a new node
+   type (`sf_writeback`) + registry entry — no migration.
+3. `ask_human` currently just records `channel: salesforce_chatter` in the
+   outcome. Phase 3 makes it real: post a Chatter @mention on the Case.
+4. Extend `cases/*.json` with a real SF Case id shape, or pull a live Case.
 
 Default to Groq for any LLM calls (classification, draft generation).
 
 ## Known issues / debt
 
-- `tenant_members` has RLS enabled with **no policy** (Supabase advisor
-  `rls_enabled_no_policy`). The `flows` RLS policies sub-select from
-  `tenant_members`, so under a normal authenticated session that sub-select
-  returns nothing and a user can't see their own flows. Works today only
-  because everything runs as service-role. Fix before Phase 2 wires a real
-  auth'd client — add a policy letting a user read their own membership
-  rows.
+- ~~`tenant_members` RLS enabled with no policy~~ — **fixed** in `006`
+  (`self_membership_read`: a user may `select` their own membership rows).
+  Advisor cleared. The interpreter still runs as service-role; this only
+  starts mattering when a Phase 4/5 auth'd client loads a flow.
 - `vector` extension lives in `public` (advisor `extension_in_public`).
   Cosmetic for now; move to an `extensions` schema if it's ever a concern.
+- **Local dev env:** this box has no `python3.12-venv` package and system
+  Python is PEP-668 externally-managed. `venv/` was bootstrapped with
+  `python -m venv --system-site-packages --without-pip` + `get-pip.py`
+  (Phase 1 deps resolve from `~/.local`; `venv/` adds `langgraph`, `groq`).
+  If `venv/` is ever rebuilt, do the same, or `apt install python3.12-venv`
+  first. GitHub Actions is unaffected (fresh `pip install -r
+  requirements.txt`).
+- Remote migration history also has a `007b_retrieval_functions_search_path`
+  row — a hotfix already folded into `007_retrieval_functions.sql` (the repo
+  file is canonical). `001`–`004` were never recorded in
+  `supabase_migrations` (applied via SQL editor pre-CLI-baseline); `005`
+  onward are.
+- `classify` reads `tier` straight from the case's `account.customer_type`
+  (mapped via `_TIER_ALIASES`); the LLM only fills `topic`/`urgency`/
+  `summary`. Real tier should come from Salesforce in Phase 3.

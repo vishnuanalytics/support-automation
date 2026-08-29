@@ -6,4 +6,6 @@ fastembed
 supabase
 neo4j
 python-dotenv
- 
+numpy
+langgraph
+groq

@@ -1,0 +1,7 @@
+{
+  "case_id": "CASE-1003",
+  "subject": "Production Zaps failing intermittently with 500 errors since this morning",
+  "body": "Since ~08:00 UTC a large share of our production Zaps are erroring with 500s on the action step. This is impacting order processing for our customers. We need someone on this urgently.",
+  "account": { "name": "Globex Enterprise", "customer_type": "enterprise", "region": "AMER" },
+  "contact": { "name": "Alex Chen", "email": "alex@globex.example" }
+}

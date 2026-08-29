@@ -80,13 +80,15 @@ def find_cycle(nodes: list[FlowNode], edges: list[FlowEdge]) -> list[str] | None
     return None
 
 
-def validate(path: str) -> None:
-    with open(path) as f:
-        raw = json.load(f)
-
-    flow = Flow.model_validate(raw)
+def check_flow(flow: "Flow", *, require_expected_types: bool = True) -> list[str]:
+    """
+    Structural checks on an already-parsed Flow. Returns a list of error
+    strings (empty == valid). Used both by the CLI below and by the Phase 2
+    interpreter's loader, which builds a `Flow` straight from Supabase rows
+    rather than a file -- one validator, not two.
+    """
     node_ids = {n.node_id for n in flow.nodes}
-    errors = []
+    errors: list[str] = []
 
     # referential integrity: every edge must point at real nodes
     for e in flow.edges:
@@ -102,14 +104,25 @@ def validate(path: str) -> None:
         if n.node_id not in connected:
             errors.append(f"node '{n.node_id}' ({n.type}) is not connected to any edge")
 
-    present_types = {n.type for n in flow.nodes}
-    missing = EXPECTED_TYPES - present_types
-    if missing:
-        errors.append(f"flow is missing expected node types: {missing}")
+    if require_expected_types:
+        present_types = {n.type for n in flow.nodes}
+        missing = EXPECTED_TYPES - present_types
+        if missing:
+            errors.append(f"flow is missing expected node types: {missing}")
 
     cycle = find_cycle(flow.nodes, flow.edges)
     if cycle:
         errors.append(f"flow contains a cycle: {' -> '.join(cycle)}")
+
+    return errors
+
+
+def validate(path: str) -> None:
+    with open(path) as f:
+        raw = json.load(f)
+
+    flow = Flow.model_validate(raw)
+    errors = check_flow(flow)
 
     if errors:
         print(f"INVALID: {path}")
