@@ -70,6 +70,16 @@ def test_phase16_endpoints_and_node_types():
 def test_flows_requires_a_bearer_token():
     assert client.get("/api/flows").status_code == 401
     assert client.get("/api/flows", headers={"Authorization": "Basic xyz"}).status_code == 401
+    assert client.get("/api/tenants").status_code == 401
+
+
+def test_flow_create_no_longer_requires_a_tenant_id():
+    """Phase 18a — `tenant_id` is optional on the create body (inferred from
+    the caller's membership); still needs a token."""
+    from api.main import FlowCreate
+
+    FlowCreate(team="support", name="n")   # no tenant_id -> valid
+    assert client.post("/api/flows", json={"team": "support", "name": "n"}).status_code == 401
 
 
 @pytest.mark.parametrize("flow, expect_substr", [
@@ -191,6 +201,28 @@ def test_run_returns_a_run_id(auth_headers):
     body = r.json()
     assert r.status_code == 200 and body["run_id"] and body["outcome"]["action"] in (
         "auto_reply", "ask_human", "handover")
+
+
+@pytest.mark.integration
+def test_tenants_lists_the_callers_membership(auth_headers):
+    rows = client.get("/api/tenants", headers=auth_headers).json()
+    assert rows and all(r["tenant_id"] == "22222222-2222-2222-2222-222222222222" for r in rows)
+    assert all("role" in r for r in rows)
+
+
+@pytest.mark.integration
+def test_create_flow_infers_the_tenant_when_omitted(auth_headers):
+    from supabase import create_client
+
+    fid = client.post("/api/flows", headers=auth_headers,
+                      json={"team": "csm", "name": "pytest-infer-tenant"}).json()["flow_id"]
+    try:
+        row = client.get("/api/flows", headers=auth_headers).json()
+        mine = next(f for f in row if f["flow_id"] == fid)
+        assert mine["tenant_id"] == "22222222-2222-2222-2222-222222222222"
+    finally:
+        create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"]) \
+            .table("flows").delete().eq("flow_id", fid).execute()
 
 
 @pytest.fixture

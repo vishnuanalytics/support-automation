@@ -22,13 +22,12 @@ export function FlowList({
   }, []);
 
   async function newFlow() {
-    const tenant_id = prompt("tenant_id (uuid)");
-    if (!tenant_id) return;
-    const team = prompt("team (support / csm / offboarding / …)");
-    if (!team) return;
-    const name = prompt("flow name") || "Untitled flow";
+    // tenant is inferred from the caller's membership — no id to type
+    const team = prompt("team (support / csm / offboarding / …)", "support");
+    if (!team?.trim()) return;
+    const name = (prompt("flow name", "Untitled flow") || "Untitled flow").trim();
     try {
-      const { flow_id } = await api.createFlow({ tenant_id, team, name });
+      const { flow_id } = await api.createFlow({ team: team.trim(), name });
       onCreated(flow_id);
     } catch (e) {
       alert((e as ApiError).message);

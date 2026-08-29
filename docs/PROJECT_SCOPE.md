@@ -134,6 +134,19 @@ cross-run clarify loop. All four built + verified — Phase 17 COMPLETE
 | 17c | Inspector forms for `clarify`/`identify`; palette + `NodeCard` terminal styling; `need_info` outcome pill + Runs surfacing; `clarify.auto_send` real outbound delivery. | **Built + verified (2026-08-29).** `salesforce.send_case_reply(case_id, body, *, to_email, subject, tenant_id)` — `emailSimple` invocable action when a recipient is known (actually sends), else a public `CaseComment`; dry-run without creds, never raises. `h_clarify` rewrite: `auto_send=true` + `sf_id` → `send_case_reply` (recipient from `sender.email` / `case.contact.email` / `case.from`), sets `clarification.auto_sent` + `outcome.{sent_to_customer,awaiting_customer}`; `auto_send=false` keeps the Chatter-to-an-agent path. `clarify` added to the web `TERMINAL` set (`graph.ts` + `FlowEditor.tsx`). **Inspector** (`Inspector.tsx`): `ClarifyForm` (`max_questions` / `channel` / `auto_send` toggle with an explanation) + `IdentifyForm` (`email_field`, `domain_match`, `create_lead_if_missing`, `free_email_domains` textarea). **Runs** (`RunsView.tsx`): `need_info` in the outcome filter, `.pill.need_info` (accent), and a "waiting on the customer" banner in the detail listing the questions from the `clarify` trace step (+ "identity check" / "sent" vs "for an agent to send"). **Verify:** 68 offline pytest green (+2 — `send_case_reply` dry-run, `h_clarify` auto-send emails the recipient); web tsc + vitest (5) + `vite build` green. Live e2e: unknown-sender benign case → `need_info`, `awaiting_customer=false` (auto_send off), `ask_identity=true`, 3 questions in the trace. |
 | 17d | Cross-run clarify loop: correlate runs by Case id, `clarify_round` counter, cap at 2 → then force `ask_human`. | **Built + live-verified (2026-08-29).** Migration `031`: `runs.clarify_round int`. `h_clarify` queries `runs` for prior `need_info` rows on the same `case_id` (`config._sb` injectable; best-effort — a failed lookup = round 1) → `clarify_round = prior_max + 1`; once `clarify_round > config.max_rounds` (default 2) it emits `outcome.action='ask_human'` / reason `clarify_exhausted` with the outstanding questions attached, and `auto_send` is forced off (no point asking again). `clarify_round` is a top-level `CaseState` key; `runs.build_row` persists it. **Verify:** 71 offline pytest green (+3 — round increments from prior runs, exhausted→`ask_human`, `build_row` persists the round). **Live e2e**: same `case_id` run 3× through `d4d4d4d4-…` → `need_info` (round 1) → `need_info` (round 2) → `ask_human` `clarify_exhausted` (round 3); `runs.clarify_round` = 1/2/3. |
 
+**Phase 18 = team access — invitations + roles (view / edit) + real
+sign-in (added 2026-08-29). Chunks: 18a one-click New flow · 18b roles
+(`owner`/`editor`/`viewer`) enforced in RLS + UI · 18c `tenant_invitations`
+(owner invites email+role; claimed on first login) · 18d Google
+sign-in button. Build + verify one chunk at a time.**
+
+| Phase | Scope | Status |
+|---|---|---|
+| 18a | **One-click New flow.** `＋ New flow` no longer prompts for a `tenant_id` — the API infers it from the caller's membership. | **Built + live-verified (2026-08-29).** `FlowCreate.tenant_id` now optional; `create_flow` calls the existing `_caller_tenant(c, None)` (single membership → that tenant; several → 400 asking for one; not-a-member → 403). New `GET /api/tenants` → `[{tenant_id, role}]` for the caller (the UI's tenant picker / prompt-skip). Web: `api.listTenants()`; `FlowList.newFlow()` drops the uuid prompt, keeps team (default `support`) + name. **Verify:** 72 offline pytest green (+1 — `FlowCreate` valid without `tenant_id`, `/tenants` 401 without a token) + 2 integration; web tsc/vitest green. **Live e2e**: `GET /api/tenants` → `[{"00000000-…","owner"}]`; `POST /api/flows {team,name}` (no tenant_id) → 201, flow landed in `00000000-…`. |
+| 18b | Roles `owner`/`editor`/`viewer` on `tenant_members` (col exists). Migration `032`: split RLS on `flows`/`flow_nodes`/`flow_edges`/`flow_versions`/`policy_rules`/KB tables — SELECT any member, write only `owner\|editor`. Web hides Save/Publish/New/Delete for `viewer`. | Planned. |
+| 18c | `tenant_invitations (id, tenant_id, email, role, invited_by, status, created_at, accepted_at)` + RLS. API `POST/GET/DELETE /api/invitations` (owner) + auto-claim on `auth.users` insert (trigger matches email → `tenant_members` row with the invited role). Web: a **Team** panel. No email infra — an invite pre-authorises an address + role. | Planned. |
+| 18d | **Continue with Google** button on `Login.tsx` (`supabase.auth.signInWithOAuth`). New-user-no-invite screen. Needs the Supabase dashboard Google provider + a Google OAuth web client redirect (`…supabase.co/auth/v1/callback`) — operator steps, not code. | Planned. |
+
 ## Phase 0 — schema (complete)
 
 Tables (Supabase/Postgres):
@@ -631,9 +644,9 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**Phases 0–17 built and verified. No open phase.** Migrations
-`001`–`031` applied. 71 offline pytest tests + web tsc/vitest/build +
-`tests/test_multiflow.py` (needs Groq quota).
+**Phases 0–17 complete; Phase 18 (team access) open — 18a done, 18b–d
+planned.** Migrations `001`–`031` applied. 72 offline pytest tests + web
+tsc/vitest/build + `tests/test_multiflow.py` (needs Groq quota).
 Every external integration has now been exercised end-to-end against a
 real account: **Salesforce** (Phase 3, JWT), **Google Docs** (Phase 15,
 OAuth → link → sync), **Slack + GitHub** (Phase 16, offboarding case →
@@ -707,21 +720,30 @@ correlating the customer's reply back to the open `need_info` run
 automatically (today the re-enqueue works, the round count is by
 `case_id`).
 
-**Uncommitted from this session** (about to be committed):
+Phase 17 (a–d) is committed + merged to `main` (PR #2, `20bdeda`).
 
-- **Phase 17 (a–d)** — `interpreter/{registry,state,builder,llm,salesforce,runs}.py`,
-  `interpreter/flows/flow_retrieval_gated.json`,
-  `db/migrations/029_*.sql`..`031_*.sql`, `tests/test_interpreter.py`,
-  `web/src/flows/{Inspector,FlowEditor,graph}.{tsx,ts}`,
-  `web/src/runs/RunsView.tsx`, `web/src/index.css`, this file.
-  Migrations `029`–`031` already applied to the live project.
-- **Editor UI bug-fixes** (from earlier this session) —
-  `web/src/flows/FlowEditor.tsx` (edge-selection: `onConnect` selects the
-  new edge, explicit `onNodeClick`/`onEdgeClick`/`onPaneClick`; palette
-  wraps into a bordered panel) + `web/src/index.css` (`.canvas-wrap`
-  `overflow: hidden`).
-- A **Slack-approval demo flow** built in the Acme tenant during testing
-  (data only, no repo change): flow `781cf1cc-…` (team
+### Resume here — Phase 18b (roles)
+
+18a is done: `POST /api/flows` infers the tenant, `GET /api/tenants`
+exists, `＋ New flow` no longer asks for a uuid. **Uncommitted** —
+`api/main.py`, `web/src/api.ts`, `web/src/flows/FlowList.tsx`,
+`tests/test_api.py`, this file.
+
+**18b** — `tenant_members.role` (`owner` / `editor` / `viewer`; the col
+already exists, everyone is currently `owner`). Migration `032`:
+replace the single `ALL`-verb RLS policy on `flows`, `flow_nodes`,
+`flow_edges`, `flow_versions`, `policy_rules`, `kb_entries`, `sources`
+(`kind='internal_kb'`) with **SELECT** for any member + **INSERT/UPDATE/
+DELETE** gated on `role in ('owner','editor')` (mirror
+`002_rls_and_constraints.sql`). Web: `App.tsx` reads the caller's role
+from `GET /api/tenants`; hide Save / Publish / ＋ New flow / Delete /
+rollback for `viewer` (a read-only badge). Then **18c** invitations,
+**18d** Google button.
+
+Standing context (unchanged):
+
+- A **Slack-approval demo flow** was built in the Acme tenant during
+  testing (data only, no repo change): flow `781cf1cc-…` (team
   `support-approvals`) + rule `a30b7d42-…` (`entities.refund_amount`>0 →
   Slack Approve/Reject in channel `C0BTPTFNXS8` → GitHub issue in
   `vishnuanalytics/support-automation`). The tenant `00000000-…` Slack

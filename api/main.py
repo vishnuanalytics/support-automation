@@ -191,10 +191,10 @@ class FlowIn(BaseModel):
 
 
 class FlowCreate(BaseModel):
-    tenant_id: str
     team: str
     name: str
     status: str = "draft"
+    tenant_id: str | None = None   # optional — inferred from the caller's membership
 
 
 class RunIn(BaseModel):
@@ -274,12 +274,21 @@ def list_flows(c: Caller = Depends(caller)) -> list[dict]:
     return rows
 
 
+@app.get("/api/tenants")
+def list_tenants(c: Caller = Depends(caller)) -> list[dict]:
+    """The caller's tenant memberships — the UI uses this to pick a tenant
+    for a new flow (or skip the prompt when there's exactly one)."""
+    return (c.sb.table("tenant_members").select("tenant_id, role")
+            .eq("user_id", c.user_id).execute().data or [])
+
+
 @app.post("/api/flows", status_code=201)
 def create_flow(body: FlowCreate, c: Caller = Depends(caller)) -> dict:
+    tenant_id = _caller_tenant(c, body.tenant_id)   # infer when not given
     fid = str(uuid.uuid4())
     try:
         c.sb.table("flows").insert({
-            "flow_id": fid, "tenant_id": body.tenant_id, "team": body.team,
+            "flow_id": fid, "tenant_id": tenant_id, "team": body.team,
             "name": body.name, "status": body.status, "version": 1,
         }).execute()
     except Exception as e:  # noqa: BLE001  -- RLS / unique-published violation

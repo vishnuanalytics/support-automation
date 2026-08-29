@@ -53,7 +53,8 @@ export class ApiError extends Error {
 export const api = {
   nodeTypes: () => req<NodeTypesResp>("/node-types"),
   listFlows: () => req<FlowMeta[]>("/flows"),
-  createFlow: (b: { tenant_id: string; team: string; name: string; status?: string }) =>
+  listTenants: () => req<{ tenant_id: string; role: string }[]>("/tenants"),
+  createFlow: (b: { team: string; name: string; status?: string; tenant_id?: string }) =>
     req<{ flow_id: string }>("/flows", { method: "POST", body: JSON.stringify(b) }),
   getFlow: (id: string) => req<Flow>(`/flows/${id}`),
   saveFlow: (id: string, b: Partial<Flow>) =>
