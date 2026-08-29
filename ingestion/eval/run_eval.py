@@ -35,7 +35,10 @@ import numpy as np
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 from ingestion.scraper import get_embedder, get_supabase  # noqa: E402  reuse client + model
 
-QRELS_PATH = pathlib.Path(__file__).with_name("qrels.jsonl")
+QRELS = {
+    "base": pathlib.Path(__file__).with_name("qrels.jsonl"),
+    "hard": pathlib.Path(__file__).with_name("qrels_hard.jsonl"),
+}
 # bge-small-en-v1.5: prepend this to queries only (not passages) for s2p retrieval.
 QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages: "
 KS = (1, 3, 5, 10)
@@ -47,15 +50,13 @@ RERANK_MODEL = "Xenova/ms-marco-MiniLM-L-6-v2"
 STRATEGIES = ("dense", "sparse", "hybrid", "hybrid_rerank")
 
 
-def load_qrels() -> list[dict]:
-    rows = []
-    with open(QRELS_PATH) as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                rows.append(json.loads(line))
+def load_qrels(which: str = "base") -> list[dict]:
+    path = QRELS[which]
+    if not path.exists():
+        sys.exit(f"{path} not found")
+    rows = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
     if not rows:
-        sys.exit(f"no questions found in {QRELS_PATH}")
+        sys.exit(f"no questions found in {path}")
     return rows
 
 
@@ -234,9 +235,13 @@ def main() -> None:
         choices=(*STRATEGIES, "all"),
         help="retrieval strategy to score (default: dense)",
     )
+    ap.add_argument(
+        "--qrels", default="base", choices=("base", "hard"),
+        help="which question set (default: base = qrels.jsonl; hard = qrels_hard.jsonl)",
+    )
     args = ap.parse_args()
 
-    qrels = load_qrels()
+    qrels = load_qrels(args.qrels)
     sb = get_supabase()
     questions = [q["question"] for q in qrels]
 

@@ -13,10 +13,10 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from interpreter import conditions, salesforce
+from interpreter import conditions, groundedness, salesforce
 from interpreter.builder import FlowBuildError, FlowRoutingError, build_graph
 from interpreter.flows.validate_flow import Flow, check_flow
-from interpreter.registry import h_ask_human, h_sf_writeback, register
+from interpreter.registry import _norm_tier, h_ask_human, h_confidence_gate, h_sf_writeback, register
 from interpreter.runs import build_row
 
 # hermetic: a populated .env (SF creds, GROQ key) must not turn these into
@@ -268,6 +268,38 @@ def test_build_row_shapes_a_runs_record():
     # retrieval is slimmed — no chunk_text
     assert row["retrieval"] == [{"doc_url": "https://x/a", "heading_path": "A", "rerank_score": 7.1}]
     assert "chunk_text" not in row["retrieval"][0]
+
+
+# --------------------------------------------------------------------------
+# Phase 7 — fail-closed tier, groundedness, gate weighting
+# --------------------------------------------------------------------------
+def test_norm_tier_fails_closed_on_unknown():
+    assert _norm_tier("enterprise") == "enterprise"
+    assert _norm_tier("Professional") == "premium"
+    assert _norm_tier("free") == "basic"
+    # unknown -> strictest, not "basic"
+    assert _norm_tier("platinum-plus") == "enterprise"
+    assert _norm_tier(None) == "enterprise"
+
+
+def test_groundedness_lexical_flags_offcorpus_draft():
+    chunks = [{"chunk_text": "Configure the webhook URL in the trigger settings and send a test event."}]
+    good = groundedness.check("Set the webhook URL in the trigger settings, then send a test event.", chunks)
+    bad = groundedness.check("Contact your account manager about the quantum blockchain refund policy.", chunks)
+    assert good["backend"] == "lexical" and good["score"] > bad["score"]
+    assert bad["score"] < 0.5
+
+
+def test_confidence_gate_groundedness_weight_pulls_score_down():
+    base_state = {"tier": "basic", "retrieval_score": 0.9, "draft_confidence": 0.9,
+                  "groundedness": {"score": 0.0}}
+    cfg = {"_node_id": "g", "default_threshold": 0.5,
+           "tier_overrides": {"basic": 0.5}, "retrieval_weight": 0.5}
+    no_w = h_confidence_gate(base_state, {**cfg, "groundedness_weight": 0.0})["confidence_gate"]
+    with_w = h_confidence_gate(base_state, {**cfg, "groundedness_weight": 0.5})["confidence_gate"]
+    assert no_w["score"] == 0.9 and no_w["pass"] is True
+    # 0.5*(0.5*0.9 + 0.5*0.9) + 0.5*0.0 = 0.45 -> below the 0.5 bar
+    assert with_w["score"] == 0.45 and with_w["pass"] is False
 
 
 # --------------------------------------------------------------------------
