@@ -132,7 +132,7 @@ def main() -> int:
 
     print(f"summary: {divergences} topic(s) where teams retrieved different top docs; "
           f"{conflicts} judged as conflicting"
-          + ("" if llm.available() else "  (judging skipped — no GROQ_API_KEY)"))
+          + ("" if llm.available() else "  (judging skipped — no LLM key)"))
     return 0
 
 

@@ -314,6 +314,34 @@ def test_confidence_gate_groundedness_weight_pulls_score_down():
 
 
 # --------------------------------------------------------------------------
+# llm provider routing (Groq + Anthropic)
+# --------------------------------------------------------------------------
+def test_llm_provider_routing_and_stub_fallback(monkeypatch):
+    from interpreter import llm
+
+    assert llm.provider("llama-3.1-8b-instant") == "groq"
+    assert llm.provider("claude-haiku-4-5") == "anthropic"
+    assert llm.provider("claude-sonnet-5") == "anthropic"
+
+    for k in ("GROQ_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    assert llm.available() is False
+    # a Claude model with no ANTHROPIC key -> deterministic stub, no exception
+    out = llm.complete("classify", "billing dispute about an invoice",
+                       model="claude-sonnet-5", json_object=True)
+    assert '"_stub": true' in out and '"topic": "billing"' in out
+
+    # a key for the *other* provider doesn't make a claude call "available"
+    monkeypatch.setenv("GROQ_API_KEY", "x")
+    assert llm.available("claude-sonnet-5") is False
+    assert llm.available("llama-3.1-8b-instant") is True
+    assert llm.available() is True
+
+    with pytest.raises(ValueError):
+        llm.complete("s", "u", model="gpt-4o")   # not in the roster
+
+
+# --------------------------------------------------------------------------
 # Phase 12 — source scoping (cross-tenant isolation)
 # --------------------------------------------------------------------------
 class _FakeSources:

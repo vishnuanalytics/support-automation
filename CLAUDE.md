@@ -65,10 +65,13 @@ complete.** Phases **7–13 are the hardening roadmap** — still sequential.
   content.
 - **Free/local tooling by default.** Local embeddings via `fastembed`
   (quantised ONNX `bge-small-en-v1.5`, CPU-only, no torch), not a paid
-  embedding API. For LLM calls in
-  code, default to Groq (`llama-3.3-70b-versatile` or
-  `llama-3.1-8b-instant`) over Anthropic/OpenAI APIs unless a step
-  specifically needs something Groq can't do.
+  embedding API. For LLM calls in code the **default provider is Groq**
+  (`llama-3.3-70b-versatile` / `llama-3.1-8b-instant`). `interpreter/llm.py`
+  also supports **Anthropic** (`claude-opus-5` / `claude-sonnet-5` /
+  `claude-haiku-4-5`) as an opt-in — routed by the model id in a node's
+  `config.model`, or flipped wholesale with `LLM_DEFAULT_MODEL` /
+  `LLM_FAST_MODEL` in `.env`. Don't change the seed flows' models or the
+  Groq default without a reason.
 - **Validate before you trust a flow JSON.** Reuse/extend
   `interpreter/flows/validate_flow.py` (referential integrity + cycle
   detection) rather than writing a second validator.
