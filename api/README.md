@@ -54,3 +54,11 @@ A run that ends in `ask_human`/`handover` on a real Case is stamped
 (EmailMessage / CaseComment) and diffs it against `runs.draft` →
 `human_action` (`sent_as_is`/`edited`/`rewrote`/`no_reply`) + `edit_distance`.
 `/runs/stats` reports `draft_acceptance` and `by_human_action`.
+
+## Auth & limits (Phase 13)
+
+`caller` **verifies** the bearer token by calling `GET
+{SUPABASE_URL}/auth/v1/user` (authoritative — checks signature, expiry,
+revocation; no JWT secret needed), cached 60 s. A missing / malformed /
+forged token → 401; an auth-service outage → 503 (fails closed).
+Per-user in-process rate limits: `/run` 20/min, `/enqueue` 120/min → 429.
