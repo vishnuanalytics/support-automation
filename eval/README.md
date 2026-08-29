@@ -10,34 +10,53 @@ retrieval tuning against.
   `{"id", "question", "relevant_urls": [...], "section"}`. `relevant_urls`
   are the doc URLs that should be retrieved for that question (usually one;
   a few have two acceptable docs). Hand-written from the live corpus.
-- **`run_eval.py`** — embeds each question with the scraper's model
-  (`BAAI/bge-small-en-v1.5` + bge query instruction), ranks all
-  `doc_chunks` by cosine similarity, collapses to unique doc URLs, and
-  reports `hit@k` (k = 1/3/5/10) and `MRR@10`.
+- **`run_eval.py`** — for each strategy, ranks `doc_chunks`, collapses to
+  unique doc URLs, and reports `hit@k` (k = 1/3/5/10) and `MRR@10`.
 
 ## Run
 
 ```
-python eval/run_eval.py      # needs .env (SUPABASE_URL, SUPABASE_SERVICE_KEY)
+python eval/run_eval.py                     # dense baseline (default)
+python eval/run_eval.py --strategy hybrid
+python eval/run_eval.py --strategy all      # all four, side by side
 ```
+Needs `.env` (`SUPABASE_URL`, `SUPABASE_SERVICE_KEY`). `sparse` / `hybrid` /
+`hybrid_rerank` call the `007` SQL functions; `hybrid_rerank` also loads the
+local `ms-marco-MiniLM-L-6-v2` cross-encoder (`--strategy all` ≈ 6 min on
+CPU, most of it the rerank).
 
-## Baseline — dense only (2026-08-28, 3568 chunks)
+## Strategies
 
-| metric | value |
+| strategy | how |
 |---|---|
-| hit@1 | 0.896 (43/48) |
-| hit@3 | 1.000 |
-| hit@5 | 1.000 |
-| MRR@10 | 0.944 |
+| `dense` | `bge-small-en-v1.5` cosine over all chunks, ranked in numpy (Phase 1 baseline) |
+| `sparse` | Postgres FTS on `doc_chunks.fts` → `match_doc_chunks_fts` |
+| `hybrid` | dense + sparse, RRF-fused in SQL → `match_doc_chunks_hybrid` |
+| `hybrid_rerank` | `hybrid` candidates, then local cross-encoder rerank — what `interpreter/retrieval.py` runs |
 
-Dense retrieval alone already puts the right doc in the top 3 for every
-question on this small, clean corpus. The 5 questions that miss at rank 1
-are near-duplicate doc pairs (e.g. a `build/` guide vs. its `reference/`
-tutorial).
+## Results (2026-08-29, 3568 chunks, 48 questions)
 
-## Not covered yet (Phase 2)
+| strategy | hit@1 | hit@3 | hit@5 | MRR@10 |
+|---|---|---|---|---|
+| dense (baseline) | **0.896** | **1.000** | 1.000 | **0.944** |
+| sparse (FTS) | 0.562 | 0.667 | 0.708 | 0.613 |
+| hybrid (RRF, SQL) | 0.771 | 0.958 | 0.958 | 0.861 |
+| hybrid + rerank | 0.896 | 1.000 | 1.000 | 0.941 |
 
-Sparse (Postgres FTS on `doc_chunks.fts`), dense+sparse RRF fusion, Neo4j
-graph-expansion, and cross-encoder rerank. When the Phase 2
-`match_doc_chunks` / hybrid SQL functions exist, add them as extra
-strategies in `run_eval.py` and compare against this baseline.
+**Read:** on this small, clean, well-written corpus dense retrieval is
+already at ceiling (right doc in top-3 for every question). Sparse alone is
+much weaker — the questions are paraphrases, not keyword matches, so
+vocabulary mismatch hurts. Naively RRF-fusing sparse *in* pulls MRR down
+(0.944 → 0.861): the weak lexical ranks displace correct dense hits. The
+cross-encoder rerank on top then re-floats them and lands right back at the
+dense baseline (MRR 0.941). So hybrid+rerank costs ~nothing here and is what
+the interpreter uses because it degrades gracefully as the corpus grows
+noisier and as queries get more keyword-shaped (error strings, API names,
+version numbers) — none of which this 400-doc eval set exercises.
+
+## Not covered yet
+
+Neo4j graph-expansion is wired in `interpreter/retrieval.py` but not scored
+here (it adds recall, not top-1 precision, so it barely moves these metrics
+on a corpus where dense is already at ceiling). A larger / noisier qrels set
+that actually separates the strategies would be the next eval investment.

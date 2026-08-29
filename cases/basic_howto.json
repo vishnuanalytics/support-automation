@@ -1,0 +1,7 @@
+{
+  "case_id": "CASE-1001",
+  "subject": "How do I create a webhook trigger in a Zap?",
+  "body": "I'm on the free plan and want my Zap to run whenever my app sends a POST request to a URL. How do I get the webhook URL and test that it's receiving data?",
+  "account": { "name": "Indie Dev", "customer_type": "basic", "region": "AMER" },
+  "contact": { "name": "Sam Rivera", "email": "sam@indie.example" }
+}
