@@ -9,3 +9,4 @@ python-dotenv
 numpy
 langgraph
 groq
+simple-salesforce

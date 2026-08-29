@@ -14,7 +14,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from interpreter import conditions
 from interpreter.builder import FlowBuildError, FlowRoutingError, build_graph
-from interpreter.registry import register
+from interpreter.registry import h_ask_human, h_sf_writeback, register
 from validate_flow import Flow, check_flow
 
 
@@ -165,6 +165,54 @@ def test_router_raises_when_no_branch_matches():
         pass
     else:
         raise AssertionError("expected FlowRoutingError when nothing matches and no default")
+
+
+# --------------------------------------------------------------------------
+# Phase 3 — sf_writeback + Chatter ask_human (offline / dry-run)
+# --------------------------------------------------------------------------
+_SFW_CFG = {
+    "_node_id": "sfw", "_label": "sf",
+    "field_map": {"urgency": "Priority", "topic": "Module__c", "region": "Region__c"},
+    "value_maps": {"Priority": {"critical": "High", "high": "High",
+                                "normal": "Medium", "low": "Low"}},
+    "append": {"Description": "summary"},
+}
+
+
+def test_sf_writeback_maps_fields_dry_run():
+    state = {
+        "case": {"sf_id": "500XXXXXXXXXXXXXXX"},
+        "tier": "premium", "region": "EMEA",
+        "classification": {"urgency": "high", "topic": "billing", "summary": "charge looks wrong"},
+    }
+    out = h_sf_writeback(state, _SFW_CFG)["sf_writeback"]
+    assert out["dry_run"] is True
+    planned = out["planned"]
+    assert planned["Priority"] == "High"          # value-mapped
+    assert planned["Module__c"] == "billing"
+    assert planned["Region__c"] == "EMEA"
+    assert "Description" in planned               # summary append planned
+
+
+def test_sf_writeback_no_sf_id_is_a_skip_not_an_error():
+    state = {"case": {}, "tier": "basic", "classification": {"urgency": "low", "topic": "x"}}
+    res = h_sf_writeback(state, _SFW_CFG)
+    assert res["sf_writeback"]["target"] is None
+    assert res["sf_writeback"]["written"] == {}
+    assert res["trace"][0]["type"] == "sf_writeback"
+
+
+def test_ask_human_posts_chatter_dry_run_when_sf_id_present():
+    state = {"case": {"sf_id": "500XXXXXXXXXXXXXXX"}, "confidence": 0.3, "draft": "try this"}
+    outcome = h_ask_human(state, {"_node_id": "ah", "channel": "salesforce_chatter"})["outcome"]
+    assert outcome["action"] == "ask_human"
+    assert outcome["chatter"]["dry_run"] is True
+
+
+def test_ask_human_without_sf_id_just_records_channel():
+    state = {"case": {}, "confidence": 0.3, "draft": "try this"}
+    outcome = h_ask_human(state, {"_node_id": "ah", "channel": "salesforce_chatter"})["outcome"]
+    assert "chatter" not in outcome
 
 
 # --------------------------------------------------------------------------

@@ -68,7 +68,7 @@ schema, not as production logic.
 | 0 | Flow-definition schema (`flows`/`flow_nodes`/`flow_edges`), RLS, tenant isolation | **Complete** — migrated, seeded, verified in Supabase |
 | 1 | Zapier docs RAG ingestion: sitemap scrape → content-hash diff → chunk → embed → Supabase + Neo4j, daily via cron | **Complete (2026-08-28)** — `004`+`005` schema live. `scraper.py`: 401 docs / 3568 chunks / 920 links in Supabase, `fastembed` embeddings. `neo4j_sync.py` against Aura: 401 Doc + 25 stub nodes, 63 Section, 396 IN_SECTION / 56 SUBSECTION_OF / 920 LINKS_TO. Retrieval eval (`eval/`, 48 Q): dense baseline hit@3 1.00 / MRR@10 0.94. Committed + pushed (`6d56f42`); `.github/workflows/daily-sync.yml` cron **live and verified green** (run 33195499360 — remote incremental no-op: scrape `skipped: 401`, Neo4j idempotent). |
 | 2 | Config-driven LangGraph interpreter: reads a flow row from Supabase, builds a real `StateGraph`, single hand-seeded flow | **Complete (2026-08-29)** — `interpreter/` package: `loader` (Supabase→dict + `validate_flow.check_flow` reuse), `builder` (dict→compiled `StateGraph`, conditional routing), `registry` (7 node handlers), `conditions` (safe AST eval of edge `if`), `retrieval` (hybrid dense+sparse→RRF→Neo4j expand→cross-encoder rerank), `llm` (Groq free-model roster + offline stub). Runs the Phase 0 seed flow end-to-end on all 3 sample cases → correct branch each (auto_reply / ask_human / handover). `006` (tenant_members RLS policy) + `007` (`match_doc_chunks` / `_fts` / `_hybrid` SQL fns) applied. 8/8 offline unit tests green. Eval: `run_eval.py --strategy all` — dense 0.944 / sparse 0.613 / hybrid 0.861 / hybrid+rerank 0.941 MRR@10 (dense at ceiling on this corpus; rerank matches it, degrades gracefully on harder ones — see `eval/README.md`). Optional follow-up: a real-Groq smoke run once a key is in `.env` (stub mode is by design). |
-| 3 | Salesforce field write-back (case module/region/account/contact) from the classify node's output; Chatter-mention as the "ask human" mechanism | Not started |
+| 3 | Salesforce field write-back (case module/region/account/contact) from the classify node's output; Chatter-mention as the "ask human" mechanism | **Complete (2026-08-29)** — `interpreter/salesforce.py` (username-token auth; real when SF creds in `.env`, else dry-run — same pattern as `llm.py`). New `sf_writeback` node handler: config-driven `field_map` (`urgency`→`Priority` w/ value-map, `topic`→`Module__c`, `region`→`Region__c`, `summary` appended to `Description`), tolerant of missing custom fields (drops + reports). `ask_human` with `channel: salesforce_chatter` now posts a Chatter FeedItem @mention (Connect API, FeedItem fallback). Migration `008` inserts `sf_writeback` into the seed flow (`classify → sf_writeback → draft`). `run.py --sf-case <Id>` pulls a live Case; `cases/*.json` may carry `sf_id`. `scripts/sf_seed_cases.py` creates test Accounts/Contacts/Cases. `SALESFORCE_SETUP.md` documents the two custom fields + creds. 12/12 offline tests green (4 new). All 4 sample cases run clean (dry-run). **Open:** a live run against a real DE org (needs creds + the 2 custom fields). |
 | 4 | Multi-tenant/multi-flow: prove several different flow configs run correctly | Not started (schema already supports it — `tenant_id`/`flow_id` built in from Phase 0) |
 | 5 | React Flow UI reading/writing the same flow schema — drag nodes, edit thresholds, toggle auto-send, pause per team/condition | Not started |
 | 6 | Observability: manager reporting on low-confidence cases, per-case "why did the bot respond this way" chat, conflicting-SOP detection across teams | Not started |
@@ -221,55 +221,35 @@ Files delivered: `004_docs_ingestion_schema.sql`, `005_docs_rag_metadata.sql`,
 
 ## Immediate next step
 
-**Phase 2 is nearly done** (2026-08-29). The `interpreter/` package is built
-and verified offline; what's in the repo:
+**Phases 0–3 are complete** (see the phase table for what each delivered).
+The `interpreter/` package runs a Supabase-defined flow as a real LangGraph
+`StateGraph`; it retrieves (hybrid+rerank), classifies, writes triage back
+to Salesforce, drafts, gates on a per-tier confidence bar, and terminates in
+auto_reply / ask_human (Chatter) / handover. Migrations through `008` are
+applied to `mjohgmivnxfwkqmlojqs`. 12/12 offline tests green. All external
+calls (Groq, Salesforce) run real when creds are in `.env`, else
+deterministic dry-run — so `python -m interpreter.run --flow
+11111111-1111-1111-1111-111111111111 --case cases/<x>.json` works with an
+empty `.env`.
 
-- `interpreter/loader.py` — `load_flow(flow_id | tenant+team)` → flow dict,
-  then `validate_flow.check_flow` (refs / orphans / cycles). No `006`-style
-  schema change was needed for the interpreter itself — Phase 0's
-  `flows`/`flow_nodes`/`flow_edges` already carried everything.
-- `interpreter/builder.py` — flow dict → compiled LangGraph `StateGraph`.
-  Entry = unique no-incoming node; terminals → `END`; a source with any
-  conditional out-edge routes via `add_conditional_edges` (first `if` that
-  evals true; empty-condition edge = `else`).
-- `interpreter/registry.py` — `type` string → handler. 7 handlers:
-  `retrieve` `classify` `draft` `confidence_gate` `auto_reply` `ask_human`
-  `handover`. `confidence_gate` score =
-  `retrieval_weight·retrieval_score + (1−w)·draft_confidence` vs the
-  per-tier threshold from node `config`.
-- `interpreter/conditions.py` — safe AST-whitelist evaluator for edge
-  `{"if": "..."}` (no `eval()`); rewrites `.pass` → `["pass"]` so the seed's
-  `confidence_gate.pass` parses.
-- `interpreter/retrieval.py` — hybrid dense (`match_doc_chunks`) + sparse
-  (`match_doc_chunks_fts`) → RRF → Neo4j `LINKS_TO` graph-expansion →
-  `fastembed` `TextCrossEncoder` (`ms-marco-MiniLM-L-6-v2`, local) rerank →
-  top squashed score feeds `confidence_gate`.
-- `interpreter/llm.py` — Groq free-model roster; **deterministic offline
-  stub when `GROQ_API_KEY` is unset** so the graph runs in CI/eval/demo.
-- `interpreter/run.py` — CLI. `cases/*.json` — 3 sample cases.
-- `tests/test_interpreter.py` — 8 offline tests (conditions, validation,
-  wiring, routing), all green.
+**Optional live smoke tests (need creds, not blocking Phase 4):**
+- `GROQ_API_KEY` → real drafts/classification instead of stubs.
+- SF creds + the 2 custom fields (`SALESFORCE_SETUP.md`) → `python
+  scripts/sf_seed_cases.py` then `python -m interpreter.run --flow <id>
+  --sf-case <Id>` to see a real field write + Chatter post.
 
-Migrations applied to `mjohgmivnxfwkqmlojqs`: **`006_tenant_members_rls`**
-(self-membership read policy — closes the `rls_enabled_no_policy` advisor)
-and **`007_retrieval_functions`** (`match_doc_chunks` / `_fts` / `_hybrid`,
-all `set search_path`). `eval/run_eval.py` gained `--strategy
-{dense,sparse,hybrid,hybrid_rerank,all}`.
-
-**Phase 2 is done and committed.** Optional: drop a `GROQ_API_KEY` in `.env`
-and re-run `python -m interpreter.run --flow 11111111-1111-1111-1111-111111111111
---case cases/premium_billing.json` to see real drafts instead of stubs
-(routing/gating is identical either way).
-
-**Next: Phase 3 — Salesforce write-back.**
-1. Personal SF Developer Edition org (see cost constraints). `simple-salesforce`
-   or the REST API directly.
-2. `classify` output (`topic`/`urgency`/`region` + the case's tier) → write
-   back to Case fields (module/region/account/contact). This is a new node
-   type (`sf_writeback`) + registry entry — no migration.
-3. `ask_human` currently just records `channel: salesforce_chatter` in the
-   outcome. Phase 3 makes it real: post a Chatter @mention on the Case.
-4. Extend `cases/*.json` with a real SF Case id shape, or pull a live Case.
+**Next: Phase 4 — multi-tenant / multi-flow.** Schema already supports it
+(`tenant_id` / `flow_id` from Phase 0; `uq_one_published_flow_per_team`).
+1. Hand-seed 2–3 more flows: a second tenant, and/or a different team
+   (`csm`, `offboarding`) with different node configs / thresholds /
+   `field_map`s. Migration `009+` in the `003`/`008` seed style.
+2. Prove `load_flow(tenant_id=…, team=…)` + `build_graph` run each correctly
+   and in isolation — same interpreter, different data. Add a test that
+   loads every seeded flow and invokes it on a sample case.
+3. Exercise the RLS story: a non-service-role client with a
+   `tenant_members` row sees only its tenant's flows (the `006` policy plus
+   the Phase 0 `flows` policies). This is the first real use of auth'd
+   access.
 
 Default to Groq for any LLM calls (classification, draft generation).
 
@@ -295,4 +275,17 @@ Default to Groq for any LLM calls (classification, draft generation).
   onward are.
 - `classify` reads `tier` straight from the case's `account.customer_type`
   (mapped via `_TIER_ALIASES`); the LLM only fills `topic`/`urgency`/
-  `summary`. Real tier should come from Salesforce in Phase 3.
+  `summary`. From Salesforce (`--sf-case`) that value is `Account.Tier__c`
+  if the org has it, else the standard `Account.Type` picklist — whose
+  values aren't `basic/premium/enterprise`, so tier falls back to `basic`.
+  Add a `Tier__c` picklist on Account for a faithful demo (`SALESFORCE_SETUP.md`).
+- Phase 3 SF integration is verified **dry-run only** — no live DE org was
+  connected this session. `sf_writeback` / Chatter real paths
+  (`simple-salesforce`, Connect API mention) are written but untested
+  against a real org; the custom fields `Case.Module__c` / `Case.Region__c`
+  must be created first (writes are tolerant if not, but then only
+  `Priority` + `Description` land).
+- Chatter @mention uses the Connect API (`connect/records/feed-elements`)
+  with a plain-`FeedItem` fallback. In a single-user DE org the mention
+  target defaults to the running user unless `ask_human.config.mention_id`
+  is set.
