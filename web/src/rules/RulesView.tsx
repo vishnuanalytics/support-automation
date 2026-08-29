@@ -78,7 +78,7 @@ export function RulesView() {
   }
 
   return (
-    <div className="col" style={{ padding: 16, gap: 16, overflow: "auto" }}>
+    <div className="col" style={{ padding: 16, gap: 16, height: "100%", overflow: "auto" }}>
       <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
         <div className="row" style={{ gap: 8 }}>
           <strong>Policy rules</strong>

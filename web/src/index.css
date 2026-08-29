@@ -62,6 +62,10 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .flow-item.active { background: var(--panel-2); outline: 1px solid var(--accent); }
 
 .editor { display: grid; grid-template-rows: 44px 1fr; height: 100%; min-width: 0; }
+/* right pane for the non-editor views (Runs / Knowledge / Rules) — they
+   manage their own internal scroll, so this must NOT be the 44px/1fr grid */
+.pane { height: 100%; min-width: 0; min-height: 0; overflow: hidden; }
+.pane-empty { display: grid; place-items: center; height: 100%; }
 .toolbar { display: flex; gap: 8px; align-items: center; padding: 0 10px; border-bottom: 1px solid var(--border); background: var(--panel); }
 .workarea { display: grid; grid-template-columns: 1fr 360px; min-height: 0; }
 .canvas-wrap { position: relative; min-width: 0; }

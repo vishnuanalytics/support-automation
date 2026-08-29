@@ -70,7 +70,7 @@ export function App() {
           </div>
         )}
       </div>
-      <div className="editor">
+      <div className={view === "editor" && flowId ? "editor" : "pane"}>
         {view === "rules" ? (
           <RulesView />
         ) : view === "knowledge" ? (
@@ -88,9 +88,7 @@ export function App() {
             }}
           />
         ) : (
-          <div style={{ display: "grid", placeItems: "center" }} className="muted">
-            select or create a flow
-          </div>
+          <div className="pane-empty muted">select or create a flow</div>
         )}
       </div>
     </div>
