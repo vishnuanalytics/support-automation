@@ -42,8 +42,8 @@
       "config": {
         "default_threshold": 0.5,
         "tier_overrides": { "basic": 0.5, "premium": 0.55, "enterprise": 0.6 },
-        "retrieval_weight": 0.5,
-        "groundedness_weight": 0.2
+        "weights": { "retrieval": 0.55, "draft": 0.1, "groundedness": 0.35 },
+        "escalate_topics": ["billing", "refund", "pricing", "compliance", "legal", "account-access", "data-export", "partner-api", "cancellation"]
       }
     },
     {
