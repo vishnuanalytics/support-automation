@@ -54,3 +54,37 @@ python -m ingestion.sources.gdoc_sync --once
 Add it to `.github/workflows/daily-sync.yml` (or its own schedule). It
 re-exports only docs whose Drive `modifiedTime` moved since the last sync;
 auth failures set `kb_entries.sync_error` and leave the current content.
+
+---
+
+# Google sign-in for the editor (Phase 18d)
+
+Separate from the Docs connector above — this is "Continue with Google" on
+the **login page**, handled by Supabase Auth (not our API). The button is
+always visible; it just fails with a provider error until the dashboard is
+configured.
+
+## 1. OAuth web client (reuse the Phase 15 project or a new one)
+
+**APIs & Services → Credentials →** your OAuth **Web** client:
+- **Authorised redirect URIs** — add
+  `https://<your-project-ref>.supabase.co/auth/v1/callback`
+  (this project: `https://mjohgmivnxfwkqmlojqs.supabase.co/auth/v1/callback`).
+- **Authorised JavaScript origins** — add `http://localhost:5173`
+  (and your deployed web origin in prod).
+
+## 2. Supabase dashboard
+
+- **Authentication → Providers → Google** → enable; paste the client
+  **ID** and **secret**.
+- **Authentication → URL Configuration** → Site URL and Additional
+  Redirect URLs: `http://localhost:5173` (+ prod origin).
+
+No API restart or `.env` change needed — it's all Supabase-side.
+
+## 3. Access
+
+Signing in with Google only authenticates. A new user still needs a
+`tenant_members` row: an owner invites their email in the **Team** tab
+(Phase 18c), and `App.tsx`'s `acceptInvitations()` claims it on their
+first sign-in. No invite → the "no workspace yet" screen.
