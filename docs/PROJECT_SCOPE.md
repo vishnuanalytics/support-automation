@@ -53,9 +53,11 @@ schema, not as production logic.
   (`.github/workflows/daily-sync.yml`), not a local machine — see cron note
   in Phase 1. Incremental runs only re-embed changed pages.
 - For LLM calls in code (draft generation, classification), **default to
-  Groq** (`llama-3.3-70b-versatile` or `llama-3.1-8b-instant`) over
-  Anthropic/OpenAI APIs, unless a step specifically needs a capability Groq
-  doesn't have.
+  Groq** (`openai/gpt-oss-120b` for drafting, `openai/gpt-oss-20b` for
+  classification / judges) over Anthropic/OpenAI APIs, unless a step
+  specifically needs a capability Groq doesn't have. Groq retired the
+  `llama-3.x` names in 2026; migration `017_llm_model_ids.sql` repointed
+  the seeded `draft` nodes and re-snapshotted the published versions.
 - Supabase (Postgres + pgvector) for relational + vector data. Neo4j for
   graph relations between docs/entities that pgvector can't express well.
 - No paid Salesforce/HubSpot tier — using a personal Salesforce Developer

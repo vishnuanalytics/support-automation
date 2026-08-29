@@ -24,13 +24,15 @@ from typing import Any
 
 # model id -> provider
 MODELS: dict[str, str] = {
-    # Groq (free tier — https://console.groq.com)
-    "llama-3.3-70b-versatile": "groq",
-    "llama-3.1-8b-instant": "groq",
-    "openai/gpt-oss-20b": "groq",
+    # Groq (free tier — https://console.groq.com; llama-3.x names were retired)
     "openai/gpt-oss-120b": "groq",
-    "gemma2-9b-it": "groq",
-    "qwen/qwen3-32b": "groq",
+    "openai/gpt-oss-20b": "groq",
+    "qwen/qwen3.8-27b": "groq",
+    "qwen/qwen3.6-27b": "groq",
+    "groq/compound": "groq",
+    "groq/compound-mini": "groq",
+    "llama-3.3-70b-versatile": "groq",   # legacy — kept so old flow configs don't KeyError
+    "llama-3.1-8b-instant": "groq",
     # Anthropic (paid — opt in with ANTHROPIC_API_KEY)
     "claude-opus-5": "anthropic",
     "claude-sonnet-5": "anthropic",
@@ -38,8 +40,8 @@ MODELS: dict[str, str] = {
 }
 FREE_MODELS = MODELS   # back-compat alias
 
-DEFAULT_MODEL = os.environ.get("LLM_DEFAULT_MODEL", "llama-3.3-70b-versatile")
-FAST_MODEL = os.environ.get("LLM_FAST_MODEL", "llama-3.1-8b-instant")
+DEFAULT_MODEL = os.environ.get("LLM_DEFAULT_MODEL", "openai/gpt-oss-120b")
+FAST_MODEL = os.environ.get("LLM_FAST_MODEL", "openai/gpt-oss-20b")
 
 _groq_client = None
 _anthropic_client = None

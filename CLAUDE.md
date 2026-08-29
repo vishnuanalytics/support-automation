@@ -66,7 +66,10 @@ complete.** Phases **7–13 are the hardening roadmap** — still sequential.
 - **Free/local tooling by default.** Local embeddings via `fastembed`
   (quantised ONNX `bge-small-en-v1.5`, CPU-only, no torch), not a paid
   embedding API. For LLM calls in code the **default provider is Groq**
-  (`llama-3.3-70b-versatile` / `llama-3.1-8b-instant`). `interpreter/llm.py`
+  (`openai/gpt-oss-120b` for `draft`, `openai/gpt-oss-20b` for
+  `classify` / judges — the `llama-3.x` names Groq retired in 2026 are
+  kept in the roster only so old flow configs don't `KeyError`).
+  `interpreter/llm.py`
   also supports **Anthropic** (`claude-opus-5` / `claude-sonnet-5` /
   `claude-haiku-4-5`) as an opt-in — routed by the model id in a node's
   `config.model`, or flipped wholesale with `LLM_DEFAULT_MODEL` /
