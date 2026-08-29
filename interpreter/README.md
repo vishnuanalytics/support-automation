@@ -12,6 +12,7 @@ registry.py    node.type (free string) -> handler fn
 conditions.py  edge.condition.if  -> safe boolean eval (AST whitelist, no eval())
 retrieval.py   hybrid dense+sparse -> RRF -> Neo4j graph-expand -> cross-encoder rerank
 llm.py         Groq free models, with a deterministic offline stub
+salesforce.py  Case read/write + Chatter, real when SF creds present, else dry-run
 state.py       CaseState (the shared graph state; `trace` is append-only)
 run.py         CLI
 ```
@@ -30,6 +31,9 @@ python -m interpreter.run --flow 11111111-1111-1111-1111-111111111111 \
 python -m interpreter.run --tenant 00000000-0000-0000-0000-000000000000 \
     --team support --status draft
 
+# pull a live Salesforce Case and run it (needs SF creds in .env)
+python -m interpreter.run --flow <id> --sf-case 500XXXXXXXXXXXXXXX
+
 # just print the wiring
 python -m interpreter.run --flow <id> --describe
 ```
@@ -40,13 +44,21 @@ LLM call to the real API — nothing else changes.
 
 ## The flow it runs
 
-Phase 0's 7-node Support flow (`003_seed_example_flow.sql`):
+Phase 0's Support flow (`003_seed_example_flow.sql`), + the `sf_writeback`
+node added in Phase 3 (`008_seed_sf_writeback_node.sql`):
 
 ```
-retrieve → classify → draft → confidence_gate ─┬─ [pass & tier≠enterprise]      → auto_reply
-                                               ├─ [¬pass & tier≠enterprise]     → ask_human
-                                               └─ [tier == enterprise]          → handover
+retrieve → classify → sf_writeback → draft → confidence_gate ─┬─ [pass & tier≠enterprise]  → auto_reply
+                                                              ├─ [¬pass & tier≠enterprise] → ask_human
+                                                              └─ [tier == enterprise]      → handover
 ```
+
+`sf_writeback` pushes `classify` output (`urgency`→`Priority`,
+`topic`→`Module__c`, `region`→`Region__c`, `summary` appended to
+`Description`) onto the Salesforce Case named by `case.sf_id`. `ask_human`
+with `channel: salesforce_chatter` posts a Chatter @mention on that Case.
+Both no-op cleanly when there's no `sf_id`, and dry-run (log intent) when
+there are no SF creds — see `../SALESFORCE_SETUP.md`.
 
 `confidence_gate` score = `retrieval_weight·retrieval_score + (1−retrieval_weight)·draft_confidence`,
 compared against a **per-tier** threshold

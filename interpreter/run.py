@@ -49,7 +49,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tenant", help="tenant_id (with --team)")
     ap.add_argument("--team", help="team (with --tenant)")
     ap.add_argument("--status", default="published", help="flow status when selecting by team")
-    ap.add_argument("--case", help="path to a case JSON file")
+    ap.add_argument("--case", help="path to a case JSON file (may carry an \"sf_id\")")
+    ap.add_argument("--sf-case", dest="sf_case", metavar="ID",
+                    help="pull this Salesforce Case Id and run it (needs SF creds in .env)")
     ap.add_argument("--describe", action="store_true", help="print wiring and exit")
     ap.add_argument("--json", action="store_true", help="emit final state as JSON")
     args = ap.parse_args(argv)
@@ -66,7 +68,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     graph = build_graph(flow)
-    case = _load_case(args.case)
+    if args.sf_case:
+        from .salesforce import get_case
+        case = get_case(args.sf_case)
+    else:
+        case = _load_case(args.case)
 
     print(describe_graph(flow))
     print(f"\nrunning case {case.get('case_id', '?')}: {case.get('subject', '')!r}\n")
@@ -76,10 +82,27 @@ def main(argv: list[str] | None = None) -> int:
     for i, step in enumerate(final.get("trace", []), 1):
         print(f"  {i}. [{step['type']}] {step['summary']}")
 
+    sfw = final.get("sf_writeback")
+    if sfw:
+        if not sfw.get("target"):
+            print(f"\nsalesforce: skipped ({sfw.get('status', 'no target')}); "
+                  f"planned={sfw.get('planned') or {}}")
+        elif sfw.get("dry_run"):
+            print(f"\nsalesforce [dry-run]: Case {sfw.get('target')} "
+                  f"would write {sfw.get('planned') or {}}")
+        else:
+            print(f"\nsalesforce [live]: Case {sfw.get('target')} "
+                  f"written={sfw.get('written') or {}} "
+                  f"skipped={list(sfw.get('skipped') or {})}")
+
     outcome = final.get("outcome", {})
     print(f"\noutcome: {outcome.get('action', '(none)')}")
     if outcome.get("action") in {"auto_reply", "ask_human", "handover"}:
         print(f"  tier={final.get('tier')}  confidence={final.get('confidence')}")
+        if outcome.get("chatter"):
+            c = outcome["chatter"]
+            print(f"  chatter: {'dry-run' if c.get('dry_run') else 'posted'} "
+                  f"mention={c.get('mention_id')} id={c.get('feed_element_id')}")
         draft = outcome.get("reply") or outcome.get("draft") or ""
         if draft:
             print("  draft:")

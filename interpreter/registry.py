@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from . import llm
+from . import llm, salesforce
 from .retrieval import hybrid_retrieve
 from .state import CaseState
 
@@ -143,6 +143,81 @@ def h_classify(state: CaseState, config: dict) -> dict:
     }
 
 
+@register("sf_writeback")
+def h_sf_writeback(state: CaseState, config: dict) -> dict:
+    """
+    Push triage output onto the Salesforce Case. Config-driven so Phase 5's
+    UI can edit the mapping without code:
+
+      config = {
+        "field_map":   {"urgency": "Priority", "topic": "Module__c",
+                        "region": "Region__c"},
+        "value_maps":  {"Priority": {"critical": "High", "high": "High",
+                                     "normal": "Medium", "low": "Low"}},
+        "append":      {"Description": "summary"}   # src key -> Case field
+      }
+
+    No `sf_id` on the case (synthetic/offline run) -> records a skip and
+    moves on. No SF creds -> salesforce.py dry-runs (logs the intended write).
+    """
+    case = state.get("case", {})
+    sf_id = case.get("sf_id") or case.get("id")
+    classification = state.get("classification") or {}
+    ctx: dict[str, Any] = {
+        "classification": classification,
+        "tier": state.get("tier"),
+        "region": state.get("region"),
+        "urgency": classification.get("urgency"),
+        "topic": classification.get("topic"),
+        "summary": classification.get("summary"),
+    }
+
+    field_map = config.get("field_map") or {
+        "urgency": "Priority", "topic": "Module__c", "region": "Region__c",
+    }
+    value_maps = config.get("value_maps") or {
+        "Priority": {"critical": "High", "high": "High", "normal": "Medium", "low": "Low"},
+    }
+    append_cfg = config.get("append") or {"Description": "summary"}
+
+    fields: dict[str, Any] = {}
+    for src, dest in field_map.items():
+        val = _dig(ctx, src) if "." in src else ctx.get(src)
+        if val in (None, ""):
+            continue
+        vm = value_maps.get(dest)
+        fields[dest] = vm.get(str(val).lower(), val) if vm else val
+
+    append = {}
+    for dest, src in append_cfg.items():
+        text = _dig(ctx, src) if "." in src else ctx.get(src)
+        if text:
+            append[dest] = f"[triage] {text}"
+
+    if not sf_id:
+        info = {
+            "target": None, "written": {}, "skipped": {}, "dry_run": True,
+            "planned": fields, "status": "no sf_id on case",
+        }
+        return {
+            "sf_writeback": info,
+            **_trace(config["_node_id"], "sf_writeback", "no sf_id — nothing written", info),
+        }
+
+    result = salesforce.update_case_fields(sf_id, fields, append=append)
+    result["target"] = sf_id
+    if result["dry_run"]:
+        summary = f"Case {sf_id} [dry-run] would write {list(result.get('planned') or {})}"
+    else:
+        summary = f"Case {sf_id} [live] wrote {list(result['written'])}"
+        if result["skipped"]:
+            summary += f", skipped {list(result['skipped'])}"
+    return {
+        "sf_writeback": result,
+        **_trace(config["_node_id"], "sf_writeback", summary, result),
+    }
+
+
 @register("draft")
 def h_draft(state: CaseState, config: dict) -> dict:
     case = state.get("case", {})
@@ -227,17 +302,36 @@ def h_auto_reply(state: CaseState, config: dict) -> dict:
 
 @register("ask_human")
 def h_ask_human(state: CaseState, config: dict) -> dict:
+    channel = config.get("channel", "salesforce_chatter")
+    case = state.get("case", {})
+    sf_id = case.get("sf_id") or case.get("id")
+    confidence = state.get("confidence")
     outcome = {
         "action": "ask_human",
-        "channel": config.get("channel", "salesforce_chatter"),
+        "channel": channel,
         "draft": state.get("draft", ""),
-        "confidence": state.get("confidence"),
+        "confidence": confidence,
         "reason": "confidence below tier threshold",
     }
-    return {
-        "outcome": outcome,
-        **_trace(config["_node_id"], "ask_human", f"handed to human via {outcome['channel']}"),
-    }
+
+    if channel == "salesforce_chatter" and sf_id:
+        body = (
+            f"Support bot needs a human on this case (confidence {confidence}). "
+            f"Suggested draft below — please review before sending.\n\n"
+            f"{state.get('draft', '')}"
+        )
+        chatter = salesforce.post_chatter(
+            sf_id, body, mention_id=config.get("mention_id")
+        )
+        outcome["chatter"] = chatter
+        mode = "dry-run" if chatter.get("dry_run") else "posted"
+        summary = f"Chatter {mode} on Case {sf_id}"
+    else:
+        summary = f"handed to human via {channel}"
+        if channel == "salesforce_chatter":
+            summary += " (no sf_id — not posted)"
+
+    return {"outcome": outcome, **_trace(config["_node_id"], "ask_human", summary, outcome)}
 
 
 @register("handover")

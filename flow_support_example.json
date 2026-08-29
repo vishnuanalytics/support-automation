@@ -19,6 +19,17 @@
       "config": { "tier_field": "account.customer_type", "region_field": "account.region" }
     },
     {
+      "node_id": "sf_writeback_1",
+      "type": "sf_writeback",
+      "label": "Write triage to Salesforce",
+      "config": {
+        "object": "Case",
+        "field_map": { "urgency": "Priority", "topic": "Module__c", "region": "Region__c" },
+        "value_maps": { "Priority": { "critical": "High", "high": "High", "normal": "Medium", "low": "Low" } },
+        "append": { "Description": "summary" }
+      }
+    },
+    {
       "node_id": "draft_1",
       "type": "draft",
       "label": "Draft reply",
@@ -54,7 +65,8 @@
   ],
   "edges": [
     { "source_node_id": "retrieve_1", "target_node_id": "classify_1", "condition": {} },
-    { "source_node_id": "classify_1", "target_node_id": "draft_1", "condition": {} },
+    { "source_node_id": "classify_1", "target_node_id": "sf_writeback_1", "condition": {} },
+    { "source_node_id": "sf_writeback_1", "target_node_id": "draft_1", "condition": {} },
     { "source_node_id": "draft_1", "target_node_id": "gate_1", "condition": {} },
     {
       "source_node_id": "gate_1",

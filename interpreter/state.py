@@ -34,6 +34,8 @@ class CaseState(TypedDict, total=False):
     region: str
     classification: dict[str, Any]    # {topic, urgency, summary, ...}
 
+    sf_writeback: dict[str, Any]      # {target, written, skipped, dry_run, ...} from the sf_writeback node
+
     draft: str                 # proposed reply text
     draft_confidence: float    # 0..1, model's own confidence in the draft
 

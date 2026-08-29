@@ -1,0 +1,9 @@
+{
+  "_comment": "Placeholder sf_id — replace with a real Salesforce Case Id (15/18-char, starts 500...), or ignore this file and use `--sf-case <id>` to pull a live Case. With SF creds in .env the sf_writeback + ask_human(chatter) nodes write for real; without creds they dry-run (log the intended calls).",
+  "sf_id": "500000000000000AAA",
+  "case_id": "CASE-SF-1",
+  "subject": "Prorated charge looks wrong after mid-cycle plan upgrade",
+  "body": "We moved from Team to Professional on the 12th and the invoice shows a full-period charge, not a prorated one. Please confirm how proration is calculated and whether this invoice is correct.",
+  "account": { "name": "Northwind Ltd", "customer_type": "premium", "region": "EMEA" },
+  "contact": { "name": "Priya Nair", "email": "priya@northwind.example" }
+}
