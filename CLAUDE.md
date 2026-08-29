@@ -25,22 +25,18 @@ Run modules from the repo root: `python -m ingestion.scraper`,
 ## Don't build ahead
 
 This project is built in explicit, sequenced phases (see
-`docs/PROJECT_SCOPE.md` for the phase table). **Phases 0–13 are built and
-complete** (0–6 the MVP, 7–13 the hardening roadmap; the Phase 7 gate
-re-calibration for real-LLM output landed in `019`). **Phases 14
-(self-serve internal KB) and 15 (Google Docs connector) are built —
-Phase 15 is live-unverified, needs `GOOGLE_CLIENT_ID`/`SECRET` in `.env`.
-Phase 16 (structured policy rules + Slack-approved actions) is planned —
-spec in `PROJECT_SCOPE.md`, no code yet.**
-**Do not jump ahead into a later phase while an earlier one is still open:**
+`docs/PROJECT_SCOPE.md` for the phase table). **All phases 0–16 are
+built** (0–6 the MVP; 7–13 the hardening roadmap; 14 self-serve internal
+KB; 15 Google Docs connector; 16 structured policy rules + Slack-approved
+GitHub actions). No open phase.
 
-- Open work: **Phase 16** (Phases 14 + 15 are built — migrations
-  `022`–`024`, `kb_lookup` node, Knowledge tab, `interpreter/gdrive.py`).
-  Phase 16's `policy_gate` supersedes `019`'s static `escalate_topics`
-  list.
+- Remaining work is **live verification of the external connectors**
+  (need creds: Phase 15 `GOOGLE_CLIENT_ID`/`SECRET`; Phase 16 a Slack app
+  + `GITHUB_TOKEN`) and polish (Phase 16 rule form builder; Phase 14 file
+  upload). See "Immediate next step" in `PROJECT_SCOPE.md`.
 - The hardening roadmap (7–13) was built in order **7 → 9 → 8 → 10 → 11 →
-  12 → 13** (eval + CI safety net before the structural changes in
-  8/10/12).
+  12 → 13**; 14 → 15 → 16 followed. New work still lands one verifiable
+  chunk at a time.
 - Don't expand scope mid-phase. Each roadmap phase is a small, verifiable
   chunk — land it and its verification before moving on.
 - If a task surfaces something that belongs to a later phase, note it in

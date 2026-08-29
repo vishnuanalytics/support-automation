@@ -25,7 +25,7 @@ import hashlib  # noqa: E402
 
 from ingestion.scraper import get_supabase  # noqa: E402
 from ingestion.sources.kb_common import embed_entry as _kb_embed  # noqa: E402
-from interpreter import feedback, jobs, salesforce  # noqa: E402
+from interpreter import feedback, github as githubmod, jobs, salesforce, slack as slackmod  # noqa: E402
 from interpreter.builder import build_graph  # noqa: E402
 from interpreter.loader import load_flow  # noqa: E402
 from interpreter.runs import record_run  # noqa: E402
@@ -46,7 +46,7 @@ def _run_flow(payload: dict, sb) -> dict:
             return {"run_id": dup[0]["run_id"], "idempotent_skip": True}
 
     flow = load_flow(flow_id=flow_id, sb=sb, status="published", validate=True)
-    final = build_graph(flow).invoke({"case": case, "tenant_id": flow["tenant_id"], "trace": []})
+    final = build_graph(flow).invoke({"case": case, "tenant_id": flow["tenant_id"], "team": flow.get("team"), "trace": []})
     run_id = record_run(flow, final, case=case, source="worker", sb=sb,
                         idempotency_key=key)
     return {"run_id": run_id, "outcome": (final.get("outcome") or {}).get("action")}
@@ -96,8 +96,47 @@ def _embed_kb_entry(payload: dict, sb) -> dict:
     return {"entry_id": eid, "chunks": n}
 
 
+def _create_github_issue(payload: dict, sb) -> dict:
+    """Phase 16 — a human approved a task_dispatch action in Slack."""
+    ar_id = payload["action_request_id"]
+    rows = sb.table("action_requests").select("*").eq("id", ar_id).execute().data
+    if not rows:
+        return {"action_request_id": ar_id, "skipped": "gone"}
+    ar = rows[0]
+    if ar["status"] not in ("approved",):
+        return {"action_request_id": ar_id, "skipped": f"status={ar['status']}"}
+    if ar.get("result"):
+        return {"action_request_id": ar_id, "idempotent_skip": True, **ar["result"]}
+
+    p = ar["payload"]
+    try:
+        token = githubmod.token_for(ar["tenant_id"], sb)
+        issue = githubmod.create_issue(
+            token, p["repo"], title=p["title"], body=p.get("body", ""),
+            labels=p.get("labels"), assignees=p.get("assignees"),
+        )
+    except Exception as e:  # noqa: BLE001
+        sb.table("action_requests").update({"status": "error", "error": str(e)[:500]}) \
+            .eq("id", ar_id).execute()
+        raise
+
+    sb.table("action_requests").update({
+        "status": "done", "result": issue,
+    }).eq("id", ar_id).execute()
+    try:
+        if ar.get("slack_channel") and ar.get("slack_ts") and slackmod.available():
+            slackmod.update_message(
+                ar["tenant_id"], ar["slack_channel"], ar["slack_ts"],
+                f":white_check_mark: *{p['title']}* — opened <{issue['html_url']}|"
+                f"{p['repo']}#{issue['number']}>", sb,
+            )
+    except Exception as e:  # noqa: BLE001
+        log.warning("slack update after issue failed: %s", e)
+    return {"action_request_id": ar_id, **issue}
+
+
 HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
-            "embed_kb_entry": _embed_kb_entry}
+            "embed_kb_entry": _embed_kb_entry, "create_github_issue": _create_github_issue}
 
 
 def process_one(sb) -> bool:

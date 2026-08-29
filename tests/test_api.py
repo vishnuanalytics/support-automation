@@ -54,6 +54,19 @@ def test_google_status_needs_a_token_but_callback_is_public():
     assert r.status_code == 200 and "failed" in r.text
 
 
+def test_phase16_endpoints_and_node_types():
+    body = client.get("/api/node-types").json()
+    for t in ("extract", "policy_gate", "task_dispatch"):
+        assert t in body["types"]
+    assert client.get("/api/rules").status_code == 401
+    assert client.post("/api/rules", json={"team": "x", "name": "y"}).status_code == 401
+    assert client.get("/api/action-requests").status_code == 401
+    assert client.get("/api/integrations/slack/status").status_code == 401
+    # slack interactions with a bad/missing signature -> 401
+    r = client.post("/api/integrations/slack/interactions", data={"payload": "{}"})
+    assert r.status_code == 401
+
+
 def test_flows_requires_a_bearer_token():
     assert client.get("/api/flows").status_code == 401
     assert client.get("/api/flows", headers={"Authorization": "Basic xyz"}).status_code == 401
@@ -312,3 +325,28 @@ def _kb_name(sid, headers):
         if c["source_id"] == sid:
             return c["name"]
     raise AssertionError("collection vanished")
+
+
+@pytest.mark.integration
+def test_policy_rule_crud(auth_headers):
+    from supabase import create_client
+
+    name = f"pytest-rule-{uuid.uuid4().hex[:8]}"
+    r = client.post("/api/rules", headers=auth_headers, json={
+        "team": "support", "name": name, "priority": 5,
+        "when": {"field": "tier", "op": "eq", "value": "premium"},
+        "then": {"type": "route", "action": "ask_human"},
+    })
+    assert r.status_code == 201, r.text
+    rid = r.json()["rule_id"]
+    assert r.json()["tenant_id"] == "22222222-2222-2222-2222-222222222222"
+
+    rows = client.get("/api/rules?team=support", headers=auth_headers).json()
+    assert any(x["rule_id"] == rid for x in rows)
+
+    p = client.patch(f"/api/rules/{rid}", headers=auth_headers, json={"status": "disabled"})
+    assert p.status_code == 200 and p.json()["status"] == "disabled"
+
+    assert client.delete(f"/api/rules/{rid}", headers=auth_headers).status_code == 204
+    create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"]) \
+        .table("policy_rules").delete().eq("rule_id", rid).execute()

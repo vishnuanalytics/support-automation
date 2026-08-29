@@ -31,8 +31,8 @@ import uuid
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client
@@ -47,7 +47,7 @@ from interpreter.loader import (  # noqa: E402
 from interpreter import jobs  # noqa: E402
 from interpreter.registry import known_types  # noqa: E402
 from interpreter.runs import record_run  # noqa: E402
-from interpreter import gdrive  # noqa: E402
+from interpreter import gdrive, github as githubmod, slack as slackmod  # noqa: E402
 from ingestion.sources.kb_common import delete_entry as _kb_delete, embed_entry as _kb_embed  # noqa: E402
 
 import hashlib  # noqa: E402
@@ -83,6 +83,9 @@ NODE_DEFAULTS: dict[str, dict[str, Any]] = {
     },
     "kb_lookup": {"collections": [], "top_k": 4, "use_rerank": True,
                   "min_score": 0.0, "out_key": "internal_kb"},
+    "extract": {"fields": {}},
+    "policy_gate": {},
+    "task_dispatch": {},
     "draft": {"model": "openai/gpt-oss-120b", "max_tokens": 900},
     "confidence_gate": {
         "default_threshold": 0.5,
@@ -426,7 +429,7 @@ def run_flow(
     except FlowInvalid as e:
         raise HTTPException(422, {"errors": e.errors})
     try:
-        final = build_graph(flow).invoke({"case": body.case, "tenant_id": flow["tenant_id"], "trace": []})
+        final = build_graph(flow).invoke({"case": body.case, "tenant_id": flow["tenant_id"], "team": flow.get("team"), "trace": []})
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"run failed: {type(e).__name__}: {e}")
 
@@ -846,3 +849,161 @@ def kb_resync_gdoc(eid: str, c: Caller = Depends(caller)) -> dict:
         "sync_error": None, "updated_by": c.user_id,
     }).eq("entry_id", eid).execute().data[0]
     return _kb_after_write(updated, col, c)
+
+
+# ── Phase 16: policy rules ───────────────────────────────────────────
+class RuleIn(BaseModel):
+    team: str
+    name: str
+    priority: int = 100
+    when: dict[str, Any] = {}
+    then: dict[str, Any] = {}
+    status: str = "active"
+    tenant_id: str | None = None
+
+
+class RulePatch(BaseModel):
+    name: str | None = None
+    priority: int | None = None
+    when: dict[str, Any] | None = None
+    then: dict[str, Any] | None = None
+    status: str | None = None
+
+
+@app.get("/api/rules")
+def list_rules(team: str | None = None, c: Caller = Depends(caller)) -> list[dict]:
+    q = c.sb.table("policy_rules").select("*")
+    if team:
+        q = q.eq("team", team)
+    return q.order("priority").execute().data or []
+
+
+@app.post("/api/rules", status_code=201)
+def create_rule(body: RuleIn, c: Caller = Depends(caller)) -> dict:
+    rate_limit(c.user_id, "rules_write", 60)
+    tenant_id = _caller_tenant(c, body.tenant_id)
+    row = {
+        "tenant_id": tenant_id, "team": body.team, "name": body.name,
+        "priority": body.priority, "when": body.when, "then": body.then,
+        "status": body.status, "created_by": c.user_id, "updated_by": c.user_id,
+    }
+    try:
+        return c.sb.table("policy_rules").insert(row).execute().data[0]
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(409, f"could not create rule: {e}")
+
+
+@app.patch("/api/rules/{rule_id}")
+def update_rule(rule_id: str, body: RulePatch, c: Caller = Depends(caller)) -> dict:
+    rate_limit(c.user_id, "rules_write", 60)
+    cur = c.sb.table("policy_rules").select("rule_id").eq("rule_id", rule_id).execute().data
+    if not cur:
+        raise HTTPException(404, "rule not found or not visible to you")
+    patch = {k: v for k, v in body.model_dump(exclude_none=True).items()}
+    patch["updated_by"] = c.user_id
+    return c.sb.table("policy_rules").update(patch).eq("rule_id", rule_id).execute().data[0]
+
+
+@app.delete("/api/rules/{rule_id}", status_code=204)
+def delete_rule(rule_id: str, c: Caller = Depends(caller)) -> None:
+    rate_limit(c.user_id, "rules_write", 60)
+    c.sb.table("policy_rules").delete().eq("rule_id", rule_id).execute()
+
+
+@app.get("/api/action-requests")
+def list_action_requests(limit: int = 50, c: Caller = Depends(caller)) -> list[dict]:
+    return (c.sb.table("action_requests").select("*")
+            .order("created_at", desc=True).limit(min(limit, 200)).execute().data or [])
+
+
+# ── Phase 16: Slack integration ─────────────────────────────────────
+SLACK_REDIRECT_URI = os.environ.get(
+    "SLACK_REDIRECT_URI", "http://localhost:8000/api/integrations/slack/callback"
+)
+
+
+@app.get("/api/integrations/slack/status")
+def slack_status(c: Caller = Depends(caller)) -> dict:
+    tenants = [r["tenant_id"] for r in
+               (c.sb.table("tenant_members").select("tenant_id").execute().data or [])]
+    return {"configured": slackmod.available(),
+            "connected": {t: slackmod.connected(t, _service) for t in tenants}}
+
+
+@app.get("/api/integrations/slack/authorize")
+def slack_authorize(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    if not slackmod.available():
+        raise HTTPException(503, "Slack is not configured on this server")
+    tid = _caller_tenant(c, tenant_id)
+    nonce = secrets.token_urlsafe(24)
+    _oauth_state[nonce] = (time.time() + 600, c.user_id, tid)
+    return {"url": slackmod.authorize_url(SLACK_REDIRECT_URI, nonce)}
+
+
+@app.get("/api/integrations/slack/callback")
+def slack_callback(code: str = "", state: str = "", error: str = "") -> HTMLResponse:
+    def page(msg: str) -> HTMLResponse:
+        return HTMLResponse(f"<!doctype html><meta charset=utf-8><p>{msg}</p>"
+                            "<script>setTimeout(()=>window.close(),1500)</script>")
+    if error:
+        return page(f"Slack authorisation failed: {error}")
+    hit = _oauth_state.pop(state, None)
+    if not hit or hit[0] < time.time():
+        return page("This authorisation link has expired — try again.")
+    _, _uid, tenant_id = hit
+    try:
+        tok = slackmod.exchange_code(code, SLACK_REDIRECT_URI)
+    except Exception as e:  # noqa: BLE001
+        return page(f"Could not complete Slack install: {e}")
+    _service.table("tenant_integrations").upsert({
+        "tenant_id": tenant_id, "kind": "slack",
+        "secret": {"bot_token": tok["bot_token"], "team": tok.get("team"),
+                   "bot_user_id": tok.get("bot_user_id")},
+    }).execute()
+    return page("Slack connected. You can close this window.")
+
+
+@app.post("/api/integrations/slack/interactions")
+async def slack_interactions(request: Request) -> PlainTextResponse:
+    raw = await request.body()
+    secret = os.environ.get("SLACK_SIGNING_SECRET", "")
+    if not secret or not slackmod.verify_signature(
+        secret, request.headers.get("X-Slack-Request-Timestamp", ""),
+        raw, request.headers.get("X-Slack-Signature", ""),
+    ):
+        raise HTTPException(401, "bad slack signature")
+
+    from urllib.parse import parse_qs
+    import json as _json
+    payload = _json.loads(parse_qs(raw.decode())["payload"][0])
+    action = (payload.get("actions") or [{}])[0]
+    ar_id = action.get("value")
+    decision = action.get("action_id")            # 'approve' | 'reject'
+    user = (payload.get("user") or {}).get("username") or (payload.get("user") or {}).get("id")
+    if not ar_id or decision not in ("approve", "reject"):
+        return PlainTextResponse("ignored")
+
+    rows = _service.table("action_requests").select("*").eq("id", ar_id).execute().data
+    if not rows:
+        return PlainTextResponse("unknown request")
+    ar = rows[0]
+    if ar["status"] != "pending":
+        return PlainTextResponse(f"already {ar['status']}")
+
+    new_status = "approved" if decision == "approve" else "rejected"
+    _service.table("action_requests").update({
+        "status": new_status, "decided_by": user, "decided_at": _now_iso(),
+    }).eq("id", ar_id).execute()
+
+    if new_status == "approved":
+        jobs.enqueue("create_github_issue", {"action_request_id": ar_id},
+                     dedupe_key=f"ghissue:{ar_id}", sb=_service)
+        msg = f":hourglass_flowing_sand: *{ar['payload'].get('title')}* — approved by {user}, opening the issue…"
+    else:
+        msg = f":no_entry: *{ar['payload'].get('title')}* — rejected by {user}."
+    try:
+        if ar.get("slack_channel") and ar.get("slack_ts"):
+            slackmod.update_message(ar["tenant_id"], ar["slack_channel"], ar["slack_ts"], msg, _service)
+    except Exception:  # noqa: BLE001
+        pass
+    return PlainTextResponse("ok")

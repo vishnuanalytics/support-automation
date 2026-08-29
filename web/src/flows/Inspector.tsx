@@ -34,6 +34,18 @@ export function NodeInspector({
         <KbLookupForm config={config} onConfig={onConfig} />
       )}
 
+      {node.data.nodeType === "extract" && (
+        <ExtractForm config={config} onConfig={onConfig} />
+      )}
+
+      {(node.data.nodeType === "policy_gate" || node.data.nodeType === "task_dispatch") && (
+        <div className="muted" style={{ fontSize: 11, borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+          {node.data.nodeType === "policy_gate"
+            ? "evaluates this team's rules (Rules tab) against the run; route on policy.action == 'ask_human' etc."
+            : "raises the matched rule's task for Slack approval; wire it after policy_gate on policy.task != None"}
+        </div>
+      )}
+
       <JsonField label="config (jsonb)" value={config} onChange={onConfig} />
 
       <button className="err" onClick={onDelete}>
@@ -85,6 +97,54 @@ function GateForm({
           onChange={(e) => set({ retrieval_weight: parseFloat(e.target.value) })}
         />
       </div>
+    </div>
+  );
+}
+
+function ExtractForm({
+  config,
+  onConfig,
+}: {
+  config: Record<string, unknown>;
+  onConfig: (v: Record<string, unknown>) => void;
+}) {
+  const fields = (config.fields as Record<string, string>) || {};
+  const rows = Object.entries(fields);
+  const setFields = (f: Record<string, string>) => onConfig({ ...config, fields: f });
+
+  return (
+    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+      <label>fields to extract into state.entities</label>
+      {rows.map(([k, v], i) => (
+        <div className="row" key={i} style={{ gap: 4 }}>
+          <input
+            value={k}
+            placeholder="report_period_years"
+            style={{ maxWidth: 150 }}
+            onChange={(e) => {
+              const next: Record<string, string> = {};
+              rows.forEach(([kk, vv], j) => (next[j === i ? e.target.value : kk] = vv));
+              setFields(next);
+            }}
+          />
+          <input
+            value={v}
+            placeholder="how old are the requested reports, in years"
+            onChange={(e) => setFields({ ...fields, [k]: e.target.value })}
+          />
+          <button
+            className="err"
+            onClick={() => {
+              const next = { ...fields };
+              delete next[k];
+              setFields(next);
+            }}
+          >
+            ×
+          </button>
+        </div>
+      ))}
+      <button onClick={() => setFields({ ...fields, "": "" })}>＋ field</button>
     </div>
   );
 }

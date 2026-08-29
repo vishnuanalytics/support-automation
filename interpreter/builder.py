@@ -46,6 +46,8 @@ def _context(state: CaseState) -> dict[str, Any]:
         "draft_confidence": state.get("draft_confidence", 0.0),
         "confidence_gate": gate,
         "classification": state.get("classification") or {},
+        "entities": state.get("entities") or {},
+        "policy": state.get("policy") or {},
         "outcome": state.get("outcome") or {},
         "case": state.get("case") or {},
     }

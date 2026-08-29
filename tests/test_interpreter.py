@@ -20,14 +20,15 @@ from interpreter.builder import FlowBuildError, FlowRoutingError, build_graph
 from interpreter.flows.validate_flow import Flow, check_flow
 from interpreter import registry as _registry
 from interpreter.registry import (
-    _norm_tier, h_ask_human, h_confidence_gate, h_draft, h_kb_lookup,
-    h_sf_writeback, register,
+    _norm_tier, h_ask_human, h_confidence_gate, h_draft, h_extract, h_kb_lookup,
+    h_policy_gate, h_sf_writeback, h_task_dispatch, register,
 )
 from interpreter.runs import build_row
 
 _HERMETIC = ("SF_USERNAME", "SF_PASSWORD", "SF_SECURITY_TOKEN", "SF_CONSUMER_KEY",
              "SF_CONSUMER_SECRET", "SF_PRIVATE_KEY", "SF_PRIVATE_KEY_FILE", "GROQ_API_KEY",
-             "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET")
+             "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GITHUB_TOKEN",
+             "SLACK_CLIENT_ID", "SLACK_CLIENT_SECRET", "SLACK_SIGNING_SECRET")
 
 
 @pytest.fixture(autouse=True)
@@ -500,6 +501,154 @@ def test_draft_folds_internal_kb_as_authoritative(monkeypatch):
     # public docs still included, but after the internal block
     assert captured["user"].index("Internal runbook") < captured["user"].index("Public documentation")
     assert out["trace"][0]["data"]["used_internal_kb"] is True
+
+
+# --------------------------------------------------------------------------
+# Phase 16 — policy rules + Slack signature
+# --------------------------------------------------------------------------
+def test_policy_predicate_evaluate():
+    from interpreter import policy
+
+    state = {"tier": "premium", "classification": {"topic": "billing"},
+             "entities": {"report_period_years": 3}}
+    assert policy.evaluate({"field": "tier", "op": "eq", "value": "premium"}, state)
+    assert not policy.evaluate({"field": "tier", "op": "eq", "value": "basic"}, state)
+    assert policy.evaluate(
+        {"all": [
+            {"field": "tier", "op": "in", "value": ["premium", "enterprise"]},
+            {"any": [
+                {"field": "classification.topic", "op": "eq", "value": "refund"},
+                {"field": "entities.report_period_years", "op": "gte", "value": 2},
+            ]},
+        ]}, state)
+    # missing field: eq is False, ne/nin True, exists:false True
+    assert not policy.evaluate({"field": "entities.nope", "op": "eq", "value": 1}, state)
+    assert policy.evaluate({"field": "entities.nope", "op": "exists", "value": False}, state)
+    # empty predicate never matches
+    assert not policy.evaluate({}, state)
+    assert not policy.evaluate(None, state)
+
+
+def test_policy_first_match_priority_and_status():
+    from interpreter import policy
+
+    rules = [
+        {"name": "lo", "priority": 10, "status": "active",
+         "when": {"field": "tier", "op": "eq", "value": "premium"}, "then": {"a": 1}},
+        {"name": "hi", "priority": 1, "status": "active",
+         "when": {"field": "tier", "op": "eq", "value": "premium"}, "then": {"a": 2}},
+        {"name": "off", "priority": 0, "status": "disabled",
+         "when": {"field": "tier", "op": "eq", "value": "premium"}, "then": {"a": 3}},
+        {"name": "bad", "priority": 0, "status": "active",
+         "when": {"nonsense": True}, "then": {"a": 4}},
+    ]
+    m = policy.first_match(rules, {"tier": "premium"})
+    assert m["name"] == "hi"   # lowest priority number, skipping disabled + malformed
+    assert policy.first_match(rules, {"tier": "basic"}) is None
+
+
+def test_slack_verify_signature():
+    from interpreter import slack
+
+    secret = "s3cr3t"
+    ts = str(int(__import__("time").time()))
+    body = b"payload=%7B%22x%22%3A1%7D"
+    import hashlib
+    import hmac
+    good = "v0=" + hmac.new(secret.encode(), b"v0:" + ts.encode() + b":" + body,
+                            hashlib.sha256).hexdigest()
+    assert slack.verify_signature(secret, ts, body, good)
+    assert not slack.verify_signature(secret, ts, body, good[:-3] + "000")
+    assert not slack.verify_signature(secret, "1", body, good)   # stale timestamp
+
+
+def test_slack_github_available_false_without_creds():
+    from interpreter import github, slack
+
+    assert slack.available() is False
+    assert github.available() is False
+
+
+class _FakeTable:
+    def __init__(self, store, name):
+        self.store, self.name, self._filters = store, name, []
+
+    def select(self, *_): return self
+    def eq(self, k, v): self._filters.append((k, v)); return self
+    def insert(self, row):
+        row = {**row, "id": f"ar-{len(self.store[self.name])+1}"}
+        self.store[self.name].append(row)
+        self._last = [row]
+        return self
+    def execute(self):
+        if hasattr(self, "_last"):
+            out, self._last = self._last, None
+            return type("R", (), {"data": out})()
+        rows = self.store.get(self.name, [])
+        for k, v in self._filters:
+            rows = [r for r in rows if r.get(k) == v]
+        return type("R", (), {"data": rows})()
+
+
+class _FakeSB:
+    def __init__(self, store): self.store = store
+    def table(self, name): return _FakeTable(self.store, name)
+
+
+def test_extract_short_circuits_without_fields():
+    out = h_extract({"case": {}}, {"_node_id": "x"})
+    assert out["entities"] == {}
+
+
+def test_policy_gate_first_match_and_route(monkeypatch):
+    rules = [{
+        "tenant_id": "T", "team": "offboarding",
+        "name": "old-export", "priority": 10, "status": "active",
+        "when": {"field": "entities.report_age_years", "op": "gte", "value": 2},
+        "then": {"type": "route", "action": "ask_human"},
+    }]
+    sb = _FakeSB({"policy_rules": rules})
+    state = {"tenant_id": "T", "team": "offboarding",
+             "entities": {"report_age_years": 4}}
+    out = h_policy_gate(state, {"_node_id": "p", "_sb": sb})
+    assert out["policy"]["matched"] == "old-export"
+    assert out["policy"]["action"] == "ask_human"
+    assert out["policy"]["task"] is None
+
+    # nothing matches -> pass through
+    out2 = h_policy_gate({**state, "entities": {"report_age_years": 1}},
+                         {"_node_id": "p", "_sb": sb})
+    assert out2["policy"]["matched"] is None
+
+
+def test_task_dispatch_raises_action_request(monkeypatch):
+    from interpreter import slack as slackmod
+    monkeypatch.setattr(slackmod, "available", lambda: False)
+
+    sb = _FakeSB({"action_requests": []})
+    state = {
+        "tenant_id": "T",
+        "case": {"subject": "export my data", "body": "leaving next month"},
+        "policy": {"matched": "old-export", "task": {
+            "type": "task", "task": "github_issue", "repo": "acme/ops",
+            "title_tmpl": "Export: {{case.subject}}", "body_tmpl": "{{case.body}}",
+            "approval": {"slack_channel": "#leads"},
+        }},
+    }
+    out = h_task_dispatch(state, {"_node_id": "t", "_sb": sb})
+    assert out["outcome"]["action"] == "task_dispatched"
+    ar = sb.store["action_requests"][0]
+    assert ar["kind"] == "github_issue" and ar["status"] == "pending"
+    assert ar["payload"]["title"] == "Export: export my data"
+    assert ar["payload"]["repo"] == "acme/ops"
+    assert out["outcome"]["slack_posted"] is False
+
+
+def test_task_dispatch_noop_without_policy_task():
+    sb = _FakeSB({"action_requests": []})
+    out = h_task_dispatch({"policy": {}}, {"_node_id": "t", "_sb": sb})
+    assert out["outcome"]["action"] == "task_skipped"
+    assert sb.store["action_requests"] == []
 
 
 # --------------------------------------------------------------------------

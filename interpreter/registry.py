@@ -17,7 +17,7 @@ import logging
 import re
 from typing import Any, Callable
 
-from . import groundedness, llm, salesforce
+from . import groundedness, llm, policy, salesforce
 from .retrieval import hybrid_retrieve
 from .state import CaseState
 
@@ -309,6 +309,135 @@ def h_kb_lookup(state: CaseState, config: dict) -> dict:
             {"score": score, "collections": collections, "hits": len(payload["matches"]),
              "query": query[:200]},
         ),
+    }
+
+
+@register("extract")
+def h_extract(state: CaseState, config: dict) -> dict:
+    """Pull named fields out of the case into `state["entities"]` so policy
+    rules can key on them (e.g. a fiscal year the customer mentioned).
+    `config.fields` = {name: "what it means"}."""
+    fields: dict[str, str] = config.get("fields") or {}
+    if not fields:
+        return {"entities": {}, **_trace(config["_node_id"], "extract", "no fields configured", {})}
+
+    case = state.get("case", {})
+    body = f"{case.get('subject','')}\n\n{case.get('body','')}".strip()
+    spec = "\n".join(f"- {k}: {v}" for k, v in fields.items())
+    raw = llm.complete(
+        system=("Extract the requested fields from the support message. Return a "
+                "JSON object with exactly these keys; use null when the message "
+                "doesn't say. Numbers as numbers, not strings."),
+        user=f"# Fields\n{spec}\n\n# Message\n{body or '(empty)'}",
+        model=config.get("model", llm.FAST_MODEL),
+        json_object=True,
+        max_tokens=int(config.get("max_tokens", 300)),
+    )
+    parsed = _safe_json(raw)
+    entities = {k: parsed.get(k) for k in fields}
+    return {
+        "entities": entities,
+        **_trace(config["_node_id"], "extract",
+                 f"extracted {', '.join(f'{k}={v!r}' for k, v in entities.items())}",
+                 {"entities": entities}),
+    }
+
+
+@register("policy_gate")
+def h_policy_gate(state: CaseState, config: dict) -> dict:
+    """Evaluate the tenant/team's `policy_rules` against the whole state.
+    First match wins (by ascending priority). `then.type=='route'` sets a
+    routing override; `then.type=='task'` stashes a task for a downstream
+    `task_dispatch` node. No match -> pass through, `policy.matched=None`."""
+    from ingestion.scraper import get_supabase
+
+    tenant_id, team = state.get("tenant_id"), state.get("team")
+    rules: list[dict] = []
+    if tenant_id and team:
+        try:
+            sb = config.get("_sb") or get_supabase()
+            rules = (sb.table("policy_rules").select("*")
+                     .eq("tenant_id", tenant_id).eq("team", team)
+                     .eq("status", "active").execute().data or [])
+        except Exception as e:  # noqa: BLE001
+            log.warning("policy_gate: could not load rules: %s", e)
+
+    rule = policy.first_match(rules, dict(state))
+    then = (rule or {}).get("then") or {}
+    result = {
+        "matched": (rule or {}).get("name"),
+        "action": then.get("action") if then.get("type") == "route" else None,
+        "task": then if then.get("type") == "task" else None,
+        "rules_evaluated": len(rules),
+    }
+    summary = (f"rule '{result['matched']}' -> {then.get('type')}"
+               if rule else f"no match ({len(rules)} rule(s))")
+    return {
+        "policy": result,
+        **_trace(config["_node_id"], "policy_gate", summary, result),
+    }
+
+
+@register("task_dispatch")
+def h_task_dispatch(state: CaseState, config: dict) -> dict:
+    """If `policy.task` is set, raise an `action_requests` row and post a
+    Slack Approve/Reject message. The external effect (a GitHub issue) is
+    NOT done here — it waits on the Slack callback. Terminal-ish."""
+    from ingestion.scraper import get_supabase
+    from interpreter import slack as slackmod
+
+    task = (state.get("policy") or {}).get("task")
+    nid = config["_node_id"]
+    if not task:
+        info = {"dispatched": False, "reason": "no policy task"}
+        return {"outcome": {"action": "task_skipped", **info},
+                **_trace(nid, "task_dispatch", "no policy task — nothing to dispatch", info)}
+
+    tenant_id = state.get("tenant_id")
+    tmpl_ctx = dict(state)
+    payload = {
+        "repo": task.get("repo", ""),
+        "title": _render_template(task.get("title_tmpl", "Support action: {{case.subject}}"), tmpl_ctx),
+        "body": _render_template(task.get("body_tmpl", "{{case.body}}"), tmpl_ctx),
+        "labels": task.get("labels", []),
+        "assignees": task.get("assignees", []),
+    }
+    approval = task.get("approval") or {}
+    channel = approval.get("slack_channel") or approval.get("slack_user") or config.get("slack_channel")
+
+    sb = config.get("_sb") or get_supabase()
+    row = {
+        "tenant_id": tenant_id,
+        "rule_name": (state.get("policy") or {}).get("matched"),
+        "kind": task.get("task", "github_issue"), "payload": payload,
+        "slack_channel": channel, "status": "pending",
+    }
+    # run_id is stamped later by runs.record_run (the run doesn't exist yet).
+    ar = sb.table("action_requests").insert(row).execute().data[0]
+
+    posted = None
+    if channel and slackmod.available():
+        try:
+            posted = slackmod.post_approval(
+                tenant_id, channel,
+                summary=f"*{payload['title']}*\nopen `{payload['repo']}` issue?  "
+                        f"(rule: {row['rule_name']})",
+                action_id=ar["id"], sb=sb,
+            )
+            sb.table("action_requests").update(
+                {"slack_ts": posted.get("ts")}
+            ).eq("id", ar["id"]).execute()
+        except Exception as e:  # noqa: BLE001
+            log.warning("task_dispatch: Slack post failed: %s", e)
+
+    info = {"dispatched": True, "action_request_id": ar["id"], "kind": row["kind"],
+            "repo": payload["repo"], "slack_posted": bool(posted), "channel": channel}
+    return {
+        "outcome": {"action": "task_dispatched", **info},
+        **_trace(nid, "task_dispatch",
+                 f"raised {row['kind']} for {payload['repo']} -> "
+                 f"{'Slack approval requested' if posted else 'pending (no Slack)'}",
+                 info),
     }
 
 
