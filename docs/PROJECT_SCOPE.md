@@ -102,7 +102,7 @@ from the 2026-08-29 self-review; still sequential (do 7 before 10, etc.).**
 
 | Phase | Scope | Status |
 |---|---|---|
-| 7 | **Evaluation & calibration.** End-to-end action eval; calibrate the gate; report *auto-send / escalation precision*; draft groundedness check; harder qrels; latency+token accounting; fix fail-open tier. | **Complete (2026-08-29)** — `eval/e2e/` (22 hand-labelled cases → gold action) runs the real pipeline and reports auto-send / escalation precision + a threshold sweep. Baseline: acc 0.864, auto-send P **0.769** (3/13 unsafe), escalation P 1.00. `interpreter/groundedness.py` (Groq judge / lexical fallback) → `state["groundedness"]`; `confidence_gate` gains `groundedness_weight` (default 0 = unchanged). `builder._make_node` stamps `elapsed_ms`; `llm.last_usage` + handlers record `tokens`. `registry._norm_tier` unknown → **`enterprise`** (strictest) + warn, was `basic`. **`011_calibrate_gate.sql`**: Acme gate → threshold 0.5 / per-tier {.5,.55,.6} / groundedness_weight 0.2 → **acc 0.909, auto-send P 0.833, escalation P 1.00** (2 residual — SOC2 / Partner-API — need an intent edge, noted). `qrels_hard.jsonl` (10 Q) + `run_eval.py --qrels hard`. 24 offline pytest tests; `test_multiflow` green with the new gate. Migration applied via SQL editor (MCP `apply_migration` timed out); `011_*.sql` is canonical. **Note (2026-08-29):** the 0.909 figure was with the deterministic stub; a re-run with real Groq drafts gave acc **0.636** / auto-send P **0.556** (over-confident `draft_confidence`). **`019_recalibrate_gate.sql`** fixes it — the Acme gate now uses an explicit blend `weights={retrieval .55, draft .1, groundedness .35}` + `escalate_topics` (billing/refund/pricing/legal/account-access/data-export/partner-api/cancellation intents → forced `ask_human`, matched on slug tokens by `registry._slug_tokens`). Real-Groq e2e: **acc 1.000, auto-send P 1.000 (10/10), escalation P 1.000 (12/12)**, coverage 0.455 (= the 10/22 ceiling; 8 gold `ask_human` + 4 gold `handover`). `escalate_topics` is the static precursor to Phase 16's rule engine; `run_e2e.py`'s threshold sweep is now stale (legacy 1-D blend). 34 offline pytest green. |
+| 7 | **Evaluation & calibration.** End-to-end action eval; calibrate the gate; report *auto-send / escalation precision*; draft groundedness check; harder qrels; latency+token accounting; fix fail-open tier. | **Complete (2026-08-29)** — `eval/e2e/` (22 hand-labelled cases → gold action) runs the real pipeline and reports auto-send / escalation precision + a threshold sweep. Baseline: acc 0.864, auto-send P **0.769** (3/13 unsafe), escalation P 1.00. `interpreter/groundedness.py` (Groq judge / lexical fallback) → `state["groundedness"]`; `confidence_gate` gains `groundedness_weight` (default 0 = unchanged). `builder._make_node` stamps `elapsed_ms`; `llm.last_usage` + handlers record `tokens`. `registry._norm_tier` unknown → **`enterprise`** (strictest) + warn, was `basic`. **`011_calibrate_gate.sql`**: Acme gate → threshold 0.5 / per-tier {.5,.55,.6} / groundedness_weight 0.2 → **acc 0.909, auto-send P 0.833, escalation P 1.00** (2 residual — SOC2 / Partner-API — need an intent edge, noted). `qrels_hard.jsonl` (10 Q) + `run_eval.py --qrels hard`. 24 offline pytest tests; `test_multiflow` green with the new gate. Migration applied via SQL editor (MCP `apply_migration` timed out); `011_*.sql` is canonical. **Note (2026-08-29):** the 0.909 figure was with the deterministic stub; a re-run with real Groq drafts gave acc **0.636** / auto-send P **0.556** (over-confident `draft_confidence`). **`019_recalibrate_gate.sql`** fixes it — the Acme gate now uses an explicit blend `weights={retrieval .55, draft .1, groundedness .35}` + `escalate_topics` (billing/refund/pricing/legal/account-access/data-export/partner-api/cancellation intents → forced `ask_human`, matched on slug tokens by `registry._slug_tokens`). Real-Groq e2e: **acc 1.000, auto-send P 1.000 (10/10), escalation P 1.000 (12/12)**, coverage 0.455 (= the 10/22 ceiling; 8 gold `ask_human` + 4 gold `handover`). `escalate_topics` is the static precursor to Phase 16's rule engine; `run_e2e.py`'s threshold sweep is now stale (legacy 1-D blend). **`020`** repoints the Globex `classify` node off the retired `llama-3.1-8b-instant` (017 missed non-draft nodes). **`021`** applies the same recalibration to the Globex "human-review-first" gate — non-enterprise tiers now always route to a human (thresholds >1.0), which real Groq drafts had started defeating (caught by `test_multiflow`). 34 offline + `test_multiflow` (4/4 real-Groq) green. |
 | 8 | **Flow versioning & safe writes.** Immutable versions, `runs.flow_version`, transactional save, optimistic concurrency. | **Complete (2026-08-29)** — migration `012`: **`flow_versions`** (immutable `nodes`/`edges`/`name`/`definition_hash`/`created_by` snapshot, RLS like the flow tables), `flows.published_version`, `runs.flow_version`; **`replace_flow_graph(flow_id, nodes, edges)`** plpgsql fn — one transactional delete+insert; backfilled v1 for the 3 published flows. `flow_nodes`/`flow_edges` stay the editable **draft**; a **run executes the published snapshot** (`loader.load_flow` reads `flow_versions` for `status="published"`, `flow_nodes/edges` for `status="draft"`) and records `flow_version`. `interpreter/loader.definition_hash()` (order-independent sha256). API: `PUT` → `replace_flow_graph` RPC + **409** if `body.version` ≠ current (bumped every save); `POST /flows/{id}/publish` (snapshot → version), `/rollback` (restore draft + re-publish), `GET /versions`. Web: `published vN` pill, `draft rev` token, **Publish** button, rollback `<select>`, 409 → auto-reload banner. Full lifecycle verified (create→PUT→stale-409→publish→edit→publish v2→run records v2→rollback restores draft). 24 offline + 7 integration pytest green; web `tsc`+vitest+build green. |
 | 9 | **Test coverage & CI.** pytest, `test_api.py`, web smoke tests, de-brittle `test_multiflow`, `ci.yml`. | **Complete (2026-08-29)** — `pytest` (`pytest.ini` with an `integration` marker; repo-root `conftest.py` for `sys.path`). **`tests/test_api.py`** — offline: `/health`, `/node-types`, 401 without a bearer token, `_structural_errors` (dangling edge / unknown type / cycle / clean). integration (real Globex token, skipped without `SUPABASE_ANON_KEY`): RLS-scoped list, cross-tenant 404, PUT→422, run→`run_id`. `test_multiflow` rewritten as pytest + de-brittled — asserts a **structural fact per flow** (gate present/absent → routing) + the **cross-tenant invariant** (`a.action != b.action`, `a.threshold < b.threshold`), not exact score-paths. **`web`**: `vitest` on `graph.ts` (RF round-trip, dagre layout, conditional-edge mapping, uuid) — 5 tests. **`.github/workflows/ci.yml`** — job `python`: `pytest -m "not integration"` (**24 pass**, 0.9s); job `web`: `tsc -b` + `vitest run` + `vite build`. On push + PR to `main`. `pytest` + `httpx` added to `requirements.txt`. |
 | 10 | **Event-driven pipeline.** SF trigger → task queue → async run → idempotency. | **Complete (2026-08-29)** — migration `013`: **`jobs`** table + **`claim_job()`** (`FOR UPDATE SKIP LOCKED`), a partial-unique `(kind, dedupe_key)` so a redelivered Case never double-enqueues; `runs.idempotency_key` + unique `(flow_id, idempotency_key)`. **`api/worker.py`** — `python -m api.worker [--once]`, dispatches `run_flow` (loads the published snapshot, invokes, records `source="worker"`); a run already recorded for `(flow_id, key)` is a no-op success. `interpreter/jobs.py` (enqueue / claim / complete / fail-with-retry). API: `POST /flows/{id}/enqueue` → `202 {job_id}`, `GET /jobs/{id}`; `POST /run` honours an `Idempotency-Key` header (returns the prior `run_id`). **`ingestion/sf_case_watch.py`** — polls `Case WHERE Status='New' AND LastModifiedDate >= now-Nmin`, enqueues one job per Case keyed on the Case Id (lookback can overlap; job dedupe handles it); `--once` for cron. Kept `POST /run` **synchronous** for the editor. 14 integration tests (incl. `test_queue.py`: dedupe, worker executes + records, no double-run). Persistent worker / trigger cron aren't deployed here — code + `--once` verified. |
@@ -422,7 +422,7 @@ Two distinct needs came out of that:
    Phase 16.
 
 Migration numbers below are indicative — take the next free number when
-you build it (`019_recalibrate_gate.sql` is the last one on disk).
+you build it (`021_recalibrate_globex_gate.sql` is the last one on disk).
 
 Design decisions already settled in that conversation:
 
@@ -445,7 +445,7 @@ Design decisions already settled in that conversation:
 
 ### Phase 14 — Internal knowledge base (unstructured), self-serve
 
-- **Migration `020_knowledge_base.sql`:**
+- **Migration `022_knowledge_base.sql`:**
   - A collection = a row in **`sources`** with `kind='internal_kb'` and
     `tenant_id` set (reuses Phase 12 scoping + `resolve_sources`
     unchanged). `sources` gains an insert/update/delete RLS policy for
@@ -503,7 +503,7 @@ Design decisions already settled in that conversation:
   collections bound to `config.collections`, plus `top_k` / `query` —
   same friendly-form treatment `confidence_gate` gets. `NodeCard` +
   palette register `kb_lookup` with an icon.
-- **Seed (`021_seed_kb_checkpoint.sql`):** a `globex-billing-runbook`
+- **Seed (`023_seed_kb_checkpoint.sql`):** a `globex-billing-runbook`
   collection + one entry ("Refund approval limits: <$200 auto, $200–2k
   lead, >$2k manager"), and a `kb_lookup` node on the Globex flow's
   billing branch feeding `draft`.
@@ -516,7 +516,7 @@ Design decisions already settled in that conversation:
 
 ### Phase 15 — Google Drive / Docs connector
 
-- **Migration `022_gdoc_sources.sql`:** `sources.kind` gains
+- **Migration `024_gdoc_sources.sql`:** `sources.kind` gains
   `'gdoc'`; `sources.config` holds `{doc_id, doc_url, last_modified,
   last_synced_at}`. A `gdoc_sync_state` isn't needed — `config` + the
   `zapier_docs` rows carry it.
@@ -552,7 +552,7 @@ Design decisions already settled in that conversation:
 
 ### Phase 16 — Structured policy rules + internal task actions
 
-- **Migration `023_policy_rules.sql`:** `policy_rules` (`rule_id`,
+- **Migration `025_policy_rules.sql`:** `policy_rules` (`rule_id`,
   `tenant_id`, `team`, `name`, `priority int`, `when jsonb`, `then jsonb`,
   `status`, audit cols). RLS via `tenant_members`. `when` is a **JSON
   predicate tree** (`{all|any: [...]}` of `{field, op, value}` over
@@ -604,7 +604,7 @@ Design decisions already settled in that conversation:
   read-only **Approvals** panel showing recent `action_requests` +
   status. `Inspector` gains `policy_gate` / `task_dispatch` / `extract`
   forms; palette + `NodeCard` register them.
-- **Seed (`024_seed_policy_demo.sql`):** a Globex rule — `when
+- **Seed (`026_seed_policy_demo.sql`):** a Globex rule — `when
   entities.report_period older than 2 years`, `then task github_issue`
   repo `globex/support-ops`, approver `#support-leads` — plus an
   `extract` + `policy_gate` + `task_dispatch` on the Globex flow's
@@ -619,7 +619,7 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**Phases 0–13 built and complete.** Migrations through `019` applied. 34 offline pytest
+**Phases 0–13 built and complete.** Migrations through `021` applied. 34 offline pytest
 tests + `tests/test_multiflow.py` green. External calls (Groq, Salesforce)
 run real when creds are in `.env`, else deterministic dry-run.
 **Phases 14–16 (self-serve knowledge & internal actions) are planned —
