@@ -100,9 +100,9 @@ from the 2026-08-29 self-review; still sequential (do 7 before 10, etc.).**
 
 | Phase | Scope | Status |
 |---|---|---|
-| 7 | **Evaluation & calibration.** End-to-end action eval; calibrate the gate; report *auto-send / escalation precision*; draft groundedness check; harder qrels; latency+token accounting; fix fail-open tier. | **Complete (2026-08-29)** — `eval/e2e/` (22 hand-labelled cases → gold action) runs the real pipeline and reports auto-send / escalation precision + a threshold sweep. Baseline: acc 0.864, auto-send P **0.769** (3/13 unsafe), escalation P 1.00. `interpreter/groundedness.py` (Groq judge / lexical fallback) → `state["groundedness"]`; `confidence_gate` gains `groundedness_weight` (default 0 = unchanged). `builder._make_node` stamps `elapsed_ms`; `llm.last_usage` + handlers record `tokens`. `registry._norm_tier` unknown → **`enterprise`** (strictest) + warn, was `basic`. **`011_calibrate_gate.sql`**: Acme gate → threshold 0.5 / per-tier {.5,.55,.6} / groundedness_weight 0.2 → **acc 0.909, auto-send P 0.833, escalation P 1.00** (2 residual — SOC2 / Partner-API — need an intent edge, noted). `qrels_hard.jsonl` (10 Q) + `run_eval.py --qrels hard`. 17/17 offline tests; `test_multiflow` green with the new gate. Migration applied via SQL editor (MCP `apply_migration` timed out); `011_*.sql` is canonical. |
+| 7 | **Evaluation & calibration.** End-to-end action eval; calibrate the gate; report *auto-send / escalation precision*; draft groundedness check; harder qrels; latency+token accounting; fix fail-open tier. | **Complete (2026-08-29)** — `eval/e2e/` (22 hand-labelled cases → gold action) runs the real pipeline and reports auto-send / escalation precision + a threshold sweep. Baseline: acc 0.864, auto-send P **0.769** (3/13 unsafe), escalation P 1.00. `interpreter/groundedness.py` (Groq judge / lexical fallback) → `state["groundedness"]`; `confidence_gate` gains `groundedness_weight` (default 0 = unchanged). `builder._make_node` stamps `elapsed_ms`; `llm.last_usage` + handlers record `tokens`. `registry._norm_tier` unknown → **`enterprise`** (strictest) + warn, was `basic`. **`011_calibrate_gate.sql`**: Acme gate → threshold 0.5 / per-tier {.5,.55,.6} / groundedness_weight 0.2 → **acc 0.909, auto-send P 0.833, escalation P 1.00** (2 residual — SOC2 / Partner-API — need an intent edge, noted). `qrels_hard.jsonl` (10 Q) + `run_eval.py --qrels hard`. 24 offline pytest tests; `test_multiflow` green with the new gate. Migration applied via SQL editor (MCP `apply_migration` timed out); `011_*.sql` is canonical. |
 | 8 | **Flow versioning & safe writes.** Immutable flow versions — editing a `published` flow forks a new `draft` version; publishing swaps the pointer; rollback. `runs` records the exact `flow_version` (or a definition hash) → every run reproducible. Move the editor's multi-statement flow save into one transactional Postgres RPC; optimistic concurrency (client sends the loaded `version`, server 409s if it moved). | Planned |
-| 9 | **Test coverage & CI.** Adopt `pytest`. `tests/test_api.py` — FastAPI `TestClient` + seeded test tenant: 401 without token, RLS scoping, PUT 422 paths, `run` → `run_id`, cross-tenant 404. Minimal web smoke tests (Vitest/Playwright). De-brittle `test_multiflow` — assert the *relative* invariant (Acme auto_reply vs Globex ask_human on identical input) + structural ones, not score-dependent absolute paths. `ci.yml` running py tests + `web` build/tsc, gating merges. | Planned |
+| 9 | **Test coverage & CI.** pytest, `test_api.py`, web smoke tests, de-brittle `test_multiflow`, `ci.yml`. | **Complete (2026-08-29)** — `pytest` (`pytest.ini` with an `integration` marker; repo-root `conftest.py` for `sys.path`). **`tests/test_api.py`** — offline: `/health`, `/node-types`, 401 without a bearer token, `_structural_errors` (dangling edge / unknown type / cycle / clean). integration (real Globex token, skipped without `SUPABASE_ANON_KEY`): RLS-scoped list, cross-tenant 404, PUT→422, run→`run_id`. `test_multiflow` rewritten as pytest + de-brittled — asserts a **structural fact per flow** (gate present/absent → routing) + the **cross-tenant invariant** (`a.action != b.action`, `a.threshold < b.threshold`), not exact score-paths. **`web`**: `vitest` on `graph.ts` (RF round-trip, dagre layout, conditional-edge mapping, uuid) — 5 tests. **`.github/workflows/ci.yml`** — job `python`: `pytest -m "not integration"` (**24 pass**, 0.9s); job `web`: `tsc -b` + `vitest run` + `vite build`. On push + PR to `main`. `pytest` + `httpx` added to `requirements.txt`. |
 | 10 | **Event-driven pipeline.** A Salesforce trigger — CDC / Platform Event subscriber, or a polling worker on new `Case`s — that **enqueues** runs (this is the missing half of "automation": today a person runs the flow). A task queue (`arq` / Postgres-backed); `POST /run` enqueues and returns `run_id` immediately; UI polls / subscribes via Supabase Realtime on the `runs` row. **Idempotency**: unique `(flow_id, case_id)` within a window / an idempotency key; terminal handlers (`auto_reply`, `sf_writeback`, `ask_human`) no-op if a completed run for that case exists. | Planned |
 | 11 | **Human-in-the-loop feedback.** After `ask_human`, capture what the human actually did — a follow-up job diffs the Case's real sent reply against the bot draft (`human_action`, `edit_distance` on the run). Surface "drafts needed heavy editing 60% of the time for billing" in the Runs view. Feed accepted drafts into the Phase 7 golden set / few-shot pool. | Planned |
 | 12 | **Real multi-tenancy.** A `sources` table (tenant_id, kind, config) so the `retrieve` node names which source(s) to hit; per-source ingestion instead of the hardcoded global `doc_chunks`. A `tenant_integrations` table — per-tenant Salesforce / Slack / KB credentials (encrypted) — that the interpreter resolves connections from. A **second concrete KB source** for one tenant (e.g. a Markdown/Notion export) so multi-tenancy is real, not cosmetic. Defensive `tenant_id` assertions on every service-role write path. | Planned |
@@ -390,25 +390,26 @@ below are indicative — take the next free number when you build it.
 
 ## Immediate next step
 
-**Phases 0–7 complete.** Migrations through `011` applied. 17/17 offline
+**Phases 0–7, 9 complete.** Migrations through `011` applied. 24 offline pytest
 tests + `tests/test_multiflow.py` green. External calls (Groq, Salesforce)
 run real when creds are in `.env`, else deterministic dry-run.
 
 Run the whole thing:
 ```
-python -m interpreter.run --list                     # 3 flows / 2 tenants
-python -m interpreter.run --flow <id> --case interpreter/cases/basic_howto.json
-python -m tests.test_multiflow                        # same case -> 3 outcomes
-python scripts/sop_conflicts.py                       # cross-team SOP divergence probe
+pytest -m "not integration" -q                        # offline suite (CI)
+pytest -q                                             # + integration (needs .env)
+python -m interpreter.run --list                      # 3 flows / 2 tenants
+python eval/e2e/run_e2e.py                            # action eval + threshold sweep
 uvicorn api.main:app --reload                         # backend :8000
 cd web && npm install && npm run dev                  # editor + Runs view :5173
 ```
-Editor login: a Supabase account. `gundamvishnu7@gmail.com` → tenant Acme;
-`globex-owner@example.test` (pw `editor-test-pw-8891`) → tenant Globex.
+Editor login: `gundamvishnu7@gmail.com` → tenant Acme; `globex-owner@example.test`
+(pw `editor-test-pw-8891`) → tenant Globex.
 
-**Next: Phase 9 — Test coverage & CI** (build order **7 → 9 → 8 → 10 → 11
-→ 12 → 13** — get the CI safety net in before the structural changes). Then
-Phase 8 (flow versioning). Phases 8–13 detailed in "Hardening roadmap".
+**Next: Phase 8 — Flow versioning & safe writes** (build order **7 → 9 → 8
+→ 10 → 11 → 12 → 13**). Immutable flow versions, `runs.flow_version`,
+transactional flow-save RPC, optimistic concurrency. Phases 8, 10–13
+detailed in "Hardening roadmap".
 
 A Phase 7 follow-up worth doing early: add an **intent → `ask_human` edge**
 to the Acme flow so commercial/legal cases (`e11` SOC2, `e12` Partner API)
@@ -499,10 +500,13 @@ From the 2026-08-29 self-review. Each is intentional MVP scope, not a bug:
   rollback, no change audit. `PUT /flows/{id}` is 4 non-transactional
   PostgREST calls (half-write on failure) with no optimistic concurrency.
   **→ Phase 8.**
-- **No committed tests for `api/` or `web/`**; no CI runs the suite on
-  push. `test_multiflow` asserts score-dependent absolute paths (brittle vs
-  the daily re-ingest). The offline suite is a hand-rolled runner, not
-  `pytest`. **→ Phase 9.**
+- ~~No tests for `api/` or `web/`; no CI; brittle `test_multiflow`;
+  hand-rolled runner.~~ **Phase 9:** `pytest` + `pytest.ini`,
+  `tests/test_api.py` (offline + integration), `web` `vitest`,
+  `.github/workflows/ci.yml` gating `main`. `test_multiflow` now asserts
+  structural + relative invariants. *Residual:* no Playwright end-to-end on
+  the web; the `eval/e2e/` auto-send-precision floor isn't wired into CI
+  yet (needs Supabase creds in CI, or a recorded fixture).
 - **Nothing triggers the flow** — a person runs it. Runs execute
   synchronously inside the request (embed + rerank + LLM + SF writes block a
   worker). No **idempotency** — a redelivered Case → duplicate auto-reply +

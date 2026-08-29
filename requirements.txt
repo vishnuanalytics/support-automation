@@ -19,3 +19,7 @@ simple-salesforce
 # api (Phase 5)
 fastapi
 uvicorn[standard]
+
+# tests / CI (Phase 9)
+pytest
+httpx
