@@ -27,10 +27,32 @@ export function Login() {
     setBusy(false);
   }
 
+  async function withGoogle() {
+    setBusy(true);
+    setMsg(null);
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo: window.location.origin },
+    });
+    if (error) {
+      setMsg(error.message);
+      setBusy(false);
+    }
+    // on success the browser redirects to Google; nothing more to do here
+  }
+
   return (
     <div className="login col">
       <h1>Support flow editor</h1>
-      <p className="muted">Sign in with your Supabase account.</p>
+      <p className="muted">Sign in to your workspace.</p>
+      <button type="button" onClick={withGoogle} disabled={busy}>
+        Continue with Google
+      </button>
+      <div className="row" style={{ gap: 8, alignItems: "center", margin: "4px 0" }}>
+        <hr style={{ flex: 1, borderColor: "var(--border)" }} />
+        <span className="muted" style={{ fontSize: 11 }}>or email</span>
+        <hr style={{ flex: 1, borderColor: "var(--border)" }} />
+      </div>
       <form className="col" onSubmit={withPassword}>
         <input
           type="email"
