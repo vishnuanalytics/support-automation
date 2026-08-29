@@ -102,7 +102,7 @@ from the 2026-08-29 self-review; still sequential (do 7 before 10, etc.).**
 
 | Phase | Scope | Status |
 |---|---|---|
-| 7 | **Evaluation & calibration.** End-to-end action eval; calibrate the gate; report *auto-send / escalation precision*; draft groundedness check; harder qrels; latency+token accounting; fix fail-open tier. | **Complete (2026-08-29)** — `eval/e2e/` (22 hand-labelled cases → gold action) runs the real pipeline and reports auto-send / escalation precision + a threshold sweep. Baseline: acc 0.864, auto-send P **0.769** (3/13 unsafe), escalation P 1.00. `interpreter/groundedness.py` (Groq judge / lexical fallback) → `state["groundedness"]`; `confidence_gate` gains `groundedness_weight` (default 0 = unchanged). `builder._make_node` stamps `elapsed_ms`; `llm.last_usage` + handlers record `tokens`. `registry._norm_tier` unknown → **`enterprise`** (strictest) + warn, was `basic`. **`011_calibrate_gate.sql`**: Acme gate → threshold 0.5 / per-tier {.5,.55,.6} / groundedness_weight 0.2 → **acc 0.909, auto-send P 0.833, escalation P 1.00** (2 residual — SOC2 / Partner-API — need an intent edge, noted). `qrels_hard.jsonl` (10 Q) + `run_eval.py --qrels hard`. 24 offline pytest tests; `test_multiflow` green with the new gate. Migration applied via SQL editor (MCP `apply_migration` timed out); `011_*.sql` is canonical. |
+| 7 | **Evaluation & calibration.** End-to-end action eval; calibrate the gate; report *auto-send / escalation precision*; draft groundedness check; harder qrels; latency+token accounting; fix fail-open tier. | **Complete (2026-08-29)** — `eval/e2e/` (22 hand-labelled cases → gold action) runs the real pipeline and reports auto-send / escalation precision + a threshold sweep. Baseline: acc 0.864, auto-send P **0.769** (3/13 unsafe), escalation P 1.00. `interpreter/groundedness.py` (Groq judge / lexical fallback) → `state["groundedness"]`; `confidence_gate` gains `groundedness_weight` (default 0 = unchanged). `builder._make_node` stamps `elapsed_ms`; `llm.last_usage` + handlers record `tokens`. `registry._norm_tier` unknown → **`enterprise`** (strictest) + warn, was `basic`. **`011_calibrate_gate.sql`**: Acme gate → threshold 0.5 / per-tier {.5,.55,.6} / groundedness_weight 0.2 → **acc 0.909, auto-send P 0.833, escalation P 1.00** (2 residual — SOC2 / Partner-API — need an intent edge, noted). `qrels_hard.jsonl` (10 Q) + `run_eval.py --qrels hard`. 24 offline pytest tests; `test_multiflow` green with the new gate. Migration applied via SQL editor (MCP `apply_migration` timed out); `011_*.sql` is canonical. **Note (2026-08-29):** the 0.909 figure was with the deterministic stub; a re-run with real Groq drafts gives acc **0.636** / auto-send P **0.556** — the gate needs re-calibrating for real (over-confident) LLM output. See "Known issues / debt" + "Immediate next step". |
 | 8 | **Flow versioning & safe writes.** Immutable versions, `runs.flow_version`, transactional save, optimistic concurrency. | **Complete (2026-08-29)** — migration `012`: **`flow_versions`** (immutable `nodes`/`edges`/`name`/`definition_hash`/`created_by` snapshot, RLS like the flow tables), `flows.published_version`, `runs.flow_version`; **`replace_flow_graph(flow_id, nodes, edges)`** plpgsql fn — one transactional delete+insert; backfilled v1 for the 3 published flows. `flow_nodes`/`flow_edges` stay the editable **draft**; a **run executes the published snapshot** (`loader.load_flow` reads `flow_versions` for `status="published"`, `flow_nodes/edges` for `status="draft"`) and records `flow_version`. `interpreter/loader.definition_hash()` (order-independent sha256). API: `PUT` → `replace_flow_graph` RPC + **409** if `body.version` ≠ current (bumped every save); `POST /flows/{id}/publish` (snapshot → version), `/rollback` (restore draft + re-publish), `GET /versions`. Web: `published vN` pill, `draft rev` token, **Publish** button, rollback `<select>`, 409 → auto-reload banner. Full lifecycle verified (create→PUT→stale-409→publish→edit→publish v2→run records v2→rollback restores draft). 24 offline + 7 integration pytest green; web `tsc`+vitest+build green. |
 | 9 | **Test coverage & CI.** pytest, `test_api.py`, web smoke tests, de-brittle `test_multiflow`, `ci.yml`. | **Complete (2026-08-29)** — `pytest` (`pytest.ini` with an `integration` marker; repo-root `conftest.py` for `sys.path`). **`tests/test_api.py`** — offline: `/health`, `/node-types`, 401 without a bearer token, `_structural_errors` (dangling edge / unknown type / cycle / clean). integration (real Globex token, skipped without `SUPABASE_ANON_KEY`): RLS-scoped list, cross-tenant 404, PUT→422, run→`run_id`. `test_multiflow` rewritten as pytest + de-brittled — asserts a **structural fact per flow** (gate present/absent → routing) + the **cross-tenant invariant** (`a.action != b.action`, `a.threshold < b.threshold`), not exact score-paths. **`web`**: `vitest` on `graph.ts` (RF round-trip, dagre layout, conditional-edge mapping, uuid) — 5 tests. **`.github/workflows/ci.yml`** — job `python`: `pytest -m "not integration"` (**24 pass**, 0.9s); job `web`: `tsc -b` + `vitest run` + `vite build`. On push + PR to `main`. `pytest` + `httpx` added to `requirements.txt`. |
 | 10 | **Event-driven pipeline.** SF trigger → task queue → async run → idempotency. | **Complete (2026-08-29)** — migration `013`: **`jobs`** table + **`claim_job()`** (`FOR UPDATE SKIP LOCKED`), a partial-unique `(kind, dedupe_key)` so a redelivered Case never double-enqueues; `runs.idempotency_key` + unique `(flow_id, idempotency_key)`. **`api/worker.py`** — `python -m api.worker [--once]`, dispatches `run_flow` (loads the published snapshot, invokes, records `source="worker"`); a run already recorded for `(flow_id, key)` is a no-op success. `interpreter/jobs.py` (enqueue / claim / complete / fail-with-retry). API: `POST /flows/{id}/enqueue` → `202 {job_id}`, `GET /jobs/{id}`; `POST /run` honours an `Idempotency-Key` header (returns the prior `run_id`). **`ingestion/sf_case_watch.py`** — polls `Case WHERE Status='New' AND LastModifiedDate >= now-Nmin`, enqueues one job per Case keyed on the Case Id (lookback can overlap; job dedupe handles it); `--once` for cron. Kept `POST /run` **synchronous** for the editor. 14 integration tests (incl. `test_queue.py`: dedupe, worker executes + records, no double-run). Persistent worker / trigger cron aren't deployed here — code + `--once` verified. |
@@ -392,9 +392,28 @@ below are indicative — take the next free number when you build it.
 
 ## Immediate next step
 
-**All 14 phases (0–13) complete.** Migrations through `016` applied. 28 offline pytest
+**All 14 phases (0–13) complete.** Migrations through `018` applied. 32 offline pytest
 tests + `tests/test_multiflow.py` green. External calls (Groq, Salesforce)
 run real when creds are in `.env`, else deterministic dry-run.
+
+**2026-08-29 — Groq key added; LLM path now runs real.** Fallout fixed
+(migrations `017`/`018`, `interpreter/llm.py`, `registry._context_block`):
+- Groq retired `llama-3.x`; defaults are now `openai/gpt-oss-120b` (draft)
+  / `openai/gpt-oss-20b` (classify, judges). `017` repointed seed flows.
+- gpt-oss are reasoning models — `reasoning_effort="low"` + `draft`
+  `max_tokens` 500→900 (`018`), and `llm.complete` now recovers from a
+  Groq `json_validate_failed` 400 (salvage partial, else retry free-form).
+- One doc chunk is ~27k chars → `_context_block` caps each chunk (1800)
+  and the prompt block (7000) so a request can't exceed the free-tier
+  8k TPM ceiling (was a hard 413). `_groq_call` backs off on 429.
+- **RAG answer quality (15 Qs, real Groq draft + Groq LLM-judge):**
+  answers the question **15/15**; grounded in retrieved docs **14/15**
+  (the one miss added a code sample not in context — exactly what the
+  `groundedness` node is there to catch).
+- **e2e action eval re-run with real drafts (not the stub):** acc
+  **0.636**, auto-send P **0.556** (10/18), escalation P 1.00, coverage
+  0.818. All 8 misses are `gold=ask_human`→`auto_reply`, **all premium
+  tier**, every one with `draft_confidence` 0.93–0.99. See "Known issues".
 
 Run the whole thing:
 ```
@@ -415,10 +434,21 @@ the worker + the `sf_case_watch` cron to real hosts; move rate-limit /
 token-cache state to Redis; encrypt `tenant_integrations.secret` with
 Supabase Vault. All are noted under "Known issues / debt".
 
-A Phase 7 follow-up worth doing early: add an **intent → `ask_human` edge**
-to the Acme flow so commercial/legal cases (`e11` SOC2, `e12` Partner API)
-route to a human regardless of retrieval confidence — the 2 residual e2e
-misses.
+A Phase 7 follow-up, now **higher priority** after the real-draft e2e
+re-run (acc dropped 0.909 stub → 0.636 real):
+
+- **`draft_confidence` from a self-grading LLM is not calibrated** — the
+  real model reports 0.93–0.99 on almost everything, so at weight 0.5 it
+  drowns out `retrieval_score` (the one signal that actually separates
+  e08/e20, retr≈0.01, from e10/e11, retr≈1.0). Rebalance the gate to
+  lean on `retrieval_score` + `groundedness` (independent judge) and
+  down-weight or drop model self-confidence.
+- **Add an intent/policy pre-gate**: premium tier + {billing dispute,
+  security/legal, account change, partner-API} → `ask_human` regardless
+  of confidence. That alone fixes most of the 8 misses; the old `e11`
+  SOC2 / `e12` Partner-API residuals are the same class.
+- Re-baseline `eval/e2e` expectations for real-LLM mode before wiring an
+  auto-send-precision floor into CI (the 0.909 figure was stub-only).
 
 Quick wins available any time (not blocking a phase):
 - a Groq key in `.env` moves `classify`/`draft` off the stub;
@@ -487,16 +517,32 @@ Default to Groq for any LLM calls (classification, draft generation).
   `scripts/sf_create_fields.py`; `get_case` prefers it over the standard
   `Account.Type` picklist for `classify`'s tier.
 
+- **Confidence gate under-escalates with a real LLM.** Re-running
+  `eval/e2e` with real Groq drafts (2026-08-29): 8/8 misses are
+  `gold=ask_human` scored as `auto_reply`, all premium tier, all with
+  `draft_confidence` 0.93–0.99. The model's self-graded confidence is
+  ~constant and, at gate weight 0.5, swamps `retrieval_score`. Fix is a
+  gate rebalance (trust `retrieval_score` + independent `groundedness`,
+  not model self-confidence) + a premium-tier intent policy pre-gate.
+  Tracked in "Immediate next step" as the priority Phase 7 follow-up.
+- **Groq free tier is 8k TPM.** `openai/gpt-oss-120b` at that ceiling
+  means the e2e eval throttles heavily (p50 latency ~10 s/case, with
+  429 backoff) and a large retrieval context can still 413 if
+  `_context_block`'s caps are raised. Fine for demo / low volume; a
+  paid tier or Anthropic key removes it.
+
 ### Design debt — addressed by the hardening roadmap (phases 7–13)
 
-- **LLM providers:** `interpreter/llm.py` now routes by model id — Groq
-  (`llama-*`, default) or **Anthropic** (`claude-opus-5` / `sonnet-5` /
-  `haiku-4-5`, opt-in). Set `ANTHROPIC_API_KEY` + optionally
+- **LLM providers:** `interpreter/llm.py` routes by model id — Groq
+  (`openai/gpt-oss-*` default; retired `llama-*` names still map to Groq
+  so old configs don't `KeyError`) or **Anthropic** (`claude-opus-5` /
+  `sonnet-5` / `haiku-4-5`, opt-in). Set `ANTHROPIC_API_KEY` + optionally
   `LLM_DEFAULT_MODEL` / `LLM_FAST_MODEL` in `.env` to use Claude for
   `draft` / `classify` / the groundedness + SOP judges. Routing +
-  stub-fallback are unit-tested; a **live Claude call is unverified**
-  (no key in this environment). Sampling params (`temperature` etc.)
-  are not sent on the Claude path — rejected by the Claude 5 family.
+  stub-fallback + the Groq `json_validate_failed` / 429 recovery paths
+  are unit-tested; a **live Claude call is unverified** (no key in this
+  environment). Sampling params (`temperature` etc.) are not sent on the
+  Claude path — rejected by the Claude 5 family.
 
 From the 2026-08-29 self-review. Each is intentional MVP scope, not a bug:
 
