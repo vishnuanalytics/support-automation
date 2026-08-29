@@ -7,9 +7,21 @@ Same pattern as `llm.py`: real calls when SF creds are in the env, a
 `dry_run=True`) when they're not — so the graph still runs in CI / eval /
 demo with no org attached.
 
-Env (.env), username-password-token flow:
-    SF_USERNAME, SF_PASSWORD, SF_SECURITY_TOKEN
-    SF_DOMAIN        optional, 'login' (default) or 'test' for a sandbox
+Env (.env). Three auth modes, tried in this order by which vars are set:
+
+  A. JWT bearer flow (recommended -- headless, no password, survives MFA and
+     the username-password flow being disabled). Needs a Connected App with
+     an uploaded cert:
+       SF_USERNAME, SF_CONSUMER_KEY, SF_PRIVATE_KEY_FILE  (or SF_PRIVATE_KEY)
+  B. OAuth username-password flow. Needs a Connected App + the org's
+     "Allow OAuth Username-Password Flows" toggle:
+       SF_USERNAME, SF_PASSWORD, SF_CONSUMER_KEY, SF_CONSUMER_SECRET
+  C. Legacy SOAP login (disabled by default on new Agentforce/trial orgs):
+       SF_USERNAME, SF_PASSWORD, SF_SECURITY_TOKEN
+
+  SF_DOMAIN  optional -- 'login' (default), 'test' for a sandbox, or a My
+             Domain token like 'mycompany-dev-ed.develop.my'. A full URL is
+             accepted too (scheme / .salesforce.com are stripped).
 
 Field writes are **tolerant**: if the org doesn't have a custom field the
 flow config references (e.g. `Module__c`), the API 400 is caught, that one
@@ -27,13 +39,43 @@ from typing import Any
 
 log = logging.getLogger("interpreter.salesforce")
 
-_REQUIRED = ("SF_USERNAME", "SF_PASSWORD", "SF_SECURITY_TOKEN")
 _client_obj = None
+
+
+def _normalize_domain(raw: str | None) -> str:
+    """
+    Accept whatever the user pasted and return the token simple-salesforce
+    wants: 'login', 'test', or a My Domain like 'acme-dev-ed.develop.my'.
+    Strips scheme, trailing slash, and a '.salesforce.com' /
+    '.salesforce-setup.com' suffix.
+    """
+    d = (raw or "login").strip()
+    d = re.sub(r"^https?://", "", d).strip("/")
+    d = re.sub(r"\.salesforce(-setup)?\.com$", "", d)
+    return d or "login"
+
+
+def _jwt_key() -> str | None:
+    inline = os.environ.get("SF_PRIVATE_KEY")
+    if inline:
+        return inline
+    path = os.environ.get("SF_PRIVATE_KEY_FILE")
+    return path or None
 
 
 def available() -> bool:
     """True when real API calls will be made."""
-    return all(os.environ.get(k) for k in _REQUIRED)
+    user = os.environ.get("SF_USERNAME")
+    ck = os.environ.get("SF_CONSUMER_KEY")
+    if user and ck and _jwt_key():                                   # A: JWT
+        return True
+    if user and os.environ.get("SF_PASSWORD") and ck \
+            and os.environ.get("SF_CONSUMER_SECRET"):                # B: OAuth u/p
+        return True
+    if user and os.environ.get("SF_PASSWORD") \
+            and os.environ.get("SF_SECURITY_TOKEN"):                 # C: SOAP
+        return True
+    return False
 
 
 def _client():
@@ -41,12 +83,28 @@ def _client():
     if _client_obj is None:
         from simple_salesforce import Salesforce
 
-        _client_obj = Salesforce(
-            username=os.environ["SF_USERNAME"],
-            password=os.environ["SF_PASSWORD"],
-            security_token=os.environ["SF_SECURITY_TOKEN"],
-            domain=os.environ.get("SF_DOMAIN", "login"),
-        )
+        kw: dict[str, Any] = {
+            "username": os.environ["SF_USERNAME"],
+            "domain": _normalize_domain(os.environ.get("SF_DOMAIN")),
+        }
+        ck, cs = os.environ.get("SF_CONSUMER_KEY"), os.environ.get("SF_CONSUMER_SECRET")
+        token = os.environ.get("SF_SECURITY_TOKEN", "")
+        jwt_key = _jwt_key()
+
+        if ck and jwt_key:                                    # A: JWT bearer flow
+            kw["consumer_key"] = ck
+            if os.environ.get("SF_PRIVATE_KEY"):
+                kw["privatekey"] = os.environ["SF_PRIVATE_KEY"]
+            else:
+                kw["privatekey_file"] = os.environ["SF_PRIVATE_KEY_FILE"]
+        elif ck and cs:                                       # B: OAuth username-password
+            kw["password"] = os.environ["SF_PASSWORD"] + token
+            kw["consumer_key"], kw["consumer_secret"] = ck, cs
+        else:                                                 # C: legacy SOAP login
+            kw["password"] = os.environ["SF_PASSWORD"]
+            kw["security_token"] = token
+
+        _client_obj = Salesforce(**kw)
     return _client_obj
 
 

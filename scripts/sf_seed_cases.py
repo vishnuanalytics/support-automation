@@ -12,6 +12,7 @@ ones in Salesforce if they pile up.
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 
 from dotenv import load_dotenv
@@ -46,6 +47,11 @@ SEED = [
 ]
 
 
+# orgs with State & Country picklists reject a region code as BillingCountry
+_COUNTRY = {"AMER": "United States", "EMEA": "United Kingdom", "APAC": "Australia"}
+_DROP_ON_INTEGRITY = re.compile(r"FIELD_INTEGRITY_EXCEPTION.*?'fields': \['([^']+)'\]", re.S)
+
+
 def _create(obj, payload: dict) -> str:
     """Create a record, retrying without any field the org rejects."""
     sf = _client()
@@ -55,8 +61,10 @@ def _create(obj, payload: dict) -> str:
             return getattr(sf, obj).create(body)["id"]
         except Exception as e:  # noqa: BLE001
             bad = _bad_field(e)
+            m = _DROP_ON_INTEGRITY.search(str(e))
+            bad = bad or (m.group(1) if m else None)
             if bad and bad in body:
-                print(f"  ({obj}: dropping unknown field {bad!r})")
+                print(f"  ({obj}: dropping field {bad!r} the org rejected)")
                 body.pop(bad)
                 continue
             raise
@@ -71,8 +79,8 @@ def main() -> int:
     for row in SEED:
         acc_id = _create("Account", {
             "Name": row["account"],
-            "Tier__c": row["tier"],           # dropped automatically if absent
-            "BillingCountry": row["region"],
+            "Tier__c": row["tier"],                       # dropped automatically if absent
+            "BillingCountry": _COUNTRY.get(row["region"], row["region"]),
         })
         first, last, email = row["contact"]
         con_id = _create("Contact", {

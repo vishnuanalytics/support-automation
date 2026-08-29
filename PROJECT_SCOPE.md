@@ -68,7 +68,7 @@ schema, not as production logic.
 | 0 | Flow-definition schema (`flows`/`flow_nodes`/`flow_edges`), RLS, tenant isolation | **Complete** — migrated, seeded, verified in Supabase |
 | 1 | Zapier docs RAG ingestion: sitemap scrape → content-hash diff → chunk → embed → Supabase + Neo4j, daily via cron | **Complete (2026-08-28)** — `004`+`005` schema live. `scraper.py`: 401 docs / 3568 chunks / 920 links in Supabase, `fastembed` embeddings. `neo4j_sync.py` against Aura: 401 Doc + 25 stub nodes, 63 Section, 396 IN_SECTION / 56 SUBSECTION_OF / 920 LINKS_TO. Retrieval eval (`eval/`, 48 Q): dense baseline hit@3 1.00 / MRR@10 0.94. Committed + pushed (`6d56f42`); `.github/workflows/daily-sync.yml` cron **live and verified green** (run 33195499360 — remote incremental no-op: scrape `skipped: 401`, Neo4j idempotent). |
 | 2 | Config-driven LangGraph interpreter: reads a flow row from Supabase, builds a real `StateGraph`, single hand-seeded flow | **Complete (2026-08-29)** — `interpreter/` package: `loader` (Supabase→dict + `validate_flow.check_flow` reuse), `builder` (dict→compiled `StateGraph`, conditional routing), `registry` (7 node handlers), `conditions` (safe AST eval of edge `if`), `retrieval` (hybrid dense+sparse→RRF→Neo4j expand→cross-encoder rerank), `llm` (Groq free-model roster + offline stub). Runs the Phase 0 seed flow end-to-end on all 3 sample cases → correct branch each (auto_reply / ask_human / handover). `006` (tenant_members RLS policy) + `007` (`match_doc_chunks` / `_fts` / `_hybrid` SQL fns) applied. 8/8 offline unit tests green. Eval: `run_eval.py --strategy all` — dense 0.944 / sparse 0.613 / hybrid 0.861 / hybrid+rerank 0.941 MRR@10 (dense at ceiling on this corpus; rerank matches it, degrades gracefully on harder ones — see `eval/README.md`). Optional follow-up: a real-Groq smoke run once a key is in `.env` (stub mode is by design). |
-| 3 | Salesforce field write-back (case module/region/account/contact) from the classify node's output; Chatter-mention as the "ask human" mechanism | **Complete (2026-08-29)** — `interpreter/salesforce.py` (username-token auth; real when SF creds in `.env`, else dry-run — same pattern as `llm.py`). New `sf_writeback` node handler: config-driven `field_map` (`urgency`→`Priority` w/ value-map, `topic`→`Module__c`, `region`→`Region__c`, `summary` appended to `Description`), tolerant of missing custom fields (drops + reports). `ask_human` with `channel: salesforce_chatter` now posts a Chatter FeedItem @mention (Connect API, FeedItem fallback). Migration `008` inserts `sf_writeback` into the seed flow (`classify → sf_writeback → draft`). `run.py --sf-case <Id>` pulls a live Case; `cases/*.json` may carry `sf_id`. `scripts/sf_seed_cases.py` creates test Accounts/Contacts/Cases. `SALESFORCE_SETUP.md` documents the two custom fields + creds. 12/12 offline tests green (4 new). All 4 sample cases run clean (dry-run). **Open:** a live run against a real DE org (needs creds + the 2 custom fields). |
+| 3 | Salesforce field write-back (case module/region/account/contact) from the classify node's output; Chatter-mention as the "ask human" mechanism | **Complete + live-verified (2026-08-29)** — `interpreter/salesforce.py`: 3 auth modes (JWT bearer / OAuth username-password / legacy SOAP), tried by which env vars are set; real when creds present, else dry-run. New `sf_writeback` node: config-driven `field_map` (`urgency`→`Priority` w/ value-map, `topic`→`Module__c`, `region`→`Region__c`, `summary` appended to `Description`), tolerant of missing fields. `ask_human` + `channel: salesforce_chatter` posts a real Chatter FeedItem (Connect API, FeedItem fallback). Migration `008` inserts `sf_writeback` (`classify → sf_writeback → draft`). `run.py --sf-case <Id>` pulls a live Case. `scripts/sf_create_fields.py` (Metadata API — creates `Case.Module__c` / `Case.Region__c` / `Account.Tier__c` + FLS) and `scripts/sf_seed_cases.py` (3 test Cases). 12/12 offline tests green. **Verified against a real Developer Edition org via JWT**: 3 seeded Cases ran end-to-end, 4/4 fields written each, Chatter FeedItem posted on the premium (ask_human) case. |
 | 4 | Multi-tenant/multi-flow: prove several different flow configs run correctly | Not started (schema already supports it — `tenant_id`/`flow_id` built in from Phase 0) |
 | 5 | React Flow UI reading/writing the same flow schema — drag nodes, edit thresholds, toggle auto-send, pause per team/condition | Not started |
 | 6 | Observability: manager reporting on low-confidence cases, per-case "why did the bot respond this way" chat, conflicting-SOP detection across teams | Not started |
@@ -279,13 +279,25 @@ Default to Groq for any LLM calls (classification, draft generation).
   if the org has it, else the standard `Account.Type` picklist — whose
   values aren't `basic/premium/enterprise`, so tier falls back to `basic`.
   Add a `Tier__c` picklist on Account for a faithful demo (`SALESFORCE_SETUP.md`).
-- Phase 3 SF integration is verified **dry-run only** — no live DE org was
-  connected this session. `sf_writeback` / Chatter real paths
-  (`simple-salesforce`, Connect API mention) are written but untested
-  against a real org; the custom fields `Case.Module__c` / `Case.Region__c`
-  must be created first (writes are tolerant if not, but then only
-  `Priority` + `Description` land).
-- Chatter @mention uses the Connect API (`connect/records/feed-elements`)
-  with a plain-`FeedItem` fallback. In a single-user DE org the mention
-  target defaults to the running user unless `ask_human.config.mention_id`
-  is set.
+- Phase 3 SF integration is **live-verified** against a real Developer
+  Edition org ("speed", `orgfarm-8f5f468eb6-dev-ed`) via the **JWT bearer
+  flow**. That org has SOAP login *and* the OAuth username-password flow
+  disabled (both default-off on Agentforce/trial orgs), so JWT is the only
+  path that works — keypair in `sf_jwt/` (gitignored), cert uploaded to the
+  Connected App, user profile pre-authorized. `.env` has `SF_USERNAME` /
+  `SF_CONSUMER_KEY` / `SF_PRIVATE_KEY_FILE` / `SF_DOMAIN`.
+- Chatter @mention uses the Connect API with a plain-`FeedItem` fallback.
+  In the live run the mention resolved to `None` (fell back to a plain
+  post); set `ask_human.config.mention_id` to a real User/Group Id for an
+  actual @mention.
+- `sf_writeback` appends the `[triage] …` block to `Description` every run,
+  so re-running the same Case grows the field. Fine for the demo; a real
+  build would use a dedicated field or a dedupe marker.
+- Seeded `region` is a country ("United States" / "United Kingdom") not a
+  region code — the org has State & Country picklists, so `BillingCountry`
+  must be a real country; `get_case` reads it straight back into
+  `account.region` and thus `Case.Region__c`. Map country→region in
+  `get_case` if AMER/EMEA semantics are wanted.
+- `Account.Tier__c` is a `Text(40)` custom field created by
+  `scripts/sf_create_fields.py`; `get_case` prefers it over the standard
+  `Account.Type` picklist for `classify`'s tier.
