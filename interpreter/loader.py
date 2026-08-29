@@ -105,8 +105,27 @@ def load_flow(
     }
 
     parsed = Flow.model_validate(flow_dict)
-    errors = check_flow(parsed)
+    # The interpreter runs arbitrary flows (a CSM / offboarding flow needn't
+    # have a confidence_gate), so only the hard checks apply here: referential
+    # integrity, no orphans, no cycles. EXPECTED_TYPES is a "does this look
+    # like the canonical support flow" convention kept for validate_flow.py's
+    # CLI on flow_support_example.json.
+    errors = check_flow(parsed, require_expected_types=False)
     if errors:
         raise FlowInvalid(errors)
 
     return flow_dict
+
+
+def list_flows(tenant_id: str | None = None, *, status: str | None = None, sb=None) -> list[dict]:
+    """Lightweight listing (service-role): flow_id/tenant/team/name/status/version."""
+    sb = sb or get_supabase()
+    q = sb.table("flows").select("flow_id, tenant_id, team, name, status, version")
+    if tenant_id:
+        q = q.eq("tenant_id", tenant_id)
+    if status:
+        q = q.eq("status", status)
+    return sorted(
+        q.execute().data or [],
+        key=lambda r: (r["tenant_id"], r["team"], r["name"]),
+    )

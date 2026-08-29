@@ -69,7 +69,7 @@ schema, not as production logic.
 | 1 | Zapier docs RAG ingestion: sitemap scrape → content-hash diff → chunk → embed → Supabase + Neo4j, daily via cron | **Complete (2026-08-28)** — `004`+`005` schema live. `scraper.py`: 401 docs / 3568 chunks / 920 links in Supabase, `fastembed` embeddings. `neo4j_sync.py` against Aura: 401 Doc + 25 stub nodes, 63 Section, 396 IN_SECTION / 56 SUBSECTION_OF / 920 LINKS_TO. Retrieval eval (`eval/`, 48 Q): dense baseline hit@3 1.00 / MRR@10 0.94. Committed + pushed (`6d56f42`); `.github/workflows/daily-sync.yml` cron **live and verified green** (run 33195499360 — remote incremental no-op: scrape `skipped: 401`, Neo4j idempotent). |
 | 2 | Config-driven LangGraph interpreter: reads a flow row from Supabase, builds a real `StateGraph`, single hand-seeded flow | **Complete (2026-08-29)** — `interpreter/` package: `loader` (Supabase→dict + `validate_flow.check_flow` reuse), `builder` (dict→compiled `StateGraph`, conditional routing), `registry` (7 node handlers), `conditions` (safe AST eval of edge `if`), `retrieval` (hybrid dense+sparse→RRF→Neo4j expand→cross-encoder rerank), `llm` (Groq free-model roster + offline stub). Runs the Phase 0 seed flow end-to-end on all 3 sample cases → correct branch each (auto_reply / ask_human / handover). `006` (tenant_members RLS policy) + `007` (`match_doc_chunks` / `_fts` / `_hybrid` SQL fns) applied. 8/8 offline unit tests green. Eval: `run_eval.py --strategy all` — dense 0.944 / sparse 0.613 / hybrid 0.861 / hybrid+rerank 0.941 MRR@10 (dense at ceiling on this corpus; rerank matches it, degrades gracefully on harder ones — see `eval/README.md`). Optional follow-up: a real-Groq smoke run once a key is in `.env` (stub mode is by design). |
 | 3 | Salesforce field write-back (case module/region/account/contact) from the classify node's output; Chatter-mention as the "ask human" mechanism | **Complete + live-verified (2026-08-29)** — `interpreter/salesforce.py`: 3 auth modes (JWT bearer / OAuth username-password / legacy SOAP), tried by which env vars are set; real when creds present, else dry-run. New `sf_writeback` node: config-driven `field_map` (`urgency`→`Priority` w/ value-map, `topic`→`Module__c`, `region`→`Region__c`, `summary` appended to `Description`), tolerant of missing fields. `ask_human` + `channel: salesforce_chatter` posts a real Chatter FeedItem (Connect API, FeedItem fallback). Migration `008` inserts `sf_writeback` (`classify → sf_writeback → draft`). `run.py --sf-case <Id>` pulls a live Case. `scripts/sf_create_fields.py` (Metadata API — creates `Case.Module__c` / `Case.Region__c` / `Account.Tier__c` + FLS) and `scripts/sf_seed_cases.py` (3 test Cases). 12/12 offline tests green. **Verified against a real Developer Edition org via JWT**: 3 seeded Cases ran end-to-end, 4/4 fields written each, Chatter FeedItem posted on the premium (ask_human) case. |
-| 4 | Multi-tenant/multi-flow: prove several different flow configs run correctly | Not started (schema already supports it — `tenant_id`/`flow_id` built in from Phase 0) |
+| 4 | Multi-tenant/multi-flow: prove several different flow configs run correctly | **Complete (2026-08-29)** — migration `009` seeds 3 published flows across 2 tenants: **Acme/support** (`1111…`, lenient per-tier gate, full SF map — now `published`), **Globex/support** (`a2a2…`, NEW — strict gate `{basic .9…enterprise .99}`, minimal SF map, no graph, 8B model; same team name as Acme, different tenant → allowed by `uq_one_published_flow_per_team`), **Acme/offboarding** (`c3c3…`, NEW — different topology `retrieve→classify→draft→handover`, no gate/sf_writeback). `loader.load_flow` now validates with `require_expected_types=False` (a CSM/offboarding flow needn't have a `confidence_gate`); `list_flows()` + `run.py --list` added. `tests/test_multiflow.py`: same `basic_howto.json` case through each flow → **auto_reply / ask_human / handover** — three behaviours, zero code differences. **RLS verified** (`scripts/rls_check.sql`) with simulated JWTs: Acme user sees 2 flows, Globex user sees 1 (+ only its 8 nodes), unknown user sees 0, service role sees 3. 13/13 offline tests green. |
 | 5 | React Flow UI reading/writing the same flow schema — drag nodes, edit thresholds, toggle auto-send, pause per team/condition | Not started |
 | 6 | Observability: manager reporting on low-confidence cases, per-case "why did the bot respond this way" chat, conflicting-SOP detection across teams | Not started |
 
@@ -221,44 +221,53 @@ Files delivered: `004_docs_ingestion_schema.sql`, `005_docs_rag_metadata.sql`,
 
 ## Immediate next step
 
-**Phases 0–3 are complete** (see the phase table for what each delivered).
-The `interpreter/` package runs a Supabase-defined flow as a real LangGraph
-`StateGraph`; it retrieves (hybrid+rerank), classifies, writes triage back
-to Salesforce, drafts, gates on a per-tier confidence bar, and terminates in
-auto_reply / ask_human (Chatter) / handover. Migrations through `008` are
-applied to `mjohgmivnxfwkqmlojqs`. 12/12 offline tests green. All external
-calls (Groq, Salesforce) run real when creds are in `.env`, else
-deterministic dry-run — so `python -m interpreter.run --flow
-11111111-1111-1111-1111-111111111111 --case cases/<x>.json` works with an
-empty `.env`.
+**Phases 0–4 are complete** (see the phase table). The `interpreter/`
+package runs any Supabase-defined flow as a real LangGraph `StateGraph`;
+migration `009` proves it with 3 published flows across 2 tenants, and RLS
+tenant isolation is verified. Migrations through `009` are applied to
+`mjohgmivnxfwkqmlojqs`. 13/13 offline tests green; `tests/test_multiflow.py`
+(integration) green. All external calls (Groq, Salesforce) run real when
+creds are in `.env`, else deterministic dry-run.
 
-**Optional live smoke tests (need creds, not blocking Phase 4):**
+Handy:
+- `python -m interpreter.run --list` — the 3 flows per tenant/team.
+- `python -m interpreter.run --tenant 22222222-2222-2222-2222-222222222222
+  --team support --case cases/basic_howto.json` — the strict Globex flow.
+- `python -m tests.test_multiflow` — same case → 3 outcomes.
+- `scripts/rls_check.sql` — the tenant-isolation check.
+
+**Optional live smoke tests (need creds, not blocking Phase 5):**
 - `GROQ_API_KEY` → real drafts/classification instead of stubs.
-- SF creds + the 2 custom fields (`SALESFORCE_SETUP.md`) → `python
-  scripts/sf_seed_cases.py` then `python -m interpreter.run --flow <id>
-  --sf-case <Id>` to see a real field write + Chatter post.
+- SF creds → `python scripts/sf_create_fields.py` then
+  `python scripts/sf_seed_cases.py` then `--sf-case <Id>`.
 
-**Next: Phase 4 — multi-tenant / multi-flow.** Schema already supports it
-(`tenant_id` / `flow_id` from Phase 0; `uq_one_published_flow_per_team`).
-1. Hand-seed 2–3 more flows: a second tenant, and/or a different team
-   (`csm`, `offboarding`) with different node configs / thresholds /
-   `field_map`s. Migration `009+` in the `003`/`008` seed style.
-2. Prove `load_flow(tenant_id=…, team=…)` + `build_graph` run each correctly
-   and in isolation — same interpreter, different data. Add a test that
-   loads every seeded flow and invokes it on a sample case.
-3. Exercise the RLS story: a non-service-role client with a
-   `tenant_members` row sees only its tenant's flows (the `006` policy plus
-   the Phase 0 `flows` policies). This is the first real use of auth'd
-   access.
+**Next: Phase 5 — React Flow UI.** Phases 0–4 are done and verified, so the
+guardrail in `CLAUDE.md` is now clear. The UI reads/writes the exact
+`flows`/`flow_nodes`/`flow_edges` rows the interpreter already consumes:
+drag nodes, edit per-tier thresholds, edit a node's `config` jsonb (incl.
+`field_map`), toggle a flow `published`/`draft`, add/remove edges with
+`condition` expressions. Nothing about the runtime changes — it's a second
+client on the same schema. Then **Phase 6** (observability: low-confidence
+reporting, per-case "why did the bot do this" from the `trace`,
+conflicting-SOP detection).
 
 Default to Groq for any LLM calls (classification, draft generation).
 
 ## Known issues / debt
 
 - ~~`tenant_members` RLS enabled with no policy~~ — **fixed** in `006`
-  (`self_membership_read`: a user may `select` their own membership rows).
-  Advisor cleared. The interpreter still runs as service-role; this only
-  starts mattering when a Phase 4/5 auth'd client loads a flow.
+  (`self_membership_read`) and **verified in Phase 4** (`scripts/rls_check.sql`):
+  simulated JWTs see only their tenant's flows. The interpreter itself still
+  runs as service-role (`scraper.get_supabase`); a real auth'd client is a
+  Phase 5 concern.
+- Phase 4 added a **synthetic auth user** `b2b20000-0000-4000-8000-000000000002`
+  (`tenant-b-owner@example.test`) directly in `auth.users` via the SQL editor,
+  so `009` could seed its `tenant_members` row (FK to `auth.users`). Not a
+  real login. Same out-of-band pattern as `4ddf2413` (created via signup).
+- `009` seeds `Account.Tier__c` values as `basic/premium/enterprise`; the
+  Globex flow's `sf_writeback` only maps `Priority` + `Description` (no
+  custom fields) — a deliberate "different tenant, different SF schema"
+  contrast, not a bug.
 - `vector` extension lives in `public` (advisor `extension_in_public`).
   Cosmetic for now; move to an `extensions` schema if it's ever a concern.
 - **Local dev env:** this box has no `python3.12-venv` package and system
