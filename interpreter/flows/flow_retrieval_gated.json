@@ -1,0 +1,95 @@
+{
+  "flow_id": "d4d4d4d4-4444-4444-8444-444444444444",
+  "tenant_id": "00000000-0000-0000-0000-000000000000",
+  "team": "support-triage",
+  "name": "Support — retrieval-gated triage",
+  "version": 1,
+  "status": "draft",
+  "_doc": "Routes on the CONFIDENCE OF THE RETRIEVED CONTEXT first: only draft a reply when the docs actually cover the case. retrieve -> classify -> retrieval_gate: (docs cover it) draft -> answer_gate -> auto_reply | ask_human ; (docs thin) ask_human ; (enterprise) handover.",
+  "nodes": [
+    {
+      "node_id": "retrieve",
+      "type": "retrieve",
+      "label": "Retrieve KB context",
+      "config": { "source": ["supabase"], "top_k": 5, "use_rerank": true }
+    },
+    {
+      "node_id": "classify",
+      "type": "classify",
+      "label": "Classify tier / topic / urgency",
+      "config": { "tier_field": "account.customer_type", "region_field": "account.region" }
+    },
+    {
+      "node_id": "retrieval_gate",
+      "type": "confidence_gate",
+      "label": "Gate on retrieval confidence",
+      "config": {
+        "weights": { "retrieval": 1.0, "draft": 0.0, "groundedness": 0.0 },
+        "default_threshold": 0.45,
+        "tier_overrides": { "basic": 0.40, "premium": 0.50, "enterprise": 0.60 },
+        "escalate_topics": ["billing", "refund", "pricing", "compliance", "legal", "account-access", "data-export", "cancellation"]
+      }
+    },
+    {
+      "node_id": "draft",
+      "type": "draft",
+      "label": "Draft reply from context",
+      "config": { "model": "openai/gpt-oss-120b", "max_tokens": 900 }
+    },
+    {
+      "node_id": "answer_gate",
+      "type": "confidence_gate",
+      "label": "Gate on answer quality",
+      "config": {
+        "weights": { "retrieval": 0.4, "draft": 0.1, "groundedness": 0.5 },
+        "default_threshold": 0.6,
+        "tier_overrides": { "basic": 0.55, "premium": 0.65, "enterprise": 0.75 }
+      }
+    },
+    { "node_id": "auto_reply", "type": "auto_reply", "label": "Send the drafted reply", "config": {} },
+    {
+      "node_id": "ask_human",
+      "type": "ask_human",
+      "label": "Route to a support agent",
+      "config": { "channel": "salesforce_chatter", "reason": "docs_thin_or_answer_unsure" }
+    },
+    {
+      "node_id": "handover",
+      "type": "handover",
+      "label": "Full handover (enterprise)",
+      "config": { "reason": "enterprise_tier" }
+    }
+  ],
+  "edges": [
+    { "source_node_id": "retrieve", "target_node_id": "classify", "condition": {} },
+    { "source_node_id": "classify", "target_node_id": "retrieval_gate", "condition": {} },
+
+    {
+      "source_node_id": "retrieval_gate",
+      "target_node_id": "handover",
+      "condition": { "if": "tier == 'enterprise'" }
+    },
+    {
+      "source_node_id": "retrieval_gate",
+      "target_node_id": "draft",
+      "condition": { "if": "confidence_gate.pass and tier != 'enterprise'" }
+    },
+    {
+      "source_node_id": "retrieval_gate",
+      "target_node_id": "ask_human",
+      "condition": { "if": "not confidence_gate.pass and tier != 'enterprise'" }
+    },
+
+    { "source_node_id": "draft", "target_node_id": "answer_gate", "condition": {} },
+    {
+      "source_node_id": "answer_gate",
+      "target_node_id": "auto_reply",
+      "condition": { "if": "confidence_gate.pass" }
+    },
+    {
+      "source_node_id": "answer_gate",
+      "target_node_id": "ask_human",
+      "condition": { "if": "not confidence_gate.pass" }
+    }
+  ]
+}
