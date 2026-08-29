@@ -30,30 +30,35 @@ from interpreter.loader import list_flows, load_flow  # noqa: E402
 from interpreter.retrieval import hybrid_retrieve  # noqa: E402
 
 TOPICS = [
-    "How do I authenticate my Zapier integration?",
-    "How do webhook / REST hook triggers work?",
+    # developer-doc questions (both teams -> the shared public docs)
     "How do I handle pagination in a trigger?",
     "What are the API rate limits and throttling rules?",
-    "How do I test my integration's triggers and actions?",
     "How do I deprecate or migrate an old integration version?",
-    "How do I deal with action timeouts hitting the 30-second limit?",
-    "How does deduplication work for polling triggers?",
+    # policy/support questions where a tenant's SOP may override the public docs
+    "Can a customer on the Team plan set up a webhook trigger?",
+    "How is a mid-cycle plan upgrade prorated on the invoice?",
+    "How do I export all of a customer's account data?",
+    "A customer is locked out after turning on two-factor auth — what do I do?",
+    "Can support issue a refund for last month's charge?",
 ]
 
 
-def team_retrieve_config() -> dict[str, dict]:
-    """One representative published flow per team -> its retrieve node config."""
-    out: dict[str, dict] = {}
+def team_retrieve_config() -> dict[str, tuple[dict, str]]:
+    """key '<tenant8>/<team>' -> (retrieve node config, tenant_id) for one
+    representative published flow. Keyed per (tenant, team) now that sources
+    are tenant-scoped (Phase 12)."""
+    out: dict[str, tuple[dict, str]] = {}
     for meta in list_flows(status="published"):
-        if meta["team"] in out:
+        key = f"{meta['tenant_id'][:8]}/{meta['team']}"
+        if key in out:
             continue
         flow = load_flow(flow_id=meta["flow_id"], validate=False)
         rn = next((n for n in flow["nodes"] if n["type"] == "retrieve"), None)
-        out[meta["team"]] = (rn or {}).get("config", {}) if rn else {}
+        out[key] = ((rn or {}).get("config", {}) if rn else {}, meta["tenant_id"])
     return out
 
 
-def top_hit(query: str, cfg: dict) -> tuple[str, str]:
+def top_hit(query: str, cfg: dict, tenant_id: str) -> tuple[str, str]:
     src = cfg.get("source", ["supabase"])
     results, _ = hybrid_retrieve(
         query,
@@ -61,6 +66,8 @@ def top_hit(query: str, cfg: dict) -> tuple[str, str]:
         use_sparse=cfg.get("use_sparse", True),
         use_graph=cfg.get("use_graph", "neo4j" in src),
         use_rerank=cfg.get("use_rerank", True),
+        kb_sources=cfg.get("kb_sources"),
+        tenant_id=tenant_id,
     )
     if not results:
         return "", ""
@@ -104,7 +111,7 @@ def main() -> int:
     divergences = 0
     conflicts = 0
     for topic in TOPICS:
-        hits = {t: top_hit(topic, cfgs[t]) for t in teams}
+        hits = {t: top_hit(topic, cfgs[t][0], cfgs[t][1]) for t in teams}
         urls = {t: h[0] for t, h in hits.items()}
         distinct = set(u for u in urls.values() if u)
         if len(distinct) < 2:

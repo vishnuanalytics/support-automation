@@ -100,6 +100,8 @@ def h_retrieve(state: CaseState, config: dict) -> dict:
         use_sparse=config.get("use_sparse", True),
         use_graph=config.get("use_graph", "neo4j" in sources),
         use_rerank=config.get("use_rerank", True),
+        kb_sources=config.get("kb_sources"),   # e.g. ["zapier-public", "globex-sop"]
+        tenant_id=state.get("tenant_id"),      # scopes reachable sources (Phase 12)
     )
     top_url = results[0]["doc_url"] if results else None
     return {
@@ -214,7 +216,9 @@ def h_sf_writeback(state: CaseState, config: dict) -> dict:
             **_trace(config["_node_id"], "sf_writeback", "no sf_id — nothing written", info),
         }
 
-    result = salesforce.update_case_fields(sf_id, fields, append=append)
+    result = salesforce.update_case_fields(
+        sf_id, fields, append=append, tenant_id=state.get("tenant_id")
+    )
     result["target"] = sf_id
     if result["dry_run"]:
         summary = f"Case {sf_id} [dry-run] would write {list(result.get('planned') or {})}"
@@ -343,7 +347,7 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
             f"{state.get('draft', '')}"
         )
         chatter = salesforce.post_chatter(
-            sf_id, body, mention_id=config.get("mention_id")
+            sf_id, body, mention_id=config.get("mention_id"), tenant_id=state.get("tenant_id")
         )
         outcome["chatter"] = chatter
         mode = "dry-run" if chatter.get("dry_run") else "posted"

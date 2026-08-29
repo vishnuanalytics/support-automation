@@ -67,7 +67,7 @@ Reorganised 2026-08-29 (Phase 5). Modules run from the repo root:
 
 ```
 docs/            this file, SALESFORCE_SETUP.md
-db/migrations/   001_*.sql .. 014_*.sql   (was repo root)
+db/migrations/   001_*.sql .. 016_*.sql   (was repo root)
 ingestion/       scraper.py, neo4j_sync.py, eval/         → python -m ingestion.scraper
 interpreter/     builder/loader/registry/conditions/retrieval/llm/salesforce/run
   flows/         validate_flow.py, flow_support_example.json
@@ -105,7 +105,7 @@ from the 2026-08-29 self-review; still sequential (do 7 before 10, etc.).**
 | 9 | **Test coverage & CI.** pytest, `test_api.py`, web smoke tests, de-brittle `test_multiflow`, `ci.yml`. | **Complete (2026-08-29)** — `pytest` (`pytest.ini` with an `integration` marker; repo-root `conftest.py` for `sys.path`). **`tests/test_api.py`** — offline: `/health`, `/node-types`, 401 without a bearer token, `_structural_errors` (dangling edge / unknown type / cycle / clean). integration (real Globex token, skipped without `SUPABASE_ANON_KEY`): RLS-scoped list, cross-tenant 404, PUT→422, run→`run_id`. `test_multiflow` rewritten as pytest + de-brittled — asserts a **structural fact per flow** (gate present/absent → routing) + the **cross-tenant invariant** (`a.action != b.action`, `a.threshold < b.threshold`), not exact score-paths. **`web`**: `vitest` on `graph.ts` (RF round-trip, dagre layout, conditional-edge mapping, uuid) — 5 tests. **`.github/workflows/ci.yml`** — job `python`: `pytest -m "not integration"` (**24 pass**, 0.9s); job `web`: `tsc -b` + `vitest run` + `vite build`. On push + PR to `main`. `pytest` + `httpx` added to `requirements.txt`. |
 | 10 | **Event-driven pipeline.** SF trigger → task queue → async run → idempotency. | **Complete (2026-08-29)** — migration `013`: **`jobs`** table + **`claim_job()`** (`FOR UPDATE SKIP LOCKED`), a partial-unique `(kind, dedupe_key)` so a redelivered Case never double-enqueues; `runs.idempotency_key` + unique `(flow_id, idempotency_key)`. **`api/worker.py`** — `python -m api.worker [--once]`, dispatches `run_flow` (loads the published snapshot, invokes, records `source="worker"`); a run already recorded for `(flow_id, key)` is a no-op success. `interpreter/jobs.py` (enqueue / claim / complete / fail-with-retry). API: `POST /flows/{id}/enqueue` → `202 {job_id}`, `GET /jobs/{id}`; `POST /run` honours an `Idempotency-Key` header (returns the prior `run_id`). **`ingestion/sf_case_watch.py`** — polls `Case WHERE Status='New' AND LastModifiedDate >= now-Nmin`, enqueues one job per Case keyed on the Case Id (lookback can overlap; job dedupe handles it); `--once` for cron. Kept `POST /run` **synchronous** for the editor. 14 integration tests (incl. `test_queue.py`: dedupe, worker executes + records, no double-run). Persistent worker / trigger cron aren't deployed here — code + `--once` verified. |
 | 11 | **Human-in-the-loop feedback.** Capture the human's resolution after ask_human/handover; feed accepted drafts to the eval golden set. | **Complete (2026-08-29)** — migration `014`: `runs` += `draft`, `human_action` (`pending\|sent_as_is\|edited\|rewrote\|no_reply`), `human_reply`, `edit_distance`, `feedback_checked_at`. A run that goes to a human on a real Case is stamped `pending` and `record_run` schedules a delayed **`check_resolution`** job (`FEEDBACK_DELAY_MIN`, default 20). `interpreter/feedback.py`: `fetch_human_reply` (latest outbound `EmailMessage`, else `CaseComment`) + `classify_edit` (`SequenceMatcher` ratio → bucket + `edit_distance`). Worker handles `check_resolution`. API `/runs/stats` gains `draft_acceptance` + `by_human_action`; `/runs` + detail carry `human_action`/`edit_distance`/`human_reply`. Web Runs view: "draft kept %" + "awaiting human" tiles, a `human` column, and a bot-draft-vs-sent diff in the detail. `scripts/harvest_feedback.py` dumps kept-draft runs as candidate `eval/e2e/` cases. **Verified live**: seeded Case → handover (`pending`) → posted an outbound EmailMessage → `check_resolution` scored the run (`edited`, `edit_distance`, `feedback_checked_at`). 26 offline + 15 integration pytest green. |
-| 12 | **Real multi-tenancy.** A `sources` table (tenant_id, kind, config) so the `retrieve` node names which source(s) to hit; per-source ingestion instead of the hardcoded global `doc_chunks`. A `tenant_integrations` table — per-tenant Salesforce / Slack / KB credentials (encrypted) — that the interpreter resolves connections from. A **second concrete KB source** for one tenant (e.g. a Markdown/Notion export) so multi-tenancy is real, not cosmetic. Defensive `tenant_id` assertions on every service-role write path. | Planned |
+| 12 | **Real multi-tenancy.** `sources` + per-source ingestion; `tenant_integrations`; a real 2nd KB source; write-path scoping. | **Complete (2026-08-29)** — migration `015`: **`sources`** (tenant_id NULL = shared), `doc_chunks`/`zapier_docs` gain `source_id` (backfilled to a shared `zapier-public` source), the 3 `match_doc_chunks*` fns gain an optional `p_source_ids uuid[]` filter (old signatures dropped to avoid overload ambiguity). **`tenant_integrations`** (per-tenant SF/Slack creds). `interpreter/retrieval.resolve_sources(names, sb, tenant_id)` — a flow only ever reaches **shared + its own tenant's** sources; naming another tenant's source falls back to its legitimate scope (**no cross-tenant KB leak** — verified). `retrieve` node `config.kb_sources`; `hybrid_retrieve(kb_sources, tenant_id)`; `state.tenant_id` threaded from the flow at `invoke`. `interpreter/salesforce.client_for(tenant_id)` resolves creds from `tenant_integrations`, else env. **`ingestion/sources/markdown_source.py`** + a real **`globex-sop`** source (4 SOP docs / 8 chunks, tenant Globex) with *deliberately different* guidance (webhooks Business-only, annual+true-up billing, no self-serve export) — migration `016` points the Globex flow's retrieve at `["globex-sop", "zapier-public"]`. `scripts/sop_conflicts.py` now probes per (tenant, team). 27 offline + 15 integration pytest green. |
 | 13 | **Security & hardening.** Verify the Supabase JWT **signature** in the `caller` dependency (JWKS / shared secret) instead of decoding unverified. Rate-limit `/run` (it triggers real SF writes / Chatter). `/security-review` pass over the accumulated API + web surface. Make `sop_conflicts.py` actually fire — give one seed flow a divergent `retrieve` config (section filter) so it demonstrates a real catch. | Planned |
 
 ## Phase 0 — schema (complete)
@@ -390,7 +390,7 @@ below are indicative — take the next free number when you build it.
 
 ## Immediate next step
 
-**Phases 0–11 complete** (0–6 MVP; 7–13 hardening). Migrations through `014` applied. 26 offline pytest
+**Phases 0–12 complete** (0–6 MVP; 7–13 hardening). Migrations through `016` applied. 27 offline pytest
 tests + `tests/test_multiflow.py` green. External calls (Groq, Salesforce)
 run real when creds are in `.env`, else deterministic dry-run.
 
@@ -406,11 +406,11 @@ cd web && npm install && npm run dev                  # editor + Runs view :5173
 Editor login: `gundamvishnu7@gmail.com` → tenant Acme; `globex-owner@example.test`
 (pw `editor-test-pw-8891`) → tenant Globex.
 
-**Next: Phase 12 — Real multi-tenancy** (build order **… → 11 → 12 →
-13**). A `sources` table + per-source ingestion (retire the hardcoded
-global `doc_chunks`), `tenant_integrations` (per-tenant SF/Slack creds), a
-real 2nd KB source for one tenant, write-path `tenant_id` assertions.
-Phases 12–13 detailed in "Hardening roadmap".
+**Next: Phase 13 — Security & hardening** (the last one). Verify the
+Supabase JWT *signature* in `api`'s `caller` (currently decoded
+unverified), rate-limit `/run`, run `/security-review` over the API + web
+surface, and confirm `sop_conflicts.py` now surfaces a real conflict.
+Detailed in "Hardening roadmap".
 
 A Phase 7 follow-up worth doing early: add an **intent → `ask_human` edge**
 to the Acme flow so commercial/legal cases (`e11` SOC2, `e12` Partner API)
@@ -524,11 +524,14 @@ From the 2026-08-29 self-review. Each is intentional MVP scope, not a bug:
   UI to correct a mis-bucketed resolution; few-shot pool from accepted
   drafts is `harvest_feedback.py` output, not yet wired into the `draft`
   node.
-- **Multi-tenancy is real for reads only.** One global Zapier-docs corpus
-  for every tenant; `retrieve` is hardcoded to `doc_chunks`; one Salesforce
-  org; all writes are service-role with no `tenant_id` backstop. The
-  "Google Sheet / Slack / Docs source" from the project pitch is unbuilt.
-  **→ Phase 12.**
+- ~~Multi-tenancy real for reads only; one global corpus; one SF org.~~
+  **Phase 12:** `sources` + `source_id` on chunks, `resolve_sources`
+  scoping (no cross-tenant KB leak), a real `globex-sop` source,
+  `tenant_integrations` + `salesforce.client_for(tenant_id)`. *Residual:*
+  the `zapier-public` corpus is still shared by all tenants (fine — it's
+  public); per-source *incremental* ingestion isn't built (markdown source
+  is full-replace); `tenant_integrations.secret` is plain jsonb, not
+  Supabase Vault / pgsodium encrypted.
 - `api`'s `caller` **decodes the JWT without verifying its signature** (RLS
   is the only real gate). No rate limiting on `/run`, which has real
   external side effects. No security review of the Phase 5/6 surface.

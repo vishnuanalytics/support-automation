@@ -24,6 +24,7 @@ class CaseState(TypedDict, total=False):
     # case: {case_id, subject, body, account: {name, customer_type, region},
     #        contact: {name, email}}
     case: dict[str, Any]
+    tenant_id: str             # the flow's tenant — for per-tenant integration creds (Phase 12)
 
     # ---- derived by nodes ------------------------------------------------------
     query: str                 # search query built by the retrieve node

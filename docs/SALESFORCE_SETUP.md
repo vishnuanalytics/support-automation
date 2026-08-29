@@ -104,3 +104,18 @@ python scripts/sf_seed_cases.py          # 3 Accounts + Contacts + Cases, prints
 python -m interpreter.run --flow 11111111-1111-1111-1111-111111111111 --sf-case 500XXXXXXXXXXXXXXX
 ```
 With creds present the run writes for real; without them it dry-runs.
+
+## Per-tenant credentials (Phase 12)
+
+For multi-tenant use, put a tenant's Salesforce creds in `tenant_integrations`
+instead of `.env`:
+
+```sql
+insert into tenant_integrations (tenant_id, kind, secret) values
+  ('<tenant uuid>', 'salesforce',
+   '{"SF_USERNAME":"...","SF_CONSUMER_KEY":"...","SF_PRIVATE_KEY_FILE":"...","SF_DOMAIN":"login"}'::jsonb);
+```
+
+`interpreter.salesforce.client_for(tenant_id)` uses that row when present,
+else the `.env` client. The interpreter passes the flow's `tenant_id`
+through `state` so `sf_writeback` / `ask_human` hit the right org.

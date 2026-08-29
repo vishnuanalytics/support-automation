@@ -16,7 +16,7 @@ Reference domain: Zapier's public developer docs (`docs.zapier.com`).
 |---|---|
 | `docs/` | `PROJECT_SCOPE.md` (phase status — the source of truth), `SALESFORCE_SETUP.md` |
 | `db/migrations/` | `001…NNN` sequential, single-concern SQL |
-| `ingestion/` | Phase 1 — `scraper.py` (sitemap → chunk → embed → Supabase + pgvector), `neo4j_sync.py` (graph), `eval/` (retrieval eval) |
+| `ingestion/` | Phase 1 + 12 — `scraper.py` (Zapier docs), `sources/markdown_source.py` (per-tenant KB sources), `neo4j_sync.py`, `sf_case_watch.py` (trigger), `eval/` |
 | `interpreter/` | Phase 2–4 — flow loader, `StateGraph` builder, node registry, safe condition eval, hybrid retrieval, Groq + Salesforce clients (real-or-dry-run). `flows/` validator, `cases/` samples |
 | `api/` | Phase 5–6 — FastAPI: list/load/validate/save/run flows + `runs` observability (reuses `interpreter/`) |
 | `web/` | Phase 5–6 — React + React Flow editor + a Runs view, over the same schema, Supabase Auth + RLS |
@@ -45,7 +45,7 @@ cd web && npm install && npm run dev      # editor on :5173
 ## Status
 
 Phases 0–9 complete (0–6 MVP; 7–13 hardening — 7–9 done) — see `docs/PROJECT_SCOPE.md` for what each
-delivered and how it was verified. Migrations `001`–`012` applied; daily
+delivered and how it was verified. Migrations `001`–`016` applied; daily
 ingestion runs on GitHub Actions; 14 offline tests + an integration test.
 
 ## Cost stance

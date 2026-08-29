@@ -351,7 +351,7 @@ def run_flow(
     except FlowInvalid as e:
         raise HTTPException(422, {"errors": e.errors})
     try:
-        final = build_graph(flow).invoke({"case": body.case, "trace": []})
+        final = build_graph(flow).invoke({"case": body.case, "tenant_id": flow["tenant_id"], "trace": []})
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"run failed: {type(e).__name__}: {e}")
 
