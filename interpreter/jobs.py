@@ -34,10 +34,15 @@ def enqueue(kind: str, payload: dict[str, Any], *, dedupe_key: str | None = None
 def claim(sb=None) -> dict[str, Any] | None:
     sb = sb or get_supabase()
     data = sb.rpc("claim_job").execute().data
-    # claim_job() returns a single jobs row or null
+    # claim_job() is `RETURNS SETOF jobs`; an empty queue can still come back
+    # as a single all-NULL row (PostgREST wraps it). Treat a row with no
+    # job_id as "nothing to do".
     if not data:
         return None
-    return data[0] if isinstance(data, list) else data
+    row = data[0] if isinstance(data, list) else data
+    if not row or not row.get("job_id"):
+        return None
+    return row
 
 
 def complete(job_id: str, result: dict[str, Any] | None = None, sb=None) -> None:
@@ -49,6 +54,8 @@ def complete(job_id: str, result: dict[str, Any] | None = None, sb=None) -> None
 
 def fail(job_id: str, error: str, *, sb=None) -> None:
     """Back to 'queued' for another attempt, or 'failed' once attempts run out."""
+    if not job_id:
+        return
     sb = sb or get_supabase()
     row = sb.table("jobs").select("attempts, max_attempts").eq("job_id", job_id).execute().data
     attempts = row[0]["attempts"] if row else 99

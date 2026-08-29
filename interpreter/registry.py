@@ -433,6 +433,9 @@ def h_task_dispatch(state: CaseState, config: dict) -> dict:
     info = {"dispatched": True, "action_request_id": ar["id"], "kind": row["kind"],
             "repo": payload["repo"], "slack_posted": bool(posted), "channel": channel}
     return {
+        # top-level so runs.record_run can link the row even if a later
+        # terminal node (handover / auto_reply) overwrites `outcome`
+        "action_request_id": ar["id"],
         "outcome": {"action": "task_dispatched", **info},
         **_trace(nid, "task_dispatch",
                  f"raised {row['kind']} for {payload['repo']} -> "

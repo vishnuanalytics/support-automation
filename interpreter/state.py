@@ -36,6 +36,15 @@ class CaseState(TypedDict, total=False):
     region: str
     classification: dict[str, Any]    # {topic, urgency, summary, ...}
 
+    # written by an `extract` node — named fields pulled from the case so
+    # policy rules can key on them (Phase 16), e.g. {report_age_years: 6}
+    entities: dict[str, Any]
+
+    # written by a `policy_gate` node (Phase 16):
+    # {matched: rule name|None, action: 'ask_human'|…|None, task: {...}|None}
+    policy: dict[str, Any]
+    action_request_id: str     # set by task_dispatch; runs.record_run links it to the run
+
     # written by a `kb_lookup` node when the flow routes through one (Phase 14):
     # {checked: bool, collections: [str], score: float, matches: [chunk dicts]}
     internal_kb: dict[str, Any]
