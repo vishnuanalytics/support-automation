@@ -419,7 +419,7 @@ def get_job(job_id: str, c: Caller = Depends(caller)) -> dict:
 def runs_stats(c: Caller = Depends(caller)) -> dict:
     rows = (
         c.sb.table("runs")
-        .select("outcome, tier, team, confidence, created_at")
+        .select("outcome, tier, team, confidence, human_action, created_at")
         .order("created_at", desc=True)
         .limit(500)
         .execute().data
@@ -427,13 +427,22 @@ def runs_stats(c: Caller = Depends(caller)) -> dict:
     )
     by_outcome: dict[str, int] = {}
     by_tier: dict[str, int] = {}
+    by_human: dict[str, int] = {}
     low = 0
     for r in rows:
         by_outcome[r.get("outcome") or "?"] = by_outcome.get(r.get("outcome") or "?", 0) + 1
         by_tier[r.get("tier") or "?"] = by_tier.get(r.get("tier") or "?", 0) + 1
+        if r.get("human_action"):
+            by_human[r["human_action"]] = by_human.get(r["human_action"], 0) + 1
         if (r.get("confidence") is not None) and float(r["confidence"]) < 0.4:
             low += 1
-    return {"total": len(rows), "by_outcome": by_outcome, "by_tier": by_tier, "low_confidence": low}
+    resolved = sum(v for k, v in by_human.items() if k != "pending")
+    kept = by_human.get("sent_as_is", 0) + by_human.get("edited", 0)
+    return {
+        "total": len(rows), "by_outcome": by_outcome, "by_tier": by_tier,
+        "low_confidence": low, "by_human_action": by_human,
+        "draft_acceptance": round(kept / resolved, 3) if resolved else None,
+    }
 
 
 @app.get("/api/runs")
@@ -445,7 +454,8 @@ def list_runs(
 ) -> list[dict]:
     q = (
         c.sb.table("runs")
-        .select("run_id, flow_id, team, tier, region, outcome, confidence, subject, source, created_at")
+        .select("run_id, flow_id, team, tier, region, outcome, confidence, subject, "
+                "source, human_action, edit_distance, created_at")
         .order("created_at", desc=True)
         .limit(min(max(limit, 1), 200))
     )

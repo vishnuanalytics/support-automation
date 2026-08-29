@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from interpreter import conditions, groundedness, salesforce
+from interpreter import conditions, feedback, groundedness, salesforce
 from interpreter.builder import FlowBuildError, FlowRoutingError, build_graph
 from interpreter.flows.validate_flow import Flow, check_flow
 from interpreter.registry import _norm_tier, h_ask_human, h_confidence_gate, h_sf_writeback, register
@@ -311,6 +311,28 @@ def test_confidence_gate_groundedness_weight_pulls_score_down():
     assert no_w["score"] == 0.9 and no_w["pass"] is True
     # 0.5*(0.5*0.9 + 0.5*0.9) + 0.5*0.0 = 0.45 -> below the 0.5 bar
     assert with_w["score"] == 0.45 and with_w["pass"] is False
+
+
+# --------------------------------------------------------------------------
+# Phase 11 — feedback.classify_edit
+# --------------------------------------------------------------------------
+def test_classify_edit_buckets():
+    draft = "Thanks for reaching out. To set up a webhook trigger, open the Zap editor, add a Webhooks by Zapier trigger, copy the URL, and send a test event."
+    assert feedback.classify_edit(draft, draft) == ("sent_as_is", 0.0)
+    assert feedback.classify_edit(draft, draft + " Let me know if that helps!")[0] in ("sent_as_is", "edited")
+    lightly = draft.replace("Thanks for reaching out.", "Hi there,").replace("send a test event", "fire a test event")
+    assert feedback.classify_edit(draft, lightly)[0] == "edited"
+    assert feedback.classify_edit(draft, "We've escalated this to billing; someone will call you.")[0] == "rewrote"
+    assert feedback.classify_edit(draft, "") == ("no_reply", 1.0)
+
+
+def test_build_row_marks_pending_only_for_human_outcomes_on_real_cases():
+    flow = {"flow_id": "f", "tenant_id": "t", "team": "support"}
+    ask = {"outcome": {"action": "ask_human"}, "trace": [], "draft": "d"}
+    assert build_row(flow, ask, case={"sf_id": "500X"}, source="api")["human_action"] == "pending"
+    assert build_row(flow, ask, case={"case_id": "synthetic"}, source="api")["human_action"] is None
+    auto = {"outcome": {"action": "auto_reply"}, "trace": [], "draft": "d"}
+    assert build_row(flow, auto, case={"sf_id": "500X"}, source="api")["human_action"] is None
 
 
 # --------------------------------------------------------------------------

@@ -28,6 +28,9 @@ def build_row(flow: dict, final: dict, *, case: dict, source: str,
               idempotency_key: str | None = None) -> dict[str, Any]:
     outcome = final.get("outcome") or {}
     case_id = case.get("case_id") or case.get("sf_id") or case.get("id")
+    action = outcome.get("action")
+    # a run that went to a human, on a real Case, will get a resolution check
+    pending = action in ("ask_human", "handover") and bool(case.get("sf_id") or case.get("id"))
     return {
         "flow_id": flow["flow_id"],
         "flow_version": flow.get("flow_version"),
@@ -38,7 +41,9 @@ def build_row(flow: dict, final: dict, *, case: dict, source: str,
         "subject": (str(case.get("subject") or "")[:500] or None),
         "tier": final.get("tier"),
         "region": final.get("region"),
-        "outcome": outcome.get("action"),
+        "outcome": action,
+        "draft": final.get("draft"),
+        "human_action": "pending" if pending else None,
         "confidence": final.get("confidence"),
         "gate": final.get("confidence_gate"),
         "trace": final.get("trace") or [],
@@ -57,7 +62,24 @@ def record_run(flow: dict, final: dict, *, case: dict, source: str = "api",
         sb = sb or get_supabase()
         row = build_row(flow, final, case=case, source=source, idempotency_key=idempotency_key)
         res = sb.table("runs").insert(row).execute()
-        return res.data[0]["run_id"] if res.data else None
+        run_id = res.data[0]["run_id"] if res.data else None
     except Exception as e:  # noqa: BLE001 -- never fail the run over telemetry
         log.warning("record_run failed: %s", e)
         return None
+
+    # close the loop later: if this went to a human on a real Case, schedule a
+    # resolution check (Phase 11). Best-effort.
+    if run_id and row.get("human_action") == "pending":
+        try:
+            import datetime as _dt
+
+            from interpreter import jobs
+
+            delay = int(os.environ.get("FEEDBACK_DELAY_MIN", "20"))
+            run_after = (_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(minutes=delay)).isoformat()
+            jobs.enqueue("check_resolution", {"run_id": run_id},
+                         dedupe_key=run_id, run_after=run_after, sb=sb)
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not schedule resolution check for %s: %s", run_id, e)
+
+    return run_id
