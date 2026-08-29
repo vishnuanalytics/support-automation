@@ -118,7 +118,7 @@ groundwork — the Phase 7 recalibration — which is done (`019`).**
 | Phase | Scope | Status |
 |---|---|---|
 | 14 | **Internal knowledge base (unstructured), self-serve.** Per-team named collections; entries authored in-app (markdown editor); chunked + embedded locally, scoped to the tenant. New `kb_lookup` node the flow author drops at a checkpoint — consulted **only when the run reaches it**, feeds `draft` as authoritative context above the public docs. | **Built (2026-08-29)** — migrations `022` (`kb_entries` + `sources` internal_kb RLS) + `023` (a `kb_lookup` checkpoint on the Globex flow's billing branch). `ingestion/sources/kb_common.embed_entry` (shared with `markdown_source`). `registry.h_kb_lookup` (templated `{{state.path}}` query, tenant-scoped collections, `use_graph=False` → `state.internal_kb`); `h_draft` folds an internal hit in above the public docs + counts it toward groundedness. API: `/api/kb/collections` + `/entries` CRUD (RLS-scoped, `kb_write` rate-limit, inline embed ≤8 KB else an `embed_kb_entry` job); `api/worker` handles it. Web: a **Knowledge** tab (collections → entries → markdown editor) + a `kb_lookup` Inspector form (collection multi-select + `top_k` + query). `scripts/seed_kb_demo.py` seeds `globex-billing-runbook`. 38 offline + KB integration tests green; Globex flow recompiles with the checkpoint. File upload (`.pdf`/`.docx` via `pypdf`/`python-docx`) is a noted follow-on; end-to-end billing-branch run pending a Groq daily-quota reset. |
-| 15 | **Google Drive / Docs connector.** Per-tenant Google OAuth (tokens in `tenant_integrations`, flagged for encryption); link a Google Doc to a collection; a scheduled job re-exports + re-embeds on `modifiedTime` change to keep it in sync; unlink = soft-delete its chunks. Adds a `gdoc` source kind alongside Phase 14's `internal_kb` collections. | **Planned** — detail below. |
+| 15 | **Google Drive / Docs connector.** Per-tenant Google OAuth; link a Google Doc into a KB collection; a scheduled job re-exports + re-embeds on `modifiedTime` change. | **Built (2026-08-29), live-unverified** — a linked doc is a `kb_entries` row with `origin='gdoc'` **inside an `internal_kb` collection** (deviation from the "distinct `gdoc` source kind" sketch — keeps one retrieval path, and `kb_lookup` picks up manual + synced entries together). Migration `024` adds `origin`/`gdoc_id`/`gdoc_url`/`gdoc_modified`/`synced_at`/`sync_error` to `kb_entries`. `interpreter/gdrive.py`: OAuth (`authorize_url`/`exchange_code`, offline access), `fetch_doc` (Drive `files.get` + Docs `documents.get`), and a pure `docs_json_to_markdown` (headings/bullets/tables — unit-tested). Refresh token in `tenant_integrations (kind='google')`. API: `/api/integrations/google/{status,authorize,callback}`, `POST /api/kb/collections/{id}/gdoc`, `POST /api/kb/entries/{id}/resync`; gdoc entries reject `body_md` PATCH (409). `ingestion/sources/gdoc_sync.py --once` for the cron. Web: **Connect Google** / **＋ Google Doc** / per-entry **re-sync**, gdoc entries read-only with a 🔗. `docs/GOOGLE_SETUP.md`. 42 offline pytest green. **Not exercised end-to-end** — needs a Google Cloud OAuth client + `GOOGLE_CLIENT_ID`/`SECRET` in `.env` (like the Salesforce JWT setup). |
 | 16 | **Structured policy rules + internal task actions.** Per-team rule store (`when → then`), edited via a form (JSON predicate, never code). New `policy_gate` node (deterministic routing override: force `ask_human` / auto-approve) and `task_dispatch` node (side-effecting, via the job queue). On an action match: post to **Slack** with Approve/Reject buttons to the person/team the rule names → on approval the bot opens a **GitHub issue** and tags the team. Slack + GitHub creds per tenant. | **Planned** — detail below. |
 
 ## Phase 0 — schema (complete)
@@ -618,12 +618,14 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**Phases 0–13 + Phase 14 built.** Migrations through `023` applied. 38 offline pytest
+**Phases 0–15 built.** Migrations through `024` applied. 42 offline pytest
 tests + `tests/test_multiflow.py` green (the latter needs Groq quota).
 External calls (Groq, Salesforce) run real when creds are in `.env`, else
-deterministic dry-run. **Phase 14 (self-serve internal KB) is built; 15
-(Google Docs sync) and 16 (structured policy rules + Slack-approved
-actions) are planned — spec above, no code yet.**
+deterministic dry-run. **Phase 14 (self-serve internal KB) and Phase 15
+(Google Docs connector) are built — Phase 15 is live-unverified, it needs
+a Google Cloud OAuth client + `GOOGLE_CLIENT_ID`/`SECRET` in `.env`.
+Phase 16 (structured policy rules + Slack-approved actions) is planned —
+spec above, no code yet.**
 
 **2026-08-29 — Groq key added; LLM path now runs real.** Fallout fixed
 (migrations `017`/`018`, `interpreter/llm.py`, `registry._context_block`):
@@ -663,11 +665,14 @@ Editor login: `gundamvishnu7@gmail.com` → tenant Acme; `globex-owner@example.t
 gate re-calibration for real-LLM output is done (`019`).** Open work, in
 order:
 
-1. **Phase 15 → 16** — Google Docs sync, then structured policy rules +
-   Slack-approved internal actions. Spec in "Self-serve knowledge &
-   internal actions (phases 14–16) — detail". **Phase 14 (self-serve
-   internal KB) is built.** (Phase 16's `policy_gate` supersedes `019`'s
-   static `escalate_topics` list.)
+1. **Phase 16** — structured policy rules + Slack-approved internal
+   actions. Spec in "Self-serve knowledge & internal actions (phases
+   14–16) — detail". (Phase 16's `policy_gate` supersedes `019`'s static
+   `escalate_topics` list.) **Phases 14 and 15 are built.**
+   - Phase 15 needs live verification: create a Google Cloud OAuth
+     client, set `GOOGLE_CLIENT_ID`/`SECRET`/`GOOGLE_REDIRECT_URI` in
+     `.env` (see `docs/GOOGLE_SETUP.md`), connect a tenant, link a doc,
+     `python -m ingestion.sources.gdoc_sync --once`.
    - Phase 14 loose ends: file upload (`.pdf`/`.docx`); an `eval/e2e`
      case that only passes when the internal entry is consulted; run the
      Globex billing branch end-to-end once Groq daily quota resets.

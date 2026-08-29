@@ -126,6 +126,10 @@ export interface KbEntryRow {
   embedded_at: string | null;
   updated_at: string;
   updated_by: string | null;
+  origin?: "manual" | "gdoc";
+  gdoc_url?: string | null;
+  synced_at?: string | null;
+  sync_error?: string | null;
 }
 
 export interface KbEntry extends KbEntryRow {
@@ -133,4 +137,10 @@ export interface KbEntry extends KbEntryRow {
   tenant_id: string;
   body_md: string;
   embed_hash: string | null;
+  gdoc_id?: string | null;
+}
+
+export interface GoogleStatus {
+  configured: boolean;
+  connected: Record<string, boolean>; // tenant_id -> connected
 }

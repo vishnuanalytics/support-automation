@@ -44,12 +44,13 @@ cd web && npm install && npm run dev      # editor on :5173
 
 ## Status
 
-Phases 0–13 built and complete — see `docs/PROJECT_SCOPE.md` for what each
-delivered and how it was verified. Migrations `001`–`023` applied; daily
-ingestion runs on GitHub Actions; 38 offline tests + integration tests.
-Phases 14–16 (self-serve knowledge base, Google Docs sync, structured
-policy rules + Slack-approved internal actions) are planned — full spec in
-`docs/PROJECT_SCOPE.md`, no code yet.
+Phases 0–15 built — see `docs/PROJECT_SCOPE.md` for what each delivered
+and how it was verified. Migrations `001`–`024` applied; daily ingestion
+runs on GitHub Actions; 42 offline tests + integration tests.
+Phase 14 (self-serve internal knowledge base + `kb_lookup` node) and
+Phase 15 (Google Docs connector — live-unverified, needs a Google OAuth
+client) are built. Phase 16 (structured policy rules + Slack-approved
+internal actions) is planned — full spec in `docs/PROJECT_SCOPE.md`.
 
 ## Cost stance
 
