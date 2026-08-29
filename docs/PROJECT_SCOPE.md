@@ -143,7 +143,7 @@ sign-in button. Build + verify one chunk at a time.**
 | Phase | Scope | Status |
 |---|---|---|
 | 18a | **One-click New flow.** `＋ New flow` no longer prompts for a `tenant_id` — the API infers it from the caller's membership. | **Built + live-verified (2026-08-29).** `FlowCreate.tenant_id` now optional; `create_flow` calls the existing `_caller_tenant(c, None)` (single membership → that tenant; several → 400 asking for one; not-a-member → 403). New `GET /api/tenants` → `[{tenant_id, role}]` for the caller (the UI's tenant picker / prompt-skip). Web: `api.listTenants()`; `FlowList.newFlow()` drops the uuid prompt, keeps team (default `support`) + name. **Verify:** 72 offline pytest green (+1 — `FlowCreate` valid without `tenant_id`, `/tenants` 401 without a token) + 2 integration; web tsc/vitest green. **Live e2e**: `GET /api/tenants` → `[{"00000000-…","owner"}]`; `POST /api/flows {team,name}` (no tenant_id) → 201, flow landed in `00000000-…`. |
-| 18b | Roles `owner`/`editor`/`viewer` on `tenant_members` (col exists). Migration `032`: split RLS on `flows`/`flow_nodes`/`flow_edges`/`flow_versions`/`policy_rules`/KB tables — SELECT any member, write only `owner\|editor`. Web hides Save/Publish/New/Delete for `viewer`. | Planned. |
+| 18b | Roles `owner`/`editor`/`viewer` on `tenant_members` (col exists). Migration `032`: split RLS on `flows`/`flow_nodes`/`flow_edges`/`flow_versions`/`policy_rules`/KB tables — SELECT any member, write only `owner\|editor`. Web hides Save/Publish/New/Delete for `viewer`. | **Built + live-verified (2026-08-29).** **Migration `032`** (applied): `public.is_tenant_member(tid)` / `is_tenant_editor(tid)` SQL helpers; every editable tenant-scoped table (`flows`, `flow_nodes`, `flow_edges`, `flow_versions`, `policy_rules`, `kb_entries`, `sources` internal_kb) drops its single `ALL` policy for a **member SELECT** + **editor `owner\|editor` write** pair (mirrors `002`). API: `_require_editor(c, tenant_id)` pre-check on every flows / rules / KB write endpoint → a clean `403 "your access is view-only"` (RLS + the SECURITY INVOKER `replace_flow_graph` RPC are the real backstop). Web: `App.tsx` reads the caller's role from `GET /api/tenants` (max of memberships) → `canEdit`; `FlowList` hides ＋ New flow, `FlowEditor` hides Save / Publish / Delete / Re-layout / rollback / the node palette and shows a **view-only** pill, for `viewer`. **Verify:** 72 offline pytest green + 3 integration (18a's 2 + `test_viewer_can_read_but_not_write`: Globex owner demoted to `viewer` → PUT / POST / publish / DELETE / rules all `403`, reads still work); web tsc + vitest (5) + build green. |
 | 18c | `tenant_invitations (id, tenant_id, email, role, invited_by, status, created_at, accepted_at)` + RLS. API `POST/GET/DELETE /api/invitations` (owner) + auto-claim on `auth.users` insert (trigger matches email → `tenant_members` row with the invited role). Web: a **Team** panel. No email infra — an invite pre-authorises an address + role. | Planned. |
 | 18d | **Continue with Google** button on `Login.tsx` (`supabase.auth.signInWithOAuth`). New-user-no-invite screen. Needs the Supabase dashboard Google provider + a Google OAuth web client redirect (`…supabase.co/auth/v1/callback`) — operator steps, not code. | Planned. |
 
@@ -644,9 +644,10 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**Phases 0–17 complete; Phase 18 (team access) open — 18a done, 18b–d
-planned.** Migrations `001`–`031` applied. 72 offline pytest tests + web
-tsc/vitest/build + `tests/test_multiflow.py` (needs Groq quota).
+**Phases 0–17 complete; Phase 18 (team access) open — 18a + 18b done,
+18c–d planned.** Migrations `001`–`032` applied. 72 offline pytest tests
+(+ 3 integration for 18a/b) + web tsc/vitest/build + `tests/test_multiflow.py`
+(needs Groq quota).
 Every external integration has now been exercised end-to-end against a
 real account: **Salesforce** (Phase 3, JWT), **Google Docs** (Phase 15,
 OAuth → link → sync), **Slack + GitHub** (Phase 16, offboarding case →
@@ -722,23 +723,32 @@ automatically (today the re-enqueue works, the round count is by
 
 Phase 17 (a–d) is committed + merged to `main` (PR #2, `20bdeda`).
 
-### Resume here — Phase 18b (roles)
+### Resume here — Phase 18c (invitations)
 
-18a is done: `POST /api/flows` infers the tenant, `GET /api/tenants`
-exists, `＋ New flow` no longer asks for a uuid. **Uncommitted** —
-`api/main.py`, `web/src/api.ts`, `web/src/flows/FlowList.tsx`,
-`tests/test_api.py`, this file.
+18a + 18b are done + merged/committed. **18b uncommitted** (about to
+be): `api/main.py`, `db/migrations/032_role_gated_rls.sql`,
+`web/src/App.tsx`, `web/src/flows/{FlowList,FlowEditor}.tsx`,
+`tests/test_api.py`, this file. Migration `032` already applied.
 
-**18b** — `tenant_members.role` (`owner` / `editor` / `viewer`; the col
-already exists, everyone is currently `owner`). Migration `032`:
-replace the single `ALL`-verb RLS policy on `flows`, `flow_nodes`,
-`flow_edges`, `flow_versions`, `policy_rules`, `kb_entries`, `sources`
-(`kind='internal_kb'`) with **SELECT** for any member + **INSERT/UPDATE/
-DELETE** gated on `role in ('owner','editor')` (mirror
-`002_rls_and_constraints.sql`). Web: `App.tsx` reads the caller's role
-from `GET /api/tenants`; hide Save / Publish / ＋ New flow / Delete /
-rollback for `viewer` (a read-only badge). Then **18c** invitations,
-**18d** Google button.
+**18c** — `tenant_invitations (id uuid pk, tenant_id, email citext,
+role, invited_by, status ['pending'|'accepted'|'revoked'], created_at,
+accepted_at)`, RLS: a tenant owner manages its rows; an invitee may
+`select` their own by `lower(email) = auth.jwt()->>'email'`. API (owner
+only): `POST /api/invitations {email, role}`, `GET /api/invitations`,
+`DELETE /api/invitations/{id}`. Auto-claim: a trigger on `auth.users`
+insert (or a `POST /api/invitations/accept` the web calls right after
+first sign-in) that matches the new user's email to a `pending` invite →
+inserts the `tenant_members` row with the invited role, marks the invite
+`accepted`. Web: a **Team** panel (owner) — invite form (email + role),
+member list with role, revoke; a "no workspace yet — ask an owner to
+invite <your email>" screen when a signed-in user has zero memberships.
+No email infra: the invite just pre-authorises an address + role.
+
+Then **18d** — a **Continue with Google** button on `Login.tsx`
+(`supabase.auth.signInWithOAuth({ provider: 'google' })`); needs the
+Supabase dashboard Google provider enabled + a Google OAuth web client
+with `https://mjohgmivnxfwkqmlojqs.supabase.co/auth/v1/callback` as a
+redirect URI (operator steps, not code).
 
 Standing context (unchanged):
 

@@ -225,6 +225,45 @@ def test_create_flow_infers_the_tenant_when_omitted(auth_headers):
             .table("flows").delete().eq("flow_id", fid).execute()
 
 
+GLOBEX_OWNER_UID = "57c26330-cb98-475a-875f-8f8a925672fd"
+GLOBEX_TENANT_ID = "22222222-2222-2222-2222-222222222222"
+
+
+@pytest.fixture
+def globex_as_viewer():
+    """Phase 18b — temporarily demote the Globex owner to `viewer`, restore after."""
+    from supabase import create_client
+
+    svc = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"])
+
+    def _set(role: str) -> None:
+        svc.table("tenant_members").update({"role": role}) \
+            .eq("user_id", GLOBEX_OWNER_UID).eq("tenant_id", GLOBEX_TENANT_ID).execute()
+
+    _set("viewer")
+    try:
+        yield
+    finally:
+        _set("owner")
+
+
+@pytest.mark.integration
+def test_viewer_can_read_but_not_write(globex_as_viewer, auth_headers):
+    flows = client.get("/api/flows", headers=auth_headers).json()
+    assert flows, "a viewer still reads their tenant's flows"
+    fid = flows[0]["flow_id"]
+    draft = client.get(f"/api/flows/{fid}", headers=auth_headers).json()
+
+    put = client.put(f"/api/flows/{fid}", headers=auth_headers, json=draft)
+    assert put.status_code == 403 and "view-only" in str(put.json())
+    assert client.post("/api/flows", headers=auth_headers,
+                       json={"team": "csm", "name": "nope"}).status_code == 403
+    assert client.post(f"/api/flows/{fid}/publish", headers=auth_headers).status_code == 403
+    assert client.delete(f"/api/flows/{fid}", headers=auth_headers).status_code == 403
+    assert client.post("/api/rules", headers=auth_headers,
+                       json={"team": "csm", "name": "nope"}).status_code == 403
+
+
 @pytest.fixture
 def scratch_flow(auth_headers):
     """A throwaway 3-node flow in the Globex tenant; deleted after the test."""

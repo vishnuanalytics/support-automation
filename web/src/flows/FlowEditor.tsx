@@ -21,6 +21,7 @@ const TERMINAL = new Set(["auto_reply", "ask_human", "handover", "clarify"]);
 
 export function FlowEditor(props: {
   flowId: string;
+  canEdit: boolean;
   onSaved: () => void;
   onDeleted: () => void;
 }) {
@@ -33,8 +34,9 @@ export function FlowEditor(props: {
 
 type Banner = { kind: "ok" | "err"; text: string; list?: string[] };
 
-function Inner({ flowId, onSaved, onDeleted }: {
+function Inner({ flowId, canEdit, onSaved, onDeleted }: {
   flowId: string;
+  canEdit: boolean;
   onSaved: () => void;
   onDeleted: () => void;
 }) {
@@ -250,7 +252,10 @@ function Inner({ flowId, onSaved, onDeleted }: {
         <span className="muted" title="draft revision (optimistic-concurrency token)">
           draft rev {flow.version}
         </span>
-        {versions.length > 0 && (
+        {!canEdit && (
+          <span className="pill" title="your access is view-only">view-only</span>
+        )}
+        {canEdit && versions.length > 0 && (
           <select
             value=""
             onChange={(e) => e.target.value && doRollback(Number(e.target.value))}
@@ -267,11 +272,15 @@ function Inner({ flowId, onSaved, onDeleted }: {
         )}
         <div style={{ flex: 1 }} />
         {dirty && <span className="muted" title="unsaved changes">●</span>}
-        <button onClick={() => setNodes((ns) => layout(ns, edges))}>Re-layout</button>
         <button onClick={doValidate} disabled={busy}>Validate</button>
-        <button className="primary" onClick={doSave} disabled={busy || !dirty}>Save draft</button>
-        <button onClick={doPublish} disabled={busy}>Publish</button>
-        <button className="err" onClick={doDelete}>Delete</button>
+        {canEdit && (
+          <>
+            <button onClick={() => setNodes((ns) => layout(ns, edges))}>Re-layout</button>
+            <button className="primary" onClick={doSave} disabled={busy || !dirty}>Save draft</button>
+            <button onClick={doPublish} disabled={busy}>Publish</button>
+            <button className="err" onClick={doDelete}>Delete</button>
+          </>
+        )}
       </div>
 
       <div className="workarea">
@@ -308,28 +317,30 @@ function Inner({ flowId, onSaved, onDeleted }: {
             <MiniMap pannable zoomable />
           </ReactFlow>
 
-          <div
-            style={{
-              position: "absolute",
-              left: 10,
-              top: 10,
-              display: "flex",
-              flexWrap: "wrap",
-              gap: 6,
-              maxWidth: 260,
-              padding: 8,
-              borderRadius: 8,
-              background: "color-mix(in srgb, var(--panel) 92%, transparent)",
-              border: "1px solid var(--border)",
-              zIndex: 5,
-            }}
-          >
-            {(types?.types ?? []).map((t) => (
-              <button key={t} onClick={() => addNode(t)} title={`add ${t}`}>
-                ＋ {t}
-              </button>
-            ))}
-          </div>
+          {canEdit && (
+            <div
+              style={{
+                position: "absolute",
+                left: 10,
+                top: 10,
+                display: "flex",
+                flexWrap: "wrap",
+                gap: 6,
+                maxWidth: 260,
+                padding: 8,
+                borderRadius: 8,
+                background: "color-mix(in srgb, var(--panel) 92%, transparent)",
+                border: "1px solid var(--border)",
+                zIndex: 5,
+              }}
+            >
+              {(types?.types ?? []).map((t) => (
+                <button key={t} onClick={() => addNode(t)} title={`add ${t}`}>
+                  ＋ {t}
+                </button>
+              ))}
+            </div>
+          )}
 
           {banner && (
             <div

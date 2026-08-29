@@ -252,6 +252,17 @@ def _require_visible(c: Caller, flow_id: str) -> dict:
     return rows[0]
 
 
+def _require_editor(c: Caller, tenant_id: str) -> None:
+    """Phase 18b — a clean 403 for view-only members before a write.
+    RLS is the real backstop; this just avoids a raw Postgres error string."""
+    rows = (c.sb.table("tenant_members").select("role")
+            .eq("user_id", c.user_id).eq("tenant_id", tenant_id).execute().data or [])
+    if not rows:
+        raise HTTPException(403, "not a member of that tenant")
+    if rows[0].get("role") not in ("owner", "editor"):
+        raise HTTPException(403, "your access is view-only")
+
+
 # ── endpoints ──────────────────────────────────────────────────────────
 @app.get("/api/health")
 def health() -> dict:
@@ -285,6 +296,7 @@ def list_tenants(c: Caller = Depends(caller)) -> list[dict]:
 @app.post("/api/flows", status_code=201)
 def create_flow(body: FlowCreate, c: Caller = Depends(caller)) -> dict:
     tenant_id = _caller_tenant(c, body.tenant_id)   # infer when not given
+    _require_editor(c, tenant_id)
     fid = str(uuid.uuid4())
     try:
         c.sb.table("flows").insert({
@@ -320,6 +332,7 @@ def save_flow(flow_id: str, body: FlowIn, c: Caller = Depends(caller)) -> dict:
     """Save the working draft — one transactional RPC. Optimistic concurrency:
     `body.version` must match the flow's current `version` or it's a 409."""
     meta = _require_visible(c, flow_id)
+    _require_editor(c, meta["tenant_id"])
     if body.version != meta["version"]:
         raise HTTPException(409, {
             "message": "flow changed since you loaded it — reload",
@@ -361,6 +374,7 @@ def publish_flow(flow_id: str, c: Caller = Depends(caller)) -> dict:
     """Snapshot the current draft into an immutable flow_versions row and
     point `published_version` at it."""
     meta = _require_visible(c, flow_id)
+    _require_editor(c, meta["tenant_id"])
     draft = load_flow(flow_id=flow_id, sb=c.sb, status="draft", validate=False)
     errs = _structural_errors(draft)
     if errs:
@@ -392,6 +406,7 @@ class RollbackIn(BaseModel):
 def rollback_flow(flow_id: str, body: RollbackIn, c: Caller = Depends(caller)) -> dict:
     """Restore the working draft from an old snapshot and re-publish it."""
     meta = _require_visible(c, flow_id)
+    _require_editor(c, meta["tenant_id"])
     snap = (
         c.sb.table("flow_versions").select("version, nodes, edges")
         .eq("flow_id", flow_id).eq("version", body.version).execute().data
@@ -410,7 +425,8 @@ def rollback_flow(flow_id: str, body: RollbackIn, c: Caller = Depends(caller)) -
 
 @app.delete("/api/flows/{flow_id}", status_code=204)
 def delete_flow(flow_id: str, c: Caller = Depends(caller)) -> None:
-    _require_visible(c, flow_id)
+    meta = _require_visible(c, flow_id)
+    _require_editor(c, meta["tenant_id"])
     c.sb.table("flows").delete().eq("flow_id", flow_id).execute()  # cascades nodes/edges
 
 
@@ -639,6 +655,7 @@ def kb_list_collections(c: Caller = Depends(caller)) -> list[dict]:
 def kb_create_collection(body: KbCollectionIn, c: Caller = Depends(caller)) -> dict:
     rate_limit(c.user_id, "kb_write", 60)
     tenant_id = _caller_tenant(c, body.tenant_id)
+    _require_editor(c, tenant_id)
     row = {
         "kind": "internal_kb", "tenant_id": tenant_id, "name": body.name,
         "config": {"description": body.description} if body.description else {},
@@ -654,6 +671,7 @@ def kb_create_collection(body: KbCollectionIn, c: Caller = Depends(caller)) -> d
 def kb_update_collection(sid: str, body: KbCollectionPatch, c: Caller = Depends(caller)) -> dict:
     rate_limit(c.user_id, "kb_write", 60)
     col = _kb_collection(c, sid)
+    _require_editor(c, col["tenant_id"])
     patch: dict[str, Any] = {}
     if body.name is not None:
         patch["name"] = body.name
@@ -667,7 +685,7 @@ def kb_update_collection(sid: str, body: KbCollectionPatch, c: Caller = Depends(
 @app.delete("/api/kb/collections/{sid}", status_code=204)
 def kb_delete_collection(sid: str, c: Caller = Depends(caller)) -> None:
     rate_limit(c.user_id, "kb_write", 60)
-    _kb_collection(c, sid)                     # RLS gate
+    _require_editor(c, _kb_collection(c, sid)["tenant_id"])   # RLS + role gate
     c.sb.table("sources").update({"status": "archived"}).eq("source_id", sid).execute()
     entries = (c.sb.table("kb_entries").select("entry_id")
                .eq("source_id", sid).eq("status", "active").execute().data or [])
@@ -690,6 +708,7 @@ def kb_list_entries(sid: str, c: Caller = Depends(caller)) -> list[dict]:
 def kb_create_entry(sid: str, body: KbEntryIn, c: Caller = Depends(caller)) -> dict:
     rate_limit(c.user_id, "kb_write", 60)
     col = _kb_collection(c, sid)
+    _require_editor(c, col["tenant_id"])
     row = {
         "source_id": sid, "tenant_id": col["tenant_id"], "title": body.title,
         "body_md": body.body_md, "created_by": c.user_id, "updated_by": c.user_id,
@@ -710,6 +729,7 @@ def kb_update_entry(eid: str, body: KbEntryPatch, c: Caller = Depends(caller)) -
     if entry.get("origin") == "gdoc" and body.body_md is not None:
         raise HTTPException(409, "this entry is synced from Google Docs — edit the doc, then re-sync")
     col = _kb_collection(c, entry["source_id"])
+    _require_editor(c, col["tenant_id"])
     patch: dict[str, Any] = {"updated_by": c.user_id}
     if body.title is not None:
         patch["title"] = body.title
@@ -726,6 +746,7 @@ def kb_update_entry(eid: str, body: KbEntryPatch, c: Caller = Depends(caller)) -
 def kb_delete_entry(eid: str, c: Caller = Depends(caller)) -> None:
     rate_limit(c.user_id, "kb_write", 60)
     entry = _kb_entry(c, eid)
+    _require_editor(c, entry["tenant_id"])
     c.sb.table("kb_entries").update({"status": "archived", "updated_by": c.user_id}) \
         .eq("entry_id", eid).execute()
     _kb_delete(_service, url=_kb_url(entry["source_id"], eid))
@@ -812,6 +833,7 @@ def google_callback(code: str = "", state: str = "", error: str = "") -> HTMLRes
 def kb_link_gdoc(sid: str, body: GdocLinkIn, c: Caller = Depends(caller)) -> dict:
     rate_limit(c.user_id, "kb_write", 60)
     col = _kb_collection(c, sid)
+    _require_editor(c, col["tenant_id"])
     if not gdrive.connected(col["tenant_id"], _service):
         raise HTTPException(400, "connect Google for this tenant first")
     try:
@@ -847,6 +869,7 @@ def kb_resync_gdoc(eid: str, c: Caller = Depends(caller)) -> dict:
     if entry.get("origin") != "gdoc":
         raise HTTPException(400, "not a Google-linked entry")
     col = _kb_collection(c, entry["source_id"])
+    _require_editor(c, col["tenant_id"])
     try:
         fetched = gdrive.fetch_doc(col["tenant_id"], entry["gdoc_id"], _service)
     except Exception as e:  # noqa: BLE001
@@ -891,6 +914,7 @@ def list_rules(team: str | None = None, c: Caller = Depends(caller)) -> list[dic
 def create_rule(body: RuleIn, c: Caller = Depends(caller)) -> dict:
     rate_limit(c.user_id, "rules_write", 60)
     tenant_id = _caller_tenant(c, body.tenant_id)
+    _require_editor(c, tenant_id)
     row = {
         "tenant_id": tenant_id, "team": body.team, "name": body.name,
         "priority": body.priority, "when": body.when, "then": body.then,
@@ -905,9 +929,11 @@ def create_rule(body: RuleIn, c: Caller = Depends(caller)) -> dict:
 @app.patch("/api/rules/{rule_id}")
 def update_rule(rule_id: str, body: RulePatch, c: Caller = Depends(caller)) -> dict:
     rate_limit(c.user_id, "rules_write", 60)
-    cur = c.sb.table("policy_rules").select("rule_id").eq("rule_id", rule_id).execute().data
+    cur = (c.sb.table("policy_rules").select("rule_id, tenant_id")
+           .eq("rule_id", rule_id).execute().data)
     if not cur:
         raise HTTPException(404, "rule not found or not visible to you")
+    _require_editor(c, cur[0]["tenant_id"])
     patch = {k: v for k, v in body.model_dump(exclude_none=True).items()}
     patch["updated_by"] = c.user_id
     return c.sb.table("policy_rules").update(patch).eq("rule_id", rule_id).execute().data[0]
@@ -916,6 +942,10 @@ def update_rule(rule_id: str, body: RulePatch, c: Caller = Depends(caller)) -> d
 @app.delete("/api/rules/{rule_id}", status_code=204)
 def delete_rule(rule_id: str, c: Caller = Depends(caller)) -> None:
     rate_limit(c.user_id, "rules_write", 60)
+    cur = (c.sb.table("policy_rules").select("tenant_id")
+           .eq("rule_id", rule_id).execute().data)
+    if cur:
+        _require_editor(c, cur[0]["tenant_id"])
     c.sb.table("policy_rules").delete().eq("rule_id", rule_id).execute()
 
 
