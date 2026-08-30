@@ -25,6 +25,7 @@ Run:  uvicorn api.main:app --reload
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import uuid
@@ -1067,6 +1068,178 @@ def kb_resync_gdoc(eid: str, c: Caller = Depends(caller)) -> dict:
         "sync_error": None, "updated_by": c.user_id,
     }).eq("entry_id", eid).execute().data[0]
     return _kb_after_write(updated, col, c)
+
+
+# ── Phase 20: email channel ─────────────────────────────────────────
+EMAIL_REDIRECT_URI = os.environ.get(
+    "EMAIL_GOOGLE_REDIRECT_URI",
+    "http://localhost:8000/api/integrations/email/google/callback",
+)
+
+
+class EmailChannelIn(BaseModel):
+    provider: str = "imap"                 # 'imap' | 'gmail'
+    team: str = "support"
+    imap_host: str | None = None
+    imap_port: int = 993
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    username: str | None = None
+    password: str | None = None            # app password -> Vault; write-only, never returned
+    from_addr: str | None = None
+    from_name: str | None = None
+    no_reply_addr: str | None = None
+    folder: str = "INBOX"
+    auto_send_enabled: bool = False        # the hard-guard master switch (default off)
+    active: bool | None = None             # flip polling on/off without re-entering creds
+    tenant_id: str | None = None
+
+
+def _email_cfg_from_body(tenant_id: str, body: EmailChannelIn, existing):
+    from interpreter.mailbox import MailboxConfig
+
+    e = existing or MailboxConfig(tenant_id=tenant_id)
+    status = e.status
+    if body.active is True:
+        status = "active"
+    elif body.active is False:
+        status = "inactive"
+    return MailboxConfig(
+        tenant_id=tenant_id,
+        provider=body.provider or e.provider,
+        team=body.team or e.team,
+        username=(body.username or e.username or "").strip(),
+        from_addr=(body.from_addr or body.username or e.from_addr or "").strip(),
+        from_name=body.from_name if body.from_name is not None else e.from_name,
+        no_reply_addr=(body.no_reply_addr or e.no_reply_addr) or None,
+        imap_host=(body.imap_host or e.imap_host or "").strip(),
+        imap_port=body.imap_port or e.imap_port,
+        smtp_host=(body.smtp_host or e.smtp_host or "").strip(),
+        smtp_port=body.smtp_port or e.smtp_port,
+        folder=body.folder or e.folder,
+        auto_send_enabled=bool(body.auto_send_enabled),
+        status=status,
+        secret=e.secret,
+    )
+
+
+@app.get("/api/integrations/email")
+def email_status(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    """Channel status for the caller's tenant. Never returns the secret."""
+    tid = _caller_tenant(c, tenant_id)
+    from interpreter.mailbox import gmail_available, load_channel
+
+    base = {"tenant_id": tid, "gmail_available": gmail_available()}
+    ch = load_channel(tid, _service)
+    if not ch:
+        return {**base, "configured": False, "status": "none"}
+    return {**base, **ch.public_status()}
+
+
+@app.put("/api/integrations/email")
+def email_configure(body: EmailChannelIn, c: Caller = Depends(caller)) -> dict:
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    rate_limit(c.user_id, "integration", 30)
+    from interpreter.mailbox import load_channel, save_channel
+
+    existing = load_channel(tid, _service)
+    if body.provider == "imap":
+        if not (body.imap_host and body.username):
+            raise HTTPException(422, "imap_host and username are required")
+        has_pw = bool(body.password) or bool(existing and existing.secret.get("password"))
+        if not has_pw:
+            raise HTTPException(422, "password (an app password) is required")
+    elif body.provider == "gmail":
+        if not (existing and existing.secret.get("refresh_token")):
+            raise HTTPException(400, "connect Gmail first (Connect Gmail button)")
+
+    cfg = _email_cfg_from_body(tid, body, existing)
+    plaintext = None
+    if body.provider == "imap" and body.password:
+        plaintext = json.dumps({"kind": "imap", "password": body.password})
+    save_channel(tid, _service, cfg, plaintext_secret=plaintext, updated_by=c.user_id)
+    return email_status(tenant_id=tid, c=c)
+
+
+@app.delete("/api/integrations/email", status_code=204)
+def email_disconnect(tenant_id: str | None = None, c: Caller = Depends(caller)) -> None:
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    from interpreter.mailbox import delete_channel
+
+    delete_channel(tid, _service)
+
+
+@app.post("/api/integrations/email/test")
+def email_test(body: EmailChannelIn, c: Caller = Depends(caller)) -> dict:
+    """Log in to the mailbox and back out — saves nothing. Uses the posted
+    creds, falling back to the stored secret when the password field is blank."""
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    rate_limit(c.user_id, "integration", 20)
+    from interpreter.mailbox import load_channel, test_connection
+
+    existing = load_channel(tid, _service)
+    cfg = _email_cfg_from_body(tid, body, existing)
+    if body.provider == "imap":
+        cfg.secret = {"password": body.password
+                      or (existing.secret.get("password") if existing else "")}
+    elif existing:
+        cfg.secret = existing.secret
+    return test_connection(cfg)
+
+
+@app.get("/api/integrations/email/google/authorize")
+def email_google_authorize(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    from interpreter.mailbox import gmail_authorize_url, gmail_available
+
+    if not gmail_available():
+        raise HTTPException(503, "Google is not configured on this server")
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    nonce = secrets.token_urlsafe(24)
+    _oauth_state[nonce] = (time.time() + 600, c.user_id, tid)
+    return {"url": gmail_authorize_url(EMAIL_REDIRECT_URI, nonce)}
+
+
+@app.get("/api/integrations/email/google/callback")
+def email_google_callback(code: str = "", state: str = "", error: str = "") -> HTMLResponse:
+    def page(msg: str) -> HTMLResponse:
+        return HTMLResponse(
+            f"<!doctype html><meta charset=utf-8><p>{msg}</p>"
+            "<script>setTimeout(()=>window.close(),1500)</script>"
+        )
+
+    if error:
+        return page(f"Google authorisation failed: {error}")
+    hit = _oauth_state.pop(state, None)
+    if not hit or hit[0] < time.time():
+        return page("This authorisation link has expired — try again.")
+    _, user_id, tid = hit
+    try:
+        tok = gdrive.exchange_code(code, EMAIL_REDIRECT_URI)
+    except Exception as e:  # noqa: BLE001
+        return page(f"Token exchange failed: {e}")
+
+    from interpreter.mailbox import MailboxConfig, gmail_profile_email, load_channel, save_channel
+
+    rt = tok["refresh_token"]
+    email_addr = ""
+    try:
+        email_addr = gmail_profile_email(rt)
+    except Exception:  # noqa: BLE001
+        pass
+    existing = load_channel(tid, _service)
+    cfg = existing or MailboxConfig(tenant_id=tid)
+    cfg.provider = "gmail"
+    if email_addr:
+        cfg.username = email_addr
+        cfg.from_addr = cfg.from_addr or email_addr
+    save_channel(tid, _service, cfg,
+                 plaintext_secret=json.dumps({"kind": "gmail", "refresh_token": rt}),
+                 updated_by=user_id)
+    return page("Gmail connected. You can close this window.")
 
 
 # ── Phase 16: policy rules ───────────────────────────────────────────

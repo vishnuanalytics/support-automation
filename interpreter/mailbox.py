@@ -1,0 +1,340 @@
+"""
+Phase 20 -- the email channel: a per-tenant mailbox the platform polls for
+inbound support mail and replies from.
+
+Non-secret settings live in `tenant_integrations (kind='email')` (`config`
+jsonb); the mailbox app-password / Gmail OAuth refresh token live in
+**Supabase Vault**, reached through the `integration_secret_{put,get,delete}`
+SECURITY DEFINER RPCs (migration 035). Only the service-role Supabase
+client touches any of it.
+
+This module (Phase 20a):
+  * `MailboxConfig`      -- the resolved channel config (secret kept out of `repr`)
+  * `load_channel` / `save_channel` / `delete_channel`
+  * `test_connection`   -- an IMAP/SMTP or Gmail login check for the UI's
+                           "Test connection" button; opens nothing persistent
+  * `parse_message`, `is_autoreply`, `looks_like_bot_address` -- pure helpers
+                           the poller (20b) uses; unit-tested here.
+
+`gmail_available()` mirrors gdrive/slack: the Gmail provider needs the
+platform `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`; the IMAP provider
+needs nothing platform-side.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass, field
+from email.utils import getaddresses, parseaddr
+
+KIND = "email"
+GMAIL_SCOPES = [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.send",
+]
+_TOKEN_URI = "https://oauth2.googleapis.com/token"
+
+# local-parts that are never a real person to reply to
+_BOT_LOCALPARTS = {
+    "no-reply", "noreply", "no_reply", "donotreply", "do-not-reply",
+    "mailer-daemon", "postmaster", "bounce", "bounces", "notifications",
+    "notification", "automated", "auto-reply", "autoreply",
+}
+
+
+def gmail_available() -> bool:
+    return bool(os.environ.get("GOOGLE_CLIENT_ID") and os.environ.get("GOOGLE_CLIENT_SECRET"))
+
+
+def gmail_authorize_url(redirect_uri: str, state: str) -> str:
+    """Gmail-scoped OAuth consent URL (offline access -> a refresh token).
+    Reuses the platform GOOGLE_CLIENT_ID; the redirect must be registered on
+    that OAuth client (see docs/EMAIL_SETUP.md)."""
+    from urllib.parse import urlencode
+
+    return "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode({
+        "client_id": os.environ["GOOGLE_CLIENT_ID"],
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": " ".join(GMAIL_SCOPES),
+        "access_type": "offline",
+        "prompt": "consent",
+        "state": state,
+        "include_granted_scopes": "true",
+    })
+
+
+def _gmail_credentials(refresh_token: str):
+    from google.oauth2.credentials import Credentials
+
+    return Credentials(
+        token=None, refresh_token=refresh_token, token_uri=_TOKEN_URI,
+        client_id=os.environ.get("GOOGLE_CLIENT_ID"),
+        client_secret=os.environ.get("GOOGLE_CLIENT_SECRET"),
+        scopes=GMAIL_SCOPES,
+    )
+
+
+def gmail_profile_email(refresh_token: str) -> str:
+    """The connected mailbox's own address (used to default username / From)."""
+    from googleapiclient.discovery import build
+
+    svc = build("gmail", "v1", credentials=_gmail_credentials(refresh_token),
+                cache_discovery=False)
+    return svc.users().getProfile(userId="me").execute().get("emailAddress", "")
+
+
+@dataclass
+class MailboxConfig:
+    tenant_id: str
+    provider: str = "imap"                 # 'imap' | 'gmail'
+    team: str = "support"
+    username: str = ""                     # mailbox address / login
+    from_addr: str = ""
+    from_name: str = ""
+    no_reply_addr: str | None = None
+    imap_host: str = ""
+    imap_port: int = 993
+    smtp_host: str = ""
+    smtp_port: int = 587
+    folder: str = "INBOX"
+    auto_send_enabled: bool = False
+    status: str = "inactive"
+    secret: dict = field(default_factory=dict, repr=False)   # {password} | {refresh_token}
+
+    # ---- (de)serialisation -------------------------------------------------
+    @classmethod
+    def from_row(cls, tenant_id: str, config: dict, status: str, secret: dict) -> "MailboxConfig":
+        c = dict(config or {})
+        return cls(
+            tenant_id=str(tenant_id),
+            provider=c.get("provider", "imap"),
+            team=c.get("team", "support"),
+            username=c.get("username", ""),
+            from_addr=c.get("from_addr") or c.get("username", ""),
+            from_name=c.get("from_name", ""),
+            no_reply_addr=c.get("no_reply_addr") or None,
+            imap_host=c.get("imap_host", ""),
+            imap_port=int(c.get("imap_port", 993)),
+            smtp_host=c.get("smtp_host", ""),
+            smtp_port=int(c.get("smtp_port", 587)),
+            folder=c.get("folder", "INBOX"),
+            auto_send_enabled=bool(c.get("auto_send_enabled", False)),
+            status=status or "inactive",
+            secret=secret or {},
+        )
+
+    def to_config(self) -> dict:
+        """The non-secret jsonb stored on the row."""
+        return {
+            "provider": self.provider, "team": self.team, "username": self.username,
+            "from_addr": self.from_addr or self.username, "from_name": self.from_name,
+            "no_reply_addr": self.no_reply_addr,
+            "imap_host": self.imap_host, "imap_port": self.imap_port,
+            "smtp_host": self.smtp_host, "smtp_port": self.smtp_port,
+            "folder": self.folder, "auto_send_enabled": self.auto_send_enabled,
+        }
+
+    def public_status(self) -> dict:
+        """What the API returns to the browser -- never the secret."""
+        return {
+            "configured": bool(self.secret) or self.provider == "gmail" and self.status != "inactive",
+            "provider": self.provider, "team": self.team,
+            "username": self.username, "from_addr": self.from_addr or self.username,
+            "from_name": self.from_name, "no_reply_addr": self.no_reply_addr,
+            "imap_host": self.imap_host, "imap_port": self.imap_port,
+            "smtp_host": self.smtp_host, "smtp_port": self.smtp_port,
+            "folder": self.folder, "auto_send_enabled": self.auto_send_enabled,
+            "status": self.status,
+        }
+
+    @property
+    def send_from(self) -> str:
+        return self.no_reply_addr or self.from_addr or self.username
+
+
+# ── storage (service-role Supabase client) ────────────────────────────
+def load_channel(tenant_id: str, sb) -> "MailboxConfig | None":
+    rows = (sb.table("tenant_integrations")
+            .select("config,status,vault_secret_id")
+            .eq("tenant_id", tenant_id).eq("kind", KIND).execute().data or [])
+    if not rows:
+        return None
+    secret: dict = {}
+    try:
+        raw = sb.rpc("integration_secret_get",
+                     {"p_tenant": tenant_id, "p_kind": KIND}).execute().data
+        if raw:
+            secret = json.loads(raw)
+    except Exception:  # noqa: BLE001 -- no secret / bad json -> treat as unconfigured
+        secret = {}
+    return MailboxConfig.from_row(tenant_id, rows[0]["config"], rows[0]["status"], secret)
+
+
+def save_channel(tenant_id: str, sb, cfg: "MailboxConfig", *,
+                 plaintext_secret: str | None, updated_by: str | None = None) -> None:
+    vault_id = None
+    if plaintext_secret is not None:
+        vault_id = sb.rpc("integration_secret_put", {
+            "p_tenant": tenant_id, "p_kind": KIND, "p_plaintext": plaintext_secret,
+        }).execute().data
+    row = {
+        "tenant_id": tenant_id, "kind": KIND, "secret": {},
+        "config": cfg.to_config(), "status": cfg.status,
+        "updated_by": updated_by, "updated_at": _now_iso(),
+    }
+    if vault_id:
+        row["vault_secret_id"] = vault_id
+    sb.table("tenant_integrations").upsert(row, on_conflict="tenant_id,kind").execute()
+
+
+def delete_channel(tenant_id: str, sb) -> None:
+    try:
+        sb.rpc("integration_secret_delete",
+               {"p_tenant": tenant_id, "p_kind": KIND}).execute()
+    except Exception:  # noqa: BLE001
+        pass
+    sb.table("tenant_integrations").delete().eq("tenant_id", tenant_id).eq("kind", KIND).execute()
+
+
+def set_status(tenant_id: str, sb, status: str, *, error: str | None = None) -> None:
+    sb.table("tenant_integrations").update({
+        "status": status, "last_error": error, "last_poll_at": _now_iso(),
+    }).eq("tenant_id", tenant_id).eq("kind", KIND).execute()
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+# ── connection check (used by POST /api/integrations/email/test) ──────
+def test_connection(cfg: "MailboxConfig") -> dict:
+    """Log in and back out. Returns {ok, imap, smtp, error}. Never raises."""
+    if cfg.provider == "gmail":
+        return _test_gmail(cfg)
+    return _test_imap_smtp(cfg)
+
+
+def _test_imap_smtp(cfg: "MailboxConfig") -> dict:
+    import imaplib
+    import smtplib
+
+    out: dict = {"imap": False, "smtp": False, "ok": False, "error": None}
+    pw = cfg.secret.get("password", "")
+    if not (cfg.imap_host and cfg.username and pw):
+        out["error"] = "imap_host, username and password are required"
+        return out
+    try:
+        m = imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port, timeout=15)
+        m.login(cfg.username, pw)
+        typ, _ = m.select(cfg.folder, readonly=True)
+        m.logout()
+        if typ != "OK":
+            out["error"] = f"folder {cfg.folder!r} not selectable"
+            return out
+        out["imap"] = True
+    except Exception as e:  # noqa: BLE001
+        out["error"] = f"IMAP: {e}"
+        return out
+    if cfg.smtp_host:
+        try:
+            s = smtplib.SMTP(cfg.smtp_host, cfg.smtp_port, timeout=15)
+            s.starttls()
+            s.login(cfg.username, pw)
+            s.quit()
+            out["smtp"] = True
+        except Exception as e:  # noqa: BLE001
+            out["error"] = f"SMTP: {e}"
+            return out
+    out["ok"] = out["imap"] and (out["smtp"] or not cfg.smtp_host)
+    return out
+
+
+def _test_gmail(cfg: "MailboxConfig") -> dict:
+    rt = cfg.secret.get("refresh_token")
+    if not rt:
+        return {"ok": False, "error": "Gmail is not connected yet"}
+    try:
+        from google.auth.transport.requests import Request
+
+        creds = _gmail_credentials(rt)
+        creds.refresh(Request())
+        return {"ok": True, "imap": True, "smtp": True, "error": None}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"Gmail: {e}"}
+
+
+# ── pure helpers for the poller (20b) ────────────────────────────────
+def looks_like_bot_address(addr: str) -> bool:
+    local = (parseaddr(addr or "")[1].split("@", 1) or [""])[0].lower()
+    return local in _BOT_LOCALPARTS or local.startswith(("no-reply", "noreply", "donotreply"))
+
+
+def is_autoreply(headers: dict) -> bool:
+    """True for vacation responders, list mail, bounces, bulk mail -- anything
+    we must not answer (headers: a case-insensitive dict-like of the message)."""
+    h = {str(k).lower(): str(v or "") for k, v in dict(headers).items()}
+    auto = h.get("auto-submitted", "").lower()
+    if auto and auto != "no":
+        return True
+    if h.get("x-autoreply") or h.get("x-autorespond") or h.get("x-auto-response-suppress"):
+        return True
+    if h.get("precedence", "").lower() in {"bulk", "junk", "list", "auto_reply"}:
+        return True
+    if h.get("list-id") or h.get("list-unsubscribe"):
+        return True
+    if h.get("x-support-bot"):                       # our own outbound (20c stamps this)
+        return True
+    return looks_like_bot_address(h.get("from", ""))
+
+
+def parse_message(raw: bytes) -> dict:
+    """RFC-822 bytes -> the `case` dict the flow runs on. Pure."""
+    import email
+    from email import policy
+
+    msg = email.message_from_bytes(raw, policy=policy.default)
+    name, addr = parseaddr(msg.get("From", ""))
+    refs = [r for r in (msg.get("References", "") or "").replace(",", " ").split() if r]
+
+    body = ""
+    if msg.is_multipart():
+        plain = next((p for p in msg.walk() if p.get_content_type() == "text/plain"
+                      and "attachment" not in str(p.get("Content-Disposition", ""))), None)
+        if plain is not None:
+            body = plain.get_content()
+        else:
+            html = next((p for p in msg.walk() if p.get_content_type() == "text/html"), None)
+            if html is not None:
+                body = _strip_html(html.get_content())
+    else:
+        payload = msg.get_content()
+        body = payload if msg.get_content_type() == "text/plain" else _strip_html(payload)
+
+    headers = {k: v for k, v in msg.items()}
+    return {
+        "channel": "email",
+        "from": addr,
+        "from_name": name or "",
+        "to": [a for _, a in getaddresses(msg.get_all("To", []))],
+        "subject": (msg.get("Subject", "") or "").strip(),
+        "body": (body or "").strip(),
+        "message_id": (msg.get("Message-ID", "") or "").strip(),
+        "in_reply_to": (msg.get("In-Reply-To", "") or "").strip(),
+        "references": refs,
+        "date": msg.get("Date", ""),
+        "is_autoreply": is_autoreply(headers),
+    }
+
+
+def _strip_html(s: str) -> str:
+    import re
+
+    s = re.sub(r"(?is)<(script|style).*?</\1>", " ", s or "")
+    s = re.sub(r"(?i)<br\s*/?>", "\n", s)
+    s = re.sub(r"(?i)</p>", "\n\n", s)
+    s = re.sub(r"<[^>]+>", "", s)
+    s = s.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+    return re.sub(r"\n{3,}", "\n\n", s).strip()
