@@ -104,7 +104,14 @@ def _build_client(creds: dict[str, str]):
     else:                                                 # C: legacy SOAP login
         kw["password"] = creds["SF_PASSWORD"]
         kw["security_token"] = token
-    return Salesforce(**kw)
+    sf = Salesforce(**kw)
+    # simple_salesforce leaves requests with no timeout — one dropped
+    # connection then hangs the caller forever. Force a per-request ceiling.
+    import functools
+
+    _to = float(os.environ.get("SF_HTTP_TIMEOUT", "30"))
+    sf.session.request = functools.partial(sf.session.request, timeout=_to)
+    return sf
 
 
 def _client():

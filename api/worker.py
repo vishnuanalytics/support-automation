@@ -13,6 +13,7 @@ the same (flow_id, idempotency_key) already recorded is a no-op success.
 from __future__ import annotations
 
 import argparse
+import os
 import logging
 import sys
 import time
@@ -44,6 +45,11 @@ def _run_flow(payload: dict, sb) -> dict:
             .eq("idempotency_key", key).execute().data
         if dup:
             return {"run_id": dup[0]["run_id"], "idempotent_skip": True}
+
+    # Cases pushed by the Salesforce trigger arrive as a bare id — hydrate
+    # the full record here (raises -> the job retries with backoff).
+    if case.get("sf_id") and not case.get("subject"):
+        case = {**salesforce.get_case(case["sf_id"]), "channel": case.get("channel", "salesforce")}
 
     flow = load_flow(flow_id=flow_id, sb=sb, status="published", validate=True)
     final = build_graph(flow).invoke({"case": case, "tenant_id": flow["tenant_id"], "team": flow.get("team"), "trace": []})
@@ -191,12 +197,28 @@ def _create_github_issue(payload: dict, sb) -> dict:
 HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
             "embed_kb_entry": _embed_kb_entry, "create_github_issue": _create_github_issue}
 
+JOB_TIMEOUT = int(os.environ.get("WORKER_JOB_TIMEOUT", "120"))
+
+
+class _JobTimeout(Exception):
+    pass
+
 
 def process_one(sb) -> bool:
+    import signal
+
     job = jobs.claim(sb=sb)
     if not job:
         return False
     jid, kind = job["job_id"], job["kind"]
+
+    def _alarm(_sig, _frm):
+        raise _JobTimeout(f"job exceeded {JOB_TIMEOUT}s")
+
+    have_alarm = hasattr(signal, "SIGALRM")
+    if have_alarm:
+        signal.signal(signal.SIGALRM, _alarm)
+        signal.alarm(JOB_TIMEOUT)
     try:
         handler = HANDLERS.get(kind)
         if not handler:
@@ -207,6 +229,9 @@ def process_one(sb) -> bool:
     except Exception as e:  # noqa: BLE001
         jobs.fail(jid, f"{type(e).__name__}: {e}", sb=sb)
         log.warning("job %s (%s) failed: %s", jid, kind, e)
+    finally:
+        if have_alarm:
+            signal.alarm(0)
     return True
 
 
