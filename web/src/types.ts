@@ -49,6 +49,29 @@ export interface NodeTypesResp {
   defaults: Record<string, Record<string, unknown>>;
 }
 
+/** Phase 19 — a proposed flow graph (from Mermaid import or AI assist),
+ *  loaded onto the editor canvas as unsaved state; never persisted as-is. */
+export interface FlowCandidate {
+  name: string | null;
+  nodes: FlowNode[];
+  edges: FlowEdge[];
+  warnings: string[];
+  errors: string[];
+}
+
+export interface AssistResult extends FlowCandidate {
+  summary?: string | null;
+  diff?: GraphDiff | null;
+}
+
+export interface GraphDiff {
+  added_nodes: string[];
+  removed_nodes: string[];
+  changed_nodes: string[];
+  added_edges: number;
+  removed_edges: number;
+}
+
 export interface TraceStep {
   node_id: string;
   type: string;

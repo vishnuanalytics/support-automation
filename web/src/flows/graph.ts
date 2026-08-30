@@ -71,3 +71,17 @@ export function toFlowPayload(
 export function uuid(): string {
   return crypto.randomUUID();
 }
+
+/** Phase 19 — a proposed graph (Mermaid import / AI assist) -> canvas state.
+ *  Reuses toReactFlow (dagre-lays-out the null positions) and pulls the
+ *  per-node config out into the map the inspector edits. */
+export function candidateToCanvas(
+  flow: Flow,
+  res: { nodes: FlowNode[]; edges: FlowEdge[] },
+): { nodes: RFNode[]; edges: RFEdge[]; configById: Record<string, Record<string, unknown>> } {
+  const { nodes, edges } = toReactFlow({ ...flow, nodes: res.nodes, edges: res.edges });
+  const configById = Object.fromEntries(
+    res.nodes.map((n) => [n.node_id, (n.config ?? {}) as Record<string, unknown>]),
+  );
+  return { nodes, edges, configById };
+}

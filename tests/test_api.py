@@ -124,6 +124,19 @@ def test_structural_errors_catches_bad_graphs(flow, expect_substr):
     assert any(expect_substr in e for e in errs), errs
 
 
+def test_mermaid_import_endpoint_needs_a_token():
+    r = client.post("/api/flows/import/mermaid", json={"text": "flowchart TD\n A-->B"})
+    assert r.status_code == 401
+
+
+def test_assist_endpoints_need_a_token():
+    assert client.post("/api/flows/assist", json={"prompt": "x"}).status_code == 401
+    assert client.post(
+        "/api/flows/11111111-1111-1111-1111-111111111111/assist",
+        json={"instruction": "x"},
+    ).status_code == 401
+
+
 def test_structural_errors_passes_a_linear_flow():
     flow = {
         "flow_id": "f", "tenant_id": "t", "team": "support", "name": "n",
@@ -164,6 +177,43 @@ def test_a_forged_token_is_rejected(auth_headers):
     bad = good[:-6] + "AAAAAA"
     r = client.get("/api/flows", headers={"Authorization": f"Bearer {bad}"})
     assert r.status_code == 401
+
+
+@pytest.mark.integration
+def test_mermaid_import_returns_a_candidate_graph(auth_headers):
+    r = client.post(
+        "/api/flows/import/mermaid",
+        headers=auth_headers,
+        json={"text": "flowchart TD\n R[retrieve] --> C[classify] --> D[draft] "
+                      "--> G[confidence_gate] --> A[auto_reply]"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [n["type"] for n in body["nodes"]] == [
+        "retrieve", "classify", "draft", "confidence_gate", "auto_reply"]
+    assert body["errors"] == []
+    assert len(body["edges"]) == 4
+
+
+@pytest.mark.integration
+def test_assist_new_flow_returns_a_candidate(auth_headers):
+    r = client.post("/api/flows/assist", headers=auth_headers,
+                    json={"prompt": "retrieve docs, classify, draft, gate, auto-reply "
+                                    "when confident else ask a human"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["errors"] == [] and body["nodes"] and body["diff"] is None
+
+
+@pytest.mark.integration
+def test_assist_edit_flow_returns_a_diff(auth_headers):
+    r = client.post(f"/api/flows/{GLOBEX_FLOW}/assist", headers=auth_headers,
+                    json={"instruction": "add a handover branch for the enterprise tier"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body["diff"]) == {"added_nodes", "removed_nodes", "changed_nodes",
+                                 "added_edges", "removed_edges"}
+    assert body["nodes"]
 
 
 @pytest.mark.integration

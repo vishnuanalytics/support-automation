@@ -92,6 +92,22 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .banner.err { background: #3a1f22; color: #f0a9ae; border: 1px solid #5a2c31; }
 .banner.ok { background: #1f3a30; color: #a9e0c6; border: 1px solid #2c5a48; }
 
+.assist-overlay {
+  position: fixed; inset: 0; z-index: 50;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex; align-items: center; justify-content: center;
+}
+.assist-modal {
+  width: min(560px, 92vw);
+  padding: 16px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+}
+.assist-modal h4 { margin: 0; }
+.assist-modal textarea { width: 100%; font-family: ui-monospace, monospace; font-size: 12px; }
+
 .run-panel { padding: 12px; overflow: auto; }
 .trace-step { padding: 6px 8px; border-left: 2px solid var(--border); margin-bottom: 4px; }
 .trace-step .ty { color: var(--accent); font-weight: 600; }

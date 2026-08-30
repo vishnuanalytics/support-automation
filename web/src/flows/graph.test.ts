@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Flow } from "../types";
-import { layout, toFlowPayload, toReactFlow, uuid } from "./graph";
+import { candidateToCanvas, layout, toFlowPayload, toReactFlow, uuid } from "./graph";
 
 const flow: Flow = {
   flow_id: "f", tenant_id: "t", team: "support", name: "n",
@@ -57,6 +57,25 @@ describe("layout", () => {
     expect(laid).toHaveLength(3);
     const byId = Object.fromEntries(laid.map((n) => [n.id, n.position]));
     expect(byId.r.x).toBeLessThan(byId.a.x); // retrieve is upstream of auto_reply
+  });
+});
+
+describe("candidateToCanvas", () => {
+  it("lays out an imported/assisted graph and pulls out its config", () => {
+    const candidate = {
+      nodes: [
+        { node_id: "x", type: "retrieve", label: "X", position_x: null, position_y: null, config: { top_k: 7 } },
+        { node_id: "y", type: "handover", label: "Y", position_x: null, position_y: null, config: {} },
+      ],
+      edges: [{ edge_id: "e", source_node_id: "x", target_node_id: "y", condition: {} }],
+    };
+    const { nodes, edges, configById } = candidateToCanvas(flow, candidate);
+    expect(nodes.map((n) => n.id).sort()).toEqual(["x", "y"]);
+    expect(nodes.find((n) => n.id === "y")!.data.terminal).toBe(true);
+    expect(edges).toHaveLength(1);
+    expect(configById.x).toEqual({ top_k: 7 });
+    // null positions were replaced by a dagre layout
+    expect(nodes.every((n) => Number.isFinite(n.position.x))).toBe(true);
   });
 });
 

@@ -11,8 +11,16 @@ import {
   type Connection,
 } from "@xyflow/react";
 import { api, ApiError } from "../api";
-import type { Flow, NodeTypesResp } from "../types";
-import { layout, toFlowPayload, toReactFlow, uuid, type RFEdge, type RFNode } from "./graph";
+import type { Flow, FlowCandidate, NodeTypesResp } from "../types";
+import {
+  candidateToCanvas,
+  layout,
+  toFlowPayload,
+  toReactFlow,
+  uuid,
+  type RFEdge,
+  type RFNode,
+} from "./graph";
 import { NodeCard } from "./NodeCard";
 import { EdgeInspector, NodeInspector } from "./Inspector";
 import { RunPanel } from "./RunPanel";
@@ -51,9 +59,34 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [versions, setVersions] = useState<{ version: number; created_at: string }[]>([]);
+  const [assist, setAssist] = useState<null | "mermaid" | "ai-edit">(null);
+  const [assistText, setAssistText] = useState("");
+  const [assistErr, setAssistErr] = useState<string | null>(null);
+  const [assistBusy, setAssistBusy] = useState(false);
 
   const nodeTypes = useMemo(() => ({ flowNode: NodeCard }), []);
   const mark = useCallback(() => setDirty(true), []);
+
+  // Phase 19 — drop a proposed graph (Mermaid import / AI assist) onto the
+  // canvas as unsaved state. Nothing is persisted until the user hits Save.
+  const putCandidate = useCallback(
+    (base: Flow, res: FlowCandidate, note: string) => {
+      const { nodes: n, edges: e, configById: cfg } = candidateToCanvas(base, res);
+      setNodes(n);
+      setEdges(e);
+      setConfigById(cfg);
+      setSelNode(null);
+      setSelEdge(null);
+      setDirty(true);
+      const list = [...res.errors, ...res.warnings];
+      setBanner(
+        res.errors.length
+          ? { kind: "err", text: `${note} — fix the problems below before saving`, list }
+          : { kind: "ok", text: note, list: list.length ? list : undefined },
+      );
+    },
+    [setNodes, setEdges],
+  );
 
   useEffect(() => {
     let alive = true;
@@ -70,12 +103,56 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
         setConfigById(Object.fromEntries(f.nodes.map((x) => [x.node_id, x.config ?? {}])));
         setDirty(false);
         setBanner(null);
+
+        const pend = sessionStorage.getItem(`pendingCandidate:${flowId}`);
+        if (pend) {
+          sessionStorage.removeItem(`pendingCandidate:${flowId}`);
+          try {
+            putCandidate(
+              f,
+              JSON.parse(pend) as FlowCandidate,
+              "loaded onto the canvas — review, then Save draft",
+            );
+          } catch {
+            /* stale handoff — ignore */
+          }
+        } else if (sessionStorage.getItem(`pendingAssistMode:${flowId}`) === "mermaid") {
+          sessionStorage.removeItem(`pendingAssistMode:${flowId}`);
+          setAssist("mermaid");
+          setAssistText("");
+          setAssistErr(null);
+        }
       })
       .catch((e: ApiError) => setBanner({ kind: "err", text: e.message }));
     return () => {
       alive = false;
     };
-  }, [flowId, setNodes, setEdges]);
+  }, [flowId, setNodes, setEdges, putCandidate]);
+
+  async function runAssist() {
+    if (!flow) return;
+    setAssistBusy(true);
+    setAssistErr(null);
+    try {
+      if (assist === "mermaid") {
+        const res = await api.importMermaid(assistText);
+        putCandidate(flow, res, `imported ${res.nodes.length} node(s) from Mermaid`);
+      } else {
+        const res = await api.assistEditFlow(flowId, assistText);
+        const d = res.diff;
+        const tail = res.summary ? ` — ${res.summary}` : "";
+        const note = d
+          ? `AI edit · +${d.added_nodes.length}/−${d.removed_nodes.length}/~${d.changed_nodes.length} nodes${tail}`
+          : `AI edit applied${tail}`;
+        putCandidate(flow, res, note);
+      }
+      setAssist(null);
+      setAssistText("");
+    } catch (e) {
+      setAssistErr((e as ApiError).message);
+    }
+    setAssistBusy(false);
+  }
 
   const onConnect = useCallback(
     (c: Connection) => {
@@ -276,6 +353,18 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
         {canEdit && (
           <>
             <button onClick={() => setNodes((ns) => layout(ns, edges))}>Re-layout</button>
+            <button
+              onClick={() => { setAssist("mermaid"); setAssistText(""); setAssistErr(null); }}
+              title="replace the canvas with a Mermaid flowchart"
+            >
+              Import Mermaid
+            </button>
+            <button
+              onClick={() => { setAssist("ai-edit"); setAssistText(""); setAssistErr(null); }}
+              title="describe a change; AI rewrites the graph for you to review"
+            >
+              ✨ AI edit
+            </button>
             <button className="primary" onClick={doSave} disabled={busy || !dirty}>Save draft</button>
             <button onClick={doPublish} disabled={busy}>Publish</button>
             <button className="err" onClick={doDelete}>Delete</button>
@@ -391,6 +480,45 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
           <RunPanel flowId={flowId} />
         </div>
       </div>
+
+      {assist && (
+        <div className="assist-overlay" onClick={() => !assistBusy && setAssist(null)}>
+          <div className="assist-modal col" onClick={(e) => e.stopPropagation()}>
+            <h4>
+              {assist === "mermaid"
+                ? "Import a Mermaid flowchart"
+                : "Edit this flow with AI"}
+            </h4>
+            <div className="muted" style={{ fontSize: 12 }}>
+              {assist === "mermaid"
+                ? "Paste a flowchart. It replaces the canvas as an unsaved draft — node types are matched by label, edge labels become warnings to wire up, nothing saves until you hit Save draft."
+                : "Describe the change in plain English (e.g. “add a clarify step when the gate fails for non-billing topics”). The AI rewrites the graph for you to review on the canvas; nothing saves until you hit Save draft."}
+            </div>
+            <textarea
+              rows={assist === "mermaid" ? 12 : 4}
+              value={assistText}
+              autoFocus
+              placeholder={
+                assist === "mermaid"
+                  ? "flowchart TD\n  R[retrieve] --> C[classify] --> D[draft]\n  D --> G{confidence gate}\n  G -->|pass| A[auto reply]\n  G -->|fail| H[ask human]"
+                  : "add an identify step before classify, and route unknown senders to a clarify node"
+              }
+              onChange={(e) => setAssistText(e.target.value)}
+            />
+            {assistErr && <div className="err" style={{ fontSize: 12 }}>{assistErr}</div>}
+            <div className="row" style={{ justifyContent: "flex-end", gap: 6 }}>
+              <button onClick={() => setAssist(null)} disabled={assistBusy}>cancel</button>
+              <button
+                className="primary"
+                onClick={runAssist}
+                disabled={assistBusy || !assistText.trim()}
+              >
+                {assistBusy ? "…" : assist === "mermaid" ? "Import" : "Generate"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
