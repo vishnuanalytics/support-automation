@@ -1,6 +1,8 @@
 import { supabase } from "./supabase";
 import type {
+  AssistResult,
   Flow,
+  FlowCandidate,
   FlowMeta,
   FlowVersion,
   ActionRequest,
@@ -74,6 +76,21 @@ export const api = {
     req<{ valid: boolean; errors: string[] }>(`/flows/${id}/validate`, {
       method: "POST",
       body: JSON.stringify(b),
+    }),
+  importMermaid: (text: string) =>
+    req<FlowCandidate>("/flows/import/mermaid", {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    }),
+  assistNewFlow: (prompt: string) =>
+    req<AssistResult>("/flows/assist", {
+      method: "POST",
+      body: JSON.stringify({ prompt }),
+    }),
+  assistEditFlow: (id: string, instruction: string) =>
+    req<AssistResult>(`/flows/${id}/assist`, {
+      method: "POST",
+      body: JSON.stringify({ instruction }),
     }),
   runFlow: (id: string, caseJson: Record<string, unknown>) =>
     req<RunResult>(`/flows/${id}/run`, {

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
-import type { FlowMeta } from "../types";
+import type { FlowCandidate, FlowMeta } from "../types";
 
 export function FlowList({
   activeId,
@@ -36,6 +36,45 @@ export function FlowList({
     }
   }
 
+  /** create an empty flow, stash a proposed graph for the editor to load
+   *  as an unsaved draft (Phase 19). */
+  async function createWithHandoff(
+    defaultName: string,
+    handoff: { candidate?: FlowCandidate; mermaidPrompt?: boolean },
+  ) {
+    const team = prompt("team (support / csm / offboarding / …)", "support");
+    if (!team?.trim()) return;
+    const name = (prompt("flow name", defaultName) || defaultName).trim();
+    try {
+      const { flow_id } = await api.createFlow({ team: team.trim(), name });
+      if (handoff.candidate) {
+        sessionStorage.setItem(
+          `pendingCandidate:${flow_id}`,
+          JSON.stringify(handoff.candidate),
+        );
+      } else if (handoff.mermaidPrompt) {
+        sessionStorage.setItem(`pendingAssistMode:${flow_id}`, "mermaid");
+      }
+      onCreated(flow_id);
+    } catch (e) {
+      alert((e as ApiError).message);
+    }
+  }
+
+  async function fromPrompt() {
+    const p = prompt(
+      "Describe the support flow you want — e.g. “retrieve docs, triage by tier, " +
+        "draft a reply, auto-send only if confident, otherwise ask a human”",
+    );
+    if (!p?.trim()) return;
+    try {
+      const res = await api.assistNewFlow(p.trim());
+      await createWithHandoff(res.name || "AI flow", { candidate: res });
+    } catch (e) {
+      alert((e as ApiError).message);
+    }
+  }
+
   const byTenant = flows.reduce<Record<string, FlowMeta[]>>((acc, f) => {
     (acc[f.tenant_id] ||= []).push(f);
     return acc;
@@ -43,7 +82,20 @@ export function FlowList({
 
   return (
     <div className="col">
-      {canEdit && <button onClick={newFlow}>＋ New flow</button>}
+      {canEdit && (
+        <div className="row" style={{ flexWrap: "wrap", gap: 4 }}>
+          <button onClick={newFlow}>＋ New flow</button>
+          <button onClick={fromPrompt} title="describe it in plain English, AI drafts the graph">
+            ✨ From prompt
+          </button>
+          <button
+            onClick={() => createWithHandoff("Imported flow", { mermaidPrompt: true })}
+            title="start from a Mermaid flowchart"
+          >
+            ⬇ From Mermaid
+          </button>
+        </div>
+      )}
       {err && <div className="err">{err}</div>}
       {Object.entries(byTenant).map(([tenant, list]) => (
         <div key={tenant}>

@@ -203,6 +203,20 @@ class RunIn(BaseModel):
     case: dict[str, Any]
 
 
+class MermaidIn(BaseModel):
+    text: str
+    tenant_id: str | None = None      # only needed if the caller is in >1 tenant
+
+
+class AssistIn(BaseModel):
+    prompt: str
+    tenant_id: str | None = None
+
+
+class AssistEditIn(BaseModel):
+    instruction: str
+
+
 class KbCollectionIn(BaseModel):
     name: str
     description: str | None = None
@@ -441,6 +455,62 @@ def validate_flow_ep(flow_id: str, body: FlowIn, c: Caller = Depends(caller)) ->
     meta = _require_visible(c, flow_id)
     errs = _structural_errors(_flow_dict(meta, body))
     return {"valid": not errs, "errors": errs}
+
+
+@app.post("/api/flows/import/mermaid")
+def import_mermaid(body: MermaidIn, c: Caller = Depends(caller)) -> dict:
+    """Phase 19a -- parse a Mermaid flowchart into a candidate flow graph.
+    Persists nothing: the web editor loads {nodes, edges} as unsaved canvas
+    state, and Save/Publish go through the normal validated path."""
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_editor(c, tid)
+    rate_limit(c.user_id, "assist", 30)
+    if not (body.text or "").strip():
+        raise HTTPException(422, "empty diagram")
+    from interpreter.flows.mermaid_import import mermaid_to_flow
+
+    try:
+        return mermaid_to_flow(body.text, defaults=NODE_DEFAULTS)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(422, f"could not parse the Mermaid diagram: {e}")
+
+
+@app.post("/api/flows/assist")
+def assist_new_flow(body: AssistIn, c: Caller = Depends(caller)) -> dict:
+    """Phase 19b -- a plain-English description -> a candidate flow graph.
+    Persists nothing; the editor loads it as an unsaved draft."""
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_editor(c, tid)
+    rate_limit(c.user_id, "assist", 12)
+    if not (body.prompt or "").strip():
+        raise HTTPException(422, "empty prompt")
+    from interpreter.flows.assist import assist_generate
+
+    try:
+        return assist_generate(body.prompt, defaults=NODE_DEFAULTS)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"assist failed: {e}")
+
+
+@app.post("/api/flows/{flow_id}/assist")
+def assist_edit_flow(flow_id: str, body: AssistEditIn, c: Caller = Depends(caller)) -> dict:
+    """Phase 19c -- rewrite the working draft from a plain-English instruction.
+    Returns a candidate graph + a diff; persists nothing."""
+    meta = _require_visible(c, flow_id)
+    _require_editor(c, meta["tenant_id"])
+    rate_limit(c.user_id, "assist", 12)
+    if not (body.instruction or "").strip():
+        raise HTTPException(422, "empty instruction")
+    from interpreter.flows.assist import assist_edit
+
+    try:
+        current = load_flow(flow_id=flow_id, sb=c.sb, status="draft", validate=False)
+    except FlowNotFound:
+        raise HTTPException(404, "flow not found")
+    try:
+        return assist_edit(current, body.instruction, defaults=NODE_DEFAULTS)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"assist failed: {e}")
 
 
 @app.put("/api/flows/{flow_id}")

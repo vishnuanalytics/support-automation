@@ -279,8 +279,42 @@ def _stub(system: str, user: str, *, json_object: bool) -> str:
     )
 
 
+_STUB_FLOW = {
+    "name": "Stub support flow",
+    "nodes": [
+        {"key": "retrieve", "type": "retrieve", "label": "Retrieve"},
+        {"key": "classify", "type": "classify", "label": "Classify"},
+        {"key": "draft", "type": "draft", "label": "Draft reply"},
+        {"key": "gate", "type": "confidence_gate", "label": "Confidence gate"},
+        {"key": "send", "type": "auto_reply", "label": "Auto reply"},
+        {"key": "human", "type": "ask_human", "label": "Ask a human"},
+    ],
+    "edges": [
+        {"source": "retrieve", "target": "classify", "if": None},
+        {"source": "classify", "target": "draft", "if": None},
+        {"source": "draft", "target": "gate", "if": None},
+        {"source": "gate", "target": "send", "if": "confidence_gate.pass"},
+        {"source": "gate", "target": "human", "if": None},
+    ],
+}
+
+
 def _stub_fields(system: str, user: str) -> dict[str, Any]:
     """Heuristic values for the keys classify / draft ask for."""
+    sys_l = system.lower()
+    # Phase 19b — `assist_generate`: a whole flow graph from a description.
+    if "you design flows for a support-automation platform" in sys_l:
+        return {"_stub": True, **json.loads(json.dumps(_STUB_FLOW))}
+    # Phase 19c — `assist_edit`: echo the current graph back unchanged (a
+    # valid no-op edit; the deterministic stub can't follow an instruction).
+    if "you edit an existing support-automation flow" in sys_l:
+        m = re.search(r"\{.*\}", user or "", re.S)
+        try:
+            cur = json.loads(m.group(0)) if m else {}
+        except (json.JSONDecodeError, AttributeError):
+            cur = {}
+        return {"_stub": True, "summary": "stub: no change",
+                "nodes": cur.get("nodes", []), "edges": cur.get("edges", [])}
     # Phase 17 `clarify` node — asks for {questions, missing}.
     if "questions whose answers" in system:
         return {
