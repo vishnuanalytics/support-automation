@@ -47,11 +47,14 @@ def _run_flow(payload: dict, sb) -> dict:
 
     flow = load_flow(flow_id=flow_id, sb=sb, status="published", validate=True)
     final = build_graph(flow).invoke({"case": case, "tenant_id": flow["tenant_id"], "team": flow.get("team"), "trace": []})
-    run_id = record_run(flow, final, case=case, source="worker", sb=sb,
+    # nodes like `sf_case` mutate the case in-flight (add sf_id, refresh the
+    # account tier) — persist / act on that, not the pre-run input.
+    run_case = final.get("case") or case
+    run_id = record_run(flow, final, case=run_case, source="worker", sb=sb,
                         idempotency_key=key)
     out = {"run_id": run_id, "outcome": (final.get("outcome") or {}).get("action")}
-    if case.get("channel") == "email":
-        out["email"] = _email_post_run(final, case, flow, sb)
+    if run_case.get("channel") == "email":
+        out["email"] = _email_post_run(final, run_case, flow, sb)
     return out
 
 

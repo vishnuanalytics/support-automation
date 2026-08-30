@@ -143,6 +143,40 @@ def test_post_run_no_channel_is_a_clean_skip(monkeypatch):
     assert res == {"skipped": "no email channel"}
 
 
+class _NoDup:
+    """Minimal sb stub: the dedupe lookup in _run_flow finds nothing."""
+    def table(self, *a): return self
+    def select(self, *a): return self
+    def eq(self, *a, **k): return self
+    def execute(self): return type("R", (), {"data": []})()
+
+
+def test_run_flow_records_and_posts_the_case_mutated_in_flight(monkeypatch):
+    # finding #3: sf_case adds sf_id / refreshes tier during the run;
+    # _run_flow must persist and act on that, not the pre-run input.
+    flow = {"flow_id": "f1", "tenant_id": "t", "team": "email", "flow_version": 1}
+    in_case = dict(_CASE)
+    final = {"outcome": {"action": "handover"},
+             "case": {**in_case, "sf_id": "500ABC",
+                      "account": {"customer_type": "basic"}}}
+
+    monkeypatch.setattr(worker, "load_flow", lambda **kw: flow)
+    monkeypatch.setattr(worker, "build_graph",
+                        lambda flow: type("G", (), {"invoke": lambda self, s: final})())
+    seen = {}
+    monkeypatch.setattr(worker, "record_run",
+                        lambda flow, final, *, case, source, sb, idempotency_key=None:
+                        (seen.update(recorded=case) or "run-1"))
+    monkeypatch.setattr(worker, "_email_post_run",
+                        lambda final, case, flow, sb: seen.update(posted=case) or {"ok": True})
+
+    out = worker._run_flow({"flow_id": "f1", "case": dict(in_case),
+                            "idempotency_key": "<m1@x.com>"}, sb=_NoDup())
+    assert out["run_id"] == "run-1"
+    assert seen["recorded"]["sf_id"] == "500ABC"
+    assert seen["posted"]["sf_id"] == "500ABC"
+
+
 # ── integration: real channel loaded from Vault, no reachable server ──
 @pytest.mark.integration
 def test_post_run_against_a_real_channel_dry_runs_the_send():

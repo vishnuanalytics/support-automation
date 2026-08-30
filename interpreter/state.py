@@ -63,6 +63,12 @@ class CaseState(TypedDict, total=False):
 
     sf_writeback: dict[str, Any]      # {target, written, skipped, dry_run, ...} from the sf_writeback node
 
+    # written by an `sf_case` node (Phase 20e) — the inbound message resolved
+    # to a real Salesforce Case: {sf_id, case_number, contact_id, account_id,
+    #  account: {name, customer_type, region}, created, reused,
+    #  contact_created, account_created, dry_run}
+    sf_case: dict[str, Any]
+
     draft: str                 # proposed reply text
     draft_confidence: float    # 0..1, model's own confidence in the draft
     groundedness: dict[str, Any]      # {score 0..1, backend, unsupported[]} — is the draft supported by the context

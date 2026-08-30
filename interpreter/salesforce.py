@@ -413,6 +413,171 @@ def post_chatter(case_id: str, body: str, *, mention_id: str | None = None, tena
                 "feed_element_id": res.get("id"), "mention_failed": True}
 
 
+# --------------------------------------------------------------------------
+# case bootstrap from an inbound message (Phase 20e)
+# --------------------------------------------------------------------------
+_OPEN_CASE_SOQL = (
+    "SELECT Id, CaseNumber FROM Case "
+    "WHERE ContactId = '{cid}' AND IsClosed = false "
+    "AND CreatedDate = LAST_N_DAYS:{days} "
+    "ORDER BY CreatedDate DESC LIMIT 1"
+)
+
+
+def _account_snapshot(sf, account_id: str) -> dict[str, Any]:
+    """{name, customer_type, region} for the classify node — tolerates an org
+    with no custom `Account.Tier__c` (falls back to the standard Type)."""
+    for soql in (
+        f"SELECT Name, Tier__c, Type, BillingCountry FROM Account WHERE Id = '{account_id}'",
+        f"SELECT Name, Type, BillingCountry FROM Account WHERE Id = '{account_id}'",
+    ):
+        try:
+            rows = sf.query(soql).get("records", [])
+            if not rows:
+                return {}
+            a = rows[0]
+            return {
+                "name": a.get("Name"),
+                "customer_type": a.get("Tier__c") or a.get("Type"),
+                "region": a.get("BillingCountry"),
+            }
+        except Exception as e:  # noqa: BLE001 — Tier__c absent -> try the base query
+            if _bad_field(e):
+                continue
+            raise
+    return {}
+
+
+def ensure_case(
+    case: dict[str, Any],
+    sender: dict[str, Any] | None = None,
+    *,
+    origin: str = "Email",
+    status: str = "New",
+    create_contact: bool = True,
+    create_account: bool = True,
+    reuse_open_days: int = 14,
+    tenant_id: str | None = None,
+) -> dict[str, Any]:
+    """Resolve an inbound `case` dict to a real Salesforce Case (Phase 20e).
+
+    * `case['sf_id']` already set -> just refresh the Account snapshot.
+    * resolve the Contact: `sender['contact_id']`, else an exact Contact by
+      the sender's email, else (when `create_contact`) create one. When
+      `create_account` and the sender has a *business* email domain with no
+      Account, create an Account from the domain and link the Contact to it
+      (free-mail domains get a Contact with no Account).
+    * reuse the Contact's most recent open Case created within
+      `reuse_open_days` (a threaded reply lands on the same Case), else
+      create a new Case (Subject / Description / ContactId / AccountId /
+      SuppliedEmail / Origin / Status).
+
+    Returns {sf_id, case_number, contact_id, account_id, account_name,
+    account: {name, customer_type, region}, created, reused, contact_created,
+    account_created, dry_run, reason?}. No SF creds -> a dry-run result;
+    never raises.
+    """
+    sender = sender or {}
+    email = (
+        (case.get("from") or "")
+        or (case.get("contact") or {}).get("email")
+        or case.get("supplied_email")
+        or sender.get("email")
+        or ""
+    ).strip().lower()
+    name = case.get("from_name") or (case.get("contact") or {}).get("name") or ""
+    domain = email.split("@", 1)[1] if "@" in email else ""
+    is_free = domain in FREE_EMAIL_DOMAINS
+
+    out: dict[str, Any] = {
+        "sf_id": case.get("sf_id"), "case_number": None,
+        "contact_id": sender.get("contact_id"), "account_id": sender.get("account_id"),
+        "account_name": sender.get("account_name"), "account": {},
+        "created": False, "reused": False,
+        "contact_created": False, "account_created": False,
+        "dry_run": not available(),
+    }
+    if not available():
+        out["reason"] = "salesforce not configured"
+        return out
+
+    sf = client_for(tenant_id)
+    try:
+        if case.get("sf_id"):
+            if out["account_id"]:
+                out["account"] = _account_snapshot(sf, out["account_id"])
+            return out
+
+        cid = sender.get("contact_id")
+        aid = sender.get("account_id")
+
+        if not cid and email:
+            rows = sf.query(
+                f"SELECT Id, AccountId, Account.Name FROM Contact "
+                f"WHERE Email = '{_soql_lit(email)}' LIMIT 1"
+            ).get("records", [])
+            if rows:
+                cid = rows[0]["Id"]
+                aid = aid or rows[0].get("AccountId")
+                out["account_name"] = out["account_name"] or (rows[0].get("Account") or {}).get("Name")
+
+        if not cid and create_contact and email:
+            if not aid and create_account and domain and not is_free:
+                arows = sf.query(
+                    f"SELECT Id, Name FROM Account WHERE Website LIKE '%{_soql_lit(domain)}%' LIMIT 1"
+                ).get("records", [])
+                if arows:
+                    aid, out["account_name"] = arows[0]["Id"], arows[0].get("Name")
+                else:
+                    label = domain.split(".")[0].title()
+                    acc = sf.Account.create({"Name": label, "Website": domain})
+                    aid, out["account_created"], out["account_name"] = acc.get("id"), True, label
+            local = email.split("@", 1)[0]
+            payload: dict[str, Any] = {"Email": email, "LastName": (name or local)[:80]}
+            if name and " " in name:
+                first, _, last = name.partition(" ")
+                payload["FirstName"] = first[:40]
+                payload["LastName"] = (last or name)[:80]
+            if aid:
+                payload["AccountId"] = aid
+            con = sf.Contact.create(payload)
+            cid, out["contact_created"] = con.get("id"), True
+
+        out["contact_id"], out["account_id"] = cid, aid
+
+        if cid and reuse_open_days > 0:
+            rows = sf.query(
+                _OPEN_CASE_SOQL.format(cid=cid, days=int(reuse_open_days))
+            ).get("records", [])
+            if rows:
+                out["sf_id"] = rows[0]["Id"]
+                out["case_number"] = rows[0].get("CaseNumber")
+                out["reused"] = True
+
+        if not out["sf_id"]:
+            payload = {
+                "Subject": (case.get("subject") or "(no subject)")[:255],
+                "Description": case.get("body") or "",
+                "Origin": origin,
+                "Status": status,
+            }
+            if cid:
+                payload["ContactId"] = cid
+            if aid:
+                payload["AccountId"] = aid
+            if email:
+                payload["SuppliedEmail"] = email
+            cres = sf.Case.create(payload)
+            out["sf_id"], out["created"] = cres.get("id"), True
+
+        if aid:
+            out["account"] = _account_snapshot(sf, aid)
+    except Exception as e:  # noqa: BLE001 — case bootstrap is best-effort
+        log.warning("ensure_case(%s): %s", email, e)
+        out["reason"] = f"error: {e}"
+    return out
+
+
 def send_case_reply(
     case_id: str,
     body: str,

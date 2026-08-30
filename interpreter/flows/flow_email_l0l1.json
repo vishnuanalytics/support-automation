@@ -1,0 +1,95 @@
+{
+  "flow_id": "e5e5e5e5-5555-4555-8555-555555555555",
+  "tenant_id": "00000000-0000-0000-0000-000000000000",
+  "team": "email",
+  "name": "Email L0/L1 — inbound to Salesforce",
+  "version": 1,
+  "status": "draft",
+  "_doc": "The flow the email-channel poller (ingestion/email_watch.py) runs against. identify (resolve the sender: contact / email-domain->account / unknown, Phase 17b) -> sf_case (create-or-reuse a real Salesforce Case; write case.sf_id + the Account tier/region back into state, Phase 20e) -> retrieve -> classify -> sf_writeback (triage fields onto the Case) -> draft -> confidence_gate: (enterprise) handover ; (pass) auto_reply (the worker's hard guard actually sends the email) ; (fail) ask_human -> a Chatter request on the Case for an agent.",
+  "nodes": [
+    {
+      "node_id": "identify",
+      "type": "identify",
+      "label": "Resolve the sender",
+      "config": { "email_field": "from", "domain_match": true, "create_lead_if_missing": false }
+    },
+    {
+      "node_id": "sf_case",
+      "type": "sf_case",
+      "label": "Create / reuse the Salesforce Case",
+      "config": { "origin": "Email", "status": "New", "create_contact": true, "create_account": true, "reuse_open_days": 14 }
+    },
+    {
+      "node_id": "retrieve",
+      "type": "retrieve",
+      "label": "Retrieve KB context",
+      "config": { "source": ["supabase"], "top_k": 5, "use_rerank": true }
+    },
+    {
+      "node_id": "classify",
+      "type": "classify",
+      "label": "Classify tier / topic / urgency",
+      "config": { "tier_field": "account.customer_type", "region_field": "account.region", "default_tier": "basic" }
+    },
+    {
+      "node_id": "sf_writeback",
+      "type": "sf_writeback",
+      "label": "Write triage fields to the Case",
+      "config": {}
+    },
+    {
+      "node_id": "draft",
+      "type": "draft",
+      "label": "Draft the reply from context",
+      "config": { "model": "openai/gpt-oss-120b", "max_tokens": 700 }
+    },
+    {
+      "node_id": "confidence_gate",
+      "type": "confidence_gate",
+      "label": "Gate on answer quality",
+      "config": {
+        "weights": { "retrieval": 0.55, "draft": 0.1, "groundedness": 0.35 },
+        "default_threshold": 0.5,
+        "tier_overrides": { "basic": 0.5, "premium": 0.6, "enterprise": 0.75 },
+        "escalate_topics": ["billing", "refund", "pricing", "legal", "compliance", "account-access", "data-export", "partner-api", "cancellation"]
+      }
+    },
+    { "node_id": "auto_reply", "type": "auto_reply", "label": "Send the drafted reply", "config": { "channel": "email" } },
+    {
+      "node_id": "ask_human",
+      "type": "ask_human",
+      "label": "Raise a human request on the Case",
+      "config": { "channel": "salesforce_chatter", "reason": "below_confidence_or_forced_escalation" }
+    },
+    {
+      "node_id": "handover",
+      "type": "handover",
+      "label": "Full handover (enterprise)",
+      "config": { "reason": "enterprise_tier" }
+    }
+  ],
+  "edges": [
+    { "source_node_id": "identify", "target_node_id": "sf_case", "condition": {} },
+    { "source_node_id": "sf_case", "target_node_id": "retrieve", "condition": {} },
+    { "source_node_id": "retrieve", "target_node_id": "classify", "condition": {} },
+    { "source_node_id": "classify", "target_node_id": "sf_writeback", "condition": {} },
+    { "source_node_id": "sf_writeback", "target_node_id": "draft", "condition": {} },
+    { "source_node_id": "draft", "target_node_id": "confidence_gate", "condition": {} },
+
+    {
+      "source_node_id": "confidence_gate",
+      "target_node_id": "handover",
+      "condition": { "if": "tier == 'enterprise'" }
+    },
+    {
+      "source_node_id": "confidence_gate",
+      "target_node_id": "auto_reply",
+      "condition": { "if": "confidence_gate.pass and tier != 'enterprise'" }
+    },
+    {
+      "source_node_id": "confidence_gate",
+      "target_node_id": "ask_human",
+      "condition": { "if": "not confidence_gate.pass and tier != 'enterprise'" }
+    }
+  ]
+}

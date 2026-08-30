@@ -20,8 +20,9 @@ from interpreter.builder import FlowBuildError, FlowRoutingError, build_graph
 from interpreter.flows.validate_flow import Flow, check_flow
 from interpreter import registry as _registry
 from interpreter.registry import (
-    _norm_tier, h_ask_human, h_clarify, h_confidence_gate, h_draft, h_extract,
-    h_identify, h_kb_lookup, h_policy_gate, h_sf_writeback, h_task_dispatch, register,
+    _norm_tier, h_ask_human, h_clarify, h_classify, h_confidence_gate, h_draft,
+    h_extract, h_identify, h_kb_lookup, h_policy_gate, h_sf_writeback,
+    h_task_dispatch, register,
 )
 from interpreter.runs import build_row
 
@@ -297,6 +298,40 @@ def test_norm_tier_fails_closed_on_unknown():
     # unknown -> strictest, not "basic"
     assert _norm_tier("platinum-plus") == "enterprise"
     assert _norm_tier(None) == "enterprise"
+
+
+# --------------------------------------------------------------------------
+# classify.default_tier -- a flow can soften the global fail-closed (Phase 20e)
+# --------------------------------------------------------------------------
+_CLS_CASE = {"subject": "hi", "body": "how do I export?", "account": {}}
+
+
+def test_classify_default_tier_applies_when_crm_has_no_tier():
+    out = h_classify({"case": _CLS_CASE}, {"_node_id": "c", "default_tier": "basic"})
+    assert out["tier"] == "basic"
+    assert out["classification"]["tier_defaulted"] is True
+
+
+def test_classify_default_tier_applies_to_an_unrecognised_value():
+    # the SF standard Account.Type ("Customer") is not one of our three tiers
+    case = {**_CLS_CASE, "account": {"customer_type": "Customer"}}
+    out = h_classify({"case": case}, {"_node_id": "c", "default_tier": "basic"})
+    assert out["tier"] == "basic"
+    assert out["classification"]["tier_defaulted"] is True
+
+
+def test_classify_real_tier_beats_the_default():
+    for raw, expect in [("enterprise", "enterprise"), ("Professional", "premium")]:
+        case = {**_CLS_CASE, "account": {"customer_type": raw}}
+        out = h_classify({"case": case}, {"_node_id": "c", "default_tier": "basic"})
+        assert out["tier"] == expect
+        assert out["classification"]["tier_defaulted"] is False
+
+
+def test_classify_without_default_still_fails_closed_to_enterprise():
+    out = h_classify({"case": _CLS_CASE}, {"_node_id": "c"})
+    assert out["tier"] == "enterprise"
+    assert out["classification"]["tier_defaulted"] is False
 
 
 def test_groundedness_lexical_flags_offcorpus_draft():
