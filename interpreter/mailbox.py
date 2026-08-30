@@ -101,6 +101,10 @@ class MailboxConfig:
     folder: str = "INBOX"
     auto_send_enabled: bool = False
     status: str = "inactive"
+    # persisted poll position — {imap_uid: int} or {internal_date_ms: int}.
+    # This, not message read-state, is what stops a message being re-processed:
+    # a human opening the mail in the client must not hide it from the poller.
+    cursor: dict = field(default_factory=dict, repr=False)
     secret: dict = field(default_factory=dict, repr=False)   # {password} | {refresh_token}
 
     # ---- (de)serialisation -------------------------------------------------
@@ -157,7 +161,7 @@ class MailboxConfig:
 # ── storage (service-role Supabase client) ────────────────────────────
 def load_channel(tenant_id: str, sb) -> "MailboxConfig | None":
     rows = (sb.table("tenant_integrations")
-            .select("config,status,vault_secret_id")
+            .select("config,status,vault_secret_id,cursor")
             .eq("tenant_id", tenant_id).eq("kind", KIND).execute().data or [])
     if not rows:
         return None
@@ -169,7 +173,9 @@ def load_channel(tenant_id: str, sb) -> "MailboxConfig | None":
             secret = json.loads(raw)
     except Exception:  # noqa: BLE001 -- no secret / bad json -> treat as unconfigured
         secret = {}
-    return MailboxConfig.from_row(tenant_id, rows[0]["config"], rows[0]["status"], secret)
+    mc = MailboxConfig.from_row(tenant_id, rows[0]["config"], rows[0]["status"], secret)
+    mc.cursor = rows[0].get("cursor") or {}
+    return mc
 
 
 def list_active_channels(sb) -> list["MailboxConfig"]:
@@ -215,6 +221,12 @@ def set_status(tenant_id: str, sb, status: str, *, error: str | None = None) -> 
     sb.table("tenant_integrations").update({
         "status": status, "last_error": error, "last_poll_at": _now_iso(),
     }).eq("tenant_id", tenant_id).eq("kind", KIND).execute()
+
+
+def set_cursor(tenant_id: str, sb, cursor: dict) -> None:
+    """Persist the poll position (highest IMAP UID / Gmail internalDate handled)."""
+    sb.table("tenant_integrations").update({"cursor": cursor}) \
+        .eq("tenant_id", tenant_id).eq("kind", KIND).execute()
 
 
 def _now_iso() -> str:
@@ -284,6 +296,7 @@ def _test_gmail(cfg: "MailboxConfig") -> dict:
 class FetchedMessage:
     ref: str            # IMAP uid (str) | Gmail message id
     raw: bytes          # RFC-822 bytes
+    sort_key: int = 0   # IMAP UID (int) | Gmail internalDate (ms) — for the cursor
 
 
 def fetch_new(cfg: "MailboxConfig", *, lookback_days: int = 3,
@@ -311,24 +324,37 @@ def _imap_login(cfg: "MailboxConfig"):
     return m
 
 
-def _fetch_imap(cfg: "MailboxConfig", lookback_days: int, limit: int) -> list["FetchedMessage"]:
+def _imap_search_args(cursor: dict, lookback_days: int) -> tuple[str, ...]:
+    """IMAP SEARCH criteria. Past the first run we ask for `UID > cursor`
+    (read-state independent); the first run is time-bounded by `lookback`."""
+    last = int((cursor or {}).get("imap_uid") or 0)
+    if last > 0:
+        return ("UID", f"{last + 1}:*")
     from datetime import datetime, timedelta, timezone
 
+    since = (datetime.now(timezone.utc) - timedelta(days=max(1, lookback_days))
+             ).strftime("%d-%b-%Y")
+    return ("SINCE", since)
+
+
+def _fetch_imap(cfg: "MailboxConfig", lookback_days: int, limit: int) -> list["FetchedMessage"]:
     m = _imap_login(cfg)
     out: list[FetchedMessage] = []
+    last = int((cfg.cursor or {}).get("imap_uid") or 0)
     try:
         typ, _ = m.select(cfg.folder, readonly=False)
         if typ != "OK":
             raise RuntimeError(f"cannot select folder {cfg.folder!r}")
-        since = (datetime.now(timezone.utc) - timedelta(days=max(1, lookback_days))
-                 ).strftime("%d-%b-%Y")
-        typ, data = m.search(None, "UNSEEN", "SINCE", since)
-        uids = (data[0].split() if data and data[0] else [])[:limit]
+        typ, data = m.uid("SEARCH", *_imap_search_args(cfg.cursor, lookback_days))
+        # 'UID n:*' always returns at least the last message even when none are
+        # actually newer — drop anything not past the cursor, then cap.
+        uids = [u for u in (data[0].split() if data and data[0] else [])
+                if int(u) > last][:limit]
         for uid in uids:
-            typ, msg_data = m.fetch(uid, "(BODY.PEEK[])")
+            typ, msg_data = m.uid("FETCH", uid, "(BODY.PEEK[])")
             if typ != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
                 continue
-            out.append(FetchedMessage(ref=uid.decode(), raw=msg_data[0][1]))
+            out.append(FetchedMessage(ref=uid.decode(), raw=msg_data[0][1], sort_key=int(uid)))
     finally:
         try:
             m.close()
@@ -342,7 +368,7 @@ def _mark_imap(cfg: "MailboxConfig", refs: list[str]) -> None:
     m = _imap_login(cfg)
     try:
         m.select(cfg.folder, readonly=False)
-        m.store(",".join(refs), "+FLAGS", "(\\Seen)")
+        m.uid("STORE", ",".join(refs), "+FLAGS", "(\\Seen)")   # courtesy for humans; not load-bearing
     finally:
         try:
             m.logout()
@@ -358,16 +384,29 @@ def _gmail_service(cfg: "MailboxConfig"):
                  cache_discovery=False)
 
 
+def _gmail_query(cursor: dict, lookback_days: int) -> str:
+    """Gmail search. Past the first run, `after:<epoch>` from the cursor
+    (read-state independent); the first run is time-bounded by `lookback`."""
+    after_ms = int((cursor or {}).get("internal_date_ms") or 0)
+    if after_ms > 0:
+        return f"in:inbox after:{after_ms // 1000}"
+    return f"in:inbox newer_than:{max(1, lookback_days)}d"
+
+
 def _fetch_gmail(cfg: "MailboxConfig", lookback_days: int, limit: int) -> list["FetchedMessage"]:
     import base64
 
     svc = _gmail_service(cfg)
-    q = f"is:unread in:inbox newer_than:{max(1, lookback_days)}d"
+    after_ms = int((cfg.cursor or {}).get("internal_date_ms") or 0)
+    q = _gmail_query(cfg.cursor, lookback_days)
     resp = svc.users().messages().list(userId="me", q=q, maxResults=limit).execute()
     out: list[FetchedMessage] = []
     for ref in [m["id"] for m in resp.get("messages", [])]:
         full = svc.users().messages().get(userId="me", id=ref, format="raw").execute()
-        out.append(FetchedMessage(ref=ref,
+        idt = int(full.get("internalDate") or 0)
+        if idt and after_ms and idt <= after_ms:      # `after:` is coarse — filter precisely
+            continue
+        out.append(FetchedMessage(ref=ref, sort_key=idt,
                                   raw=base64.urlsafe_b64decode(full["raw"].encode())))
     return out
 

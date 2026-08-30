@@ -7,6 +7,16 @@ to pick up where the last session left off.
 
 ## What this project is
 
+**Primary objective (stated by the project owner, 2026-08-30): have AI
+handle Salesforce support Cases end to end.** An inbound support request
+becomes — or attaches to — a real Salesforce Case; the config-driven
+LangGraph flow triages it, drafts a reply from the knowledge base, and
+then auto-responds, asks a human, or fully hands over — always writing the
+outcome back onto the Case (fields via `sf_writeback`, human requests as
+Chatter on the Case, resolution feedback via the Phase 11 loop). Every
+channel (web form, email — Phase 20, Slack, …) is just an input path into
+that Salesforce-Case pipeline. Salesforce is the source of truth.
+
 A multi-tenant AI support automation platform: agents read incoming support
 cases, draft replies from a knowledge base, and either auto-send, ask a human,
 or fully hand over — gated by a confidence score that is stricter for
@@ -166,9 +176,10 @@ unsaved state and Save/Publish go through the existing validated
 **Phase 20 = email channel — auto-respond to inbound mail, configured from
 the UI (added 2026-08-30 from a scoping conversation). Chunks: 20a
 credentials + Supabase Vault + API · 20b inbound poller · 20c outbound +
-hard guard · 20d web Channels panel + docs. Sequential. All four BUILT +
-verified (2026-08-30) — Phase 20 COMPLETE; no live e2e against a real
-mailbox yet (needs creds).** Decisions: **both** providers —
+hard guard · 20d web Channels panel + docs · 20e inbound → Salesforce
+Case + the L0/L1 email flow. Sequential. 20a–20d BUILT + verified
+(2026-08-30); 20e BUILT + live-configured (2026-08-30), live mail e2e
+pending a clean test sender.** Decisions: **both** providers —
 Gmail via OAuth (reuses Phase 15 `GOOGLE_CLIENT_ID`) and other mailboxes
 via IMAP/SMTP + an app-password; the credential (password / refresh token)
 is stored in **Supabase Vault** (`vault.secrets`), never in
@@ -188,6 +199,7 @@ the bot's own mail).
 | 20b | **Inbound poller.** `ingestion/email_watch.py --once` — IMAP/Gmail fetch new mail → loop-breaker filters → `parse_message` → enqueue `run_flow` keyed on `Message-ID` against the tenant's published flow for `config.team`; mark processed (label/move, no delete); update `last_poll_at`/`last_error`. | **Built + verified (2026-08-30).** `interpreter/mailbox.py` += `list_active_channels`, `fetch_new`/`mark_processed` (IMAP `UNSEEN SINCE` + `BODY.PEEK[]` → `\Seen`; Gmail `q="is:unread in:inbox newer_than:Nd"` + `format=raw` → remove `UNREAD`), pure `should_process` (drops no-From / auto-responder / own-mail / empty) + `thread_key` (thread-root id → `case_id`, so a customer's reply lines up with the run that asked, Phase 17d). `ingestion/email_watch.py` (`--once` / `--tenant` / `--lookback` days / `--limit` / `--dry-run` / loop) — per active channel: resolve the published `(tenant, team)` flow (none → `status='error'`), fetch, filter, `jobs.enqueue("run_flow", {flow_id, case, idempotency_key=<msg-id>}, dedupe_key="email:<msg-id>")`, mark read, `set_status('active')`; a fetch failure → `set_status('error', last_error=…)`, never crashes the tick. No SF-style watermark (job dedupe + `\Seen` are the cursor). **Verify:** 8 offline pytest (`test_email_watch.py` — `should_process`/`thread_key`; answerable mail → one enqueue with the right keys + marked; auto-responder / own-mail skipped-but-marked; dry-run enqueues+marks nothing; no-flow → error status; fetch exception caught) + 1 integration (active Globex channel via **Vault** → `tick` resolves the published flow, IMAP to a bogus host fails, `status='error'`/`last_error` written to the live DB, cleaned up). `python -m ingestion.email_watch --once` with no active channel → notice + exit 0. |
 | 20c | **Outbound + hard guard.** `interpreter/emailer.py` SMTP/Gmail send (`From` = `no_reply_addr` or the mailbox; stamps `X-Support-Bot: 1`); the **worker** (not a flow node — keeps the graph channel-agnostic) sends after an email-sourced run *only* when `outcome.action == "auto_reply"` and the channel's `auto_send_enabled` is on; `need_info` sends only if the `clarify` node's own `auto_send` is set; everything else is left for a human. | **Built + verified (2026-08-30).** `interpreter/emailer.py` — pure `decide(outcome, cfg, clarification) → (send_reply|send_questions|needs_human|noop, meta)` (the guard: `auto_reply` sends only with the master switch **on** and a non-empty draft; `need_info` sends only with the switch on **and** `clarification.auto_send`; `ask_human`/`handover`/switch-off/empty-draft → `needs_human`), and `send_reply(cfg, to, subject, body, in_reply_to, references)` — builds a threaded `EmailMessage` stamped `X-Support-Bot: 1` + `Auto-Submitted: auto-replied`, sends via SMTP (imap provider) or `gmail.users().messages().send` (gmail), **dry-run with no creds, never raises**. `interpreter/mailbox.mark_needs_human(cfg, message_id)` — looks the message up by Message-ID and re-marks it unread + `\Flagged` / `STARRED` (the poller marked it read on enqueue). `api/worker._run_flow` → `_email_post_run(final, case, flow, sb)` for `case.channel == "email"`: applies `decide`, sends or flags, returns the delivery in the job result; wrapped so a delivery failure never fails/retries the run. **Verify:** 12 offline pytest (`test_emailer.py` — the full `decide` matrix; `send_reply` dry-run / missing recipient / threaded-bot-stamped headers via a monkeypatched SMTP; `_email_post_run` auto_reply→send, ask_human→flag+no-send, need_info+opt-in→questions, no-channel→skip) incl. 1 integration (a real Vault-loaded channel with no SMTP host → `auto_reply` → `decision=send_reply`, `delivery.dry_run=True`). |
 | 20d | **Web + docs.** A **Channels** nav panel (owners): provider picker / Connect Gmail, IMAP form, from-name, optional no-reply, team, folder, the `auto_send_enabled` toggle, Test-connection, status (last poll / last error). Editors read-only. `docs/EMAIL_SETUP.md`. | **Built + verified (2026-08-30).** `web/src/channels/ChannelsView.tsx` — owner-only panel: provider radio (IMAP / Gmail, Gmail disabled + labelled when `gmail_available:false`), team + from-name, IMAP host/port + SMTP host/port + mailbox login + **app-password field that says "leave blank to keep"**, folder, optional reply-from, an **auto-send** toggle (copy: "off = every reply waits for a human") and an **active** toggle; **Test connection** / **Save** / **Disconnect**; a status banner (`status` + `last_poll_at` + `last_error`, red on `error`). Gmail: a **Connect Gmail** button that pops the OAuth consent window. `api.email.{status,save,test,remove,googleAuthorize}` + `EmailChannel`/`EmailChannelSave` types; `App.tsx` gains a **Channels** nav for owners (next to Team). `GET /api/integrations/email` now also returns `last_poll_at`/`last_error`. `docs/EMAIL_SETUP.md` (the safety model, app-password steps for Gmail/Outlook, the cron, the Gmail-provider operator steps). **Verify:** web tsc + vitest (6) + build green; the 3 email API integration tests still green with the status change. |
+| 20e | **Inbound → Salesforce Case + the L0/L1 email flow.** An inbound email has no `sf_id`, so `ask_human`/`sf_writeback`/`handover` were inert on the email channel. New **`sf_case`** node (`interpreter/registry.h_sf_case` → `salesforce.ensure_case`): resolve the Contact (`sender.contact_id` from `identify` → exact Contact by email → create one; business-domain sender w/ no Account → create the Account), **reuse the Contact's most recent open Case within `reuse_open_days` (14)** else create one (`Origin='Email'`, `SuppliedEmail`, `ContactId`/`AccountId`), and merge `sf_id` + the Account `Tier__c`/`BillingCountry` back into `state.case` so `classify` gates on the real tier. Migration **`036`** seeds + publishes **`e5e5e5e5-…`** "Email L0/L1 — inbound to Salesforce" (tenant Acme, **team `email`**): `identify → sf_case → retrieve → classify → sf_writeback → draft → confidence_gate → {handover (enterprise) \| auto_reply (pass) \| ask_human = SF Chatter on the Case (fail)}`; the 3 gate edges are mutually exclusive + exhaustive. Portable `interpreter/flows/flow_email_l0l1.json`. | **Built + live-verified (2026-08-30).** Offline pytest green — 6 in `test_sf_case.py` (`ensure_case` dry-run/keeps-existing-id, `h_sf_case` passthrough + account-snapshot merge + reused-Case summary, portable flow compiles + 3-way routing). **Live-configured:** flow published (loader+`build_graph` clean against the live DB); SF **Account `Gundam Vishnu (Gmail)` + Contact `gundamvishnu7@gmail.com`** created (`Tier__c='basic'` so it exercises auto_reply/ask_human, not the enterprise handover); the **email channel saved to Vault** for tenant `00000000-…` (provider imap, `imap.gmail.com`/`smtp.gmail.com`, team `email`, `auto_send_enabled=true`, `status='active'`) — `test_connection` → IMAP+SMTP OK. **Synthetic e2e — PASSED (2026-08-30, real Groq + live SF + live SMTP)**, driven through `api.worker._run_flow` against the published flow: (A) *"How do I turn on a Zap?"* → `identify` matched the Contact/Account → `sf_case` **created Case 00001033** (Origin=Email) → `retrieve` real KB hit → `classify` topic=zap-activation tier=basic → `sf_writeback` **wrote Priority/Module__c/Description live** → `draft` (groundedness 1.0) → gate PASS (0.988/0.50) → `auto_reply` → **real email sent via Gmail SMTP** (~17 s cold / ~10 s warm; the ~7 s embedding-model load is one-time per worker process). (B) *"Refund for my annual plan"* → `sf_case` **reused open Case 00001033** (thread correlation) → `classify` topic=refund → gate **forced-escalate** → `ask_human` **posted Chatter on the Case** (Connect mention 404 in this org → plain FeedItem fallback) → `email.decision=needs_human`, message flagged, **nothing sent**. `ingestion/email_watch.py` gained `--from <addr>` (only-process filter, leaves other mail untouched). **Real inbound e2e — PASSED (2026-08-30):** 6 real emails from `vishnu.r@urbanpiper.com` fetched from the live Gmail via IMAP → `identify` (1st = `none`) → `sf_case` **created Account "Urbanpiper" + Contact + Case 00001034** from the business domain, then the next 5 **reused open Case 00001034** → `sf_writeback` live each time → all → `handover` (see the fail-closed note) → `email.decision=needs_human`, flagged, nothing sent. Inbound fetch + Case bootstrap + thread-reuse + the guard all confirmed against real mail. **Finding (1) — FIXED (2026-08-30):** `classify` gains a `default_tier` config knob — when the CRM gives no *recognisable* tier (missing, or a non-canonical value like the SF standard `Account.Type`="Customer"), the node uses `default_tier` instead of letting `_norm_tier` fail closed to `enterprise`; a real basic/premium/enterprise on the account still wins. `classification.tier_defaulted` records it. The email L0/L1 flow's `classify` carries `default_tier:"basic"` (migration `036` + the live v1 snapshot updated; portable JSON updated). **Live-verified:** account with `Tier__c=null`/`Type="Customer"` + doc-answerable question → `tier=basic`, gate 0.996/0.50 **PASS → auto_reply → real email sent** (was `handover`). New `_tier_known()` helper; the global `_norm_tier` fail-closed is unchanged. **Finding (2) — FIXED (2026-08-30):** the poller no longer relies on read-state. `interpreter/mailbox.py` — `MailboxConfig.cursor` (persisted to the existing `tenant_integrations.cursor` jsonb: `{imap_uid}` / `{internal_date_ms}`), pure `_imap_search_args`/`_gmail_query` (`UID >cursor` / `after:<epoch>`, no `UNSEEN`/`is:unread`), `_fetch_imap`/`_mark_imap` switched to UID commands, `set_cursor()`; `email_watch.poll_channel` advances the cursor past **every** message a tick saw (handled or skipped) and skips the cursor bump on a `--from` test run. `\Seen` / `UNREAD`-removal are now courtesy-only. The live channel's cursor was seeded to the current INBOX head (UID 28777). **Finding (3) — FIXED (2026-08-30):** `api/worker._run_flow` and `POST /flows/{id}/run` now pass `final["case"]` (the graph's mutated case) to `record_run` / `_email_post_run`, not the pre-run input — so `runs.case_payload.sf_id` is populated (live-verified) and `build_row`'s `pending` check (which gates the Phase 11 `check_resolution` job on `case.sf_id`) now fires for email-created Cases. **140 offline pytest** green (+8 across the three fixes). **Test data from this session (SF Account "Urbanpiper" + Contact + Cases 00001033/00001034, 8 `runs` rows) was deleted; the `gundamvishnu7@gmail.com` bootstrap Account/Contact was kept.** |
 
 ## Phase 0 — schema (complete)
 
@@ -686,16 +698,35 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**Phases 0–20 built. No open phase.** Migrations `001`–`035` applied
+**Phases 0–20 built. No open phase.** Migrations `001`–`036` applied
 (`034`/`035` = Phase 20a: `tenant_integrations` poller columns + the
-Supabase-Vault `integration_secret_*` RPCs). 125 offline pytest tests
-+ web tsc/vitest (6)/build + `tests/test_multiflow.py` (needs Groq quota).
+Supabase-Vault `integration_secret_*` RPCs; `036` = Phase 20e: the
+"Email L0/L1 — inbound to Salesforce" flow, team `email`, tenant Acme).
+140 offline pytest tests + web tsc/vitest (6)/build +
+`tests/test_multiflow.py` (needs Groq quota).
 Phase 18d's button is built but signing in with Google needs the Supabase
 dashboard Google provider enabled first (`docs/GOOGLE_SETUP.md`
 §"Google sign-in"); the Phase 20 Gmail *provider* needs the same
 `GOOGLE_CLIENT_ID`/`SECRET` + a redirect registered (the IMAP path needs
-nothing server-side). No live e2e of the email channel against a real
-mailbox yet — pending IMAP or Gmail creds.
+nothing server-side).
+
+**2026-08-30 — Phase 20e: the email channel is LIVE-CONFIGURED for
+`gundamvishnu7@gmail.com` (tenant Acme `00000000-…`, team `email`).**
+The IMAP/SMTP app-password is in Supabase Vault; `test_connection` passes;
+`auto_send_enabled=true`, `status='active'`. New **`sf_case`** node turns
+an inbound email into a real Salesforce Case (create-or-reuse Contact /
+Account / Case) so `sf_writeback` / `ask_human` / `handover` act on a real
+record; migration `036` publishes the L0/L1 email flow
+(`identify → sf_case → retrieve → classify → sf_writeback → draft →
+confidence_gate → {handover | auto_reply | ask_human}`). A bootstrap SF
+**Account + Contact for `gundamvishnu7@gmail.com`** exist (`Tier__c=basic`).
+**Blocking the live mail e2e:** that Gmail is a noisy personal inbox — a
+`--dry-run` poll skipped 44/50 as bulk but 6 marketing mails would still
+enqueue. Do NOT run a blind live poll with auto-send on. Next: either a
+dedicated support mailbox, or add a `--from <addr>` filter to
+`ingestion/email_watch.py` and drive one clean test message through
+`email_watch --once` + `api.worker --once` (measure latency, confirm the
+Case + the threaded reply).
 
 **2026-08-30 — Phase 20 (email channel) COMPLETE — the whole round-trip
 works in code.** A workspace **owner** points a support mailbox at a
@@ -715,8 +746,9 @@ questions only if the `clarify` node opted in;
 `ask_human`/`handover`/switch-off → `mailbox.mark_needs_human` re-flags the
 message unread for a human, nothing sent. Outbound is threaded and stamped
 `X-Support-Bot: 1` so the poller never answers it. `docs/EMAIL_SETUP.md`.
-**Not yet done:** a live e2e against a real mailbox (needs IMAP or Gmail
-creds); a GitHub Actions cron for `email_watch` + a running `api.worker`;
+**Not yet done:** a live mail e2e (channel is configured — see the Phase
+20e note above; blocked only on a clean test sender / dedicated mailbox);
+a GitHub Actions cron for `email_watch` + a running `api.worker`;
 migrating the existing Slack/SF/Google `tenant_integrations` rows onto the
 same Vault mechanism (the `integration_secret_*` RPCs are generic).
 

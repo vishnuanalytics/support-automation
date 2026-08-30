@@ -95,6 +95,11 @@ _TIER_ALIASES = {
 STRICTEST_TIER = "enterprise"
 
 
+def _tier_known(raw: Any) -> bool:
+    """True when `raw` maps to one of the three canonical tiers."""
+    return str(raw or "").strip().lower() in _TIER_ALIASES
+
+
 def _norm_tier(raw: Any) -> str:
     key = str(raw or "").strip().lower()
     if key in _TIER_ALIASES:
@@ -144,7 +149,13 @@ def h_classify(state: CaseState, config: dict) -> dict:
     case = state.get("case", {})
     tier_raw = _dig(case, config.get("tier_field", "account.customer_type"))
     region = _dig(case, config.get("region_field", "account.region"))
-    tier = _norm_tier(tier_raw)
+    # When the CRM gives no *recognisable* tier for this sender — missing, or a
+    # value like the SF standard `Account.Type` ("Customer") that isn't one of
+    # basic/premium/enterprise — `_norm_tier` fails *closed* to `enterprise`
+    # (always-handover). A flow can opt into a gentler fallback with
+    # `config.default_tier`; a real, mappable tier on the account still wins.
+    tier_defaulted = bool(config.get("default_tier")) and not _tier_known(tier_raw)
+    tier = _norm_tier(config["default_tier"] if tier_defaulted else tier_raw)
 
     body = f"{case.get('subject', '')}\n\n{case.get('body', '')}".strip()
     raw = llm.complete(
@@ -164,6 +175,7 @@ def h_classify(state: CaseState, config: dict) -> dict:
         "urgency": str(parsed.get("urgency", "normal")).lower(),
         "summary": parsed.get("summary", body[:200]),
         "tier_raw": tier_raw,
+        "tier_defaulted": tier_defaulted,
         "stub": parsed.get("_stub", False),
     }
     return {
@@ -253,6 +265,61 @@ def h_sf_writeback(state: CaseState, config: dict) -> dict:
         "sf_writeback": result,
         **_trace(config["_node_id"], "sf_writeback", summary, result),
     }
+
+
+@register("sf_case")
+def h_sf_case(state: CaseState, config: dict) -> dict:
+    """Phase 20e — resolve an inbound message (email / chat) to a real
+    Salesforce Case, so every downstream SF node (`sf_writeback`,
+    `ask_human`, `handover`) has an `sf_id` to act on. Reuses the sender's
+    open Case when the message is a thread reply; otherwise creates the
+    Contact (and, for a business domain, the Account) and the Case.
+    Pass-through — merges `sf_id` and the Account tier / region back into
+    `state.case`. Dry-run (nothing created) with no Salesforce creds.
+
+    config: {origin="Email", status="New", create_contact=true,
+             create_account=true, reuse_open_days=14}
+    """
+    nid = config["_node_id"]
+    case = dict(state.get("case") or {})
+    info = salesforce.ensure_case(
+        case, state.get("sender") or {},
+        origin=config.get("origin", "Email"),
+        status=config.get("status", "New"),
+        create_contact=bool(config.get("create_contact", True)),
+        create_account=bool(config.get("create_account", True)),
+        reuse_open_days=int(config.get("reuse_open_days", 14)),
+        tenant_id=state.get("tenant_id"),
+    )
+
+    if info.get("sf_id"):
+        case["sf_id"] = info["sf_id"]
+    acct = dict(case.get("account") or {})
+    for k, v in (info.get("account") or {}).items():
+        if v:
+            acct[k] = v
+    if info.get("account_name") and not acct.get("name"):
+        acct["name"] = info["account_name"]
+    if acct:
+        case["account"] = acct
+    con = dict(case.get("contact") or {})
+    if info.get("contact_id") and not con.get("email"):
+        con["email"] = case.get("from") or ""
+    if con:
+        case["contact"] = con
+
+    if info.get("dry_run"):
+        summary = "dry-run — no Salesforce Case created"
+    else:
+        base = (f"reused open Case {info.get('case_number') or info['sf_id']}"
+                if info.get("reused") else
+                f"created Case {info['sf_id']}" if info.get("created") else
+                f"Case {info.get('sf_id')}")
+        extra = [x for x, on in (("new Account", info.get("account_created")),
+                                 ("new Contact", info.get("contact_created"))) if on]
+        summary = base + (f" ({', '.join(extra)})" if extra else "")
+
+    return {"case": case, "sf_case": info, **_trace(nid, "sf_case", summary, info)}
 
 
 def _render_template(tmpl: str, state: CaseState) -> str:

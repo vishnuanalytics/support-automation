@@ -645,7 +645,8 @@ def run_flow(
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"run failed: {type(e).__name__}: {e}")
 
-    run_id = record_run(flow, final, case=body.case, source="api",
+    # a node like `sf_case` may have mutated the case (sf_id, refreshed tier)
+    run_id = record_run(flow, final, case=(final.get("case") or body.case), source="api",
                         idempotency_key=idempotency_key, sb=_service)
 
     return {

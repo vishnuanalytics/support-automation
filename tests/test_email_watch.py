@@ -16,7 +16,9 @@ load_dotenv()
 
 from ingestion import email_watch
 from interpreter import mailbox
-from interpreter.mailbox import MailboxConfig, should_process, thread_key
+from interpreter.mailbox import (
+    MailboxConfig, _gmail_query, _imap_search_args, should_process, thread_key,
+)
 
 GLOBEX_TENANT = "22222222-2222-2222-2222-222222222222"
 
@@ -45,12 +47,14 @@ def _raw(frm="Jane <jane@customer.com>", subject="Help", body="my export fails",
 
 @pytest.fixture
 def patched(monkeypatch):
-    calls = {"enqueue": [], "marked": [], "status": []}
+    calls = {"enqueue": [], "marked": [], "status": [], "cursor": []}
     monkeypatch.setattr(email_watch, "_published_flow_id", lambda sb, t, team: "flow-1")
     monkeypatch.setattr(mailbox, "set_status",
                         lambda tid, sb, status, error=None: calls["status"].append((tid, status, error)))
     monkeypatch.setattr(mailbox, "mark_processed",
                         lambda cfg, refs: calls["marked"].extend(refs))
+    monkeypatch.setattr(mailbox, "set_cursor",
+                        lambda tid, sb, cur: calls["cursor"].append(cur))
 
     def fake_enqueue(kind, payload, *, dedupe_key=None, sb=None):
         calls["enqueue"].append({"kind": kind, "payload": payload, "dedupe_key": dedupe_key})
@@ -76,6 +80,16 @@ def test_thread_key_prefers_the_thread_root():
     assert thread_key({"references": ["<root@a>", "<r2@a>"], "message_id": "<m@a>"}) == "<root@a>"
     assert thread_key({"in_reply_to": "<p@a>", "message_id": "<m@a>"}) == "<p@a>"
     assert thread_key({"message_id": "<m@a>"}) == "<m@a>"
+
+
+def test_search_criteria_use_the_cursor_not_read_state():
+    # first run: time-bounded, no read-state filter
+    assert _imap_search_args({}, 3)[0] == "SINCE"
+    assert "unread" not in _gmail_query({}, 3).lower()
+    assert _gmail_query({}, 3) == "in:inbox newer_than:3d"
+    # subsequent runs: strictly past the saved position
+    assert _imap_search_args({"imap_uid": 41}, 3) == ("UID", "42:*")
+    assert _gmail_query({"internal_date_ms": 1_700_000_000_000}, 3) == "in:inbox after:1700000000"
 
 
 # ── poll_channel ─────────────────────────────────────────────────
@@ -117,6 +131,44 @@ def test_dry_run_enqueues_and_marks_nothing(patched, monkeypatch):
                         lambda cfg, **kw: [mailbox.FetchedMessage(ref="1", raw=_raw())])
     n = email_watch.poll_channel(SB, _cfg(), lookback_days=3, limit=50, dry_run=True)
     assert n == 1 and patched["enqueue"] == [] and patched["marked"] == []
+
+
+def test_cursor_advances_past_every_message_seen(patched, monkeypatch):
+    # an already-read message (would be invisible to the old UNSEEN search)
+    # still gets processed, and the cursor moves past the highest UID.
+    msgs = [
+        mailbox.FetchedMessage(ref="101", raw=_raw(mid="<a@c.com>"), sort_key=101),
+        mailbox.FetchedMessage(ref="102", raw=_raw(frm="bulk@x.com", mid="<b@c.com>",
+                                                   extra={"Precedence": "bulk"}), sort_key=102),
+    ]
+    monkeypatch.setattr(mailbox, "fetch_new", lambda cfg, **kw: msgs)
+    email_watch.poll_channel(SB, _cfg(cursor={"imap_uid": 100}), lookback_days=3,
+                             limit=50, dry_run=False)
+    # the bulk one is skipped-but-accounted; cursor jumps to 102 regardless
+    assert patched["cursor"] == [{"imap_uid": 102}]
+
+
+def test_cursor_not_touched_on_dry_run_or_from_filter(patched, monkeypatch):
+    msgs = [mailbox.FetchedMessage(ref="7", raw=_raw(), sort_key=7)]
+    monkeypatch.setattr(mailbox, "fetch_new", lambda cfg, **kw: msgs)
+    email_watch.poll_channel(SB, _cfg(), lookback_days=3, limit=50, dry_run=True)
+    email_watch.poll_channel(SB, _cfg(), lookback_days=3, limit=50, dry_run=False,
+                             only_from={"someone-else@test.com"})
+    assert patched["cursor"] == []
+
+
+def test_only_from_filter_skips_other_senders_untouched(patched, monkeypatch):
+    msgs = [
+        mailbox.FetchedMessage(ref="20", raw=_raw(frm="wanted@test.com", mid="<w@test.com>")),
+        mailbox.FetchedMessage(ref="21", raw=_raw(frm="noise@bulk.com", mid="<n@bulk.com>")),
+    ]
+    monkeypatch.setattr(mailbox, "fetch_new", lambda cfg, **kw: msgs)
+    n = email_watch.poll_channel(SB, _cfg(), lookback_days=3, limit=50, dry_run=False,
+                                 only_from={"wanted@test.com"})
+    assert n == 1
+    assert [j["payload"]["idempotency_key"] for j in patched["enqueue"]] == ["<w@test.com>"]
+    # only the wanted message is marked read; the other is left untouched
+    assert patched["marked"] == ["20"]
 
 
 def test_no_published_flow_sets_error_status(patched, monkeypatch):
