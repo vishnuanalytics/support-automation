@@ -708,7 +708,7 @@ Design decisions already settled in that conversation:
 Supabase-Vault `integration_secret_*` RPCs; `036` = Phase 20e: the
 "Email L0/L1 — inbound to Salesforce" flow, team `email`, tenant Acme;
 `037` = Phase 20f: that flow's `sf_case` → thread-based Case reuse).
-149 offline pytest tests + web tsc/vitest (6)/build +
+160 offline pytest tests + web tsc/vitest (6)/build +
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
 Phase 18d's button is built but signing in with Google needs the Supabase
@@ -716,6 +716,32 @@ dashboard Google provider enabled first (`docs/GOOGLE_SETUP.md`
 §"Google sign-in"); the Phase 20 Gmail *provider* needs the same
 `GOOGLE_CLIENT_ID`/`SECRET` + a redirect registered (the IMAP path needs
 nothing server-side).
+
+**2026-08-30 — Phase 20j: local Docker runtime + SMTP outbound (no cloud,
+no credit card).**
+- **`docker-compose.yml`** (+ `Dockerfile`, `.dockerignore`) — one image,
+  three `restart: unless-stopped` services on the dev box:
+  `poller` (`ingestion.email_watch --interval 15`), `worker`
+  (`api.worker`), `api` (`uvicorn api.main:app`, `:8000`, `/api/health`
+  healthcheck). `./sf_jwt` bind-mounted `:ro`; compose overrides
+  `SF_PRIVATE_KEY_FILE=/app/sf_jwt/server.key` (the `.env` value is a host
+  path). `model-cache` named volume keeps the fastembed ONNX model across
+  rebuilds. Replaces the opaque GitHub-Actions cron for NFR-2. Usage +
+  the Cloudflare-tunnel wiring for the SF push: **`docs/LOCAL_RUNTIME.md`**.
+  *Not built/run here:* Docker isn't on this box — compose YAML + anchor
+  merge validated, image build is the user's `docker compose up -d --build`.
+- **Outbound reply now goes over SMTP** (FR-12 revised).
+  `api/worker._email_post_run._deliver` calls `emailer.send_reply` (SMTP
+  from the mailbox — what actually reaches the customer), then best-effort
+  mirrors it onto the Case as an outbound `EmailMessage`
+  (`salesforce.log_email_message`, `Incoming=false`, `status=_EM_SENT`).
+  `salesforce.send_case_reply()` / the `emailSimple` action dropped from
+  this path: this DE org has no Org-Wide Email Address and Deliverability =
+  "System email only", so `emailSimple` returned `sent=true` while
+  delivering nothing (that was the "no reply in mail" bug). `send_case_reply`
+  is now only referenced by `registry.h_clarify` (Phase 17c). **160 offline
+  pytest** green (`test_emailer.py`: the SF-reply test replaced by an
+  SMTP-send + Case-mirror test and a send-failure test).
 
 **2026-08-30 — Phase 20e: the email channel is LIVE-CONFIGURED for
 `gundamvishnu7@gmail.com` (tenant Acme `00000000-…`, team `email`).**

@@ -1,0 +1,27 @@
+# Keep the build context (and the image) small and secret-free.
+.git/
+venv/
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.log
+*:Zone.Identifier
+
+# secrets — passed at runtime via env_file / bind mount, never baked in
+.env
+.env.*
+sf_jwt/
+
+# web build tooling — the Python services don't need it
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo
+
+# local dev cruft
+.pytest_cache/
+.ruff_cache/
+scratchpad/
+docs/
+ingestion/eval/
+tests/

@@ -1,0 +1,55 @@
+# Local always-on runtime for the email -> Salesforce pipeline.
+# No cloud, no credit card: this runs on your machine (WSL2 / Docker Desktop).
+#
+#   docker compose up -d --build      # start all three; rebuild on a code change
+#   docker compose logs -f            # watch every service
+#   docker compose logs -f poller     # just the mailbox poller
+#   docker compose restart worker     # bounce one service
+#   docker compose down               # stop everything
+#
+# Needs a .env in the repo root (SUPABASE_*, GROQ_API_KEY, SF_*, SF_HOOK_SECRET,
+# optional ANTHROPIC_API_KEY). The Gmail app-password is NOT here — it lives in
+# Supabase Vault and the containers fetch it with the SUPABASE_* creds.
+
+name: support-automation
+
+x-svc: &svc
+  build: .
+  env_file: .env
+  environment:
+    # the .env path is a host path; the key is bind-mounted at /app/sf_jwt
+    SF_PRIVATE_KEY_FILE: /app/sf_jwt/server.key
+  restart: unless-stopped
+  volumes:
+    - ./sf_jwt:/app/sf_jwt:ro          # Salesforce JWT bearer key (gitignored)
+    - model-cache:/root/.cache         # fastembed / HF model — survives rebuilds
+  stop_grace_period: 20s
+
+services:
+  # inbound Gmail -> `jobs`. --interval is the poll cadence in seconds; drop it
+  # for a snappier demo (IMAP IDLE is the real zero-latency upgrade, later).
+  poller:
+    <<: *svc
+    command: python -m ingestion.email_watch --interval 15
+
+  # drains `jobs` -> runs the flow -> writes the Case -> sends the reply (SMTP).
+  worker:
+    <<: *svc
+    command: python -m api.worker
+
+  # receives the Salesforce -> automation push (POST /api/hooks/salesforce/case).
+  # Expose it to Salesforce with a Cloudflare quick tunnel (scripts/dev_serve.sh).
+  api:
+    <<: *svc
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  model-cache:

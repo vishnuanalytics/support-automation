@@ -83,15 +83,31 @@ def _email_post_run(final: dict, case: dict, flow: dict, sb) -> dict:
         sf_id = case.get("sf_id") or case.get("id")
 
         def _deliver(body: str) -> dict:
-            # FR-12: when the case is on a Salesforce Case, reply *through*
-            # Salesforce so the outbound is an EmailMessage on the Case
-            # (threaded, visible to agents). Fall back to SMTP otherwise.
-            if sf_id and salesforce.available():
-                r = salesforce.send_case_reply(sf_id, body, to_email=to, subject=subject,
-                                               tenant_id=flow["tenant_id"])
-                return {**r, "via": "salesforce", "sf_method": r.get("via")}
-            return emailer.send_reply(cfg, to=to, subject=subject, body=body,
-                                      in_reply_to=mid, references=refs)
+            # FR-12: the reply goes out over SMTP from the support mailbox —
+            # that is what actually lands in the customer's inbox. A
+            # Salesforce API send (`emailSimple`) needs org-wide
+            # deliverability = "All email" + an Org-Wide Email Address and
+            # silently drops the message otherwise (it returned sent=True
+            # while nothing was delivered). Salesforce stays the source of
+            # truth for the Case; Gmail just carries the message.
+            r = emailer.send_reply(cfg, to=to, subject=subject, body=body,
+                                   in_reply_to=mid, references=refs)
+            # Best-effort: mirror the sent reply onto the Case as an outbound
+            # EmailMessage so agents see the full thread in Salesforce.
+            # Never let this fail (or retry) the delivery.
+            if r.get("sent") and sf_id and salesforce.available():
+                try:
+                    em = salesforce.log_email_message(
+                        sf_id, incoming=False, status=salesforce._EM_SENT,
+                        from_addr=cfg.send_from, from_name=cfg.from_name or "",
+                        to_addrs=to, subject=emailer._subject_reply(subject),
+                        body=body, message_id=r.get("message_id") or "",
+                        tenant_id=flow["tenant_id"],
+                    )
+                    r["case_email"] = em.get("id") or em.get("error") or "logged"
+                except Exception as e:  # noqa: BLE001
+                    r["case_email"] = f"log failed: {e}"
+            return r
 
         if kind == "send_reply":
             return {"decision": kind, "delivery": _deliver(meta["body"])}

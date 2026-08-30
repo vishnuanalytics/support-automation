@@ -86,10 +86,15 @@ planned future channel — it must slot in as another adapter, not a rewrite
   per-tier thresholds. Topics **billing, refund, pricing, legal,
   account-access, data-export, cancellation** MUST always escalate,
   regardless of confidence. _(built)_
-- **FR-12** On **auto_reply**, the response MUST be sent **via Salesforce**
-  (`emailSimple` / outbound `EmailMessage` on the Case), threaded — so the
-  whole conversation lives on the Case. _(current build sends via Gmail SMTP
-  — MUST change.)_
+- **FR-12** On **auto_reply**, the response MUST reach the customer **and**
+  the whole conversation MUST live on the Case. _(built — revised
+  2026-08-30.)_ The reply is sent **over SMTP from the support mailbox**
+  (`emailer.send_reply`) and then **mirrored onto the Case as an outbound
+  `EmailMessage`** (`salesforce.log_email_message`, best-effort). The
+  original "send via Salesforce `emailSimple`" was abandoned: this
+  Developer Edition org has no Org-Wide Email Address and Deliverability =
+  "System email only", so `emailSimple` returned `sent=true` while
+  delivering nothing.
 - **FR-13** On **ask_human**, the drafted reply MUST be attached to the Case
   for a human — a Chatter note **and** a ready-to-send email draft on the
   Case — and the inbound message flagged. Nothing is auto-sent. _(Chatter
@@ -125,11 +130,15 @@ planned future channel — it must slot in as another adapter, not a rewrite
 ## 4. Non-functional requirements
 
 - **NFR-1 Latency:** email arrival → Case + first action ≤ 2 min (target).
-- **NFR-2 Reliability:** the poller + worker MUST run continuously. GitHub
-  Actions `schedule` alone is best-effort (observed: not firing for 30+ min)
-  and is NOT sufficient on its own — an external pinger (cron-job.org)
-  drives the workflow every 5 min. A persistent worker on an always-on host
-  is the eventual target (OD-1).
+- **NFR-2 Reliability:** the poller + worker MUST run continuously.
+  _(addressed 2026-08-30.)_ GitHub Actions `schedule` was too opaque and
+  unreliable (observed: not firing for 30+ min; no visibility into what
+  happened to a given mail). Replaced by a local **Docker Compose** stack
+  (`docker-compose.yml`: `poller` + `worker` + `api`, `restart:
+  unless-stopped`) run on the dev box — see `docs/LOCAL_RUNTIME.md`. Runs
+  while the machine is on; not a substitute for a real always-on host
+  (OD-1) but self-hosted, free, and fully observable via
+  `docker compose logs`.
 - **NFR-3 Cost:** free tooling by default — Groq free tier for the LLM,
   local `fastembed` embeddings, no paid email API. Target ≤ $5/mo.
 - **NFR-4 Security:** bearer tokens verified server-side; per-user
@@ -226,7 +235,7 @@ Tracked in `PROJECT_SCOPE.md`; summary as of 2026-08-30.
 |---|---|
 | FR-6 | `sf_case` `reuse: "thread"` — `salesforce.find_case_by_thread()` matches the email's `In-Reply-To` / `References` against `EmailMessage.MessageIdentifier` on open Cases; a genuinely new subject → a new Case. Migration `037`. |
 | FR-7 | `sf_case` calls `salesforce.log_email_message(incoming=True)` — the customer's mail becomes an `EmailMessage` on the Case, idempotent on `MessageIdentifier`. |
-| FR-12 | `api/worker._email_post_run` replies through `salesforce.send_case_reply()` (outbound `EmailMessage` on the Case, threaded) whenever the case has an `sf_id`; SMTP is the fallback. |
+| FR-12 | ✅ revised (2026-08-30) — `api/worker._email_post_run._deliver` sends the reply over **SMTP** (`emailer.send_reply`) and then mirrors it onto the Case as an outbound `EmailMessage` (`salesforce.log_email_message`, `Incoming=false`, best-effort). `salesforce.send_case_reply()` / `emailSimple` dropped from this path — the DE org silently discarded those (no OWEA; Deliverability = System-email-only). |
 | FR-13 | `ask_human` leaves the drafted reply on the Case as an internal `CaseComment` (`salesforce.add_case_comment`) beside the Chatter note — Salesforce rejects an API-created outbound draft `EmailMessage`. The agent copies it into the Email quick action. |
 | FR-14 | `handover` calls `salesforce.assign_case(queue=…)` when the node config carries a `queue` / `owner_user_id` — resolves a Queue by DeveloperName or Name and sets `Case.OwnerId`. No target → outcome only, unchanged. |
 
