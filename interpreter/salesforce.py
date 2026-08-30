@@ -521,6 +521,76 @@ def log_email_message(
         return {"created": False, "dry_run": False, "id": None, "error": str(e)}
 
 
+# ── classifier slug / country -> the Case picklists (scripts/sf_support_setup.py) ──
+_MODULE_RULES: "list[tuple[tuple[str, ...], str]]" = [
+    (("billing", "refund", "charge", "invoice", "plan", "pricing", "payment",
+      "subscription", "proration", "chargeback"), "Billing & Plans"),
+    (("sso", "saml", "login", "password", "2fa", "mfa", "two-factor",
+      "account", "member", "role", "seat", "signin", "sign-in"), "Account & Login"),
+    (("webhook", "api", "rest", "rate-limit", "ratelimit", "endpoint", "token",
+      "429"), "API & Webhooks"),
+    (("export", "gdpr", "retention", "deletion", "dump"), "Data & Export"),
+    (("zap", "trigger", "action", "filter", "path", "schedul"), "Zaps"),
+    (("integration", "connector"), "Integrations & Apps"),
+]
+_SUBMODULE_RULES: "dict[str, list[tuple[tuple[str, ...], str]]]" = {
+    "Billing & Plans": [(("refund", "chargeback"), "Refunds"),
+                        (("invoice", "receipt"), "Invoices"),
+                        (("plan", "upgrade", "downgrade", "proration"), "Plan Change"),
+                        (("charge", "billed", "double", "duplicate", "payment"), "Charges")],
+    "Account & Login": [(("sso", "saml", "okta"), "SSO"),
+                        (("password", "reset"), "Password"),
+                        (("2fa", "mfa", "two-factor"), "Two-Factor"),
+                        (("member", "role", "seat", "invite"), "Members & Roles")],
+    "API & Webhooks": [(("webhook",), "Webhooks"),
+                       (("rate", "limit", "429"), "Rate Limits"),
+                       (("api", "rest", "endpoint", "token"), "REST API")],
+    "Data & Export": [(("gdpr", "deletion", "delete"), "Deletion / GDPR"),
+                      (("retention",), "Retention"),
+                      (("export", "dump"), "Export")],
+    "Zaps": [(("trigger",), "Triggers"), (("action",), "Actions"),
+             (("filter",), "Filters"), (("path",), "Paths"), (("schedul",), "Scheduling")],
+    "Integrations & Apps": [(("auth",), "Authentication"), (("error",), "App Errors"),
+                            (("new-app", "new app", "request"), "New App Request")],
+}
+_REGION_BY_COUNTRY = {c: r for r, cs in {
+    "NA": ("united states", "usa", "us", "u.s.", "canada"),
+    "EMEA": ("united kingdom", "uk", "gb", "ireland", "germany", "france", "spain",
+             "italy", "netherlands", "sweden", "poland", "switzerland", "belgium",
+             "austria", "norway", "denmark", "finland", "portugal", "greece",
+             "czechia", "czech republic", "romania", "israel",
+             "united arab emirates", "uae", "saudi arabia", "south africa",
+             "nigeria", "kenya", "egypt", "turkey"),
+    "APAC": ("india", "singapore", "australia", "japan", "china", "hong kong",
+             "indonesia", "malaysia", "philippines", "thailand", "vietnam",
+             "south korea", "korea", "new zealand", "taiwan", "bangladesh", "pakistan"),
+    "LATAM": ("brazil", "mexico", "argentina", "chile", "colombia", "peru", "uruguay"),
+}.items() for c in cs}
+
+
+def map_case_fields(topic: str | None, country: str | None) -> dict[str, str]:
+    """Classifier `topic` slug + Account country -> the restricted Case
+    picklists (`Module__c` / `SubModule__c` / `Region__c`). `Topic__c` always
+    gets the raw slug — the safety net; the rest are best-effort and omitted
+    when nothing matches. Pure."""
+    slug = (topic or "").strip().lower()
+    out: dict[str, str] = {}
+    if slug:
+        out["Topic__c"] = str(topic)
+    module = next((m for keys, m in _MODULE_RULES if any(k in slug for k in keys)),
+                  "Other" if slug else "")
+    if module:
+        out["Module__c"] = module
+        sub = next((s for keys, s in _SUBMODULE_RULES.get(module, [])
+                    if any(k in slug for k in keys)), "")
+        if sub:
+            out["SubModule__c"] = sub
+    region = _REGION_BY_COUNTRY.get((country or "").strip().lower())
+    if region:
+        out["Region__c"] = region
+    return out
+
+
 def assign_case(
     case_id: str,
     *,

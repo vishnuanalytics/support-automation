@@ -1,0 +1,266 @@
+"""
+One-shot Salesforce org setup for the support-automation flows: the routing
+queues the `handover` / `ask_human` nodes point at, plus the Case picklists
+`sf_writeback` fills.
+
+    python scripts/sf_support_setup.py               # do everything
+    python scripts/sf_support_setup.py --only queues
+    python scripts/sf_support_setup.py --dry-run
+
+Stages (each idempotent — re-running skips what already exists):
+  queues      9 queues (5 per-team + 4 per-escalation-reason), Case assigned,
+              the running user added as the sole member
+  types       Case.Type  -> software-support values; Case.Status += "Waiting on Customer"
+  fields      Case.Module__c / Case.Region__c  Text -> restricted Picklist
+              Case.SubModule__c  new Picklist, dependent on Module__c
+              Case.Topic__c      new Text(255) — the classifier's raw slug
+  fls         field-level security for the new/changed fields on the admin profile
+
+Needs SF creds in .env and a user with "Customize Application" +
+"Modify Metadata" (System Administrator has both).
+"""
+
+from __future__ import annotations
+
+import argparse
+import pathlib
+import sys
+
+from dotenv import load_dotenv
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+load_dotenv()
+
+from interpreter.salesforce import _client, available  # noqa: E402
+
+# ── config ──────────────────────────────────────────────────────────────
+TEAM_QUEUES = [
+    ("Team_Email", "Team — Email"),
+    ("Team_Support", "Team — Support"),
+    ("Team_CSM", "Team — CSM"),
+    ("Team_Sales", "Team — Sales"),
+    ("Team_Offboarding", "Team — Offboarding"),
+]
+REASON_QUEUES = [
+    ("Support_L0L1", "Support L0/L1"),
+    ("Billing_Escalations", "Billing Escalations"),
+    ("Enterprise_Support", "Enterprise Support"),
+    ("Support_Tier2", "Support Tier 2"),
+]
+ALL_QUEUES = TEAM_QUEUES + REASON_QUEUES
+
+CASE_TYPE_VALUES = [
+    "Question", "How-to", "Problem / Bug", "Billing",
+    "Account / Login", "Feature Request", "Other",
+]
+CASE_STATUS_VALUES = [  # (label, closed)
+    ("New", False), ("Working", False), ("Escalated", False),
+    ("Waiting on Customer", False), ("Closed", True),
+]
+
+MODULE_VALUES = [
+    "Zaps", "Integrations & Apps", "Billing & Plans", "Account & Login",
+    "API & Webhooks", "Data & Export", "Other",
+]
+REGION_VALUES = ["NA", "EMEA", "APAC", "LATAM", "Other"]
+# sub-module -> controlling Module value
+SUBMODULE_BY_MODULE = {
+    "Zaps": ["Triggers", "Actions", "Filters", "Paths", "Scheduling"],
+    "Integrations & Apps": ["Authentication", "App Errors", "New App Request"],
+    "Billing & Plans": ["Charges", "Refunds", "Plan Change", "Invoices"],
+    "Account & Login": ["SSO", "Password", "Two-Factor", "Members & Roles"],
+    "API & Webhooks": ["REST API", "Webhooks", "Rate Limits"],
+    "Data & Export": ["Export", "Retention", "Deletion / GDPR"],
+    "Other": ["General"],
+}
+NEW_TEXT_FIELDS = [
+    {"api": "Case.Topic__c", "label": "Topic (raw)", "length": 255},
+]
+PICKLIST_CONVERT = [  # Text -> Picklist, restricted
+    {"api": "Case.Module__c", "label": "Module", "values": MODULE_VALUES},
+    {"api": "Case.Region__c", "label": "Region", "values": REGION_VALUES},
+]
+FLS_FIELDS = ["Case.Module__c", "Case.Region__c", "Case.SubModule__c", "Case.Topic__c"]
+
+
+# ── helpers ─────────────────────────────────────────────────────────────
+def _existing_queue_names(sf) -> set[str]:
+    return {r["DeveloperName"] for r in
+            sf.query("SELECT DeveloperName FROM Group WHERE Type = 'Queue'")["records"]}
+
+
+def _case_fields(sf) -> dict:
+    return {f["name"]: f for f in sf.Case.describe()["fields"]}
+
+
+def _cv(md, label: str, default: bool = False):
+    return md.CustomValue(fullName=label, label=label, default=default)
+
+
+def _create_ok(fn, *a) -> str:
+    """Run an mdapi create; treat 'already exists' as success. Returns a note."""
+    try:
+        fn(*a)
+        return "created"
+    except Exception as e:  # noqa: BLE001
+        s = str(e)
+        if "DUPLICATE_DEVELOPER_NAME" in s or "DUPLICATE_VALUE" in s or "already" in s.lower():
+            return "exists"
+        raise
+
+
+# ── stages ──────────────────────────────────────────────────────────────
+def stage_queues(sf, dry: bool) -> None:
+    me = __import__("os").environ["SF_USERNAME"]
+    md = sf.mdapi
+    have = _existing_queue_names(sf)
+    for api, label in ALL_QUEUES:
+        if api in have:
+            print(f"  queue {api}: exists")
+            continue
+        if dry:
+            print(f"  queue {api}: WOULD create ('{label}', Case, member={me})")
+            continue
+        md.Queue.create(md.Queue(
+            fullName=api, name=label, doesSendEmailToMembers=False,
+            queueSobject=[md.QueueSobject(sobjectType="Case")],
+            queueMembers=md.QueueMembers(users=md.Users(user=[me])),
+        ))
+        print(f"  queue {api}: created")
+
+
+def stage_types(sf, dry: bool) -> None:
+    md = sf.mdapi
+    if dry:
+        print(f"  Case.Type  -> {CASE_TYPE_VALUES}")
+        print(f"  Case.Status -> {[s for s, _ in CASE_STATUS_VALUES]}")
+        return
+    ct = md.StandardValueSet.read("CaseType")
+    ct.standardValue = [
+        md.StandardValue(fullName=v, label=v, default=(i == 0))
+        for i, v in enumerate(CASE_TYPE_VALUES)
+    ]
+    md.StandardValueSet.update(ct)
+    print(f"  Case.Type set to {CASE_TYPE_VALUES}")
+
+    cs = md.StandardValueSet.read("CaseStatus")
+    cs.standardValue = [
+        md.StandardValue(fullName=label, label=label, default=(label == "New"), closed=closed)
+        for label, closed in CASE_STATUS_VALUES
+    ]
+    md.StandardValueSet.update(cs)
+    print(f"  Case.Status set to {[s for s, _ in CASE_STATUS_VALUES]}")
+
+
+def stage_fields(sf, dry: bool) -> None:
+    md = sf.mdapi
+    have = _case_fields(sf)
+
+    for f in NEW_TEXT_FIELDS:
+        short = f["api"].split(".")[1]
+        if short in have:
+            print(f"  {f['api']}: exists")
+        elif dry:
+            print(f"  {f['api']}: WOULD create Text({f['length']})")
+        else:
+            note = _create_ok(md.CustomField.create, md.CustomField(
+                fullName=f["api"], label=f["label"], type="Text",
+                length=f["length"], required=False))
+            print(f"  {f['api']}: {note} Text({f['length']})")
+
+    for f in PICKLIST_CONVERT:
+        short = f["api"].split(".")[1]
+        cur = have.get(short, {})
+        if cur.get("type") == "picklist":
+            print(f"  {f['api']}: already a picklist")
+            continue
+        if dry:
+            print(f"  {f['api']}: WOULD (re)create as restricted Picklist {f['values']}")
+            continue
+        vsd = md.ValueSetValuesDefinition(
+            sorted=False, value=[_cv(md, v) for v in f["values"]])   # no default -> blank until set
+        cf = md.CustomField(
+            fullName=f["api"], label=f["label"], type="Picklist",
+            valueSet=md.ValueSet(restricted=True, valueSetDefinition=vsd))
+        if short in have and have[short].get("type") != "picklist":
+            # Text -> Picklist isn't a supported in-place conversion; drop and
+            # recreate (the classifier's slug is preserved in Topic__c anyway).
+            try:
+                md.CustomField.delete(f["api"])
+                print(f"  {f['api']}: dropped Text field")
+            except Exception as e:  # noqa: BLE001
+                print(f"  {f['api']}: delete skipped ({str(e)[:60]})")
+        print(f"  {f['api']}: {_create_ok(md.CustomField.create, cf)} restricted Picklist")
+
+    # SubModule__c — dependent on Module__c
+    if "SubModule__c" in have:
+        print("  Case.SubModule__c: exists")
+    elif dry:
+        print("  Case.SubModule__c: WOULD create Picklist dependent on Module__c")
+    else:
+        all_subs = [s for subs in SUBMODULE_BY_MODULE.values() for s in subs]
+        vsd = md.ValueSetValuesDefinition(
+            sorted=False, value=[_cv(md, s) for s in all_subs])
+        settings = [
+            md.ValueSettings(valueName=s, controllingFieldValue=[mod])
+            for mod, subs in SUBMODULE_BY_MODULE.items() for s in subs
+        ]
+        cf = md.CustomField(
+            fullName="Case.SubModule__c", label="Sub-module", type="Picklist",
+            valueSet=md.ValueSet(
+                restricted=True, controllingField="Module__c",
+                valueSetDefinition=vsd, valueSettings=settings))
+        print(f"  Case.SubModule__c: {_create_ok(md.CustomField.create, cf)} (dependent on Module__c)")
+
+
+def stage_fls(sf, dry: bool) -> None:
+    import os
+
+    me = sf.query(
+        f"SELECT ProfileId FROM User WHERE Username = '{os.environ['SF_USERNAME']}'"
+    )["records"][0]["ProfileId"]
+    ps_id = sf.query(
+        "SELECT Id FROM PermissionSet WHERE IsOwnedByProfile = true "
+        f"AND ProfileId = '{me}'"
+    )["records"][0]["Id"]
+    existing = {r["Field"] for r in sf.query(
+        f"SELECT Field FROM FieldPermissions WHERE ParentId = '{ps_id}'")["records"]}
+    for api in FLS_FIELDS:
+        if api in existing:
+            print(f"  {api}: FLS set")
+            continue
+        if dry:
+            print(f"  {api}: WOULD grant FLS read/edit")
+            continue
+        try:
+            sf.FieldPermissions.create({
+                "ParentId": ps_id, "SobjectType": "Case", "Field": api,
+                "PermissionsRead": True, "PermissionsEdit": True,
+            })
+            print(f"  {api}: FLS granted")
+        except Exception as e:  # noqa: BLE001
+            print(f"  {api}: FLS failed — {e}")
+
+
+STAGES = {"queues": stage_queues, "types": stage_types,
+          "fields": stage_fields, "fls": stage_fls}
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--only", choices=list(STAGES), action="append",
+                    help="run only these stage(s)")
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args()
+    if not available():
+        sys.exit("no SF creds in .env")
+    sf = _client()
+    for name in (args.only or list(STAGES)):
+        print(f"\n== {name} ==")
+        STAGES[name](sf, args.dry_run)
+    print("\ndone.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

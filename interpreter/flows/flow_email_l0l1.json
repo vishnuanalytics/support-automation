@@ -59,13 +59,13 @@
       "node_id": "ask_human",
       "type": "ask_human",
       "label": "Raise a human request on the Case",
-      "config": { "channel": "salesforce_chatter", "reason": "below_confidence_or_forced_escalation" }
+      "config": { "channel": "salesforce_chatter", "reason": "below_confidence_or_forced_escalation", "queue": "Support_L0L1", "escalate_queue": "Billing_Escalations" }
     },
     {
       "node_id": "handover",
       "type": "handover",
       "label": "Full handover (enterprise)",
-      "config": { "reason": "enterprise_tier" }
+      "config": { "reason": "enterprise_tier", "queue": "Enterprise_Support" }
     }
   ],
   "edges": [
