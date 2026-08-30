@@ -61,6 +61,11 @@ class CaseState(TypedDict, total=False):
     #  contact_id, lead_id, name, account_id, account_name}
     sender: dict[str, Any]
 
+    # written by a `team_route` node (Phase 20i) — which team owns this case:
+    # 'support' | 'csm' | 'sales' | 'offboarding' (the design doc's routing).
+    # `ask_human` / `handover` resolve the target queue from it.
+    routed_team: str
+
     sf_writeback: dict[str, Any]      # {target, written, skipped, dry_run, ...} from the sf_writeback node
 
     # written by an `sf_case` node (Phase 20e/f) — the inbound message resolved

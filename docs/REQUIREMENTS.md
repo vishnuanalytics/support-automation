@@ -230,10 +230,19 @@ Tracked in `PROJECT_SCOPE.md`; summary as of 2026-08-30.
 | FR-13 | `ask_human` also leaves the drafted reply on the Case as a `Status='Draft'` `EmailMessage` (recipient + `Re:` subject prefilled) beside the Chatter note. |
 | FR-14 | `handover` calls `salesforce.assign_case(queue=…)` when the node config carries a `queue` / `owner_user_id` — resolves a Queue by DeveloperName or Name and sets `Case.OwnerId`. No target → outcome only, unchanged. |
 
+**Added + built in Phase 20i (2026-08-30):**
+
+| Req | How |
+|---|---|
+| **FR-21** Team routing | `team_route` node → `state.routed_team` ∈ {support, csm, sales, offboarding} from keyword rules (renewal/expansion → csm, pricing/pre-sales → sales, cancellation/data-export → offboarding, else support). The design doc's "One team, one flow" as a routing step. |
+| **FR-22** Team-aware escalation | `ask_human` / `handover` resolve `Case.OwnerId` to the routed team's queue (`queue_by_team`); a `support` billing escalation → `Billing_Escalations`; enterprise → `Enterprise_Support`. |
+| **FR-23** Team roster in SF | `Contact.Team__c` + `Contact.TeamRole__c`; 2 real Users (Support/CSM managers) + 13 Contacts, 1 Manager + 2 Members per team. `scripts/sf_seed_teams.py`. |
+| **FR-24** Salesforce → automation push | `POST /api/hooks/salesforce/case` (shared secret) pulls the Case and queues the router flow. SF side: a record-triggered Flow → HTTP Callout (no Apex). |
+
 **Still open:**
 
 | Req | Gap |
 |---|---|
 | C-1 | Email-to-Case not enabled in the org — the `EmailMessage` records are created via API regardless, but the **Email** quick action + the **Emails** related list on the Case page need it. |
 | NFR-2 | cron-job.org pinger not set up; scheduled runs unreliable. |
-| FR-14 | the seeded email flow's `handover` node has no `queue` set — a no-op until an admin configures one. |
+| FR-24 | the SF-side record-triggered Flow + Named Credential aren't created yet — needs the API at a public URL (deploy or tunnel). The webhook itself is live and `curl`-verified. |

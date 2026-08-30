@@ -117,6 +117,56 @@ Billing / Account·Login / Feature Request / Other`; `Case.Status` gains
 classifier's raw slug; `Module__c` / `SubModule__c` / `Region__c` are a
 best-effort keyword mapping and left blank when nothing matches.
 
+## 2c. Case-router workflow + team roster (Phase 20i)
+
+```
+python scripts/sf_seed_teams.py        # 2 Users + 13 Contacts, Team__c / TeamRole__c
+python scripts/seed_router_flow.py     # the router flow -> published
+```
+
+**Router flow** ("Case router — team routing + tag manager", team `router`):
+`identify → sf_case → retrieve → classify → team_route → sf_writeback →
+draft → confidence_gate → {auto_reply | ask_human | handover}`.
+`team_route` picks **support / csm / sales / offboarding** from keyword
+rules over the case (renewal/expansion → csm, pricing/pre-sales → sales,
+cancellation/data-export → offboarding, else support); `ask_human` /
+`handover` resolve the Salesforce queue from `routed_team`
+(`queue_by_team` config) — a routed team keeps its own case, `support`
+billing cases go to `Billing_Escalations`, enterprise → `Enterprise_Support`.
+
+**Team roster** — Dev Edition caps Salesforce Users at 4, so: 2 real
+Users (`Sam Rivera` = Support manager, `Casey Lin` = CSM manager, each in
+their `Team_*` queue) + 13 Contacts on the *"Internal — Support Teams"*
+Account tagged `Contact.Team__c` + `Contact.TeamRole__c` (each team = 1
+Manager + 2 Members).
+
+## 2d. Salesforce → automation **push** (Phase 20i)
+
+The automation exposes `POST /api/hooks/salesforce/case` — body
+`{"case_id": "..."}`, header `X-SF-Hook-Secret: <SF_HOOK_SECRET from .env>`.
+It pulls the Case, resolves the published `router` flow, and queues a
+`run_flow` job (deduped on the Case Id). 401 without the secret.
+
+Wire it from Salesforce (no Apex), once the API has a public URL
+(a deploy, or `cloudflared tunnel --url http://localhost:8000`):
+
+1. **Setup → Named Credentials → New** — Label `SupportAutomation`, URL =
+   the public API base, Identity Type *Anonymous* (the shared secret is
+   the auth). Optionally add a Custom Header `X-SF-Hook-Secret` = the
+   secret so the Flow doesn't carry it.
+2. **Setup → Flows → New → Record-Triggered Flow** on **Case**, *After
+   Save*, **A record is created**, entry condition `Status Equals New`
+   (optionally `AND Origin Not Equal Email` to skip bot-created email
+   Cases).
+3. Add an **HTTP Callout** action → `POST` to
+   `callout:SupportAutomation/api/hooks/salesforce/case`, body
+   `{ "case_id": "{!$Record.Id}" }`, header `X-SF-Hook-Secret: <secret>`
+   (skip the header if you set it on the Named Credential).
+4. Activate the Flow.
+
+Now a Case created in Salesforce triggers the router in seconds. Until the
+URL is public, test with `curl` against `localhost:8000` (see above).
+
 ## 3. Chatter "ask human"
 
 When `confidence_gate` fails for a non-enterprise tier, `ask_human` posts a

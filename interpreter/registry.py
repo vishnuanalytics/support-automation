@@ -190,6 +190,61 @@ def h_classify(state: CaseState, config: dict) -> dict:
     }
 
 
+@register("team_route")
+def h_team_route(state: CaseState, config: dict) -> dict:
+    """Phase 20i — pick the team that owns this case (the design doc's
+    "One team, one flow" routing). Keyword rules over the case
+    subject/body/topic; first match wins, else `default`. Writes
+    `state.routed_team` ('support' | 'csm' | 'sales' | 'offboarding'); the
+    `ask_human` / `handover` nodes resolve their target queue from it, and
+    edge conditions can branch on `routed_team`. Pure — no LLM.
+
+    config: {
+      rules: [{"team": "csm", "any": ["renewal", "account manage", ...]}, ...],
+      default: "support",
+    }
+    """
+    nid = config["_node_id"]
+    case = state.get("case", {})
+    topic = str((state.get("classification") or {}).get("topic", ""))
+    hay = " ".join(str(x) for x in (
+        topic, case.get("subject", ""), case.get("body", ""))).lower()
+
+    rules = config.get("rules") or _DEFAULT_ROUTE_RULES
+    matched = None
+    hit = ""
+    for r in rules:
+        kws = [k.lower() for k in (r.get("any") or []) if k]
+        m = next((k for k in kws if k in hay), None)
+        if m:
+            matched, hit = r.get("team"), m
+            break
+    team = matched or config.get("default", "support")
+    summary = (f"{team}  (matched '{hit}')" if matched
+               else f"{team}  (default)")
+    return {"routed_team": team,
+            **_trace(nid, "team_route", summary, {"routed_team": team, "matched": hit})}
+
+
+# Order matters — first match wins. Offboarding (leaving) is unambiguous;
+# CSM (existing-customer lifecycle: renew / expand / adopt) is checked
+# before Sales (net-new buying intent) so an expansion question from a
+# current customer doesn't fall to Sales.
+_DEFAULT_ROUTE_RULES = [
+    {"team": "offboarding", "any": ["cancel", "close my account", "close account",
+        "data export", "export my data", "delete my data", "delete my account",
+        "offboard", "gdpr", "right to be forgotten", "terminate our", "downgrade to free"]},
+    {"team": "csm", "any": ["renewal", "renew", "renewing", "account management",
+        "account manager", "our contract", "contract renewal", "add seats",
+        "more seats", "expand our", "expansion", "quarterly review", "qbr",
+        "success plan", "adoption", "onboarding help", "true-up"]},
+    {"team": "sales", "any": ["pricing", "how much does", "quote", "pre-sales",
+        "presales", "plan comparison", "which plan", "compare plans", "discount",
+        "upgrade to enterprise", "new subscription", "purchasing", "procurement",
+        "evaluate", "trial extension"]},
+]
+
+
 @register("sf_writeback")
 def h_sf_writeback(state: CaseState, config: dict) -> dict:
     """
@@ -605,6 +660,28 @@ def _re_subject(subject: str) -> str:
     return s if s[:3].lower() == "re:" else f"Re: {s}"
 
 
+_BILLING_REASON = ("billing", "refund", "charge", "invoice", "& plans")
+
+
+def _route_queue(state: CaseState, config: dict) -> str | None:
+    """Pick the human queue for an escalation/handover (Phase 20i).
+
+    * a case the router sent to a specific team (csm / sales / offboarding)
+      goes to that team's queue — they own it, billing-adjacent or not.
+    * otherwise (routed to support, or unrouted): a **billing-reason** forced
+      escalation goes to `escalate_queue` (the billing sub-queue); else the
+      routed team's / the static `queue`.
+    """
+    team = state.get("routed_team") or ""
+    by_team = config.get("queue_by_team") or {}
+    if team and team != "support" and by_team.get(team):
+        return by_team[team]
+    reason = str((state.get("confidence_gate") or {}).get("forced_escalation") or "").lower()
+    if config.get("escalate_queue") and any(w in reason for w in _BILLING_REASON):
+        return config["escalate_queue"]
+    return by_team.get(team) or config.get("queue")
+
+
 @register("confidence_gate")
 def h_confidence_gate(state: CaseState, config: dict) -> dict:
     tier = state.get("tier", "basic")
@@ -746,11 +823,10 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
         if channel == "salesforce_chatter":
             summary += " (no sf_id — not posted)"
 
-    # Phase 20g/h: drop the Case into a human queue. `escalate_queue` (e.g.
-    # Billing_Escalations) wins when the gate forced the escalation (on topic
-    # *or* the billing/plans module — see h_confidence_gate); else `queue`.
+    # Phase 20g/h/i: drop the Case into a human queue. Billing/forced -> the
+    # escalation queue; else the routed team's queue; else the static `queue`.
     forced = bool((state.get("confidence_gate") or {}).get("forced_escalation"))
-    queue = (config.get("escalate_queue") if forced else None) or config.get("queue")
+    queue = _route_queue(state, config)
     if sf_id and queue:
         assignment = salesforce.assign_case(sf_id, queue=queue, tenant_id=state.get("tenant_id"))
         outcome["assignment"] = assignment
@@ -777,9 +853,16 @@ def h_handover(state: CaseState, config: dict) -> dict:
     summary = f"full handover ({outcome['reason']})"
     case = state.get("case", {})
     sf_id = case.get("sf_id") or case.get("id")
-    if sf_id and (config.get("queue") or config.get("owner_user_id")):
+    # enterprise always goes to the enterprise queue; otherwise the routed
+    # team's queue (queue_by_team) / the static queue (Phase 20i).
+    queue = config.get("queue")
+    if config.get("enterprise_queue") and state.get("tier") == "enterprise":
+        queue = config["enterprise_queue"]
+    else:
+        queue = _route_queue(state, config) or queue
+    if sf_id and (queue or config.get("owner_user_id")):
         assignment = salesforce.assign_case(
-            sf_id, queue=config.get("queue"), user_id=config.get("owner_user_id"),
+            sf_id, queue=queue, user_id=config.get("owner_user_id"),
             tenant_id=state.get("tenant_id"),
         )
         outcome["assignment"] = assignment

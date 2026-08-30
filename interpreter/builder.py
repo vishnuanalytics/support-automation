@@ -48,6 +48,7 @@ def _context(state: CaseState) -> dict[str, Any]:
         "classification": state.get("classification") or {},
         "entities": state.get("entities") or {},
         "policy": state.get("policy") or {},
+        "routed_team": state.get("routed_team") or "",
         "clarification": state.get("clarification") or {},
         "sender": state.get("sender") or {},
         "outcome": state.get("outcome") or {},
