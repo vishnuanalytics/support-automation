@@ -5,6 +5,11 @@ GLM-5.2, Claude, etc.) as system/project context before asking it to continue
 the build — it should not need anything beyond this file plus the repo itself
 to pick up where the last session left off.
 
+**`docs/REQUIREMENTS.md` is the spec** (numbered functional / non-functional
+requirements, constraints, open decisions, acceptance scenarios). This file
+is the build log — phase status and history. New requirement → write it in
+`REQUIREMENTS.md` first, then build and record progress here.
+
 ## What this project is
 
 **Primary objective (stated by the project owner, 2026-08-30): have AI
