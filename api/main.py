@@ -689,6 +689,47 @@ def enqueue_run(flow_id: str, body: EnqueueIn, c: Caller = Depends(caller)) -> d
     return {"job_id": job_id}
 
 
+class SFCaseHookIn(BaseModel):
+    case_id: str
+    flow_id: str | None = None       # optional override; else the published 'router' flow
+
+
+@app.post("/api/hooks/salesforce/case", status_code=202)
+def salesforce_case_hook(
+    body: SFCaseHookIn,
+    secret: str | None = Header(default=None, alias="X-SF-Hook-Secret"),
+) -> dict:
+    """Salesforce → automation **push**. A record-triggered Flow on Case
+    (After Save, on Create, Status='New', not bot-created) POSTs `{case_id}`
+    here; we pull the Case, resolve the published router flow, and queue a
+    `run_flow` job (deduped on the Case Id). No user auth — a shared secret
+    (`SF_HOOK_SECRET`) gates it. Returns 202."""
+    want = os.environ.get("SF_HOOK_SECRET")
+    if not want or secret != want:
+        raise HTTPException(401, "bad or missing X-SF-Hook-Secret")
+
+    flow_id = body.flow_id
+    if not flow_id:
+        rows = (_service.table("flows").select("flow_id")
+                .eq("team", "router").eq("status", "published").execute().data or [])
+        if len(rows) != 1:
+            raise HTTPException(500, f"expected exactly one published 'router' flow, found {len(rows)}")
+        flow_id = rows[0]["flow_id"]
+
+    from interpreter import salesforce as _sf
+    try:
+        case = _sf.get_case(body.case_id)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(422, f"could not load Case {body.case_id}: {e}")
+
+    job_id = jobs.enqueue(
+        "run_flow",
+        {"flow_id": flow_id, "case": case, "idempotency_key": body.case_id},
+        dedupe_key=f"sfcase:{body.case_id}", sb=_service,
+    )
+    return {"job_id": job_id, "deduped": job_id is None, "flow_id": flow_id}
+
+
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id: str, c: Caller = Depends(caller)) -> dict:
     rows = (

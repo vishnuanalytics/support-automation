@@ -703,7 +703,7 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**Phases 0–20 built. No open phase.** Migrations `001`–`039` applied
+**Phases 0–20 built. No open phase.** Migrations `001`–`040` applied
 (`034`/`035` = Phase 20a: `tenant_integrations` poller columns + the
 Supabase-Vault `integration_secret_*` RPCs; `036` = Phase 20e: the
 "Email L0/L1 — inbound to Salesforce" flow, team `email`, tenant Acme;
@@ -734,6 +734,41 @@ dedicated support mailbox, or add a `--from <addr>` filter to
 `ingestion/email_watch.py` and drive one clean test message through
 `email_watch --once` + `api.worker --once` (measure latency, confirm the
 Case + the threaded reply).
+
+**2026-08-30 — Phase 20i: the Case-router workflow (the design doc, as
+one flow) + team data + Salesforce push.**
+- **New node `team_route`** (`registry.h_team_route`, pure) — keyword rules
+  over the case → `state.routed_team` ∈ {support, csm, sales, offboarding}
+  (renewal/expansion → csm, pricing/pre-sales → sales, cancellation/
+  data-export → offboarding, else support). `_context` exposes
+  `routed_team` for edge conditions.
+- **`ask_human` / `handover` resolve the queue from `routed_team`** via a
+  `queue_by_team` config + `_route_queue()`: a routed team keeps its own
+  case (→ `Team_CSM` / `Team_Sales` / `Team_Offboarding`); a `support`
+  billing-reason escalation → `Billing_Escalations`; enterprise →
+  `enterprise_queue` (`Enterprise_Support`).
+- **The flow** (`f0f0f0f0-…`, team `router`, published): `identify →
+  sf_case → retrieve → classify → team_route → sf_writeback → draft →
+  confidence_gate → {auto_reply | ask_human | handover}`. Migration `040`
+  / `scripts/seed_router_flow.py` (canonical) / portable
+  `flow_case_router.json`.
+- **Salesforce team data** (`scripts/sf_seed_teams.py`): `Contact.Team__c`
+  + `Contact.TeamRole__c` picklists; **2 real Users** (Sam Rivera =
+  Support mgr, Casey Lin = CSM mgr — Dev Edition caps Users at 4) added to
+  their `Team_*` queues; **13 Contacts** on an "Internal — Support Teams"
+  Account, 1 Manager + 2 Members per team.
+- **Salesforce → automation push**: `POST /api/hooks/salesforce/case`
+  (`api/main.py`) — shared-secret (`SF_HOOK_SECRET`), pulls the Case,
+  queues the router flow (deduped on Case Id). The SF side is a
+  record-triggered Flow → HTTP Callout (no Apex; needs the API at a public
+  URL — see `docs/SALESFORCE_SETUP.md` §2d). Live-verified: `curl` →
+  202 → worker → Case owner set to the routed team's queue.
+- **Live e2e** through the published router flow: renewal+seats → csm →
+  `ask_human` → Team_CSM; pricing → sales → Team_Sales; cancel+export →
+  offboarding → `handover` → Team_Offboarding; generic Zap issue →
+  support → `auto_reply`; double-charge → support → `ask_human` →
+  Billing_Escalations; enterprise SSO → `handover` → Enterprise_Support.
+  159 offline pytest (6 new in `test_router.py`).
 
 **2026-08-30 — Phase 20h: all-flows e2e test + wire the rest.**
 `scripts/test_all_flows.py` runs representative cases (basic/premium/

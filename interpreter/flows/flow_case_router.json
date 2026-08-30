@@ -1,0 +1,202 @@
+{
+  "flow_id": "f0f0f0f0-0000-4000-8000-000000000000",
+  "tenant_id": "00000000-0000-0000-0000-000000000000",
+  "team": "router",
+  "name": "Case router \u2014 team routing + tag manager",
+  "version": 1,
+  "status": "draft",
+  "_doc": "The design doc's single end-to-end workflow: identify -> sf_case -> retrieve -> classify -> team_route -> sf_writeback -> draft -> confidence_gate -> {auto_reply | ask_human | handover}. team_route sets routed_team from keyword rules; ask_human/handover resolve the Salesforce queue from it.",
+  "nodes": [
+    {
+      "node_id": "f0000000-0000-4000-8000-000000000001",
+      "type": "identify",
+      "label": "Resolve the sender",
+      "config": {
+        "email_field": "contact.email",
+        "domain_match": true
+      }
+    },
+    {
+      "node_id": "f0000000-0000-4000-8000-000000000002",
+      "type": "sf_case",
+      "label": "Create / reuse the Salesforce Case",
+      "config": {
+        "origin": "Web",
+        "status": "New",
+        "reuse": "thread"
+      }
+    },
+    {
+      "node_id": "f0000000-0000-4000-8000-000000000003",
+      "type": "retrieve",
+      "label": "Retrieve KB context",
+      "config": {
+        "source": [
+          "supabase"
+        ],
+        "top_k": 5,
+        "use_rerank": true
+      }
+    },
+    {
+      "node_id": "f0000000-0000-4000-8000-000000000004",
+      "type": "classify",
+      "label": "Classify tier / topic / urgency",
+      "config": {
+        "tier_field": "account.customer_type",
+        "region_field": "account.region",
+        "default_tier": "basic"
+      }
+    },
+    {
+      "node_id": "f0000000-0000-4000-8000-000000000005",
+      "type": "team_route",
+      "label": "Route to a team (design-doc rules)",
+      "config": {
+        "default": "support"
+      }
+    },
+    {
+      "node_id": "f0000000-0000-4000-8000-000000000006",
+      "type": "sf_writeback",
+      "label": "Write triage fields to the Case",
+      "config": {}
+    },
+    {
+      "node_id": "f0000000-0000-4000-8000-000000000007",
+      "type": "draft",
+      "label": "Draft the reply from context",
+      "config": {
+        "model": "openai/gpt-oss-120b",
+        "max_tokens": 700
+      }
+    },
+    {
+      "node_id": "f0000000-0000-4000-8000-000000000008",
+      "type": "confidence_gate",
+      "label": "Tag manager \u2014 score & decide",
+      "config": {
+        "weights": {
+          "retrieval": 0.55,
+          "draft": 0.1,
+          "groundedness": 0.35
+        },
+        "default_threshold": 0.5,
+        "tier_overrides": {
+          "basic": 0.5,
+          "premium": 0.6,
+          "enterprise": 0.75
+        },
+        "escalate_topics": [
+          "billing",
+          "refund",
+          "pricing",
+          "legal",
+          "compliance",
+          "account-access",
+          "data-export",
+          "cancellation"
+        ],
+        "escalate_modules": [
+          "Billing & Plans"
+        ]
+      }
+    },
+    {
+      "node_id": "f0000000-0000-4000-8000-000000000009",
+      "type": "auto_reply",
+      "label": "Auto-reply to the customer",
+      "config": {
+        "channel": "email"
+      }
+    },
+    {
+      "node_id": "f0000000-0000-4000-8000-000000000010",
+      "type": "ask_human",
+      "label": "Escalate \u2014 ask a human on the Case",
+      "config": {
+        "channel": "salesforce_chatter",
+        "queue_by_team": {
+          "support": "Support_Tier2",
+          "csm": "Team_CSM",
+          "sales": "Team_Sales",
+          "offboarding": "Team_Offboarding"
+        },
+        "escalate_queue": "Billing_Escalations"
+      }
+    },
+    {
+      "node_id": "f0000000-0000-4000-8000-000000000011",
+      "type": "handover",
+      "label": "Full handover to the team",
+      "config": {
+        "reason": "enterprise_or_offboarding",
+        "queue_by_team": {
+          "support": "Support_Tier2",
+          "csm": "Team_CSM",
+          "sales": "Team_Sales",
+          "offboarding": "Team_Offboarding"
+        },
+        "enterprise_queue": "Enterprise_Support"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "source_node_id": "f0000000-0000-4000-8000-000000000001",
+      "target_node_id": "f0000000-0000-4000-8000-000000000002",
+      "condition": {}
+    },
+    {
+      "source_node_id": "f0000000-0000-4000-8000-000000000002",
+      "target_node_id": "f0000000-0000-4000-8000-000000000003",
+      "condition": {}
+    },
+    {
+      "source_node_id": "f0000000-0000-4000-8000-000000000003",
+      "target_node_id": "f0000000-0000-4000-8000-000000000004",
+      "condition": {}
+    },
+    {
+      "source_node_id": "f0000000-0000-4000-8000-000000000004",
+      "target_node_id": "f0000000-0000-4000-8000-000000000005",
+      "condition": {}
+    },
+    {
+      "source_node_id": "f0000000-0000-4000-8000-000000000005",
+      "target_node_id": "f0000000-0000-4000-8000-000000000006",
+      "condition": {}
+    },
+    {
+      "source_node_id": "f0000000-0000-4000-8000-000000000006",
+      "target_node_id": "f0000000-0000-4000-8000-000000000007",
+      "condition": {}
+    },
+    {
+      "source_node_id": "f0000000-0000-4000-8000-000000000007",
+      "target_node_id": "f0000000-0000-4000-8000-000000000008",
+      "condition": {}
+    },
+    {
+      "source_node_id": "f0000000-0000-4000-8000-000000000008",
+      "target_node_id": "f0000000-0000-4000-8000-000000000009",
+      "condition": {
+        "if": "confidence_gate.pass and tier != 'enterprise' and routed_team != 'offboarding'"
+      }
+    },
+    {
+      "source_node_id": "f0000000-0000-4000-8000-000000000008",
+      "target_node_id": "f0000000-0000-4000-8000-000000000010",
+      "condition": {
+        "if": "not confidence_gate.pass and tier != 'enterprise' and routed_team != 'offboarding'"
+      }
+    },
+    {
+      "source_node_id": "f0000000-0000-4000-8000-000000000008",
+      "target_node_id": "f0000000-0000-4000-8000-000000000011",
+      "condition": {
+        "if": "tier == 'enterprise' or routed_team == 'offboarding'"
+      }
+    }
+  ]
+}
