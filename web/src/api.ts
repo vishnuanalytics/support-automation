@@ -1,6 +1,8 @@
 import { supabase } from "./supabase";
 import type {
   AssistResult,
+  EmailChannel,
+  EmailChannelSave,
   Flow,
   FlowCandidate,
   FlowMeta,
@@ -129,6 +131,19 @@ export const api = {
     status: () => req<GoogleStatus>("/integrations/slack/status"),
     authorize: (tenant_id: string) =>
       req<{ url: string }>(`/integrations/slack/authorize?tenant_id=${tenant_id}`),
+  },
+
+  email: {
+    status: () => req<EmailChannel>("/integrations/email"),
+    save: (b: EmailChannelSave) =>
+      req<EmailChannel>("/integrations/email", { method: "PUT", body: JSON.stringify(b) }),
+    remove: () => req<void>("/integrations/email", { method: "DELETE" }),
+    test: (b: EmailChannelSave) =>
+      req<{ ok: boolean; imap?: boolean; smtp?: boolean; error: string | null }>(
+        "/integrations/email/test",
+        { method: "POST", body: JSON.stringify(b) },
+      ),
+    googleAuthorize: () => req<{ url: string }>("/integrations/email/google/authorize"),
   },
 
   acceptInvitations: () =>

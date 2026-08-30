@@ -379,6 +379,38 @@ def _mark_gmail(cfg: "MailboxConfig", refs: list[str]) -> None:
     ).execute()
 
 
+def mark_needs_human(cfg: "MailboxConfig", message_id: str) -> None:
+    """Hand a message back to a human: re-mark it unread and flag/star it.
+    Looks the message up by its Message-ID (the poller already marked it
+    read on enqueue). Best-effort."""
+    if not message_id:
+        return
+    if cfg.provider == "gmail":
+        svc = _gmail_service(cfg)
+        found = svc.users().messages().list(
+            userId="me", q=f"rfc822msgid:{message_id}").execute().get("messages", [])
+        ids = [m["id"] for m in found]
+        if ids:
+            svc.users().messages().batchModify(
+                userId="me", body={"ids": ids, "addLabelIds": ["UNREAD", "STARRED"]}
+            ).execute()
+        return
+    m = _imap_login(cfg)
+    try:
+        m.select(cfg.folder, readonly=False)
+        typ, data = m.search(None, "HEADER", "Message-ID", message_id)
+        uids = data[0].split() if data and data[0] else []
+        if uids:
+            joined = b",".join(uids).decode()
+            m.store(joined, "-FLAGS", "(\\Seen)")
+            m.store(joined, "+FLAGS", "(\\Flagged)")
+    finally:
+        try:
+            m.logout()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 # ── pure helpers for the poller ─────────────────────────────────────
 def thread_key(case: dict) -> str:
     """A stable key for a conversation -- the thread root, so a customer's
