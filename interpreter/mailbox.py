@@ -172,6 +172,19 @@ def load_channel(tenant_id: str, sb) -> "MailboxConfig | None":
     return MailboxConfig.from_row(tenant_id, rows[0]["config"], rows[0]["status"], secret)
 
 
+def list_active_channels(sb) -> list["MailboxConfig"]:
+    """Every tenant whose email channel is switched on (status='active')."""
+    rows = (sb.table("tenant_integrations")
+            .select("tenant_id").eq("kind", KIND).eq("status", "active")
+            .execute().data or [])
+    out: list[MailboxConfig] = []
+    for r in rows:
+        ch = load_channel(r["tenant_id"], sb)
+        if ch:
+            out.append(ch)
+    return out
+
+
 def save_channel(tenant_id: str, sb, cfg: "MailboxConfig", *,
                  plaintext_secret: str | None, updated_by: str | None = None) -> None:
     vault_id = None
@@ -266,7 +279,130 @@ def _test_gmail(cfg: "MailboxConfig") -> dict:
         return {"ok": False, "error": f"Gmail: {e}"}
 
 
-# ── pure helpers for the poller (20b) ────────────────────────────────
+# ── fetching new mail (20b) ─────────────────────────────────────────
+@dataclass
+class FetchedMessage:
+    ref: str            # IMAP uid (str) | Gmail message id
+    raw: bytes          # RFC-822 bytes
+
+
+def fetch_new(cfg: "MailboxConfig", *, lookback_days: int = 3,
+              limit: int = 50) -> list["FetchedMessage"]:
+    if cfg.provider == "gmail":
+        return _fetch_gmail(cfg, lookback_days, limit)
+    return _fetch_imap(cfg, lookback_days, limit)
+
+
+def mark_processed(cfg: "MailboxConfig", refs: list[str]) -> None:
+    if not refs:
+        return
+    if cfg.provider == "gmail":
+        _mark_gmail(cfg, refs)
+    else:
+        _mark_imap(cfg, refs)
+
+
+def _imap_login(cfg: "MailboxConfig"):
+    import imaplib
+
+    pw = cfg.secret.get("password", "")
+    m = imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port, timeout=30)
+    m.login(cfg.username, pw)
+    return m
+
+
+def _fetch_imap(cfg: "MailboxConfig", lookback_days: int, limit: int) -> list["FetchedMessage"]:
+    from datetime import datetime, timedelta, timezone
+
+    m = _imap_login(cfg)
+    out: list[FetchedMessage] = []
+    try:
+        typ, _ = m.select(cfg.folder, readonly=False)
+        if typ != "OK":
+            raise RuntimeError(f"cannot select folder {cfg.folder!r}")
+        since = (datetime.now(timezone.utc) - timedelta(days=max(1, lookback_days))
+                 ).strftime("%d-%b-%Y")
+        typ, data = m.search(None, "UNSEEN", "SINCE", since)
+        uids = (data[0].split() if data and data[0] else [])[:limit]
+        for uid in uids:
+            typ, msg_data = m.fetch(uid, "(BODY.PEEK[])")
+            if typ != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
+                continue
+            out.append(FetchedMessage(ref=uid.decode(), raw=msg_data[0][1]))
+    finally:
+        try:
+            m.close()
+            m.logout()
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
+def _mark_imap(cfg: "MailboxConfig", refs: list[str]) -> None:
+    m = _imap_login(cfg)
+    try:
+        m.select(cfg.folder, readonly=False)
+        m.store(",".join(refs), "+FLAGS", "(\\Seen)")
+    finally:
+        try:
+            m.logout()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _gmail_service(cfg: "MailboxConfig"):
+    from googleapiclient.discovery import build
+
+    return build("gmail", "v1",
+                 credentials=_gmail_credentials(cfg.secret.get("refresh_token", "")),
+                 cache_discovery=False)
+
+
+def _fetch_gmail(cfg: "MailboxConfig", lookback_days: int, limit: int) -> list["FetchedMessage"]:
+    import base64
+
+    svc = _gmail_service(cfg)
+    q = f"is:unread in:inbox newer_than:{max(1, lookback_days)}d"
+    resp = svc.users().messages().list(userId="me", q=q, maxResults=limit).execute()
+    out: list[FetchedMessage] = []
+    for ref in [m["id"] for m in resp.get("messages", [])]:
+        full = svc.users().messages().get(userId="me", id=ref, format="raw").execute()
+        out.append(FetchedMessage(ref=ref,
+                                  raw=base64.urlsafe_b64decode(full["raw"].encode())))
+    return out
+
+
+def _mark_gmail(cfg: "MailboxConfig", refs: list[str]) -> None:
+    svc = _gmail_service(cfg)
+    svc.users().messages().batchModify(
+        userId="me", body={"ids": refs, "removeLabelIds": ["UNREAD"]}
+    ).execute()
+
+
+# ── pure helpers for the poller ─────────────────────────────────────
+def thread_key(case: dict) -> str:
+    """A stable key for a conversation -- the thread root, so a customer's
+    reply correlates with the run that asked them for more info (Phase 17d
+    clarify rounds key on `case_id`)."""
+    refs = case.get("references") or []
+    return (refs[0] if refs else "") or case.get("in_reply_to") or case.get("message_id") or ""
+
+
+def should_process(case: dict, cfg: "MailboxConfig") -> tuple[bool, str]:
+    """Loop-breaker gate for an inbound message. Pure."""
+    frm = (case.get("from") or "").lower()
+    if not frm:
+        return False, "no From address"
+    if case.get("is_autoreply"):
+        return False, "auto-responder / bulk / list mail"
+    own = {x.lower() for x in (cfg.username, cfg.from_addr, cfg.no_reply_addr or "") if x}
+    if frm in own:
+        return False, "message is from this mailbox itself"
+    if not (case.get("subject") or case.get("body")):
+        return False, "empty message"
+    return True, "ok"
+
+
 def looks_like_bot_address(addr: str) -> bool:
     local = (parseaddr(addr or "")[1].split("@", 1) or [""])[0].lower()
     return local in _BOT_LOCALPARTS or local.startswith(("no-reply", "noreply", "donotreply"))
