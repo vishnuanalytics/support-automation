@@ -716,15 +716,15 @@ def salesforce_case_hook(
             raise HTTPException(500, f"expected exactly one published 'router' flow, found {len(rows)}")
         flow_id = rows[0]["flow_id"]
 
-    from interpreter import salesforce as _sf
-    try:
-        case = _sf.get_case(body.case_id)
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(422, f"could not load Case {body.case_id}: {e}")
-
+    # Enqueue a bare Case Id — the worker hydrates it via `salesforce.get_case`
+    # (with retries). Doing the SF read here would call *back* into Salesforce
+    # while the triggering @future callout is still blocked on our response,
+    # which fails intermittently.
     job_id = jobs.enqueue(
         "run_flow",
-        {"flow_id": flow_id, "case": case, "idempotency_key": body.case_id},
+        {"flow_id": flow_id,
+         "case": {"sf_id": body.case_id, "id": body.case_id, "channel": "salesforce"},
+         "idempotency_key": body.case_id},
         dedupe_key=f"sfcase:{body.case_id}", sb=_service,
     )
     return {"job_id": job_id, "deduped": job_id is None, "flow_id": flow_id}

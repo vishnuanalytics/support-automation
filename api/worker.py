@@ -45,6 +45,11 @@ def _run_flow(payload: dict, sb) -> dict:
         if dup:
             return {"run_id": dup[0]["run_id"], "idempotent_skip": True}
 
+    # Cases pushed by the Salesforce trigger arrive as a bare id — hydrate
+    # the full record here (raises -> the job retries with backoff).
+    if case.get("sf_id") and not case.get("subject"):
+        case = {**salesforce.get_case(case["sf_id"]), "channel": case.get("channel", "salesforce")}
+
     flow = load_flow(flow_id=flow_id, sb=sb, status="published", validate=True)
     final = build_graph(flow).invoke({"case": case, "tenant_id": flow["tenant_id"], "team": flow.get("team"), "trace": []})
     # nodes like `sf_case` mutate the case in-flight (add sf_id, refresh the
