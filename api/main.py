@@ -1133,7 +1133,11 @@ def email_status(tenant_id: str | None = None, c: Caller = Depends(caller)) -> d
     ch = load_channel(tid, _service)
     if not ch:
         return {**base, "configured": False, "status": "none"}
-    return {**base, **ch.public_status()}
+    row = (_service.table("tenant_integrations")
+           .select("last_poll_at,last_error").eq("tenant_id", tid).eq("kind", "email")
+           .execute().data or [{}])[0]
+    return {**base, **ch.public_status(),
+            "last_poll_at": row.get("last_poll_at"), "last_error": row.get("last_error")}
 
 
 @app.put("/api/integrations/email")

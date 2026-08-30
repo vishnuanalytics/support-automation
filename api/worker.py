@@ -49,7 +49,49 @@ def _run_flow(payload: dict, sb) -> dict:
     final = build_graph(flow).invoke({"case": case, "tenant_id": flow["tenant_id"], "team": flow.get("team"), "trace": []})
     run_id = record_run(flow, final, case=case, source="worker", sb=sb,
                         idempotency_key=key)
-    return {"run_id": run_id, "outcome": (final.get("outcome") or {}).get("action")}
+    out = {"run_id": run_id, "outcome": (final.get("outcome") or {}).get("action")}
+    if case.get("channel") == "email":
+        out["email"] = _email_post_run(final, case, flow, sb)
+    return out
+
+
+def _email_post_run(final: dict, case: dict, flow: dict, sb) -> dict:
+    """Phase 20c — the hard guard. Decide from the flow's outcome whether a
+    customer-facing email goes out; otherwise flag the message for a human.
+    Never raises (a delivery failure must not fail/retry the flow run)."""
+    from interpreter import emailer, mailbox
+
+    try:
+        cfg = mailbox.load_channel(flow["tenant_id"], sb)
+        if not cfg:
+            return {"skipped": "no email channel"}
+        outcome = final.get("outcome") or {}
+        kind, meta = emailer.decide(outcome, cfg, final.get("clarification"))
+        to = case.get("from") or ""
+        subject = case.get("subject") or "your request"
+        mid = case.get("message_id") or ""
+        refs = case.get("references") or []
+
+        if kind == "send_reply":
+            d = emailer.send_reply(cfg, to=to, subject=subject, body=meta["body"],
+                                   in_reply_to=mid, references=refs)
+            return {"decision": kind, "delivery": d}
+        if kind == "send_questions":
+            d = emailer.send_reply(cfg, to=to, subject=subject,
+                                   body=emailer._questions_body(meta["questions"]),
+                                   in_reply_to=mid, references=refs)
+            return {"decision": kind, "delivery": d}
+        if kind == "needs_human":
+            try:
+                mailbox.mark_needs_human(cfg, mid)
+                flagged = True
+            except Exception as e:  # noqa: BLE001
+                flagged = f"flag failed: {e}"
+            return {"decision": kind, "reason": meta.get("reason"), "flagged": flagged}
+        return {"decision": "noop", "reason": meta.get("reason")}
+    except Exception as e:  # noqa: BLE001
+        log.warning("email post-run failed: %s", e)
+        return {"error": str(e)}
 
 
 def _check_resolution(payload: dict, sb) -> dict:
