@@ -70,8 +70,29 @@ python -m ingestion.email_watch --once --dry-run    # show, enqueue nothing
 Cron (GitHub Actions or similar):
 
 ```
-*/5 * * * *   python -m ingestion.email_watch --once
+*/5 * * * *   python -m ingestion.email_watch --once && python -m api.worker --once
 ```
+
+### GitHub Actions (the current stopgap)
+
+`.github/workflows/email-automation.yml` runs both `--once` steps every
+5 minutes. Add these repo secrets (Settings -> Secrets and variables ->
+Actions) — the **mailbox password is not one of them**, it lives in
+Supabase Vault:
+
+| secret | value |
+|---|---|
+| `SUPABASE_URL` | `https://<project>.supabase.co` |
+| `SUPABASE_SERVICE_KEY` | service_role key |
+| `GROQ_API_KEY` | for classify / draft |
+| `SF_USERNAME` | Salesforce integration user |
+| `SF_CONSUMER_KEY` | Connected App consumer key (JWT flow) |
+| `SF_DOMAIN` | `login` \| `test` \| your my-domain host |
+| `SF_PRIVATE_KEY` | the JWT private key, full PEM (multi-line ok) |
+
+GitHub cron is best-effort (runs can lag several minutes; skipped after
+60 days of repo inactivity). The persistent-worker deployment removes the
+lag — this workflow is the interim.
 
 ## Gmail provider — operator steps (one-off)
 

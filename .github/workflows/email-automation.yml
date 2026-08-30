@@ -1,0 +1,64 @@
+name: Email automation
+
+# Phase 20 — the inbound email channel, run on GitHub's runners as a
+# stopgap until it moves to a long-lived worker. Each run:
+#   1. `ingestion.email_watch --once` — poll every active mailbox past its
+#      saved cursor, drop auto-responders / own-mail, enqueue one
+#      `run_flow` job per real message (keyed on Message-ID).
+#   2. `api.worker --once` — drain the job queue: load the published flow,
+#      run it (identify -> sf_case -> classify -> ... -> auto_reply |
+#      ask_human | handover), record the run, and for an email-sourced run
+#      apply the hard guard (send only on `auto_reply` + `auto_send_enabled`).
+#
+# The mailbox password / OAuth token lives in Supabase Vault, so it is NOT
+# a repo secret. Required repo secrets (Settings -> Secrets and variables
+# -> Actions):
+#   SUPABASE_URL          https://mjohgmivnxfwkqmlojqs.supabase.co
+#   SUPABASE_SERVICE_KEY  service_role key
+#   GROQ_API_KEY          for the classify / draft LLM calls
+#   SF_USERNAME           Salesforce integration user
+#   SF_CONSUMER_KEY       Connected App consumer key (JWT bearer flow)
+#   SF_DOMAIN             login | test | your my-domain host
+#   SF_PRIVATE_KEY        the JWT private key (full PEM, multi-line is fine)
+#
+# NOTE: GitHub cron is best-effort — runs can be delayed several minutes
+# under load and may be skipped if the repo is inactive for 60 days. This
+# is the stopgap; a persistent worker removes the lag.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"     # every 5 minutes (best-effort)
+  workflow_dispatch: {}        # manual "Run workflow" button
+
+concurrency:
+  group: email-automation
+  cancel-in-progress: false    # let an in-flight run finish; the next tick waits
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      SF_USERNAME: ${{ secrets.SF_USERNAME }}
+      SF_CONSUMER_KEY: ${{ secrets.SF_CONSUMER_KEY }}
+      SF_DOMAIN: ${{ secrets.SF_DOMAIN }}
+      SF_PRIVATE_KEY: ${{ secrets.SF_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Poll mailboxes -> enqueue run_flow jobs
+        run: python -m ingestion.email_watch --once
+
+      - name: Drain the job queue (run flows, send / flag)
+        if: always()            # still drain any jobs from a previous tick
+        run: python -m api.worker --once

@@ -746,11 +746,19 @@ questions only if the `clarify` node opted in;
 `ask_human`/`handover`/switch-off → `mailbox.mark_needs_human` re-flags the
 message unread for a human, nothing sent. Outbound is threaded and stamped
 `X-Support-Bot: 1` so the poller never answers it. `docs/EMAIL_SETUP.md`.
-**Not yet done:** a live mail e2e (channel is configured — see the Phase
-20e note above; blocked only on a clean test sender / dedicated mailbox);
-a GitHub Actions cron for `email_watch` + a running `api.worker`;
-migrating the existing Slack/SF/Google `tenant_integrations` rows onto the
-same Vault mechanism (the `integration_secret_*` RPCs are generic).
+**Scheduling (2026-08-30):** `.github/workflows/email-automation.yml`
+runs `email_watch --once` + `api.worker --once` every 5 min (best-effort
+GitHub cron — the agreed stopgap; a persistent worker is the eventual
+target, deferred). Needs repo secrets `SUPABASE_URL` /
+`SUPABASE_SERVICE_KEY` / `GROQ_API_KEY` / `SF_USERNAME` / `SF_CONSUMER_KEY`
+/ `SF_DOMAIN` / `SF_PRIVATE_KEY` — the mailbox password is **not** one
+(it's in Vault). Architecture decision: **Path A** — the platform owns
+each inbound channel and creates the SF Case itself (`sf_case` node), so a
+future **Freshworks chat** channel slots in as another adapter feeding the
+same queue. **Not yet done:** the workflow's secrets added on GitHub + a
+first green scheduled run; a dedicated support mailbox (the configured one
+is a noisy personal Gmail); migrating the existing Slack/SF/Google
+`tenant_integrations` rows onto the same Vault mechanism.
 
 **2026-08-30 — Phase 19 (assisted flow authoring) COMPLETE.** You no
 longer hand-draw the graph: **⬇ From Mermaid** (paste a `flowchart` — a
