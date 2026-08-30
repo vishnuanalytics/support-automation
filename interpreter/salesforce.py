@@ -420,6 +420,24 @@ def post_chatter(case_id: str, body: str, *, mention_id: str | None = None, tena
                 "feed_element_id": res.get("id"), "mention_failed": True}
 
 
+def add_case_comment(case_id: str, body: str, *, published: bool = False,
+                     tenant_id: str | None = None) -> dict[str, Any]:
+    """Add a `CaseComment` (internal by default). Used for the bot's
+    suggested-reply draft — Salesforce won't take an API-created outbound
+    draft `EmailMessage`. Dry-run with no creds; never raises."""
+    if not available():
+        log.info("[sf dry-run] CaseComment on %s (published=%s): %r", case_id, published, body[:80])
+        return {"created": False, "dry_run": True, "id": None}
+    try:
+        res = client_for(tenant_id).CaseComment.create(
+            {"ParentId": case_id, "CommentBody": body[:4000], "IsPublished": bool(published)}
+        )
+        return {"created": True, "dry_run": False, "id": res.get("id")}
+    except Exception as e:  # noqa: BLE001
+        log.warning("add_case_comment(%s): %s", case_id, e)
+        return {"created": False, "dry_run": False, "id": None, "error": str(e)}
+
+
 # --------------------------------------------------------------------------
 # case bootstrap from an inbound message (Phase 20e / 20f)
 # --------------------------------------------------------------------------

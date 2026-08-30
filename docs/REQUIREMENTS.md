@@ -227,7 +227,7 @@ Tracked in `PROJECT_SCOPE.md`; summary as of 2026-08-30.
 | FR-6 | `sf_case` `reuse: "thread"` — `salesforce.find_case_by_thread()` matches the email's `In-Reply-To` / `References` against `EmailMessage.MessageIdentifier` on open Cases; a genuinely new subject → a new Case. Migration `037`. |
 | FR-7 | `sf_case` calls `salesforce.log_email_message(incoming=True)` — the customer's mail becomes an `EmailMessage` on the Case, idempotent on `MessageIdentifier`. |
 | FR-12 | `api/worker._email_post_run` replies through `salesforce.send_case_reply()` (outbound `EmailMessage` on the Case, threaded) whenever the case has an `sf_id`; SMTP is the fallback. |
-| FR-13 | `ask_human` also leaves the drafted reply on the Case as a `Status='Draft'` `EmailMessage` (recipient + `Re:` subject prefilled) beside the Chatter note. |
+| FR-13 | `ask_human` leaves the drafted reply on the Case as an internal `CaseComment` (`salesforce.add_case_comment`) beside the Chatter note — Salesforce rejects an API-created outbound draft `EmailMessage`. The agent copies it into the Email quick action. |
 | FR-14 | `handover` calls `salesforce.assign_case(queue=…)` when the node config carries a `queue` / `owner_user_id` — resolves a Queue by DeveloperName or Name and sets `Case.OwnerId`. No target → outcome only, unchanged. |
 
 **Added + built in Phase 20i (2026-08-30):**
@@ -243,6 +243,6 @@ Tracked in `PROJECT_SCOPE.md`; summary as of 2026-08-30.
 
 | Req | Gap |
 |---|---|
-| C-1 | Email-to-Case not enabled in the org — the `EmailMessage` records are created via API regardless, but the **Email** quick action + the **Emails** related list on the Case page need it. |
+| C-1 | ✅ Email-to-Case enabled (2026-08-30) — inbound `EmailMessage` on the Case now works; the **Email** action + **Emails** related list are live. Outbound draft `EmailMessage` via API stays blocked by design → FR-13 uses a `CaseComment`. |
 | NFR-2 | cron-job.org pinger not set up; scheduled runs unreliable. |
 | FR-24 | the SF-side record-triggered Flow + Named Credential aren't created yet — needs the API at a public URL (deploy or tunnel). The webhook itself is live and `curl`-verified. |

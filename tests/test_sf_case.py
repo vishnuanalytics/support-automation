@@ -200,23 +200,24 @@ def test_h_sf_case_records_the_inbound_email_on_the_case(monkeypatch):
     assert seen["message_id"] == "<abc@mail>"
 
 
-def test_h_ask_human_leaves_a_ready_to_send_email_draft(monkeypatch):
+def test_h_ask_human_leaves_the_draft_as_a_case_comment(monkeypatch):
+    # Salesforce won't take an API-created outbound draft EmailMessage, so the
+    # suggested reply lands as an internal CaseComment (plus the Chatter note).
     monkeypatch.setattr(salesforce, "post_chatter",
                         lambda cid, body, **k: {"posted": False, "dry_run": True})
     seen = {}
-    monkeypatch.setattr(salesforce, "log_email_message",
-                        lambda cid, **kw: (seen.update(kw, case=cid) or
-                                           {"created": True, "dry_run": False, "id": "02sDR"}))
+    monkeypatch.setattr(salesforce, "add_case_comment",
+                        lambda cid, body, **kw: (seen.update(kw, case=cid, body=body) or
+                                                 {"created": True, "dry_run": False, "id": "00aDR"}))
     state = {
         "case": {"channel": "email", "sf_id": "500Z", "from": "cust@x.com", "subject": "Help"},
         "draft": "Here is a suggested answer.",
-        "sender": {"email": "cust@x.com"},
     }
     out = h_ask_human(state, {"_node_id": "ah", "channel": "salesforce_chatter"})
-    assert out["outcome"]["email_draft"]["id"] == "02sDR"
-    assert seen["case"] == "500Z" and seen["incoming"] is False
-    assert seen["status"] == salesforce._EM_DRAFT
-    assert seen["to_addrs"] == "cust@x.com" and seen["subject"] == "Re: Help"
+    assert out["outcome"]["draft_comment"]["id"] == "00aDR"
+    assert seen["case"] == "500Z" and seen["published"] is False
+    assert "Here is a suggested answer." in seen["body"]
+    assert "draft comment" in out["trace"][0]["summary"]
 
 
 def test_h_handover_reassigns_when_a_queue_is_configured(monkeypatch):

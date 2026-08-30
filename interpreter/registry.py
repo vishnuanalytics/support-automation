@@ -801,23 +801,18 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
         mode = "dry-run" if chatter.get("dry_run") else "posted"
         summary = f"Chatter {mode} on Case {sf_id}"
 
-        # FR-13: leave the drafted reply on the Case as a ready-to-send email
-        # draft, so the agent edits and hits Send instead of re-typing.
-        if draft.strip() and case.get("channel") == "email":
-            recipient = (
-                (state.get("sender") or {}).get("email")
-                or (case.get("contact") or {}).get("email")
-                or case.get("from")
+        # FR-13: the suggested reply rides in the Chatter note above. Salesforce
+        # rejects an API-created outbound draft EmailMessage (Incoming=false is
+        # UI-composer-only), so also drop it as a private CaseComment — the
+        # agent copies it into the Email quick action and sends.
+        if draft.strip():
+            note = salesforce.add_case_comment(
+                sf_id, f"[bot draft — review before sending]\n\n{draft}",
+                published=False, tenant_id=state.get("tenant_id"),
             )
-            em = salesforce.log_email_message(
-                sf_id, incoming=False, status=salesforce._EM_DRAFT,
-                to_addrs=recipient or "", from_addr=case.get("to", [""])[0] if isinstance(case.get("to"), list) else "",
-                subject=_re_subject(case.get("subject", "")), body=draft,
-                tenant_id=state.get("tenant_id"),
-            )
-            outcome["email_draft"] = em
-            if not em.get("dry_run"):
-                summary += " + email draft"
+            outcome["draft_comment"] = note
+            if note.get("created"):
+                summary += " + draft comment"
     else:
         summary = f"handed to human via {channel}"
         if channel == "salesforce_chatter":
