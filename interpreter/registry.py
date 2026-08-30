@@ -269,16 +269,18 @@ def h_sf_writeback(state: CaseState, config: dict) -> dict:
 
 @register("sf_case")
 def h_sf_case(state: CaseState, config: dict) -> dict:
-    """Phase 20e — resolve an inbound message (email / chat) to a real
+    """Phase 20e/f — resolve an inbound message (email / chat) to a real
     Salesforce Case, so every downstream SF node (`sf_writeback`,
-    `ask_human`, `handover`) has an `sf_id` to act on. Reuses the sender's
-    open Case when the message is a thread reply; otherwise creates the
-    Contact (and, for a business domain, the Account) and the Case.
-    Pass-through — merges `sf_id` and the Account tier / region back into
-    `state.case`. Dry-run (nothing created) with no Salesforce creds.
+    `ask_human`, `handover`) has an `sf_id` to act on. Attaches to an open
+    Case only when the email is a genuine thread reply (`reuse="thread"`);
+    otherwise creates the Contact (and, for a business domain, the Account)
+    and a new Case. For an email-channel case it also records the inbound
+    mail as an `EmailMessage` on the Case (FR-7). Pass-through — merges
+    `sf_id` and the Account tier / region back into `state.case`. Dry-run
+    (nothing created) with no Salesforce creds.
 
     config: {origin="Email", status="New", create_contact=true,
-             create_account=true, reuse_open_days=14}
+             create_account=true, reuse="thread"|"never"}
     """
     nid = config["_node_id"]
     case = dict(state.get("case") or {})
@@ -288,12 +290,22 @@ def h_sf_case(state: CaseState, config: dict) -> dict:
         status=config.get("status", "New"),
         create_contact=bool(config.get("create_contact", True)),
         create_account=bool(config.get("create_account", True)),
-        reuse_open_days=int(config.get("reuse_open_days", 14)),
+        reuse=str(config.get("reuse", "thread")),
         tenant_id=state.get("tenant_id"),
     )
 
     if info.get("sf_id"):
         case["sf_id"] = info["sf_id"]
+        # FR-7: the customer's email itself, on the Case (not just Description)
+        if case.get("channel") == "email" and not info.get("dry_run"):
+            info["inbound_email"] = salesforce.log_email_message(
+                info["sf_id"], incoming=True,
+                from_addr=case.get("from", ""), from_name=case.get("from_name", ""),
+                to_addrs=case.get("to") or case.get("supplied_email") or "",
+                subject=case.get("subject", ""), body=case.get("body", ""),
+                message_id=case.get("message_id", ""),
+                tenant_id=state.get("tenant_id"),
+            )
     acct = dict(case.get("account") or {})
     for k, v in (info.get("account") or {}).items():
         if v:
@@ -577,6 +589,11 @@ def _slug_tokens(s: str) -> set[str]:
     return {t for t in re.split(r"[^a-z0-9]+", (s or "").lower()) if t}
 
 
+def _re_subject(subject: str) -> str:
+    s = (subject or "").strip() or "your request"
+    return s if s[:3].lower() == "re:" else f"Re: {s}"
+
+
 @register("confidence_gate")
 def h_confidence_gate(state: CaseState, config: dict) -> dict:
     tier = state.get("tier", "basic")
@@ -675,11 +692,11 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
         "reason": "confidence below tier threshold",
     }
 
+    draft = state.get("draft", "")
     if channel == "salesforce_chatter" and sf_id:
         body = (
             f"Support bot needs a human on this case (confidence {confidence}). "
-            f"Suggested draft below — please review before sending.\n\n"
-            f"{state.get('draft', '')}"
+            f"Suggested draft below — please review before sending.\n\n{draft}"
         )
         chatter = salesforce.post_chatter(
             sf_id, body, mention_id=config.get("mention_id"), tenant_id=state.get("tenant_id")
@@ -687,6 +704,24 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
         outcome["chatter"] = chatter
         mode = "dry-run" if chatter.get("dry_run") else "posted"
         summary = f"Chatter {mode} on Case {sf_id}"
+
+        # FR-13: leave the drafted reply on the Case as a ready-to-send email
+        # draft, so the agent edits and hits Send instead of re-typing.
+        if draft.strip() and case.get("channel") == "email":
+            recipient = (
+                (state.get("sender") or {}).get("email")
+                or (case.get("contact") or {}).get("email")
+                or case.get("from")
+            )
+            em = salesforce.log_email_message(
+                sf_id, incoming=False, status=salesforce._EM_DRAFT,
+                to_addrs=recipient or "", from_addr=case.get("to", [""])[0] if isinstance(case.get("to"), list) else "",
+                subject=_re_subject(case.get("subject", "")), body=draft,
+                tenant_id=state.get("tenant_id"),
+            )
+            outcome["email_draft"] = em
+            if not em.get("dry_run"):
+                summary += " + email draft"
     else:
         summary = f"handed to human via {channel}"
         if channel == "salesforce_chatter":
@@ -697,6 +732,9 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
 
 @register("handover")
 def h_handover(state: CaseState, config: dict) -> dict:
+    """Full human handover. When `config.queue` (or `config.owner_user_id`) is
+    set and the case has an `sf_id`, the Case is reassigned to that queue /
+    user so it lands in a human's list (FR-14); otherwise just the outcome."""
     outcome = {
         "action": "handover",
         "reason": config.get("reason", "policy"),
@@ -704,10 +742,20 @@ def h_handover(state: CaseState, config: dict) -> dict:
         "confidence": state.get("confidence"),
         "tier": state.get("tier"),
     }
-    return {
-        "outcome": outcome,
-        **_trace(config["_node_id"], "handover", f"full handover ({outcome['reason']})"),
-    }
+    summary = f"full handover ({outcome['reason']})"
+    case = state.get("case", {})
+    sf_id = case.get("sf_id") or case.get("id")
+    if sf_id and (config.get("queue") or config.get("owner_user_id")):
+        assignment = salesforce.assign_case(
+            sf_id, queue=config.get("queue"), user_id=config.get("owner_user_id"),
+            tenant_id=state.get("tenant_id"),
+        )
+        outcome["assignment"] = assignment
+        if assignment.get("assigned"):
+            summary += f" → reassigned ({assignment.get('owner_type')})"
+        elif assignment.get("reason"):
+            summary += f" (not reassigned: {assignment['reason']})"
+    return {"outcome": outcome, **_trace(config["_node_id"], "handover", summary, outcome)}
 
 
 @register("identify")

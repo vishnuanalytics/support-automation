@@ -151,6 +151,26 @@ class _NoDup:
     def execute(self): return type("R", (), {"data": []})()
 
 
+def test_post_run_replies_through_salesforce_when_the_case_has_an_sf_id(monkeypatch):
+    # FR-12: reply via Salesforce so the outbound is an EmailMessage on the
+    # Case; the SMTP path must not be taken.
+    monkeypatch.setattr(mailbox, "load_channel",
+                        lambda tid, sb: _cfg(auto_send=True, secret={"password": "pw"}))
+    monkeypatch.setattr(worker.salesforce, "available", lambda *a, **k: True)
+    seen = {}
+    monkeypatch.setattr(worker.salesforce, "send_case_reply",
+                        lambda cid, body, **k: (seen.update(case=cid, body=body) or
+                                                {"sent": True, "dry_run": False, "via": "email"}))
+    monkeypatch.setattr(emailer, "send_reply",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("used SMTP")))
+
+    final = {"outcome": {"action": "auto_reply", "reply": "Here's the fix."}}
+    res = worker._email_post_run(final, {**_CASE, "sf_id": "500CASE"}, _FLOW, sb=object())
+    assert res["decision"] == "send_reply"
+    assert res["delivery"]["via"] == "salesforce" and res["delivery"]["sent"] is True
+    assert seen == {"case": "500CASE", "body": "Here's the fix."}
+
+
 def test_run_flow_records_and_posts_the_case_mutated_in_flight(monkeypatch):
     # finding #3: sf_case adds sf_id / refreshes tier during the run;
     # _run_flow must persist and act on that, not the pre-run input.

@@ -63,10 +63,10 @@ class CaseState(TypedDict, total=False):
 
     sf_writeback: dict[str, Any]      # {target, written, skipped, dry_run, ...} from the sf_writeback node
 
-    # written by an `sf_case` node (Phase 20e) — the inbound message resolved
+    # written by an `sf_case` node (Phase 20e/f) — the inbound message resolved
     # to a real Salesforce Case: {sf_id, case_number, contact_id, account_id,
     #  account: {name, customer_type, region}, created, reused,
-    #  contact_created, account_created, dry_run}
+    #  contact_created, account_created, inbound_email: {id, ...}, dry_run}
     sf_case: dict[str, Any]
 
     draft: str                 # proposed reply text
