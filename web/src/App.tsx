@@ -10,8 +10,9 @@ import { KnowledgeView } from "./kb/KnowledgeView";
 import { RulesView } from "./rules/RulesView";
 import { TeamView } from "./team/TeamView";
 import { ChannelsView } from "./channels/ChannelsView";
+import { FlowGuideView } from "./guide/FlowGuideView";
 
-type View = "editor" | "runs" | "knowledge" | "rules" | "team" | "channels";
+type View = "editor" | "runs" | "knowledge" | "rules" | "guide" | "team" | "channels";
 
 export function App() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
@@ -84,6 +85,9 @@ export function App() {
             <button className={view === "rules" ? "primary" : ""} onClick={() => setView("rules")}>
               Rules
             </button>
+            <button className={view === "guide" ? "primary" : ""} onClick={() => setView("guide")}>
+              Guide
+            </button>
             {isOwner && (
               <button className={view === "team" ? "primary" : ""} onClick={() => setView("team")}>
                 Team
@@ -129,12 +133,20 @@ export function App() {
             evaluates; <code>task</code> outcomes route through Slack approval
           </div>
         )}
+        {view === "guide" && (
+          <div className="muted">
+            how an inbound email becomes a handled Salesforce Case — the live
+            flow, end to end
+          </div>
+        )}
       </div>
       <div className={view === "editor" && flowId ? "editor" : "pane"}>
         {view === "team" ? (
           <TeamView />
         ) : view === "channels" ? (
           <ChannelsView />
+        ) : view === "guide" ? (
+          <FlowGuideView />
         ) : view === "rules" ? (
           <RulesView />
         ) : view === "knowledge" ? (
