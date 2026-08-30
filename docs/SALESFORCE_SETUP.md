@@ -87,6 +87,36 @@ tier falls back to `basic`).
 > `United States/United Kingdom/Australia`. `get_case` then reads that country
 > straight into `account.region`.
 
+## 2b. Routing queues + Case picklists — `scripts/sf_support_setup.py` (Phase 20g)
+
+```
+python scripts/sf_support_setup.py            # everything (idempotent)
+python scripts/sf_support_setup.py --only queues
+python scripts/sf_support_setup.py --dry-run
+```
+
+Via the Metadata API (needs "Modify Metadata" — System Administrator has it):
+
+**Queues** (Case assigned, you're added as the sole member — add real
+agents in Setup): per-team `Team_Email` / `Team_Support` / `Team_CSM` /
+`Team_Sales` / `Team_Offboarding`, and per-reason `Support_L0L1` /
+`Billing_Escalations` / `Enterprise_Support` / `Support_Tier2`. The
+`handover` node's `config.queue` and `ask_human`'s `config.queue` /
+`config.escalate_queue` (the latter used when the gate forced the
+escalation on topic) name one of these; the node resolves it by
+DeveloperName or Name and sets `Case.OwnerId` (migration `038` wires the
+seeded flows).
+
+**Case picklists**: `Case.Type` → `Question / How-to / Problem·Bug /
+Billing / Account·Login / Feature Request / Other`; `Case.Status` gains
+`Waiting on Customer`. `Case.Module__c` / `Case.Region__c` become
+**restricted picklists** (Text → Picklist is a drop-and-recreate); new
+`Case.SubModule__c` (picklist dependent on `Module__c`) and
+`Case.Topic__c` Text(255). `sf_writeback` fills them via
+`salesforce.map_case_fields(topic, country)` — `Topic__c` always gets the
+classifier's raw slug; `Module__c` / `SubModule__c` / `Region__c` are a
+best-effort keyword mapping and left blank when nothing matches.
+
 ## 3. Chatter "ask human"
 
 When `confidence_gate` fails for a non-enterprise tier, `ask_human` posts a

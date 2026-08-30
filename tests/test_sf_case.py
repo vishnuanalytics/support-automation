@@ -21,7 +21,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from interpreter import salesforce
 from interpreter.builder import build_graph
 from interpreter.flows.validate_flow import Flow, check_flow
-from interpreter.registry import h_ask_human, h_handover, h_sf_case
+from interpreter.registry import h_ask_human, h_handover, h_sf_case, h_sf_writeback
 
 _HERMETIC = ("SF_USERNAME", "SF_PASSWORD", "SF_SECURITY_TOKEN", "SF_CONSUMER_KEY",
              "SF_CONSUMER_SECRET", "SF_PRIVATE_KEY", "SF_PRIVATE_KEY_FILE")
@@ -235,3 +235,58 @@ def test_h_handover_without_a_queue_is_unchanged():
     out = h_handover({"case": {"sf_id": "500H"}}, {"_node_id": "ho", "reason": "policy"})
     assert "assignment" not in out["outcome"]
     assert out["trace"][0]["summary"] == "full handover (policy)"
+
+
+# --------------------------------------------------------------------------
+# Phase 20g — classifier slug -> the Case picklists + queue routing
+# --------------------------------------------------------------------------
+def test_map_case_fields_slug_and_country():
+    m = salesforce.map_case_fields("refund-for-duplicate-charge", "United Kingdom")
+    assert m["Topic__c"] == "refund-for-duplicate-charge"
+    assert m["Module__c"] == "Billing & Plans" and m["SubModule__c"] == "Refunds"
+    assert m["Region__c"] == "EMEA"
+
+    m = salesforce.map_case_fields("sso-login-broken", "India")
+    assert m["Module__c"] == "Account & Login" and m["SubModule__c"] == "SSO"
+    assert m["Region__c"] == "APAC"
+
+    # unknown slug -> Other, no submodule; unknown country -> no region
+    m = salesforce.map_case_fields("something-weird", "Narnia")
+    assert m == {"Topic__c": "something-weird", "Module__c": "Other"}
+    assert salesforce.map_case_fields("", None) == {}
+
+
+def test_h_sf_writeback_writes_the_derived_picklists(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(salesforce, "update_case_fields",
+                        lambda cid, fields, **k: (seen.update(case=cid, fields=fields) or
+                                                  {"written": fields, "skipped": {}, "dry_run": False,
+                                                   "planned": {}}))
+    state = {
+        "case": {"sf_id": "500W", "account": {"region": "United States"}},
+        "classification": {"topic": "webhook-not-firing", "urgency": "high"},
+        "tier": "premium",
+    }
+    h_sf_writeback(state, {"_node_id": "w"})
+    f = seen["fields"]
+    assert f["Topic__c"] == "webhook-not-firing"
+    assert f["Module__c"] == "API & Webhooks" and f["SubModule__c"] == "Webhooks"
+    assert f["Region__c"] == "NA" and f["Priority"] == "High"  # value_map
+
+
+def test_h_ask_human_routes_to_the_escalation_queue_on_forced_topic(monkeypatch):
+    monkeypatch.setattr(salesforce, "post_chatter", lambda *a, **k: {"posted": False, "dry_run": True})
+    seen = {}
+    monkeypatch.setattr(salesforce, "assign_case",
+                        lambda cid, **k: (seen.update(k, case=cid) or {"assigned": True, "owner_type": "queue"}))
+    cfg = {"_node_id": "ah", "channel": "salesforce_chatter",
+           "queue": "Support_L0L1", "escalate_queue": "Billing_Escalations"}
+
+    # forced escalation -> escalate_queue
+    h_ask_human({"case": {"sf_id": "500A"}, "confidence_gate": {"forced_escalation": "topic 'refund'"}}, cfg)
+    assert seen["queue"] == "Billing_Escalations"
+
+    # plain low-confidence fail -> the default queue
+    seen.clear()
+    h_ask_human({"case": {"sf_id": "500B"}, "confidence_gate": {"pass": False}}, cfg)
+    assert seen["queue"] == "Support_L0L1"

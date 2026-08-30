@@ -703,7 +703,7 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**Phases 0–20 built. No open phase.** Migrations `001`–`037` applied
+**Phases 0–20 built. No open phase.** Migrations `001`–`038` applied
 (`034`/`035` = Phase 20a: `tenant_integrations` poller columns + the
 Supabase-Vault `integration_secret_*` RPCs; `036` = Phase 20e: the
 "Email L0/L1 — inbound to Salesforce" flow, team `email`, tenant Acme;
@@ -734,6 +734,25 @@ dedicated support mailbox, or add a `--from <addr>` filter to
 `ingestion/email_watch.py` and drive one clean test message through
 `email_watch --once` + `api.worker --once` (measure latency, confirm the
 Case + the threaded reply).
+
+**2026-08-30 — Phase 20g: Salesforce org set up for the flows.**
+`scripts/sf_support_setup.py` (Metadata API, idempotent) created: **9
+queues** (5 per-team + `Support_L0L1` / `Billing_Escalations` /
+`Enterprise_Support` / `Support_Tier2`); `Case.Type` → software-support
+values + `Case.Status` `Waiting on Customer`; `Case.Module__c` /
+`Case.Region__c` Text → **restricted picklists** (drop-and-recreate),
+new `Case.SubModule__c` (dependent on `Module__c`) + `Case.Topic__c`
+Text(255) + FLS. `salesforce.map_case_fields(topic, country)` maps the
+classifier's slug → `Module__c`/`SubModule__c` and country → `Region__c`
+(`Topic__c` always gets the raw slug); `h_sf_writeback`'s default
+field_map now targets these. `h_ask_human` / `h_handover` take a
+`queue` (+ `ask_human` an `escalate_queue`, used on a forced-topic
+escalation) and reassign `Case.OwnerId`. **Migration `038`** wires the
+email / L0-L1 / triage flows to the queues + repoints the L0-L1
+`sf_writeback` field_map. Live-verified: a billing case → `Module__c`
+"Billing & Plans" / `SubModule__c` "Refunds" / `Topic__c` "billing-refund"
+written, Case owner → **Billing Escalations** queue. 152 offline pytest
+(3 new). Picklist values carry no default (blank until set).
 
 **2026-08-30 — Phase 20f: the email conversation lives on the Salesforce
 Case.** Five spec gaps closed (`docs/REQUIREMENTS.md` §9):

@@ -210,6 +210,12 @@ def h_sf_writeback(state: CaseState, config: dict) -> dict:
     case = state.get("case", {})
     sf_id = case.get("sf_id") or case.get("id")
     classification = state.get("classification") or {}
+    # classifier slug + Account country -> the restricted Case picklists
+    # (Module__c / SubModule__c / Region__c) + Topic__c (raw slug). Phase 20g.
+    derived = salesforce.map_case_fields(
+        classification.get("topic"),
+        state.get("region") or _dig(case, "account.region"),
+    )
     ctx: dict[str, Any] = {
         "classification": classification,
         "tier": state.get("tier"),
@@ -217,10 +223,15 @@ def h_sf_writeback(state: CaseState, config: dict) -> dict:
         "urgency": classification.get("urgency"),
         "topic": classification.get("topic"),
         "summary": classification.get("summary"),
+        "case_topic": derived.get("Topic__c"),
+        "case_module": derived.get("Module__c"),
+        "case_submodule": derived.get("SubModule__c"),
+        "case_region": derived.get("Region__c"),
     }
 
     field_map = config.get("field_map") or {
-        "urgency": "Priority", "topic": "Module__c", "region": "Region__c",
+        "urgency": "Priority", "case_topic": "Topic__c", "case_module": "Module__c",
+        "case_submodule": "SubModule__c", "case_region": "Region__c",
     }
     value_maps = config.get("value_maps") or {
         "Priority": {"critical": "High", "high": "High", "normal": "Medium", "low": "Low"},
@@ -726,6 +737,19 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
         summary = f"handed to human via {channel}"
         if channel == "salesforce_chatter":
             summary += " (no sf_id — not posted)"
+
+    # Phase 20g: drop the Case into a human queue. `escalate_queue` (e.g.
+    # Billing_Escalations) wins when the gate forced the escalation on topic;
+    # otherwise `queue` (e.g. Support_L0L1).
+    forced = bool((state.get("confidence_gate") or {}).get("forced_escalation"))
+    queue = (config.get("escalate_queue") if forced else None) or config.get("queue")
+    if sf_id and queue:
+        assignment = salesforce.assign_case(sf_id, queue=queue, tenant_id=state.get("tenant_id"))
+        outcome["assignment"] = assignment
+        if assignment.get("assigned"):
+            summary += f" → {queue}"
+        elif assignment.get("reason"):
+            summary += f" (queue: {assignment['reason']})"
 
     return {"outcome": outcome, **_trace(config["_node_id"], "ask_human", summary, outcome)}
 
