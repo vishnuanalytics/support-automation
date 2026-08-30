@@ -286,7 +286,14 @@ def test_h_ask_human_routes_to_the_escalation_queue_on_forced_topic(monkeypatch)
     h_ask_human({"case": {"sf_id": "500A"}, "confidence_gate": {"forced_escalation": "topic 'refund'"}}, cfg)
     assert seen["queue"] == "Billing_Escalations"
 
-    # plain low-confidence fail -> the default queue
+    # plain low-confidence fail on a non-billing topic -> the default queue
     seen.clear()
-    h_ask_human({"case": {"sf_id": "500B"}, "confidence_gate": {"pass": False}}, cfg)
+    h_ask_human({"case": {"sf_id": "500B"}, "confidence_gate": {"pass": False},
+                 "classification": {"topic": "zap-not-triggering"}}, cfg)
     assert seen["queue"] == "Support_L0L1"
+
+    # billing-family topic without a forced flag still -> escalate_queue (20h)
+    seen.clear()
+    h_ask_human({"case": {"sf_id": "500C"}, "confidence_gate": {"pass": False},
+                 "classification": {"topic": "duplicate-annual-charge"}}, cfg)
+    assert seen["queue"] == "Billing_Escalations"

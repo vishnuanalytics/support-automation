@@ -703,7 +703,7 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**Phases 0–20 built. No open phase.** Migrations `001`–`038` applied
+**Phases 0–20 built. No open phase.** Migrations `001`–`039` applied
 (`034`/`035` = Phase 20a: `tenant_integrations` poller columns + the
 Supabase-Vault `integration_secret_*` RPCs; `036` = Phase 20e: the
 "Email L0/L1 — inbound to Salesforce" flow, team `email`, tenant Acme;
@@ -734,6 +734,20 @@ dedicated support mailbox, or add a `--from <addr>` filter to
 `ingestion/email_watch.py` and drive one clean test message through
 `email_watch --once` + `api.worker --once` (measure latency, confirm the
 Case + the threaded reply).
+
+**2026-08-30 — Phase 20h: all-flows e2e test + wire the rest.**
+`scripts/test_all_flows.py` runs representative cases (basic/premium/
+enterprise + a vague one) through **every published flow** against live
+Groq + Salesforce, checks the outcome + Case fields + owner queue, and
+cleans up. First run confirmed all 7 flows branch correctly and surfaced
+3 gaps, now fixed: (1) `h_ask_human` routes to `escalate_queue` when the
+topic maps to the **Billing & Plans** module (`salesforce.map_case_fields`)
+— not only when the gate's `forced_escalation` flag is set, so it's robust
+to the classifier's exact slug; (2) **migration `039`** wires the Globex /
+catalog / offboarding / Slack-approval flows' `ask_human` / `handover` to
+queues (038 had only done the three Acme support flows); (3) the Globex
+`sf_writeback` field_map gains the Case picklists (`Topic__c` / `Module__c`
+/ `SubModule__c` / `Region__c`) like the others. 152 offline pytest (the ask_human queue test gains the billing-topic case).
 
 **2026-08-30 — Phase 20g: Salesforce org set up for the flows.**
 `scripts/sf_support_setup.py` (Metadata API, idempotent) created: **9

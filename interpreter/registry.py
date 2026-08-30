@@ -738,11 +738,14 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
         if channel == "salesforce_chatter":
             summary += " (no sf_id — not posted)"
 
-    # Phase 20g: drop the Case into a human queue. `escalate_queue` (e.g.
-    # Billing_Escalations) wins when the gate forced the escalation on topic;
-    # otherwise `queue` (e.g. Support_L0L1).
+    # Phase 20g/h: drop the Case into a human queue. `escalate_queue` (e.g.
+    # Billing_Escalations) wins when the gate forced the escalation on topic,
+    # OR the topic maps to a billing/plans module (robust to the classifier's
+    # exact slug wording); otherwise `queue` (e.g. Support_L0L1).
     forced = bool((state.get("confidence_gate") or {}).get("forced_escalation"))
-    queue = (config.get("escalate_queue") if forced else None) or config.get("queue")
+    topic = (state.get("classification") or {}).get("topic")
+    billing_ish = salesforce.map_case_fields(topic, None).get("Module__c") == "Billing & Plans"
+    queue = (config.get("escalate_queue") if (forced or billing_ish) else None) or config.get("queue")
     if sf_id and queue:
         assignment = salesforce.assign_case(sf_id, queue=queue, tenant_id=state.get("tenant_id"))
         outcome["assignment"] = assignment
