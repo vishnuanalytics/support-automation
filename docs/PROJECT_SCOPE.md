@@ -163,6 +163,31 @@ unsaved state and Save/Publish go through the existing validated
 | 19c | **AI edit-an-existing-flow.** An instruction + the working draft → a rewritten candidate + a diff to review on the canvas. | **Built + live-verified (2026-08-30).** `assist.assist_edit(current, instruction, defaults, model?)` — sends the current graph (keys = real `node_id`s, so kept nodes retain identity) + the instruction; the model returns the COMPLETE new graph; `assemble_candidate` + `interpreter/flows/flow_diff.py` `diff_graphs(before, after)` → `{added_nodes, removed_nodes, changed_nodes (labels), added_edges, removed_edges (counts)}`. `llm` stub edit branch echoes the current graph back (a valid no-op — the deterministic stub can't follow an instruction). API `POST /api/flows/{id}/assist` (loads the draft snapshot, editor-only, persists nothing). Web: `FlowEditor` **✨ AI edit** button (overlay → instruction → `assistEditFlow()` → canvas replaced as unsaved, diff summary in the banner). **Verify:** offline pytest (`test_assist.py` — edit returns a valid graph + a diff, node identity preserved on a no-op; `diff_graphs` add/remove/change) + 1 API integration (`/api/flows/{globex}/assist` → a diff). **Live e2e (real Groq)**: `POST /api/flows/{GLOBEX_FLOW}/assist` "add a handover branch for the enterprise tier" → 200, well-formed diff, graph non-empty. |
 | 19d | Docs + polish. | **Done (2026-08-30).** `docs/FLOW_AUTHORING.md` (the three entry points, how types/labels/conditions map, the "review then Save" model). `EXPECTED_TYPES` untouched (import/AI don't change what a "complete" flow is). Note: for a multi-tenant caller the assist/import endpoints need a `tenant_id` (same 400 as `＋ New flow`); the diff can cosmetically over-report a bare node as "changed" when defaults get merged in (advisory only — the user reviews on the canvas). |
 
+**Phase 20 = email channel — auto-respond to inbound mail, configured from
+the UI (added 2026-08-30 from a scoping conversation). Chunks: 20a
+credentials + Supabase Vault + API · 20b inbound poller · 20c outbound +
+hard guard · 20d web Channels panel + docs. Sequential. 20a BUILT +
+verified (2026-08-30); 20b–20d planned.** Decisions: **both** providers —
+Gmail via OAuth (reuses Phase 15 `GOOGLE_CLIENT_ID`) and other mailboxes
+via IMAP/SMTP + an app-password; the credential (password / refresh token)
+is stored in **Supabase Vault** (`vault.secrets`), never in
+`tenant_integrations` in the clear and never returned to the browser; a
+workspace **owner** configures it and can change it later; auto-replies go
+out from the **same mailbox** (optional `no_reply_addr` field built, unset
+for now); the **hard guard** is that the LangGraph flow's outcome gates
+sending — email goes out only on `outcome.action == "auto_reply"`,
+`ask_human`/`handover` leave the message for a human, plus a per-channel
+`auto_send_enabled` master switch (default **off**) and loop-breakers
+(skip `no-reply`/`mailer-daemon`/`Auto-Submitted`/`List-Id` senders and
+the bot's own mail).
+
+| Phase | Scope | Status |
+|---|---|---|
+| 20a | **Credentials + Vault + API.** Store a per-tenant mailbox config from the UI; secret in Supabase Vault; owner-gated; a "test connection" endpoint. | **Built + verified (2026-08-30).** Migrations `034` (`tenant_integrations` += `config`/`vault_secret_id`/`status`/`last_poll_at`/`last_error`/`cursor`/`updated_by` + a `status` check) and `035` (`public.integration_secret_{put,get,delete}(tenant, kind, …)` — SECURITY DEFINER wrappers over `vault.create_secret`/`vault.decrypted_secrets`; execute revoked from `anon`/`authenticated`, granted to `service_role`) — **applied**; Vault round-trip verified (create / update-by-name / get / delete). `interpreter/mailbox.py` — `MailboxConfig` (secret kept out of `repr` + `public_status()`), `load_channel`/`save_channel`/`delete_channel`/`set_status`, `test_connection` (IMAP+SMTP login check, or a Gmail token refresh), `gmail_authorize_url`/`gmail_profile_email`, and pure `parse_message`/`is_autoreply`/`looks_like_bot_address`. API: `GET /api/integrations/email` (any member; status only, never the secret), `PUT` / `DELETE` / `POST …/test` (owner), `GET …/google/{authorize,callback}` (owner; callback public). **Verify:** 10 offline pytest (`test_mailbox.py`) + 3 offline API (401/403 gating) + 3 integration (`test_api.py`: IMAP creds via **Vault** → status shows `configured` with no password anywhere → flip `auto_send_enabled`/`active` without re-sending the password → DELETE clears it; `test` reports a bad host cleanly; a demoted viewer gets 403 on every write). Gmail-OAuth path is built but needs `GOOGLE_CLIENT_ID`/`SECRET` + the `.../email/google/callback` redirect registered — an operator step (same status as Phase 15/18d). |
+| 20b | **Inbound poller.** `ingestion/email_watch.py --once` — IMAP/Gmail fetch new mail → loop-breaker filters → `parse_message` → enqueue `run_flow` keyed on `Message-ID` against the tenant's published flow for `config.team`; mark processed (label/move, no delete); update `last_poll_at`/`last_error`. | **Planned.** |
+| 20c | **Outbound + hard guard.** `interpreter/email.py` SMTP/Gmail send (`From` = `no_reply_addr` or the mailbox; stamps `X-Support-Bot: 1`); the **worker** (not a flow node — keeps the graph channel-agnostic) sends after an email-sourced run *only* when `outcome.action == "auto_reply"` and the channel's `auto_send_enabled` is on; `need_info` sends only if the `clarify` node's own `auto_send` is set; everything else is left for a human. | **Planned.** |
+| 20d | **Web + docs.** A **Channels** nav panel (owners): provider picker / Connect Gmail, IMAP form, from-name, optional no-reply, team, folder, the `auto_send_enabled` toggle, Test-connection, status (last poll / last error). Editors read-only. `docs/EMAIL_SETUP.md`. | **Planned.** |
+
 ## Phase 0 — schema (complete)
 
 Tables (Supabase/Postgres):
@@ -660,12 +685,26 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**Phases 0–19 built. No open phase.** Migrations `001`–`033` applied
-(**Phase 19 adds no migration** — assisted authoring is stateless).
-94 offline pytest tests + web tsc/vitest (6)/build
-+ `tests/test_multiflow.py` (needs Groq quota). Phase 18d's button is
-built but signing in with Google needs the Supabase dashboard Google
-provider enabled first (`docs/GOOGLE_SETUP.md` §"Google sign-in").
+**Phases 0–19 built. Phase 20 (email channel) IN PROGRESS — 20a done,
+20b–20d next.** Migrations `001`–`035` applied (`034`/`035` = Phase 20a:
+`tenant_integrations` poller columns + the Supabase-Vault
+`integration_secret_*` RPCs). 105 offline pytest tests + web tsc/vitest
+(6)/build + `tests/test_multiflow.py` (needs Groq quota). Phase 18d's
+button is built but signing in with Google needs the Supabase dashboard
+Google provider enabled first (`docs/GOOGLE_SETUP.md` §"Google sign-in").
+
+**2026-08-30 — Phase 20a (email channel: credentials + Vault + API) done.**
+`interpreter/mailbox.py` + `GET/PUT/DELETE /api/integrations/email`,
+`POST …/test`, `GET …/google/{authorize,callback}`. A per-tenant mailbox
+config (IMAP/app-password or Gmail OAuth) is entered by a workspace
+**owner**; the password / refresh token goes to **Supabase Vault**
+(migration `035`), never to the browser. Next: **20b** `ingestion/email_watch.py`
+(poll → enqueue a `run_flow` keyed on Message-ID), then **20c** outbound
+send behind the hard guard (`outcome.action == "auto_reply"` + a
+per-channel `auto_send_enabled` switch), then **20d** the web Channels
+panel + `docs/EMAIL_SETUP.md`. Gmail OAuth needs `GOOGLE_CLIENT_ID`/`SECRET`
+in `.env` + the `.../email/google/callback` redirect registered (operator
+step; IMAP path is fully verified).
 
 **2026-08-30 — Phase 19 (assisted flow authoring) COMPLETE.** You no
 longer hand-draw the graph: **⬇ From Mermaid** (paste a `flowchart` — a

@@ -137,6 +137,17 @@ def test_assist_endpoints_need_a_token():
     ).status_code == 401
 
 
+def test_email_channel_endpoints_need_a_token():
+    assert client.get("/api/integrations/email").status_code == 401
+    assert client.put("/api/integrations/email", json={"provider": "imap"}).status_code == 401
+    assert client.post("/api/integrations/email/test", json={"provider": "imap"}).status_code == 401
+    assert client.delete("/api/integrations/email").status_code == 401
+    assert client.get("/api/integrations/email/google/authorize").status_code == 401
+    # the OAuth callback is public (browser follows a Google redirect)
+    r = client.get("/api/integrations/email/google/callback?error=access_denied")
+    assert r.status_code == 200 and "failed" in r.text
+
+
 def test_structural_errors_passes_a_linear_flow():
     flow = {
         "flow_id": "f", "tenant_id": "t", "team": "support", "name": "n",
@@ -358,6 +369,65 @@ def test_invalid_invite_role_is_400(auth_headers):
     r = client.post("/api/invitations", headers=auth_headers,
                     json={"email": "x@example.test", "role": "owner"})
     assert r.status_code == 400
+
+
+@pytest.mark.integration
+def test_email_channel_configure_status_and_disconnect(auth_headers):
+    body = {
+        "provider": "imap", "team": "support",
+        "imap_host": "imap.example.test", "smtp_host": "smtp.example.test",
+        "username": "support@example.test", "password": "app-pw-secret",
+        "from_name": "Acme Support", "auto_send_enabled": False, "active": True,
+    }
+    try:
+        r = client.put("/api/integrations/email", headers=auth_headers, json=body)
+        assert r.status_code == 200, r.text
+        got = client.get("/api/integrations/email", headers=auth_headers).json()
+        assert got["configured"] is True and got["provider"] == "imap"
+        assert got["username"] == "support@example.test" and got["status"] == "active"
+        assert got["auto_send_enabled"] is False
+        assert "app-pw-secret" not in str(got) and "password" not in got
+        # flip the master switch without re-sending the password
+        r2 = client.put("/api/integrations/email", headers=auth_headers,
+                        json={"provider": "imap", "imap_host": "imap.example.test",
+                              "username": "support@example.test",
+                              "auto_send_enabled": True, "active": False})
+        assert r2.status_code == 200
+        got2 = client.get("/api/integrations/email", headers=auth_headers).json()
+        assert got2["auto_send_enabled"] is True and got2["status"] == "inactive"
+    finally:
+        client.delete("/api/integrations/email", headers=auth_headers)
+    gone = client.get("/api/integrations/email", headers=auth_headers).json()
+    assert gone["configured"] is False and gone["status"] == "none"
+
+
+@pytest.mark.integration
+def test_email_channel_test_connection_reports_failure_cleanly(auth_headers):
+    r = client.post("/api/integrations/email/test", headers=auth_headers, json={
+        "provider": "imap", "imap_host": "nope.invalid.test",
+        "username": "x@y.test", "password": "bad",
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False and body["error"]
+
+
+@pytest.mark.integration
+def test_email_channel_write_is_owner_only(globex_as_viewer, auth_headers):
+    assert client.get("/api/integrations/email", headers=auth_headers).status_code == 200
+    for call in (
+        lambda: client.put("/api/integrations/email", headers=auth_headers,
+                           json={"provider": "imap", "imap_host": "h", "username": "u",
+                                 "password": "p"}),
+        lambda: client.post("/api/integrations/email/test", headers=auth_headers,
+                            json={"provider": "imap"}),
+        lambda: client.delete("/api/integrations/email", headers=auth_headers),
+    ):
+        assert call().status_code == 403
+    # authorize is owner-gated too (403), unless the server has no Google
+    # creds at all, in which case it 503s before the role check
+    assert client.get("/api/integrations/email/google/authorize",
+                      headers=auth_headers).status_code in (403, 503)
 
 
 @pytest.mark.integration
