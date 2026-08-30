@@ -168,6 +168,44 @@ export interface GoogleStatus {
   connected: Record<string, boolean>; // tenant_id -> connected
 }
 
+export interface EmailChannel {
+  tenant_id: string;
+  gmail_available: boolean;
+  configured: boolean;
+  status: "none" | "inactive" | "active" | "error";
+  provider?: "imap" | "gmail";
+  team?: string;
+  username?: string;
+  from_addr?: string;
+  from_name?: string;
+  no_reply_addr?: string | null;
+  imap_host?: string;
+  imap_port?: number;
+  smtp_host?: string;
+  smtp_port?: number;
+  folder?: string;
+  auto_send_enabled?: boolean;
+  last_poll_at?: string | null;
+  last_error?: string | null;
+}
+
+export interface EmailChannelSave {
+  provider: "imap" | "gmail";
+  team?: string;
+  imap_host?: string;
+  imap_port?: number;
+  smtp_host?: string;
+  smtp_port?: number;
+  username?: string;
+  password?: string;
+  from_addr?: string;
+  from_name?: string;
+  no_reply_addr?: string;
+  folder?: string;
+  auto_send_enabled?: boolean;
+  active?: boolean;
+}
+
 export interface PolicyRule {
   rule_id: string;
   tenant_id: string;

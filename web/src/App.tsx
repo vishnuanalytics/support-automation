@@ -9,8 +9,9 @@ import { RunsView } from "./runs/RunsView";
 import { KnowledgeView } from "./kb/KnowledgeView";
 import { RulesView } from "./rules/RulesView";
 import { TeamView } from "./team/TeamView";
+import { ChannelsView } from "./channels/ChannelsView";
 
-type View = "editor" | "runs" | "knowledge" | "rules" | "team";
+type View = "editor" | "runs" | "knowledge" | "rules" | "team" | "channels";
 
 export function App() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
@@ -88,6 +89,11 @@ export function App() {
                 Team
               </button>
             )}
+            {isOwner && (
+              <button className={view === "channels" ? "primary" : ""} onClick={() => setView("channels")}>
+                Channels
+              </button>
+            )}
           </div>
           <div className="row" style={{ gap: 6 }}>
             {role && !canEdit && (
@@ -127,6 +133,8 @@ export function App() {
       <div className={view === "editor" && flowId ? "editor" : "pane"}>
         {view === "team" ? (
           <TeamView />
+        ) : view === "channels" ? (
+          <ChannelsView />
         ) : view === "rules" ? (
           <RulesView />
         ) : view === "knowledge" ? (

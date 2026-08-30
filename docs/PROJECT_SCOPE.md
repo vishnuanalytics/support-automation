@@ -166,8 +166,9 @@ unsaved state and Save/Publish go through the existing validated
 **Phase 20 = email channel — auto-respond to inbound mail, configured from
 the UI (added 2026-08-30 from a scoping conversation). Chunks: 20a
 credentials + Supabase Vault + API · 20b inbound poller · 20c outbound +
-hard guard · 20d web Channels panel + docs. Sequential. 20a BUILT +
-verified (2026-08-30); 20b–20d planned.** Decisions: **both** providers —
+hard guard · 20d web Channels panel + docs. Sequential. All four BUILT +
+verified (2026-08-30) — Phase 20 COMPLETE; no live e2e against a real
+mailbox yet (needs creds).** Decisions: **both** providers —
 Gmail via OAuth (reuses Phase 15 `GOOGLE_CLIENT_ID`) and other mailboxes
 via IMAP/SMTP + an app-password; the credential (password / refresh token)
 is stored in **Supabase Vault** (`vault.secrets`), never in
@@ -186,7 +187,7 @@ the bot's own mail).
 | 20a | **Credentials + Vault + API.** Store a per-tenant mailbox config from the UI; secret in Supabase Vault; owner-gated; a "test connection" endpoint. | **Built + verified (2026-08-30).** Migrations `034` (`tenant_integrations` += `config`/`vault_secret_id`/`status`/`last_poll_at`/`last_error`/`cursor`/`updated_by` + a `status` check) and `035` (`public.integration_secret_{put,get,delete}(tenant, kind, …)` — SECURITY DEFINER wrappers over `vault.create_secret`/`vault.decrypted_secrets`; execute revoked from `anon`/`authenticated`, granted to `service_role`) — **applied**; Vault round-trip verified (create / update-by-name / get / delete). `interpreter/mailbox.py` — `MailboxConfig` (secret kept out of `repr` + `public_status()`), `load_channel`/`save_channel`/`delete_channel`/`set_status`, `test_connection` (IMAP+SMTP login check, or a Gmail token refresh), `gmail_authorize_url`/`gmail_profile_email`, and pure `parse_message`/`is_autoreply`/`looks_like_bot_address`. API: `GET /api/integrations/email` (any member; status only, never the secret), `PUT` / `DELETE` / `POST …/test` (owner), `GET …/google/{authorize,callback}` (owner; callback public). **Verify:** 10 offline pytest (`test_mailbox.py`) + 3 offline API (401/403 gating) + 3 integration (`test_api.py`: IMAP creds via **Vault** → status shows `configured` with no password anywhere → flip `auto_send_enabled`/`active` without re-sending the password → DELETE clears it; `test` reports a bad host cleanly; a demoted viewer gets 403 on every write). Gmail-OAuth path is built but needs `GOOGLE_CLIENT_ID`/`SECRET` + the `.../email/google/callback` redirect registered — an operator step (same status as Phase 15/18d). |
 | 20b | **Inbound poller.** `ingestion/email_watch.py --once` — IMAP/Gmail fetch new mail → loop-breaker filters → `parse_message` → enqueue `run_flow` keyed on `Message-ID` against the tenant's published flow for `config.team`; mark processed (label/move, no delete); update `last_poll_at`/`last_error`. | **Built + verified (2026-08-30).** `interpreter/mailbox.py` += `list_active_channels`, `fetch_new`/`mark_processed` (IMAP `UNSEEN SINCE` + `BODY.PEEK[]` → `\Seen`; Gmail `q="is:unread in:inbox newer_than:Nd"` + `format=raw` → remove `UNREAD`), pure `should_process` (drops no-From / auto-responder / own-mail / empty) + `thread_key` (thread-root id → `case_id`, so a customer's reply lines up with the run that asked, Phase 17d). `ingestion/email_watch.py` (`--once` / `--tenant` / `--lookback` days / `--limit` / `--dry-run` / loop) — per active channel: resolve the published `(tenant, team)` flow (none → `status='error'`), fetch, filter, `jobs.enqueue("run_flow", {flow_id, case, idempotency_key=<msg-id>}, dedupe_key="email:<msg-id>")`, mark read, `set_status('active')`; a fetch failure → `set_status('error', last_error=…)`, never crashes the tick. No SF-style watermark (job dedupe + `\Seen` are the cursor). **Verify:** 8 offline pytest (`test_email_watch.py` — `should_process`/`thread_key`; answerable mail → one enqueue with the right keys + marked; auto-responder / own-mail skipped-but-marked; dry-run enqueues+marks nothing; no-flow → error status; fetch exception caught) + 1 integration (active Globex channel via **Vault** → `tick` resolves the published flow, IMAP to a bogus host fails, `status='error'`/`last_error` written to the live DB, cleaned up). `python -m ingestion.email_watch --once` with no active channel → notice + exit 0. |
 | 20c | **Outbound + hard guard.** `interpreter/emailer.py` SMTP/Gmail send (`From` = `no_reply_addr` or the mailbox; stamps `X-Support-Bot: 1`); the **worker** (not a flow node — keeps the graph channel-agnostic) sends after an email-sourced run *only* when `outcome.action == "auto_reply"` and the channel's `auto_send_enabled` is on; `need_info` sends only if the `clarify` node's own `auto_send` is set; everything else is left for a human. | **Built + verified (2026-08-30).** `interpreter/emailer.py` — pure `decide(outcome, cfg, clarification) → (send_reply|send_questions|needs_human|noop, meta)` (the guard: `auto_reply` sends only with the master switch **on** and a non-empty draft; `need_info` sends only with the switch on **and** `clarification.auto_send`; `ask_human`/`handover`/switch-off/empty-draft → `needs_human`), and `send_reply(cfg, to, subject, body, in_reply_to, references)` — builds a threaded `EmailMessage` stamped `X-Support-Bot: 1` + `Auto-Submitted: auto-replied`, sends via SMTP (imap provider) or `gmail.users().messages().send` (gmail), **dry-run with no creds, never raises**. `interpreter/mailbox.mark_needs_human(cfg, message_id)` — looks the message up by Message-ID and re-marks it unread + `\Flagged` / `STARRED` (the poller marked it read on enqueue). `api/worker._run_flow` → `_email_post_run(final, case, flow, sb)` for `case.channel == "email"`: applies `decide`, sends or flags, returns the delivery in the job result; wrapped so a delivery failure never fails/retries the run. **Verify:** 13 pytest (`test_emailer.py` — the full `decide` matrix; `send_reply` dry-run / missing recipient / threaded-bot-stamped headers via a monkeypatched SMTP; `_email_post_run` auto_reply→send, ask_human→flag+no-send, need_info+opt-in→questions, no-channel→skip) incl. 1 integration (a real Vault-loaded channel with no SMTP host → `auto_reply` → `decision=send_reply`, `delivery.dry_run=True`). |
-| 20d | **Web + docs.** A **Channels** nav panel (owners): provider picker / Connect Gmail, IMAP form, from-name, optional no-reply, team, folder, the `auto_send_enabled` toggle, Test-connection, status (last poll / last error). Editors read-only. `docs/EMAIL_SETUP.md`. | **Planned.** |
+| 20d | **Web + docs.** A **Channels** nav panel (owners): provider picker / Connect Gmail, IMAP form, from-name, optional no-reply, team, folder, the `auto_send_enabled` toggle, Test-connection, status (last poll / last error). Editors read-only. `docs/EMAIL_SETUP.md`. | **Built + verified (2026-08-30).** `web/src/channels/ChannelsView.tsx` — owner-only panel: provider radio (IMAP / Gmail, Gmail disabled + labelled when `gmail_available:false`), team + from-name, IMAP host/port + SMTP host/port + mailbox login + **app-password field that says "leave blank to keep"**, folder, optional reply-from, an **auto-send** toggle (copy: "off = every reply waits for a human") and an **active** toggle; **Test connection** / **Save** / **Disconnect**; a status banner (`status` + `last_poll_at` + `last_error`, red on `error`). Gmail: a **Connect Gmail** button that pops the OAuth consent window. `api.email.{status,save,test,remove,googleAuthorize}` + `EmailChannel`/`EmailChannelSave` types; `App.tsx` gains a **Channels** nav for owners (next to Team). `GET /api/integrations/email` now also returns `last_poll_at`/`last_error`. `docs/EMAIL_SETUP.md` (the safety model, app-password steps for Gmail/Outlook, the cron, the Gmail-provider operator steps). **Verify:** web tsc + vitest (6) + build green; the 3 email API integration tests still green with the status change. |
 
 ## Phase 0 — schema (complete)
 
@@ -685,36 +686,39 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**Phases 0–19 built. Phase 20 (email channel) IN PROGRESS — 20a + 20b +
-20c done, 20d (web Channels panel + docs) next.** Migrations `001`–`035`
-applied (`034`/`035` = Phase 20a: `tenant_integrations` poller columns +
-the Supabase-Vault `integration_secret_*` RPCs). 138 offline pytest tests
+**Phases 0–20 built. No open phase.** Migrations `001`–`035` applied
+(`034`/`035` = Phase 20a: `tenant_integrations` poller columns + the
+Supabase-Vault `integration_secret_*` RPCs). 138 offline pytest tests
 + web tsc/vitest (6)/build + `tests/test_multiflow.py` (needs Groq quota).
 Phase 18d's button is built but signing in with Google needs the Supabase
 dashboard Google provider enabled first (`docs/GOOGLE_SETUP.md`
-§"Google sign-in").
+§"Google sign-in"); the Phase 20 Gmail *provider* needs the same
+`GOOGLE_CLIENT_ID`/`SECRET` + a redirect registered (the IMAP path needs
+nothing server-side). No live e2e of the email channel against a real
+mailbox yet — pending IMAP or Gmail creds.
 
-**2026-08-30 — Phase 20a + 20b + 20c done (email round-trip works end to
-end in code).** 20a: `interpreter/mailbox.py` + `GET/PUT/DELETE
-/api/integrations/email`, `POST …/test`, `GET …/google/{authorize,callback}`
-— a per-tenant mailbox config (IMAP/app-password or Gmail OAuth) entered
-by a workspace **owner**; the password / refresh token goes to **Supabase
-Vault** (migration `035`), never to the browser. 20b:
-`ingestion/email_watch.py --once` polls each active channel, drops
-auto-responders / own-mail, enqueues a `run_flow` keyed on `Message-ID`
-against the tenant's published flow; messages marked read, never deleted.
-20c: `interpreter/emailer.py` `decide()` (the hard guard — send a
-customer-facing email **only** on `outcome.action == "auto_reply"` +
-`auto_send_enabled` on; `need_info` only if the `clarify` node opted in;
-`ask_human`/`handover` → `mailbox.mark_needs_human` re-flags the message
-unread) + `send_reply()` (SMTP/Gmail, threaded, `X-Support-Bot` stamped,
-dry-run without creds); `api/worker._email_post_run` runs it after an
-email-sourced run. Next: **20d** the web **Channels** panel (owners:
-provider / Connect Gmail / IMAP form / the `auto_send_enabled` toggle /
-Test-connection / status) + `docs/EMAIL_SETUP.md`. Live e2e against a real
-mailbox is pending IMAP or Gmail creds; Gmail OAuth also needs
-`GOOGLE_CLIENT_ID`/`SECRET` in `.env` + the `.../email/google/callback`
-redirect registered (operator step).
+**2026-08-30 — Phase 20 (email channel) COMPLETE — the whole round-trip
+works in code.** A workspace **owner** points a support mailbox at a
+tenant in the **Channels** tab (`web/src/channels/ChannelsView.tsx`):
+provider IMAP+app-password or **Connect Gmail** (OAuth), team, from-name,
+optional reply-from, an **auto-send** toggle (default off), an **active**
+toggle, Test-connection. The password / refresh token is stored in
+**Supabase Vault** (migration `035`), never returned to the browser.
+`python -m ingestion.email_watch --once` (20b) polls each active channel,
+drops auto-responders / list mail / the mailbox's own mail, and enqueues a
+`run_flow` job keyed on `Message-ID` against the tenant's published flow.
+`api/worker._email_post_run` (20c) then applies
+`interpreter/emailer.decide()` — the **hard guard**: a customer-facing
+email goes out **only** on `outcome.action == "auto_reply"` with the
+channel's `auto_send_enabled` on and a non-empty draft; `need_info` sends
+questions only if the `clarify` node opted in;
+`ask_human`/`handover`/switch-off → `mailbox.mark_needs_human` re-flags the
+message unread for a human, nothing sent. Outbound is threaded and stamped
+`X-Support-Bot: 1` so the poller never answers it. `docs/EMAIL_SETUP.md`.
+**Not yet done:** a live e2e against a real mailbox (needs IMAP or Gmail
+creds); a GitHub Actions cron for `email_watch` + a running `api.worker`;
+migrating the existing Slack/SF/Google `tenant_integrations` rows onto the
+same Vault mechanism (the `integration_secret_*` RPCs are generic).
 
 **2026-08-30 — Phase 19 (assisted flow authoring) COMPLETE.** You no
 longer hand-draw the graph: **⬇ From Mermaid** (paste a `flowchart` — a
