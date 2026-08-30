@@ -646,9 +646,17 @@ def h_confidence_gate(state: CaseState, config: dict) -> dict:
     topic = str((state.get("classification") or {}).get("topic", ""))
     ttok = _slug_tokens(topic)
     forced = next(
-        (e for e in escalate
+        (f"topic '{topic}' ~ '{e}'" for e in escalate
          if _slug_tokens(e) and _slug_tokens(e) <= ttok), None
     )
+    # Module-family escalation (Phase 20h): billing/plans questions are never a
+    # docs answer whatever slug the classifier picked. `escalate_modules`
+    # defaults to Billing & Plans; a flow can set `[]` to opt out.
+    if not forced:
+        esc_mods = config.get("escalate_modules", ["Billing & Plans"])
+        mod = salesforce.map_case_fields(topic, None).get("Module__c")
+        if mod and mod in esc_mods:
+            forced = f"module '{mod}'"
     if forced:
         passed = False
 
@@ -664,7 +672,7 @@ def h_confidence_gate(state: CaseState, config: dict) -> dict:
                     "groundedness": round(wg, 3)},
     }
     if forced:
-        gate["forced_escalation"] = f"topic '{topic}' ~ '{forced}'"
+        gate["forced_escalation"] = forced
     reason = (f"forced escalate ({gate['forced_escalation']})" if forced
               else f"score={score:.3f} vs threshold={threshold:.2f} ({tier})")
     return {
@@ -738,9 +746,9 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
         if channel == "salesforce_chatter":
             summary += " (no sf_id — not posted)"
 
-    # Phase 20g: drop the Case into a human queue. `escalate_queue` (e.g.
-    # Billing_Escalations) wins when the gate forced the escalation on topic;
-    # otherwise `queue` (e.g. Support_L0L1).
+    # Phase 20g/h: drop the Case into a human queue. `escalate_queue` (e.g.
+    # Billing_Escalations) wins when the gate forced the escalation (on topic
+    # *or* the billing/plans module — see h_confidence_gate); else `queue`.
     forced = bool((state.get("confidence_gate") or {}).get("forced_escalation"))
     queue = (config.get("escalate_queue") if forced else None) or config.get("queue")
     if sf_id and queue:

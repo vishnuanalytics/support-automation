@@ -286,7 +286,36 @@ def test_h_ask_human_routes_to_the_escalation_queue_on_forced_topic(monkeypatch)
     h_ask_human({"case": {"sf_id": "500A"}, "confidence_gate": {"forced_escalation": "topic 'refund'"}}, cfg)
     assert seen["queue"] == "Billing_Escalations"
 
-    # plain low-confidence fail -> the default queue
+    # plain low-confidence fail (no forced flag) -> the default queue
     seen.clear()
     h_ask_human({"case": {"sf_id": "500B"}, "confidence_gate": {"pass": False}}, cfg)
     assert seen["queue"] == "Support_L0L1"
+
+    # a module-family forced escalation (h_confidence_gate sets this for a
+    # billing/plans topic whatever the slug) -> escalate_queue (20h)
+    seen.clear()
+    h_ask_human({"case": {"sf_id": "500C"},
+                 "confidence_gate": {"forced_escalation": "module 'Billing & Plans'"}}, cfg)
+    assert seen["queue"] == "Billing_Escalations"
+
+
+def test_confidence_gate_forces_a_human_on_a_billing_module_topic():
+    from interpreter.registry import h_confidence_gate
+    # slug has no "billing"/"refund" token, but maps to the Billing & Plans module
+    out = h_confidence_gate(
+        {"classification": {"topic": "duplicate-annual-charge"},
+         "retrieval_score": 0.9, "draft_confidence": 0.9, "groundedness": {"score": 0.9},
+         "tier": "basic"},
+        {"_node_id": "g", "default_threshold": 0.3},
+    )
+    g = out["confidence_gate"]
+    assert g["pass"] is False and "Billing & Plans" in g["forced_escalation"]
+
+    # opt out with escalate_modules: []
+    out2 = h_confidence_gate(
+        {"classification": {"topic": "duplicate-annual-charge"},
+         "retrieval_score": 0.9, "draft_confidence": 0.9, "groundedness": {"score": 0.9},
+         "tier": "basic"},
+        {"_node_id": "g", "default_threshold": 0.3, "escalate_modules": []},
+    )
+    assert out2["confidence_gate"]["pass"] is True
