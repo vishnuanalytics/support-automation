@@ -44,6 +44,7 @@ public with sharing class SupportAutomationHook {
 
     @future(callout=true)
     public static void notify(Set<Id> caseIds) {
+        String err = null;
         for (Id cid : caseIds) {
             HttpRequest req = new HttpRequest();
             req.setEndpoint('callout:SupportAutomation/api/hooks/salesforce/case');
@@ -51,14 +52,21 @@ public with sharing class SupportAutomationHook {
             req.setHeader('Content-Type', 'application/json');
             req.setHeader('X-SF-Hook-Secret', SECRET);
             req.setBody('{"case_id":"' + String.valueOf(cid) + '"}');
-            req.setTimeout(20000);
+            req.setTimeout(30000);
             try {
-                new Http().send(req);
+                HttpResponse res = new Http().send(req);
+                System.debug(LoggingLevel.INFO, 'SupportAutomationHook ' + cid
+                    + ' -> ' + res.getStatusCode() + ' ' + res.getBody());
+                if (res.getStatusCode() >= 300) {
+                    err = cid + ': HTTP ' + res.getStatusCode() + ' ' + res.getBody();
+                }
             } catch (Exception e) {
-                System.debug(LoggingLevel.WARN,
-                    'SupportAutomationHook ' + cid + ': ' + e.getMessage());
+                err = cid + ': ' + e.getTypeName() + ' ' + e.getMessage();
+                System.debug(LoggingLevel.ERROR, 'SupportAutomationHook ' + err);
             }
         }
+        // surface a failure on the AsyncApexJob (Status=Failed / ExtendedStatus)
+        if (err != null) { throw new CalloutException(err); }
     }
 }
 """

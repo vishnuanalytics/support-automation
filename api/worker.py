@@ -13,6 +13,7 @@ the same (flow_id, idempotency_key) already recorded is a no-op success.
 from __future__ import annotations
 
 import argparse
+import os
 import logging
 import sys
 import time
@@ -196,12 +197,28 @@ def _create_github_issue(payload: dict, sb) -> dict:
 HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
             "embed_kb_entry": _embed_kb_entry, "create_github_issue": _create_github_issue}
 
+JOB_TIMEOUT = int(os.environ.get("WORKER_JOB_TIMEOUT", "120"))
+
+
+class _JobTimeout(Exception):
+    pass
+
 
 def process_one(sb) -> bool:
+    import signal
+
     job = jobs.claim(sb=sb)
     if not job:
         return False
     jid, kind = job["job_id"], job["kind"]
+
+    def _alarm(_sig, _frm):
+        raise _JobTimeout(f"job exceeded {JOB_TIMEOUT}s")
+
+    have_alarm = hasattr(signal, "SIGALRM")
+    if have_alarm:
+        signal.signal(signal.SIGALRM, _alarm)
+        signal.alarm(JOB_TIMEOUT)
     try:
         handler = HANDLERS.get(kind)
         if not handler:
@@ -212,6 +229,9 @@ def process_one(sb) -> bool:
     except Exception as e:  # noqa: BLE001
         jobs.fail(jid, f"{type(e).__name__}: {e}", sb=sb)
         log.warning("job %s (%s) failed: %s", jid, kind, e)
+    finally:
+        if have_alarm:
+            signal.alarm(0)
     return True
 
 
