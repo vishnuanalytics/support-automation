@@ -414,14 +414,146 @@ def post_chatter(case_id: str, body: str, *, mention_id: str | None = None, tena
 
 
 # --------------------------------------------------------------------------
-# case bootstrap from an inbound message (Phase 20e)
+# case bootstrap from an inbound message (Phase 20e / 20f)
 # --------------------------------------------------------------------------
-_OPEN_CASE_SOQL = (
-    "SELECT Id, CaseNumber FROM Case "
-    "WHERE ContactId = '{cid}' AND IsClosed = false "
-    "AND CreatedDate = LAST_N_DAYS:{days} "
-    "ORDER BY CreatedDate DESC LIMIT 1"
-)
+def _thread_msg_ids(case: dict[str, Any]) -> list[str]:
+    """RFC Message-IDs the inbound email threads onto (In-Reply-To +
+    References), de-duplicated, each offered with and without angle brackets
+    (Salesforce stores `EmailMessage.MessageIdentifier` without them)."""
+    raw: list[str] = []
+    v = case.get("in_reply_to")
+    if isinstance(v, str) and v.strip():
+        raw.append(v.strip())
+    for r in case.get("references") or []:
+        if isinstance(r, str) and r.strip():
+            raw.append(r.strip())
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in raw:
+        for form in (m, m.strip("<>")):
+            if form and form not in seen:
+                seen.add(form)
+                out.append(form)
+    return out
+
+
+def find_case_by_thread(message_ids: "list[str]", *, tenant_id: str | None = None) -> dict[str, Any]:
+    """Given the Message-IDs an inbound email replies to, find the **open**
+    Case those messages are already recorded on (via `EmailMessage`). Returns
+    {sf_id, case_number} or {} — never raises."""
+    if not message_ids or not available():
+        return {}
+    sf = client_for(tenant_id)
+    lits = ", ".join(f"'{_soql_lit(m)}'" for m in message_ids[:50])
+    try:
+        rows = sf.query(
+            f"SELECT ParentId, Parent.CaseNumber, Parent.IsClosed FROM EmailMessage "
+            f"WHERE MessageIdentifier IN ({lits}) AND ParentId != null "
+            f"ORDER BY CreatedDate DESC"
+        ).get("records", [])
+    except Exception as e:  # noqa: BLE001
+        log.warning("find_case_by_thread: %s", e)
+        return {}
+    for r in rows:
+        pid = r.get("ParentId") or ""
+        parent = r.get("Parent") or {}
+        if pid.startswith("500") and not parent.get("IsClosed"):
+            return {"sf_id": pid, "case_number": parent.get("CaseNumber")}
+    return {}
+
+
+# EmailMessage.Status codes
+_EM_NEW, _EM_SENT, _EM_DRAFT = "0", "3", "5"
+
+
+def log_email_message(
+    case_id: str,
+    *,
+    incoming: bool,
+    from_addr: str = "",
+    from_name: str = "",
+    to_addrs: "str | list[str]" = "",
+    subject: str = "",
+    body: str = "",
+    message_id: str = "",
+    status: str | None = None,
+    tenant_id: str | None = None,
+) -> dict[str, Any]:
+    """Create an `EmailMessage` on the Case so the real email shows in
+    Salesforce's Emails related list (not only the Description). `incoming`
+    True = the customer's mail (Status New); False + `status=_EM_DRAFT` = a
+    ready-to-send agent draft. Idempotent on `MessageIdentifier`. Dry-run
+    with no creds — never raises."""
+    to = ", ".join(to_addrs) if isinstance(to_addrs, list) else (to_addrs or "")
+    mid = (message_id or "").strip().strip("<>")
+    if not available():
+        log.info("[sf dry-run] EmailMessage on Case %s (incoming=%s) mid=%s", case_id, incoming, mid)
+        return {"created": False, "dry_run": True, "id": None}
+
+    sf = client_for(tenant_id)
+    try:
+        if mid:
+            dup = sf.query(
+                f"SELECT Id FROM EmailMessage WHERE ParentId = '{_soql_lit(case_id)}' "
+                f"AND MessageIdentifier = '{_soql_lit(mid)}' LIMIT 1"
+            ).get("records", [])
+            if dup:
+                return {"created": False, "dry_run": False, "id": dup[0]["Id"], "idempotent": True}
+        from datetime import datetime, timezone
+
+        rec: dict[str, Any] = {
+            "ParentId": case_id,
+            "Incoming": bool(incoming),
+            "Status": status or (_EM_NEW if incoming else _EM_DRAFT),
+            "Subject": (subject or "")[:3000],
+            "TextBody": body or "",
+            "FromAddress": from_addr or "",
+            "FromName": from_name or "",
+            "ToAddress": to[:4000],
+            "MessageDate": datetime.now(timezone.utc).isoformat(),
+        }
+        if mid:
+            rec["MessageIdentifier"] = mid[:700]
+        res = sf.EmailMessage.create({k: v for k, v in rec.items() if v not in (None, "")})
+        return {"created": True, "dry_run": False, "id": res.get("id")}
+    except Exception as e:  # noqa: BLE001
+        log.warning("log_email_message(Case %s): %s", case_id, e)
+        return {"created": False, "dry_run": False, "id": None, "error": str(e)}
+
+
+def assign_case(
+    case_id: str,
+    *,
+    queue: str | None = None,
+    user_id: str | None = None,
+    tenant_id: str | None = None,
+) -> dict[str, Any]:
+    """Route a Case to a human — set `OwnerId` to a queue (resolved by
+    DeveloperName or Name) or a user. No target / no creds -> a no-op with a
+    reason. Never raises."""
+    if not (queue or user_id):
+        return {"assigned": False, "reason": "no queue or user configured"}
+    if not available():
+        log.info("[sf dry-run] assign Case %s -> queue=%r user=%r", case_id, queue, user_id)
+        return {"assigned": False, "dry_run": True, "queue": queue, "user_id": user_id}
+
+    sf = client_for(tenant_id)
+    owner_id, owner_type = user_id, "user"
+    try:
+        if not owner_id and queue:
+            q = _soql_lit(queue)
+            rows = sf.query(
+                f"SELECT Id FROM Group WHERE Type = 'Queue' AND "
+                f"(DeveloperName = '{q}' OR Name = '{q}') LIMIT 1"
+            ).get("records", [])
+            if not rows:
+                return {"assigned": False, "reason": f"queue {queue!r} not found"}
+            owner_id, owner_type = rows[0]["Id"], "queue"
+        sf.Case.update(case_id, {"OwnerId": owner_id})
+        return {"assigned": True, "dry_run": False, "owner_id": owner_id, "owner_type": owner_type}
+    except Exception as e:  # noqa: BLE001
+        log.warning("assign_case(%s): %s", case_id, e)
+        return {"assigned": False, "error": str(e)}
 
 
 def _account_snapshot(sf, account_id: str) -> dict[str, Any]:
@@ -456,10 +588,10 @@ def ensure_case(
     status: str = "New",
     create_contact: bool = True,
     create_account: bool = True,
-    reuse_open_days: int = 14,
+    reuse: str = "thread",
     tenant_id: str | None = None,
 ) -> dict[str, Any]:
-    """Resolve an inbound `case` dict to a real Salesforce Case (Phase 20e).
+    """Resolve an inbound `case` dict to a real Salesforce Case (Phase 20e/f).
 
     * `case['sf_id']` already set -> just refresh the Account snapshot.
     * resolve the Contact: `sender['contact_id']`, else an exact Contact by
@@ -467,10 +599,12 @@ def ensure_case(
       `create_account` and the sender has a *business* email domain with no
       Account, create an Account from the domain and link the Contact to it
       (free-mail domains get a Contact with no Account).
-    * reuse the Contact's most recent open Case created within
-      `reuse_open_days` (a threaded reply lands on the same Case), else
-      create a new Case (Subject / Description / ContactId / AccountId /
-      SuppliedEmail / Origin / Status).
+    * `reuse="thread"` (default): attach to an existing **open** Case only
+      when the email is a genuine reply — its `In-Reply-To` / `References`
+      match an `EmailMessage` already on that Case (Phase 20f / FR-6).
+      `reuse="never"`: always a new Case. Otherwise create a new Case
+      (Subject / Description / ContactId / AccountId / SuppliedEmail /
+      Origin / Status).
 
     Returns {sf_id, case_number, contact_id, account_id, account_name,
     account: {name, customer_type, region}, created, reused, contact_created,
@@ -545,13 +679,11 @@ def ensure_case(
 
         out["contact_id"], out["account_id"] = cid, aid
 
-        if cid and reuse_open_days > 0:
-            rows = sf.query(
-                _OPEN_CASE_SOQL.format(cid=cid, days=int(reuse_open_days))
-            ).get("records", [])
-            if rows:
-                out["sf_id"] = rows[0]["Id"]
-                out["case_number"] = rows[0].get("CaseNumber")
+        if reuse == "thread":
+            match = find_case_by_thread(_thread_msg_ids(case), tenant_id=tenant_id)
+            if match:
+                out["sf_id"] = match["sf_id"]
+                out["case_number"] = match.get("case_number")
                 out["reused"] = True
 
         if not out["sf_id"]:

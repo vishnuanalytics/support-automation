@@ -74,16 +74,24 @@ def _email_post_run(final: dict, case: dict, flow: dict, sb) -> dict:
         subject = case.get("subject") or "your request"
         mid = case.get("message_id") or ""
         refs = case.get("references") or []
+        sf_id = case.get("sf_id") or case.get("id")
+
+        def _deliver(body: str) -> dict:
+            # FR-12: when the case is on a Salesforce Case, reply *through*
+            # Salesforce so the outbound is an EmailMessage on the Case
+            # (threaded, visible to agents). Fall back to SMTP otherwise.
+            if sf_id and salesforce.available():
+                r = salesforce.send_case_reply(sf_id, body, to_email=to, subject=subject,
+                                               tenant_id=flow["tenant_id"])
+                return {**r, "via": "salesforce", "sf_method": r.get("via")}
+            return emailer.send_reply(cfg, to=to, subject=subject, body=body,
+                                      in_reply_to=mid, references=refs)
 
         if kind == "send_reply":
-            d = emailer.send_reply(cfg, to=to, subject=subject, body=meta["body"],
-                                   in_reply_to=mid, references=refs)
-            return {"decision": kind, "delivery": d}
+            return {"decision": kind, "delivery": _deliver(meta["body"])}
         if kind == "send_questions":
-            d = emailer.send_reply(cfg, to=to, subject=subject,
-                                   body=emailer._questions_body(meta["questions"]),
-                                   in_reply_to=mid, references=refs)
-            return {"decision": kind, "delivery": d}
+            return {"decision": kind,
+                    "delivery": _deliver(emailer._questions_body(meta["questions"]))}
         if kind == "needs_human":
             try:
                 mailbox.mark_needs_human(cfg, mid)

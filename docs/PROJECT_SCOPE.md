@@ -703,12 +703,14 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**Phases 0–20 built. No open phase.** Migrations `001`–`036` applied
+**Phases 0–20 built. No open phase.** Migrations `001`–`037` applied
 (`034`/`035` = Phase 20a: `tenant_integrations` poller columns + the
 Supabase-Vault `integration_secret_*` RPCs; `036` = Phase 20e: the
-"Email L0/L1 — inbound to Salesforce" flow, team `email`, tenant Acme).
-140 offline pytest tests + web tsc/vitest (6)/build +
-`tests/test_multiflow.py` (needs Groq quota).
+"Email L0/L1 — inbound to Salesforce" flow, team `email`, tenant Acme;
+`037` = Phase 20f: that flow's `sf_case` → thread-based Case reuse).
+149 offline pytest tests + web tsc/vitest (6)/build +
+`tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
+the spec; its §9 tracks gaps.
 Phase 18d's button is built but signing in with Google needs the Supabase
 dashboard Google provider enabled first (`docs/GOOGLE_SETUP.md`
 §"Google sign-in"); the Phase 20 Gmail *provider* needs the same
@@ -732,6 +734,31 @@ dedicated support mailbox, or add a `--from <addr>` filter to
 `ingestion/email_watch.py` and drive one clean test message through
 `email_watch --once` + `api.worker --once` (measure latency, confirm the
 Case + the threaded reply).
+
+**2026-08-30 — Phase 20f: the email conversation lives on the Salesforce
+Case.** Five spec gaps closed (`docs/REQUIREMENTS.md` §9):
+- **FR-6** `sf_case` `reuse: "thread"` (migration `037`) —
+  `salesforce.find_case_by_thread()` matches the inbound email's
+  `In-Reply-To` / `References` against `EmailMessage.MessageIdentifier` on
+  open Cases; a new subject → a new Case (was: any open Case for the
+  contact within 14 days).
+- **FR-7** `sf_case` → `salesforce.log_email_message(incoming=True)`: the
+  customer's mail is an `EmailMessage` on the Case (idempotent on
+  `MessageIdentifier`), not only in the Description.
+- **FR-12** `api/worker._email_post_run` replies via
+  `salesforce.send_case_reply()` (outbound `EmailMessage`, threaded on the
+  Case) whenever the case has an `sf_id`; SMTP is the fallback.
+- **FR-13** `ask_human` leaves the drafted reply on the Case as a
+  `Status='Draft'` `EmailMessage` (recipient + `Re:` subject prefilled)
+  beside the Chatter note.
+- **FR-14** `handover` calls `salesforce.assign_case(queue=…)` when the
+  node has a `queue` / `owner_user_id` (resolves a Queue by DeveloperName
+  or Name, sets `Case.OwnerId`); no target → outcome only.
+
+Needs the org admin to **enable Email-to-Case** (C-1) for the Email action
++ Emails related list to show on the Case page — the `EmailMessage`
+records are created via API regardless. 149 offline pytest (9 new in
+`test_sf_case.py` / `test_emailer.py`).
 
 **2026-08-30 — Phase 20 (email channel) COMPLETE — the whole round-trip
 works in code.** A workspace **owner** points a support mailbox at a

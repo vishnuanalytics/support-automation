@@ -17,7 +17,7 @@
       "node_id": "sf_case",
       "type": "sf_case",
       "label": "Create / reuse the Salesforce Case",
-      "config": { "origin": "Email", "status": "New", "create_contact": true, "create_account": true, "reuse_open_days": 14 }
+      "config": { "origin": "Email", "status": "New", "create_contact": true, "create_account": true, "reuse": "thread" }
     },
     {
       "node_id": "retrieve",
