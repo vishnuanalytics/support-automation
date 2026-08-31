@@ -22,6 +22,7 @@ RUN useradd -m -u 1000 app || true
 USER app
 
 ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
     HF_HOME=/tmp/hf \
     HF_HUB_CACHE=/tmp/hf \
     FASTEMBED_CACHE_PATH=/tmp/fastembed \
