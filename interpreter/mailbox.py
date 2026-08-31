@@ -191,6 +191,39 @@ def list_active_channels(sb) -> list["MailboxConfig"]:
     return out
 
 
+def _error_backoff_minutes(retries: int) -> int:
+    """1, 2, 4, 8, 16, 30, 30 … — a channel that errored is retried on this
+    schedule instead of being skipped forever."""
+    return min(2 ** max(0, int(retries)), 30)
+
+
+def list_pollable_channels(sb) -> list["MailboxConfig"]:
+    """`active` channels + `error` channels whose backoff window has elapsed
+    (Phase-23 auto-recovery — one transient IMAP timeout no longer parks a
+    channel permanently)."""
+    from datetime import datetime, timedelta, timezone
+
+    rows = (sb.table("tenant_integrations")
+            .select("tenant_id,status,last_poll_at,config")
+            .eq("kind", KIND).in_("status", ["active", "error"])
+            .execute().data or [])
+    now = datetime.now(timezone.utc)
+    out: list[MailboxConfig] = []
+    for r in rows:
+        if r.get("status") == "error":
+            retries = int((r.get("config") or {}).get("error_retries", 1))
+            try:
+                last = datetime.fromisoformat(str(r.get("last_poll_at")).replace("Z", "+00:00"))
+            except Exception:  # noqa: BLE001
+                last = None
+            if last and now - last < timedelta(minutes=_error_backoff_minutes(retries)):
+                continue                       # not due for a retry yet
+        ch = load_channel(r["tenant_id"], sb)
+        if ch:
+            out.append(ch)
+    return out
+
+
 def save_channel(tenant_id: str, sb, cfg: "MailboxConfig", *,
                  plaintext_secret: str | None, updated_by: str | None = None) -> None:
     vault_id = None
@@ -218,9 +251,22 @@ def delete_channel(tenant_id: str, sb) -> None:
 
 
 def set_status(tenant_id: str, sb, status: str, *, error: str | None = None) -> None:
-    sb.table("tenant_integrations").update({
-        "status": status, "last_error": error, "last_poll_at": _now_iso(),
-    }).eq("tenant_id", tenant_id).eq("kind", KIND).execute()
+    patch: dict = {"status": status, "last_error": error, "last_poll_at": _now_iso()}
+    # track consecutive errors so list_pollable_channels can back off / recover
+    try:
+        cur = (sb.table("tenant_integrations").select("config")
+               .eq("tenant_id", tenant_id).eq("kind", KIND).execute().data or [{}])[0]
+        cfg = dict(cur.get("config") or {})
+        if status == "error":
+            cfg["error_retries"] = min(int(cfg.get("error_retries", 0)) + 1, 8)
+        elif status == "active" and cfg.pop("error_retries", None) is None:
+            cfg = None            # nothing to change
+        if cfg is not None:
+            patch["config"] = cfg
+    except Exception:  # noqa: BLE001 — status update must not fail on this
+        pass
+    sb.table("tenant_integrations").update(patch) \
+        .eq("tenant_id", tenant_id).eq("kind", KIND).execute()
 
 
 def set_cursor(tenant_id: str, sb, cursor: dict) -> None:

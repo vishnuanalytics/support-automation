@@ -490,6 +490,8 @@ def post_chatter(case_id: str, body: str, *, mention_id: str | None = None, tena
         return {"posted": False, "dry_run": True, "mention_id": mention_id}
 
     sf = client_for(tenant_id)
+    if _recent_duplicate(sf, "FeedItem", case_id, "Body", body):
+        return {"posted": False, "dry_run": False, "mention_id": mention_id, "deduped": True}
     mention_id = mention_id or _current_user_id(sf)
 
     segments: list[dict[str, Any]] = []
@@ -515,16 +517,40 @@ def post_chatter(case_id: str, body: str, *, mention_id: str | None = None, tena
                 "feed_element_id": res.get("id"), "mention_failed": True}
 
 
+def _recent_duplicate(sf, sobject: str, case_id: str, body_field: str, body: str,
+                      minutes: int = 180) -> bool:
+    """True if an identical (same leading text) row already exists on the Case
+    in the last `minutes` — so a re-run of the same flow doesn't stack a
+    second identical Chatter note / draft CaseComment (Phase 23)."""
+    try:
+        from datetime import datetime, timedelta, timezone
+
+        head = _soql_lit((body or "")[:255])
+        since = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+        rows = sf.query(
+            f"SELECT Id FROM {sobject} WHERE ParentId = '{_soql_lit(case_id)}' "
+            f"AND {body_field} LIKE '{head}%' AND CreatedDate >= {since} LIMIT 1"
+        ).get("records", [])
+        return bool(rows)
+    except Exception:  # noqa: BLE001 — dedup is best-effort, never blocks the write
+        return False
+
+
 def add_case_comment(case_id: str, body: str, *, published: bool = False,
                      tenant_id: str | None = None) -> dict[str, Any]:
     """Add a `CaseComment` (internal by default). Used for the bot's
     suggested-reply draft — Salesforce won't take an API-created outbound
-    draft `EmailMessage`. Dry-run with no creds; never raises."""
+    draft `EmailMessage`. Skips an identical comment posted in the last 3h.
+    Dry-run with no creds; never raises."""
     if not available():
         log.info("[sf dry-run] CaseComment on %s (published=%s): %r", case_id, published, body[:80])
         return {"created": False, "dry_run": True, "id": None}
+    sf = client_for(tenant_id)
+    if _recent_duplicate(sf, "CaseComment", case_id, "CommentBody", body):
+        return {"created": False, "dry_run": False, "id": None, "deduped": True}
     try:
-        res = client_for(tenant_id).CaseComment.create(
+        res = sf.CaseComment.create(
             {"ParentId": case_id, "CommentBody": body[:4000], "IsPublished": bool(published)}
         )
         return {"created": True, "dry_run": False, "id": res.get("id")}

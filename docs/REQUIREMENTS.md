@@ -153,7 +153,16 @@ planned future channel — it must slot in as another adapter, not a rewrite
   (OD-1) but self-hosted, free, and fully observable via
   `docker compose logs`.
 - **NFR-3 Cost:** free tooling by default — Groq free tier for the LLM,
-  local `fastembed` embeddings, no paid email API. Target ≤ $5/mo.
+  local `fastembed` embeddings, no paid email API. Target ≤ $5/mo. _(Phase 23:
+  when Groq's daily token quota is spent, `llm.complete` fails over to an
+  **OpenRouter `:free`** model, then the deterministic stub — a quota-exhausted
+  provider no longer stalls the pipeline.)_
+- **NFR-7 Resilience (Phase 23):** every long-running process writes a
+  `system_health` heartbeat; `scripts/health_check.py` alerts when one goes
+  silent or the job failure rate spikes. An errored email channel is retried
+  with backoff, not parked forever. Salesforce writes (`add_case_comment` /
+  `post_chatter`) are idempotent within a 3 h window. CDC ignores the bot's own
+  Case writes. `validate_env()` fails a process fast on bad config.
 - **NFR-4 Security:** bearer tokens verified server-side; per-user
   rate-limiting on write endpoints; secrets only in Vault.
 - **NFR-5 Safety:** the system MUST NOT send a customer-facing email on any

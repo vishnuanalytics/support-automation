@@ -30,6 +30,7 @@ import logging
 import os
 import secrets
 import uuid
+from datetime import datetime as _dt
 from typing import Any
 
 log = logging.getLogger("api")
@@ -297,7 +298,23 @@ def _require_owner(c: Caller, tenant_id: str) -> None:
 # ── endpoints ──────────────────────────────────────────────────────────
 @app.get("/api/health")
 def health() -> dict:
-    return {"ok": True}
+    """Liveness + the last heartbeat age (seconds) of each pipeline component,
+    so one URL covers the whole stack for an uptime monitor."""
+    import time as _t
+
+    out: dict = {"ok": True, "components": {}}
+    try:
+        rows = _service.table("system_health").select("component,last_healthy_at").execute().data or []
+        now = _t.time()
+        for r in rows:
+            try:
+                ts = _dt.fromisoformat(str(r["last_healthy_at"]).replace("Z", "+00:00")).timestamp()
+                out["components"][r["component"]] = round(now - ts, 1)
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception as e:  # noqa: BLE001
+        out["components_error"] = str(e)
+    return out
 
 
 @app.get("/api/node-types")

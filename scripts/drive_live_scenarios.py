@@ -58,11 +58,17 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", default="")
     ap.add_argument("--list", action="store_true")
+    ap.add_argument("--go", action="store_true",
+                    help="actually enqueue (creates real SF Cases + spends LLM quota); "
+                         "without it this just prints what it would do")
     args = ap.parse_args()
 
     keys = [k.strip().upper() for k in args.only.split(",") if k.strip()] or list(SCENARIOS)
 
-    if args.list:
+    if args.list or not args.go:
+        if not args.go:
+            print("(dry — pass --go to actually enqueue; this spends LLM quota + "
+                  "creates real Salesforce Cases)\n")
         for k in keys:
             s, subj, body, exp = SCENARIOS[k]
             print(f"{k}  {s:<26} {subj!r}  -> {exp}")

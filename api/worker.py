@@ -328,6 +328,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--idle-sleep", type=float, default=2.0)
     args = ap.parse_args(argv)
 
+    from interpreter.config import validate_env
+    validate_env()
+
     sb = get_supabase()
     if args.once:
         n = 0
@@ -336,9 +339,14 @@ def main(argv: list[str] | None = None) -> int:
         log.info("drained %d job(s)", n)
         return 0
 
+    from interpreter.health import beat
+
     log.info("worker started; polling every %.1fs", args.idle_sleep)
+    beat("worker", {"pid": os.getpid()}, sb=sb, force=True)
     while True:
-        if not process_one(sb):
+        did = process_one(sb)
+        beat("worker", {"idle": not did}, sb=sb)
+        if not did:
             time.sleep(args.idle_sleep)
 
 

@@ -724,6 +724,38 @@ the single comprehensive workflow (`team_route` + 5-way gate) — **applied
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
 
+**Phase 23 (2026-08-31): resilience — Tier 1 + Tier 2.**
+- **LLM fallback chain** (`interpreter/llm.py`): `complete()` tries the chosen
+  model → `LLM_FALLBACK_MODEL` (an **OpenRouter** `:free` model) → the Groq
+  default → the stub, skipping any provider that rate-limits/errors. In-process
+  classify **cache** (`cache=True`, `LLM_CACHE`). `_openrouter_complete` via
+  plain httpx. Fixes the "Groq daily quota → whole pipeline dead" failure.
+- **Channel auto-recovery** (`interpreter/mailbox.py`): `list_pollable_channels`
+  = active + errored-**and-due** channels (backoff 1→30 min by consecutive
+  `error_retries`, cleared on a good poll). One IMAP timeout no longer parks a
+  channel forever.
+- **Heartbeat + alert** (migration `050` `system_health`; `interpreter/health.py`):
+  worker / poller / cdc `beat()` every ~20 s; `/api/health` returns each
+  component's heartbeat age; `scripts/health_check.py` (cron / cron-job.org)
+  alerts to `SLACK_ALERT_WEBHOOK` if a component is silent >15 min or the
+  `run_flow` failure rate >50 %/h.
+- **Salesforce write idempotency** (`salesforce._recent_duplicate`):
+  `add_case_comment` / `post_chatter` skip an identical row posted on the Case
+  in the last 3 h — was stacking duplicate draft comments on re-runs.
+- **CDC self-write filter** (`sf_pubsub/plan.py`): a Case `OwnerId` change whose
+  `commitUser` is the integration user (an `ask_human`/`handover` reassignment)
+  is dropped — the bot no longer re-triggers on its own writes.
+- **Migration CI** (`scripts/check_migrations.py`, wired into `ci.yml`): numbering
+  gaps/dupes + every portable flow compiles. **Config validation at boot**
+  (`interpreter/config.py::validate_env`) on worker/api/poller/cdc — fails loud
+  on a bad `SUPABASE_URL` / missing key (the `.com`-vs-`.co` typo class).
+  `drive_live_scenarios.py` now needs `--go` to enqueue (dry by default).
+  `case_memory_sync` enriches `case_number`/`Type`/`tier` from Salesforce +
+  `--reindex-stale DAYS`.
+- 231 offline pytest (9 new in `test_resilience.py`). Migration `050` applied;
+  Docker stack rebuilt; heartbeats verified live (`/api/health` →
+  `{"worker": 15.0, "poller": 5.9}`).
+
 **Phase 22 (2026-08-31): one timeline per Case.** `GET /api/trace/{key}`
 (`key` = Salesforce Case number / Case id / run_id / job_id; a bare Case
 number is resolved to its Id via SOQL) stitches **`jobs` + `runs` + every

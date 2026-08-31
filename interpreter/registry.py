@@ -178,6 +178,7 @@ def h_classify(state: CaseState, config: dict) -> dict:
         model=config.get("model", llm.FAST_MODEL),
         json_object=True,
         max_tokens=320,
+        cache=True,   # same case text -> same triage; kills retry/re-run cost
     )
     parsed = _safe_json(raw)
     topic = parsed.get("topic", "unknown")

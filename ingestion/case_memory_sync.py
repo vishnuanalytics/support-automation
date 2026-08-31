@@ -97,9 +97,44 @@ def _iter_runs(sb, since_iso: str, limit: int):
     return q.execute().data or []
 
 
+def _enrich_from_sf(rows: list[dict]) -> None:
+    """Fill case_number / case_type / module / tier from Salesforce for rows
+    whose `case_sf_id` is a real Id (the `runs` backfill often lacks them)."""
+    from interpreter import salesforce
+    if not salesforce.available():
+        return
+    want = {r["case_sf_id"] for r in rows
+            if isinstance(r["case_sf_id"], str) and len(r["case_sf_id"]) in (15, 18)
+            and not r.get("case_type")}
+    if not want:
+        return
+    try:
+        sf = salesforce.client_for(None)
+        ids = ", ".join(f"'{salesforce._soql_lit(i)}'" for i in list(want)[:200])
+        recs = sf.query(
+            "SELECT Id, CaseNumber, Type, Module__c, Region__c, Account.Tier__c "
+            f"FROM Case WHERE Id IN ({ids})"
+        ).get("records", [])
+        by_id = {c["Id"]: c for c in recs}
+    except Exception as e:  # noqa: BLE001
+        log.warning("SF enrich failed: %s", e)
+        return
+    for r in rows:
+        c = by_id.get(r["case_sf_id"])
+        if not c:
+            continue
+        r["case_number"] = r.get("case_number") or c.get("CaseNumber")
+        r["case_type"] = r.get("case_type") or c.get("Type")
+        r["module"] = r.get("module") or c.get("Module__c")
+        r["region"] = r.get("region") or c.get("Region__c")
+        r["tier"] = r.get("tier") or (c.get("Account") or {}).get("Tier__c")
+
+
 def _sync_rows(rows: list[dict], *, dry: bool) -> int:
     sb = get_supabase()
     done = 0
+    if not dry:
+        _enrich_from_sf(rows)
     # de-dupe by case: keep the newest resolution per case_sf_id
     by_case: dict[str, dict] = {}
     for row in rows:
@@ -181,7 +216,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--limit", type=int, default=2000)
     ap.add_argument("--from-salesforce", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--reindex-stale", type=int, metavar="DAYS", default=0,
+                    help="mark case_memory rows older than DAYS as status='stale' and exit")
     args = ap.parse_args(argv)
+
+    if args.reindex_stale:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=args.reindex_stale)).isoformat()
+        res = (get_supabase().table("case_memory").update({"status": "stale"})
+               .lt("resolved_at", cutoff).eq("status", "active").execute())
+        log.info("marked %d row(s) stale (resolved before %s)", len(res.data or []), cutoff[:10])
+        return 0
 
     since = args.since or (datetime.now(timezone.utc) - timedelta(days=90)).date().isoformat()
     since_iso = since if "T" in since else f"{since}T00:00:00Z"

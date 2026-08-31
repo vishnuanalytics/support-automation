@@ -31,7 +31,8 @@ client = TestClient(app)
 
 # ── offline ────────────────────────────────────────────────────────────
 def test_health_ok():
-    assert client.get("/api/health").json() == {"ok": True}
+    body = client.get("/api/health").json()
+    assert body["ok"] is True and "components" in body
 
 
 def test_node_types_lists_the_registry():
