@@ -164,13 +164,20 @@ def h_classify(state: CaseState, config: dict) -> dict:
             "topic (short slug), "
             "type (one of: Question | How-to | Problem / Bug | Billing | "
             "Account / Login | Feature Request | Other), "
+            "answer_mode (one of: informational | diagnostic | action | status) "
+            "— informational = a how-to / what-is question answerable from docs; "
+            "diagnostic = 'why did THIS happen to my data / account' — needs "
+            "the customer's own logs or records to answer with proof; "
+            "action = a request to DO something (cancel, onboard, change plan, "
+            "export) that a person must carry out; "
+            "status = 'is this broken right now / known issue'. "
             "urgency (one of low|normal|high|critical), "
             "summary (<=200 chars)."
         ),
         user=body or "(empty case)",
         model=config.get("model", llm.FAST_MODEL),
         json_object=True,
-        max_tokens=300,
+        max_tokens=320,
     )
     parsed = _safe_json(raw)
     topic = parsed.get("topic", "unknown")
@@ -179,9 +186,11 @@ def h_classify(state: CaseState, config: dict) -> dict:
     # value; else derive deterministically from the topic/body (stub-safe).
     case_type = (salesforce.normalize_case_type(parsed.get("type"))
                  or salesforce.map_case_type(topic, body))
+    answer_mode = _norm_answer_mode(parsed.get("answer_mode"), topic, body)
     classification = {
         "topic": topic,
         "case_type": case_type,
+        "answer_mode": answer_mode,
         "urgency": str(parsed.get("urgency", "normal")).lower(),
         "summary": parsed.get("summary", body[:200]),
         "tier_raw": tier_raw,
@@ -195,10 +204,37 @@ def h_classify(state: CaseState, config: dict) -> dict:
         **_trace(
             config["_node_id"], "classify",
             f"tier={tier} region={region} urgency={classification['urgency']} "
-            f"topic={topic} type={case_type or '-'}",
+            f"topic={topic} type={case_type or '-'} mode={answer_mode}",
             {**classification, "tokens": llm.last_usage},
         ),
     }
+
+
+_ANSWER_MODES = ("informational", "diagnostic", "action", "status")
+_ACTION_KW = ("cancel", "close my account", "close our account", "downgrade",
+              "upgrade my plan", "change our plan", "onboard", "offboard",
+              "delete my account", "delete our account", "export all",
+              "gdpr", "right to be forgotten", "terminate our contract")
+_DIAGNOSTIC_KW = ("why did", "why is my", "why are my", "did my", "did our",
+                  "is my data", "where is my", "where are my", "prove",
+                  "what happened to my", "my zap didn't run", "my zap did not run",
+                  "not showing my", "missing from my")
+_STATUS_KW = ("is this a known issue", "known issue", "is it down", "is the api down",
+              "any outage", "status page", "incident")
+
+
+def _norm_answer_mode(value: str | None, topic: str, body: str) -> str:
+    v = (value or "").strip().lower()
+    if v in _ANSWER_MODES:
+        return v
+    hay = f"{topic} {body}".lower()
+    if any(k in hay for k in _ACTION_KW):
+        return "action"
+    if any(k in hay for k in _STATUS_KW):
+        return "status"
+    if any(k in hay for k in _DIAGNOSTIC_KW):
+        return "diagnostic"
+    return "informational"
 
 
 @register("team_route")
@@ -427,6 +463,82 @@ def _render_template(tmpl: str, state: CaseState) -> str:
     return re.sub(r"\{\{\s*([\w.]+)\s*\}\}", sub, tmpl).strip()
 
 
+@register("case_lookup")
+def h_case_lookup(state: CaseState, config: dict) -> dict:
+    """Phase 21 — pull the closest past *resolved* Cases so `draft` can answer
+    from real resolutions, not just KB docs. Best-effort: no `case_memory`
+    rows / no embedder -> a no-op, `draft` behaves exactly as before.
+
+    Respects `classification.answer_mode`:
+      * action     -> skipped entirely (a person carries it out).
+      * diagnostic -> `prior_resolutions` is forced empty; matches become
+                      `investigation_hints` only (memory must never state a
+                      customer-specific fact it cannot prove).
+      * informational / status -> full result.
+
+    config: {k=3, pool=10, min_similarity=0.35, min_memories=3,
+             use_graph=true, skip_modes=["action"]}
+    """
+    nid = config["_node_id"]
+    from interpreter import case_memory
+
+    case = state.get("case", {})
+    cls = state.get("classification") or {}
+    mode = cls.get("answer_mode", "informational")
+    tenant_id = state.get("tenant_id")
+    skip_modes = config.get("skip_modes", ["action"])
+
+    def _out(citable, hints, note):
+        return {
+            "prior_resolutions": citable,
+            "investigation_hints": hints,
+            **_trace(nid, "case_lookup", note,
+                     {"citable": len(citable), "hints": len(hints), "mode": mode}),
+        }
+
+    if mode in skip_modes:
+        return _out([], [], f"skipped (answer_mode={mode})")
+    if not tenant_id:
+        return _out([], [], "skipped (no tenant)")
+
+    try:
+        from ingestion.scraper import get_supabase
+
+        sb = config.get("_sb") or get_supabase()
+    except Exception as e:  # noqa: BLE001
+        return _out([], [], f"skipped (no db: {e})")
+
+    min_mem = int(config.get("min_memories", 3))
+    if case_memory.count_for_tenant(sb, tenant_id) < min_mem:
+        return _out([], [], f"skipped (<{min_mem} memories for tenant)")
+
+    query = f"{case.get('subject', '')}\n{case.get('body', '')}\n{cls.get('summary', '')}".strip()
+    module = ((state.get("sf_writeback") or {}).get("written") or {}).get("Module__c") \
+        or salesforce.map_case_fields(cls.get("topic"), None).get("Module__c")
+    res = case_memory.lookup(
+        sb, query, tenant_id=str(tenant_id),
+        case_type=cls.get("case_type"), module=module, tier=state.get("tier"),
+        k=int(config.get("k", 3)), pool=int(config.get("pool", 10)),
+        min_similarity=float(config.get("min_similarity", 0.35)),
+        use_graph=bool(config.get("use_graph", True)),
+    )
+    citable = [] if mode == "diagnostic" else res["citable"]
+    hints = list(res["hints"])
+    if mode == "diagnostic":
+        # the near-matches are leads for the human / an evidence step, not copy
+        hints = [f"{c['subject']}: {summarize_hint(c['resolution_text'])}"
+                 for c in res["citable"]] + hints
+    note = (f"{len(citable)} citable + {len(hints)} hint(s) from {res['scanned']} scanned"
+            if (citable or hints) else f"no match in {res['scanned']} scanned")
+    return _out(citable, hints[:6], note)
+
+
+def summarize_hint(text: str, limit: int = 160) -> str:
+    from interpreter import case_memory
+
+    return case_memory.summarize(text, limit=limit)
+
+
 @register("kb_lookup")
 def h_kb_lookup(state: CaseState, config: dict) -> dict:
     """Consult one or more internal KB collections *at this point in the
@@ -628,12 +740,39 @@ def h_draft(state: CaseState, config: dict) -> dict:
     else:
         user = f"# Case\n{body}\n\n# Documentation context\n{context}"
 
+    # Phase 21: resolutions that actually closed near-identical past Cases.
+    prior = state.get("prior_resolutions") or []
+    mode = (state.get("classification") or {}).get("answer_mode", "informational")
+    if prior:
+        blocks = []
+        for p in prior[:3]:
+            tag = " (CONFIRMED DUPLICATE — lead with this)" if p.get("duplicate") else ""
+            blocks.append(f"[relevance {p.get('relevance', 0):.2f}] Case "
+                          f"{p.get('case_number') or '?'} \"{p.get('subject') or ''}\"{tag}\n"
+                          f"resolution ({p.get('kind')}): {p.get('resolution_text', '')}")
+        user += "\n\n# Prior resolved cases (replies that actually resolved a near-identical issue)\n" \
+                + "\n\n".join(blocks)
+
+    grounding_rule = (
+        "Ground the reply in the KNOWLEDGE BASE and, when they closely match, the "
+        "PRIOR RESOLVED CASES — prefer their wording and steps; if one is a "
+        "CONFIRMED DUPLICATE, lead with it. "
+        if prior else
+        "Using ONLY the provided context, "
+    )
+    if mode == "diagnostic":
+        grounding_rule += (
+            "This is a DIAGNOSTIC request about the customer's own data. Do NOT "
+            "assert what happened to their specific account/records unless the "
+            "context proves it. If it isn't proven, say what you will check and "
+            "that a specialist will follow up with findings — never guess. "
+        )
+
     raw = llm.complete(
         system=(
-            "You are a support agent. Using ONLY the provided context, write a "
-            "concise, friendly reply that resolves the customer's issue. When an "
-            "internal runbook is provided it is authoritative — prefer it over "
-            "the public documentation. "
+            "You are a support agent. " + grounding_rule +
+            "When an internal runbook is provided it is authoritative — prefer it "
+            "over the public documentation. Invent nothing not in the context. "
             "Return a JSON object: {\"reply\": string, \"confidence\": number 0..1} "
             "where confidence reflects how well the context actually answers the case."
         ),
@@ -651,7 +790,9 @@ def h_draft(state: CaseState, config: dict) -> dict:
         model_conf = 0.5
     model_conf = max(0.0, min(1.0, model_conf))
 
-    grounded = groundedness.check(reply, (internal_matches[:5] + retrieval[:5]))
+    prior_as_src = [{"chunk_text": p.get("resolution_text", ""),
+                     "doc_url": f"case:{p.get('case_number')}"} for p in prior[:3]]
+    grounded = groundedness.check(reply, (internal_matches[:5] + prior_as_src + retrieval[:5]))
 
     return {
         "draft": reply,
@@ -661,10 +802,13 @@ def h_draft(state: CaseState, config: dict) -> dict:
             config["_node_id"], "draft",
             f"{len(reply)} chars, model_confidence={model_conf:.2f}, "
             f"groundedness={grounded['score']:.2f} ({grounded['backend']}), "
-            f"sources={len(retrieval[:5])}+{len(internal_matches[:5])} internal",
+            f"sources={len(retrieval[:5])}+{len(internal_matches[:5])} internal"
+            f"+{len(prior_as_src)} prior-case",
             {"draft_confidence": model_conf, "chars": len(reply),
              "groundedness": grounded, "tokens": tokens,
-             "used_internal_kb": bool(internal_matches)},
+             "used_internal_kb": bool(internal_matches),
+             "prior_cases": [p.get("case_number") for p in prior[:3]],
+             "answer_mode": mode},
         ),
     }
 
@@ -761,6 +905,14 @@ def h_confidence_gate(state: CaseState, config: dict) -> dict:
                  or salesforce.map_case_type(topic))
         if ctype and ctype in esc_types:
             forced = f"type '{ctype}'"
+    # answer_mode escalation (Phase 21, opt-in): an `action` request (cancel,
+    # onboard, export, plan change) is carried out by a person, never
+    # auto-answered. Off by default; a flow sets `escalate_answer_modes`.
+    if not forced:
+        esc_modes = config.get("escalate_answer_modes", [])
+        amode = (state.get("classification") or {}).get("answer_mode")
+        if amode and amode in esc_modes:
+            forced = f"answer_mode '{amode}'"
     if forced:
         passed = False
 

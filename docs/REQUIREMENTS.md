@@ -4,7 +4,7 @@ The **what and why**. `PROJECT_SCOPE.md` is the build log (what's done, what's
 next); this file is the spec every phase is measured against. When a new
 requirement surfaces, add it here first, then build.
 
-Last updated 2026-08-31.
+Last updated 2026-08-31 (Phase 21).
 
 ---
 
@@ -274,6 +274,13 @@ Tracked in `PROJECT_SCOPE.md`; summary as of 2026-08-30.
 | **FR-28** Round-capped clarify → support queue | `clarify` gained `handover_queue`: once `max_rounds` (2) of asking the customer is exhausted it reassigns the Case to that queue (`Team_Support`) so a human owns it. The email + router flows send a non-forced low-confidence Case to `clarify` instead of a blind `ask_human`. |
 
 Flows updated: `flow_email_l0l1.json` (`ask_human` removed, `notify` + `clarify` added, gate split 4-way) and `flow_case_router.json` (`notify` + `clarify` added, gate split 5-way). Migration `044` **applied 2026-08-31** to the live email flow → published **v3** (the router flow isn't seeded to this DB — its change stays in `scripts/seed_router_flow.py` + the portable JSON). Web Inspector gains a `notify` form + `clarify` handover-queue field.
+
+**Added + built in Phase 21 (2026-08-31):**
+
+| Req | How |
+|---|---|
+| **FR-30** Answer from resolution history | New `case_memory` store (migration `048`): one row per resolved Case + a 384-d embedding, `match_case_memory` pgvector kNN, RLS. `ingestion/case_memory_sync.py` populates it from accepted `runs` resolutions (+ `--from-salesforce` for closed Cases). New `case_lookup` node (migration `049`, email flow **v7**) recalls the closest resolutions and, when they closely match, `draft` grounds the reply in them (a CONFIRMED DUPLICATE leads). `interpreter/case_memory.py` does the kNN + taxonomy/recency/duplicate boosts; `sync_graph()` MERGEs `(:Case)-[:RESOLVED_BY]->(:Reply)` / `-[:ABOUT]->` / `-[:SIMILAR_TO]->` into Neo4j. All best-effort → no memory / no embedder / Neo4j down = a no-op. |
+| **FR-31** Pattern vs proof | `classify` emits `answer_mode` (informational \| diagnostic \| action \| status). `case_lookup` is **skipped for `action`** (a person does it) and for **`diagnostic`** the near-matches become `investigation_hints` only — `prior_resolutions` is forced empty so `draft` never states a customer-specific fact from memory; the draft prompt tells it to say what it will check and defer to a specialist rather than guess. A resolution whose text cites the customer's own IDs / timestamps / logs is stored `generalizable=false` → hint only, never reply copy. |
 
 **Still open:**
 

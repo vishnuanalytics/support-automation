@@ -74,6 +74,10 @@ class CaseState(TypedDict, total=False):
     #  contact_created, account_created, inbound_email: {id, ...}, dry_run}
     sf_case: dict[str, Any]
 
+    # Phase 21 — Case-resolution memory (case_lookup node)
+    prior_resolutions: list[dict[str, Any]]   # citable past resolutions the draft may quote
+    investigation_hints: list[str]            # leads for a human / evidence step — never reply copy
+
     draft: str                 # proposed reply text
     draft_confidence: float    # 0..1, model's own confidence in the draft
     groundedness: dict[str, Any]      # {score 0..1, backend, unsupported[]} — is the draft supported by the context

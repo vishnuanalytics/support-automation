@@ -1,7 +1,7 @@
 export type NodeType =
   | "retrieve" | "classify" | "sf_writeback" | "draft"
   | "confidence_gate" | "auto_reply" | "ask_human" | "handover"
-  | "team_route" | "notify" | "clarify" | "identify"
+  | "team_route" | "notify" | "clarify" | "identify" | "case_lookup"
   | string;
 
 export interface FlowNode {

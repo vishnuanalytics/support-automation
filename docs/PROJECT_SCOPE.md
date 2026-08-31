@@ -724,6 +724,40 @@ the single comprehensive workflow (`team_route` + 5-way gate) — **applied
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
 
+**Phase 21 (2026-08-31): Case-resolution memory — answer from past
+resolutions, not just docs.** Migrations `048` (`case_memory` table: one row
+per resolved Case + a 384-d embedding + `match_case_memory` pgvector kNN,
+RLS) and `049` (splice `case_lookup` into the email flow between
+`sf_writeback` and `draft` → **v7**).
+- **`interpreter/case_memory.py`** — `looks_specific` / `redact` (the
+  "pattern vs proof" heuristic: a resolution that cites the customer's own
+  IDs / timestamps / log lines is **not** `generalizable` — hint only, never
+  reply copy); `classify_resolution_kind`; `lookup()` — kNN in Supabase,
+  then taxonomy (type/module/tier) + recency + `DUPLICATE_OF` (Neo4j) boosts,
+  split into `citable` (quotable) vs `hints` (leads). `sync_graph()` MERGEs
+  Case/Reply/Module/Agent + `SIMILAR_TO` edges into Neo4j (best-effort).
+- **`ingestion/case_memory_sync.py`** — populates it from resolved `runs`
+  rows (`human_action` in {sent, edited, guided_resume}, minus the bot's own
+  "review before sending" drafts) and, with `--from-salesforce`, closed
+  Cases. Backfilled 14 rows from this env.
+- **`classify`** gains `answer_mode` (informational | diagnostic | action |
+  status). **`case_lookup`** node: skipped for `action`; for `diagnostic`
+  the near-matches become `investigation_hints` only (`prior_resolutions`
+  forced empty — the bot must not state a customer-specific fact from
+  memory). **`draft`** takes a "Prior resolved cases" block (CONFIRMED
+  DUPLICATE leads); groundedness now counts a cited prior resolution as a
+  source. `confidence_gate` gains opt-in `escalate_answer_modes` (off).
+- Degrades fully: no `case_memory` rows / no embedder / Neo4j down → a
+  no-op, `draft` behaves as before. **Verified live:** informational query →
+  2 citable past "how to set up a Zap" replies (rel 0.84); diagnostic query
+  ("CalloutException in MY hook") → 0 citable + 8 hints, `draft` used KB
+  only, outcome `clarify` (didn't guess). 218 offline pytest (13 new in
+  `test_case_memory.py`).
+- **Deferred (Phase 21b/c):** an `investigate` step that pulls the
+  customer's own logs for diagnostic Cases; `DUPLICATE_OF` / `Incident`
+  clustering; the expertise graph driving `notify`/`ask_human` routing;
+  routing `answer_mode=action` straight to a human.
+
 **2026-08-31 — live scenario sweep (7 real Cases through v6).** Drove
 `scripts/drive_live_scenarios.py` (A–G, senders mapped to the tier
 accounts). **6/7 correct first pass:** how-to→`auto_reply` (real draft, SMTP

@@ -50,8 +50,8 @@ HANDOVER_QUEUE_BY_TEAM = {"offboarding": "Team_Offboarding"}
 CLARIFY_HANDOVER_QUEUE = "Team_Support"
 
 n_identify, n_sf_case, n_retrieve, n_classify, n_route, n_writeback, \
-    n_draft, n_gate, n_auto, n_ask, n_handover, n_notify, n_clarify = (
-        _nid(i) for i in range(1, 14))
+    n_draft, n_gate, n_auto, n_ask, n_handover, n_notify, n_clarify, \
+    n_case_lookup = (_nid(i) for i in range(1, 15))
 
 NODES = [
     (n_identify, "identify", "Resolve the sender",
@@ -67,6 +67,9 @@ NODES = [
      {"default": "support"}),
     (n_writeback, "sf_writeback",
      "Write triage fields to the Case (Type, Module, Priority…)", {}),
+    (n_case_lookup, "case_lookup", "Recall similar resolved Cases (Phase 21)",
+     {"k": 3, "pool": 10, "min_similarity": 0.35, "min_memories": 3,
+      "use_graph": True, "skip_modes": ["action"]}),
     (n_draft, "draft", "Draft the reply from context",
      {"model": "openai/gpt-oss-120b", "max_tokens": 700}),
     (n_gate, "confidence_gate", "Tag manager — score & decide",
@@ -103,7 +106,8 @@ EDGES = [
     (n_retrieve, n_classify, {}),
     (n_classify, n_route, {}),
     (n_route, n_writeback, {}),
-    (n_writeback, n_draft, {}),
+    (n_writeback, n_case_lookup, {}),
+    (n_case_lookup, n_draft, {}),
     (n_draft, n_gate, {}),
     (n_gate, n_handover, {"if": "tier == 'enterprise' or routed_team == 'offboarding'"}),
     (n_gate, n_auto, {"if": f"confidence_gate.pass and {_LIVE}"}),
