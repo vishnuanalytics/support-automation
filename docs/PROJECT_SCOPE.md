@@ -717,10 +717,32 @@ this DB; it's the `sf_entry` flow), published as **v3**. The Case-router
 flow `f0f0f0f0…` was never seeded to this DB — migration `044`'s router half
 lives in `scripts/seed_router_flow.py` + the portable JSON for whenever it
 is stood up; `045` = Phase 20o: `notify_targets` — **applied 2026-08-31**,
-seeded 7 rows for tenant `00000000…`).
-193 offline pytest tests + web tsc/vitest (6)/build +
+seeded 7 rows for tenant `00000000…`; `046` = Phase 20p: the email flow →
+the single comprehensive workflow (`team_route` + 5-way gate) — **applied
+2026-08-31**, published **v4**).
+205 offline pytest tests + web tsc/vitest (6)/build +
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
+
+**Phase 20p (2026-08-31): the email `sf_entry` flow is now the single
+comprehensive workflow — every team, every scenario.** v3 had no team
+routing; v4 splices `team_route` (classify → team_route → sf_writeback) and
+widens `confidence_gate` to a **5-way** split:
+`(enterprise tier OR routed_team==offboarding) → handover [Enterprise_Support
+/ Team_Offboarding]` · `(routed_team ∈ {csm,sales}, non-enterprise) →
+ask_human [Team_CSM / Team_Sales]` · `(support + gate PASS) → auto_reply` ·
+`(support + FAIL + forced escalation) → notify [Case.Type → notify_targets;
+Case stays in Team_Email]` · `(support + FAIL + not forced) → clarify [ask
+the customer; 2 rounds → Team_Support]`. Migration `046` applied → **v4**;
+portable `flow_email_l0l1.json` + `flow_case_router.json` + `seed_router_flow.py`
+all carry the same 13-node shape. `scripts/run_scenarios.py` (fast routing
+check, no LLM) + `tests/test_flow_scenarios.py` (12 cases) — a 10-scenario
+matrix (how-to/vague/billing/login/bug/renewal/pricing/cancellation/enterprise
+× basic/premium/enterprise tiers) all route as expected against the live v4.
+Docker stack rebuilt on v4; SF tier accounts already exist (Northwind
+Ltd=premium/EMEA, Globex Enterprise=enterprise/NA, Indie Dev Co=basic).
+**Live e2e (clarify-exhausted, agent re-engage, customer reply, real inbound
+email) still to run with the worker.**
 
 **Phase 20o (2026-08-31): `notify` targets come from a central table, not
 node config.** So a flow editor never pastes Salesforce ids. Migration `045`
