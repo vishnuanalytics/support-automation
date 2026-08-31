@@ -18,9 +18,12 @@ CI / eval / demos. The stub is heuristic, not smart.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from typing import Any
+
+log = logging.getLogger("interpreter.llm")
 
 # model id -> provider
 MODELS: dict[str, str] = {
@@ -111,7 +114,19 @@ def complete(
     if prov == "anthropic":
         return _anthropic_complete(system, user, model, max_tokens, json_object)
 
-    return _groq_complete(system, user, model, max_tokens, temperature, json_object)
+    try:
+        return _groq_complete(system, user, model, max_tokens, temperature, json_object)
+    except Exception as e:  # noqa: BLE001
+        # Groq free-tier daily token quota (TPD) exhausted, or a transient
+        # 429 that outlived the retry budget: degrade to the deterministic
+        # stub instead of failing the whole Case. Routing / escalation still
+        # work; only draft quality suffers (and the confidence gate catches a
+        # weak stub draft). Any other error is a real bug -> re-raise.
+        if "rate_limit" in str(e).lower() or e.__class__.__name__ == "RateLimitError":
+            log.warning("Groq rate-limited (%s) — falling back to the offline stub", model)
+            last_usage = None
+            return _stub(system, user, json_object=json_object)
+        raise
 
 
 # cap on how long we'll sit blocked on a single rate-limited Groq call
