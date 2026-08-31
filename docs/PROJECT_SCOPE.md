@@ -711,9 +711,18 @@ Supabase-Vault `integration_secret_*` RPCs; `036` = Phase 20e: the
 `042` = Phase 20k: the `flows.sf_entry` flag — applied 2026-08-31 via the
 Supabase SQL editor, `f0f0f0f0-…` (router) backfilled `sf_entry=true`;
 `043` = Phase 20l: `sf_cdc_state` — applied 2026-08-31 via the SQL editor).
-173 offline pytest tests + web tsc/vitest (6)/build +
+175 offline pytest tests + web tsc/vitest (6)/build +
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
+
+**Deploy** (`docs/DEPLOY.md`): the runtime = `worker` + `cdc` + `poller`
+(all outbound-only, no public URL) + optional `api`. `docker-compose.yml`
+runs them locally / on a VM; `Procfile` + `railway.json` for Railway
+(paid — no free tier); `deploy/run_all.py` + `deploy/Dockerfile` bundle
+all three under one supervisor + health port for a single-container free
+host (Hugging Face Spaces, no card). Git-based deploys need
+`SF_PRIVATE_KEY` inline (the `sf_jwt/` file is git-ignored). API is on
+Vercel (`support-automation-ashy.vercel.app`); set `WEB_ORIGINS` there.
 
 Phase 20l's CDC subscriber is **live-verified** (2026-08-31): a real
 inbound `EmailMessage` on Case `500jV0…` streamed off `/data/
