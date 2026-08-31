@@ -724,6 +724,23 @@ the single comprehensive workflow (`team_route` + 5-way gate) — **applied
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
 
+**2026-08-31 — case study: "sent a mail, no automation response".** Root
+cause: **Groq free-tier daily token quota (200K TPD) exhausted** by the
+day's testing — every `run_flow` job was failing 3× with `RateLimitError
+429` at the classify/draft node. `interpreter/llm.py::complete()` now
+catches a post-retry rate-limit and returns the deterministic stub, so a
+Case is still routed + escalated (only draft quality degrades). The
+re-enqueued job then ran clean: the email ("need help for account manager
+zappi") → Email-to-Case → Case `00001170` → CDC → `classify(stub)` →
+`team_route` matched "account manager" → **csm → `ask_human` → reassigned to
+Team_CSM** + Chatter note + draft `CaseComment`; **no customer email** (csm
+owns the relationship — correct). Also observed: the intake is now
+**Salesforce Email-to-Case + CDC**, and the Gmail *poller* channel is
+`status='error'` (an IMAP read timeout) so that redundant second path is
+off. For real-quality drafts today, add `ANTHROPIC_API_KEY` +
+`LLM_DEFAULT_MODEL=claude-sonnet-5` / `LLM_FAST_MODEL=claude-haiku-4-5` to
+`.env` and rebuild the worker.
+
 **Phase 20p (2026-08-31): the email `sf_entry` flow is now the single
 comprehensive workflow — every team, every scenario.** v3 had no team
 routing; v4 splices `team_route` (classify → team_route → sf_writeback) and
