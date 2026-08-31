@@ -724,6 +724,31 @@ the single comprehensive workflow (`team_route` + 5-way gate) — **applied
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
 
+**Phase 23b (2026-08-31): Salesforce-end gap fixes.**
+- **Cross-path Case dedup** — `_thread_msg_ids` now also includes the mail's
+  **own** Message-ID, so the poller's `sf_case` reuses a Case that Email-to-Case
+  already opened for the same mail instead of creating a duplicate. (Safe to
+  run both intake paths; still recommend one.)
+- **CDC `case_created` delivers on the first pass** — `_run_flow` overlays the
+  Case's inbound `EmailMessage` and sets `channel="email"` for **both**
+  `case_created` and `inbound_email` triggers, and collapses them onto one
+  run via `idempotency_key = email:<mid>` (was: `case_created` ran with
+  `channel="salesforce"` → `auto_reply` sent nothing; the parallel
+  `EmailMessageChangeEvent` job re-ran to actually deliver).
+- **`update_case_fields(append=…)` is idempotent** — skips a `[triage]` block
+  already present (was stacking one per re-run).
+- **`resolve_notify_target` TTL-cached** (`NOTIFY_ROUTE_TTL_S`, default 300 s)
+  + `SF_DEDUP_WRITES=0` to skip the `_recent_duplicate` SOQL — keeps under the
+  DE API cap on Oracle.
+- **`notify.config.attention_fields`** — optional Case-field writes (e.g.
+  `{"Bot_Attention__c": true}`) so a record-triggered SF Flow can send an
+  Email Alert (OD-4: Connect @mention 404s on this DE org).
+- **`scripts/sf_support_setup.py --only permset`** — a least-privilege
+  `Support_Bot_Integration` Permission Set for the integration user.
+- 234 offline pytest (5 new). **Operator TODO:** keep the Gmail poller channel
+  `inactive` while Email-to-Case is the intake (don't forward AND poll);
+  assign the permset + downgrade the integration user's profile.
+
 **Phase 23 (2026-08-31): resilience — Tier 1 + Tier 2.**
 - **LLM fallback chain** (`interpreter/llm.py`): `complete()` tries the chosen
   model → `LLM_FALLBACK_MODEL` (an **OpenRouter** `:free` model) → the Groq

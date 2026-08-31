@@ -1057,6 +1057,18 @@ def h_notify(state: CaseState, config: dict) -> dict:
             outcome["draft_comment"] = note
             if note.get("created"):
                 summary += " + draft comment"
+
+        # OD-4 workaround: Connect API @mention 404s on this DE org, so a
+        # Chatter mention doesn't actually notify anyone. Set flag fields on
+        # the Case instead — a record-triggered SF Flow keyed on them can fire
+        # an Email Alert to the routed team. Unknown fields are skipped.
+        af = config.get("attention_fields")
+        if af:
+            rendered = {k: (v.format(label=label, case_type=case_type or "",
+                                     module=module or "") if isinstance(v, str) else v)
+                        for k, v in af.items()}
+            outcome["attention"] = salesforce.update_case_fields(
+                sf_id, rendered, tenant_id=state.get("tenant_id"))
     else:
         summary = f"notify {label!r} (no sf_id — not posted)"
 

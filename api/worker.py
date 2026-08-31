@@ -39,29 +39,36 @@ def _run_flow(payload: dict, sb) -> dict:
     flow_id = payload["flow_id"]
     case = payload["case"]
     key = payload.get("idempotency_key")
-
-    if key:
-        dup = sb.table("runs").select("run_id").eq("flow_id", flow_id) \
-            .eq("idempotency_key", key).execute().data
-        if dup:
-            return {"run_id": dup[0]["run_id"], "idempotent_skip": True}
+    trigger = payload.get("trigger")
 
     # Cases pushed by the Salesforce trigger arrive as a bare id — hydrate
     # the full record here (raises -> the job retries with backoff).
     if case.get("sf_id") and not case.get("subject"):
         case = {**salesforce.get_case(case["sf_id"]), "channel": case.get("channel", "salesforce")}
-        # A CDC `inbound_email` event means the *customer replied*. get_case
-        # returns the (stale) Case Description — overlay the newest incoming
-        # message so the flow re-triages what the customer actually just said.
-        if payload.get("trigger") == "inbound_email":
+        # An email-origin Case (E2C or a customer reply) has an *incoming*
+        # EmailMessage. Overlay it so the flow triages what the customer
+        # actually said, not the stale Case Description — for BOTH the
+        # `case_created` and the `inbound_email` CDC events, so a new
+        # Email-to-Case Case still gets a real reply on the first pass.
+        if trigger in ("inbound_email", "case_created"):
             m = salesforce.latest_inbound_email(case["sf_id"])
             if m and m.get("text"):
                 case.update(body=m["text"], channel="email",
                             subject=m.get("subject") or case.get("subject"))
                 if m.get("from_addr"):
                     case["from"] = m["from_addr"]
-                if m.get("message_id"):
-                    case["message_id"] = m["message_id"]
+                mid = m.get("message_id")
+                if mid:
+                    case["message_id"] = mid
+                    # collapse the CaseChangeEvent + EmailMessageChangeEvent
+                    # for the same mail onto one run: both use `email:<mid>`.
+                    key = f"email:{mid}"
+
+    if key:
+        dup = sb.table("runs").select("run_id").eq("flow_id", flow_id) \
+            .eq("idempotency_key", key).execute().data
+        if dup:
+            return {"run_id": dup[0]["run_id"], "idempotent_skip": True}
 
     flow = load_flow(flow_id=flow_id, sb=sb, status="published", validate=True)
     final = build_graph(flow).invoke({"case": case, "tenant_id": flow["tenant_id"], "team": flow.get("team"), "trace": []})

@@ -242,8 +242,49 @@ def stage_fls(sf, dry: bool) -> None:
             print(f"  {api}: FLS failed — {e}")
 
 
+def stage_permset(sf, dry: bool) -> None:
+    """A least-privilege Permission Set for the integration user — so the bot
+    doesn't run as a full admin. Grants Case/EmailMessage/FeedItem/CaseComment
+    + Contact/Account CRUD and read on the roster fields. Assign it, then
+    downgrade the integration user's profile to 'Minimum Access - Salesforce'.
+    """
+    name = "Support_Bot_Integration"
+    obj_perms = {
+        "Case": dict(Read=True, Create=True, Edit=True, Delete=False, ViewAllRecords=True, ModifyAllRecords=False),
+        "EmailMessage": dict(Read=True, Create=True, Edit=True, Delete=False, ViewAllRecords=True, ModifyAllRecords=False),
+        "CaseComment": dict(Read=True, Create=True, Edit=True, Delete=False),
+        "Contact": dict(Read=True, Create=True, Edit=True, Delete=False, ViewAllRecords=True, ModifyAllRecords=False),
+        "Account": dict(Read=True, Create=True, Edit=True, Delete=False, ViewAllRecords=True, ModifyAllRecords=False),
+    }
+    rows = sf.query(f"SELECT Id FROM PermissionSet WHERE Name = '{name}'")["records"]
+    if rows:
+        ps_id = rows[0]["Id"]
+        print(f"  PermissionSet {name}: exists ({ps_id})")
+    elif dry:
+        print(f"  PermissionSet {name}: WOULD create + grant {list(obj_perms)}")
+        return
+    else:
+        ps_id = sf.PermissionSet.create({"Name": name, "Label": "Support Bot Integration"})["id"]
+        print(f"  PermissionSet {name}: created ({ps_id})")
+    if dry:
+        return
+    have = {r["SobjectType"] for r in sf.query(
+        f"SELECT SobjectType FROM ObjectPermissions WHERE ParentId = '{ps_id}'")["records"]}
+    for obj, perms in obj_perms.items():
+        if obj in have:
+            print(f"    {obj}: object perms set"); continue
+        try:
+            sf.ObjectPermissions.create({"ParentId": ps_id, "SobjectType": obj,
+                                         **{f"Permissions{k}": v for k, v in perms.items()}})
+            print(f"    {obj}: granted")
+        except Exception as e:  # noqa: BLE001
+            print(f"    {obj}: failed — {e}")
+    print(f"  -> assign it:  System > Permission Sets > {name} > Manage Assignments > add the integration user")
+    print("  -> then set that user's Profile to 'Minimum Access - Salesforce'")
+
+
 STAGES = {"queues": stage_queues, "types": stage_types,
-          "fields": stage_fields, "fls": stage_fls}
+          "fields": stage_fields, "fls": stage_fls, "permset": stage_permset}
 
 
 def main() -> int:

@@ -18,11 +18,27 @@ to this resolver when the node config has no match. Everything degrades to
 from __future__ import annotations
 
 import logging
+import os
+import time
 from typing import Any
 
 from interpreter import salesforce
 
 log = logging.getLogger("interpreter.routing")
+
+# TTL cache — routing config + the SF lookups it does barely change, and this
+# runs on every escalation. Keeps us well under the Dev-Edition API cap.
+_TTL_S = float(os.environ.get("NOTIFY_ROUTE_TTL_S", "300"))
+_cache: dict[str, tuple[float, Any]] = {}
+
+
+def _cache_get(key: str) -> Any:
+    hit = _cache.get(key)
+    return hit[1] if hit and hit[0] > time.monotonic() else None
+
+
+def _cache_put(key: str, value: Any) -> None:
+    _cache[key] = (time.monotonic() + _TTL_S, value)
 
 
 def _default_sb():
@@ -102,15 +118,22 @@ def resolve_notify_target(
 
     Returns `{"id", "type", "label", "resolver"}` (id/type may be `None` when
     the row is note-only or the live lookup found nobody), or `None` when no
-    row matches / the table is unavailable.
+    row matches / the table is unavailable. Result is cached `NOTIFY_ROUTE_TTL_S`
+    (default 300 s) so an escalation storm doesn't hammer the SF API.
     """
+    ck = f"resolve:{tenant_id}:{case_type}:{module}"
+    cached = _cache_get(ck)
+    if cached is not None:
+        return None if cached == "__none__" else cached
+
     rows = _fetch_rows(tenant_id, sb)
     if not rows:
-        return None
+        return None                       # table down — don't cache a transient miss
     by_type = {r["match_value"]: r for r in rows if r.get("match_kind") == "case_type"}
     by_mod = {r["match_value"]: r for r in rows if r.get("match_kind") == "module"}
     row = (case_type and by_type.get(case_type)) or (module and by_mod.get(module))
     if not row:
+        _cache_put(ck, "__none__")
         return None
 
     resolver = row.get("resolver") or "static"
@@ -133,4 +156,6 @@ def resolve_notify_target(
         if name and not row.get("label"):
             role = row.get("sf_role") or "Manager"
             out["label"] = f"{name} ({row['sf_team']} {role})"
+
+    _cache_put(ck, out)
     return out

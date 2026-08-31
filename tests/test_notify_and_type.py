@@ -33,6 +33,7 @@ def _hermetic(monkeypatch):
     for k in _HERMETIC:
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setattr(salesforce, "_client_obj", None, raising=False)
+    routing._cache.clear()   # the resolve_notify_target TTL cache is module-level
     # no notify_targets rows unless a test provides them (keeps h_notify off the DB)
     monkeypatch.setattr(routing, "_fetch_rows", lambda tenant_id, sb: [])
 

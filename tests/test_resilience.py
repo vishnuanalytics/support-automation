@@ -172,3 +172,56 @@ def test_plan_events_drops_the_bots_own_owner_change():
     assert specs and specs[0].trigger == "case_owner_changed"
     # no bot id known -> don't filter (back-compat)
     assert plan_events(_owner_evt("005BOT"), "aa") != []
+
+
+# --------------------------------------------------------------------------
+# Salesforce: cross-path Case dedup + append idempotency
+# --------------------------------------------------------------------------
+def test_thread_ids_include_the_messages_own_id():
+    ids = salesforce._thread_msg_ids({
+        "message_id": "<own@x>", "in_reply_to": "<parent@y>", "references": ["<root@z>"],
+    })
+    assert "<own@x>" in ids and "own@x" in ids           # so E2C's Case is found + reused
+    assert ids.index("<own@x>") < ids.index("<parent@y>")
+
+
+def test_update_case_fields_append_is_idempotent(monkeypatch):
+    monkeypatch.setattr(salesforce, "available", lambda: True)
+    updates: list = []
+
+    class _C:
+        class Case:
+            _desc = "line one"
+
+            @classmethod
+            def get(cls, cid):
+                return {"Description": cls._desc}
+
+            @classmethod
+            def update(cls, cid, rec):
+                updates.append(rec)
+                if "Description" in rec:
+                    cls._desc = rec["Description"]
+
+    monkeypatch.setattr(salesforce, "client_for", lambda *a, **k: _C())
+
+    salesforce.update_case_fields("500X", {}, append={"Description": "[triage] hello"})
+    salesforce.update_case_fields("500X", {}, append={"Description": "[triage] hello"})
+    # the block is written once; the second run sees it already present -> no-op
+    assert sum("[triage] hello" in (u.get("Description") or "") for u in updates) == 1
+
+
+def test_routing_cache_hits(monkeypatch):
+    from interpreter import routing
+
+    routing._cache.clear()
+    monkeypatch.setattr(routing, "_fetch_rows",
+                        lambda t, sb: [{"match_kind": "case_type", "match_value": "Billing",
+                                        "resolver": "static", "sf_target_id": "005X",
+                                        "sf_target_type": "user", "label": "Billing"}])
+    calls = [0]
+    orig = routing._fetch_rows
+    monkeypatch.setattr(routing, "_fetch_rows", lambda t, sb: (calls.__setitem__(0, calls[0] + 1), orig(t, sb))[1])
+    routing.resolve_notify_target("t", "Billing", None)
+    routing.resolve_notify_target("t", "Billing", None)
+    assert calls[0] == 1                                   # second call served from cache

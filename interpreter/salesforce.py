@@ -446,6 +446,9 @@ def update_case_fields(
         current = sf.Case.get(case_id)
         for fld, text in append.items():
             base = (current.get(fld) or "").strip()
+            # idempotent: a re-run must not stack the same [triage] block again
+            if text and text.strip() and text.strip() in base:
+                continue
             fields[fld] = f"{base}\n\n{text}".strip() if base else text
 
     if not fields:
@@ -521,7 +524,10 @@ def _recent_duplicate(sf, sobject: str, case_id: str, body_field: str, body: str
                       minutes: int = 180) -> bool:
     """True if an identical (same leading text) row already exists on the Case
     in the last `minutes` — so a re-run of the same flow doesn't stack a
-    second identical Chatter note / draft CaseComment (Phase 23)."""
+    second identical Chatter note / draft CaseComment (Phase 23). Set
+    SF_DEDUP_WRITES=0 to skip the check (saves one SOQL per escalation)."""
+    if os.environ.get("SF_DEDUP_WRITES") == "0":
+        return False
     try:
         from datetime import datetime, timedelta, timezone
 
@@ -563,10 +569,16 @@ def add_case_comment(case_id: str, body: str, *, published: bool = False,
 # case bootstrap from an inbound message (Phase 20e / 20f)
 # --------------------------------------------------------------------------
 def _thread_msg_ids(case: dict[str, Any]) -> list[str]:
-    """RFC Message-IDs the inbound email threads onto (In-Reply-To +
-    References), de-duplicated, each offered with and without angle brackets
-    (Salesforce stores `EmailMessage.MessageIdentifier` without them)."""
+    """RFC Message-IDs this inbound email is linked to — In-Reply-To,
+    References, **and its own Message-ID**. De-duplicated, each with and
+    without angle brackets (Salesforce stores `EmailMessage.MessageIdentifier`
+    without them). Including the message's own id lets `find_case_by_thread`
+    reuse a Case that Salesforce Email-to-Case already created for this exact
+    mail — so the poller and E2C don't both open a Case."""
     raw: list[str] = []
+    v = case.get("message_id")
+    if isinstance(v, str) and v.strip():
+        raw.append(v.strip())
     v = case.get("in_reply_to")
     if isinstance(v, str) and v.strip():
         raw.append(v.strip())
