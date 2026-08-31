@@ -68,6 +68,11 @@ export const api = {
   deleteFlow: (id: string) => req<string>(`/flows/${id}`, { method: "DELETE" }),
   publishFlow: (id: string) =>
     req<{ published_version: number }>(`/flows/${id}/publish`, { method: "POST" }),
+  setSfEntry: (id: string, sf_entry: boolean) =>
+    req<{ sf_entry: boolean }>(`/flows/${id}/sf-entry`, {
+      method: "PUT",
+      body: JSON.stringify({ sf_entry }),
+    }),
   listVersions: (id: string) => req<FlowVersion[]>(`/flows/${id}/versions`),
   rollbackFlow: (id: string, version: number) =>
     req<{ published_version: number }>(`/flows/${id}/rollback`, {

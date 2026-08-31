@@ -280,6 +280,22 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
     setBusy(false);
   }
 
+  async function doSetSfEntry(on: boolean) {
+    setBusy(true);
+    try {
+      await api.setSfEntry(flowId, on);
+      await reload();
+      setBanner({
+        kind: "ok",
+        text: on ? "this flow now runs on new Salesforce Cases" : "disconnected from Salesforce",
+      });
+      onSaved();
+    } catch (e) {
+      setBanner({ kind: "err", text: (e as ApiError).message });
+    }
+    setBusy(false);
+  }
+
   async function doRollback(v: number) {
     if (!confirm(`Roll back the draft + published pointer to v${v}?`)) return;
     setBusy(true);
@@ -331,6 +347,28 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
         </span>
         {!canEdit && (
           <span className="pill" title="your access is view-only">view-only</span>
+        )}
+        {canEdit ? (
+          <label
+            className={`pill ${flow.sf_entry ? "published" : ""}`}
+            title="when on, POST /api/hooks/salesforce/case runs this flow for every new Case (one flow per workspace)"
+            style={{ cursor: busy ? "wait" : "pointer" }}
+          >
+            <input
+              type="checkbox"
+              checked={!!flow.sf_entry}
+              disabled={busy}
+              onChange={(e) => doSetSfEntry(e.target.checked)}
+              style={{ marginRight: 4 }}
+            />
+            Salesforce entry
+          </label>
+        ) : (
+          flow.sf_entry && (
+            <span className="pill published" title="the Salesforce Case hook runs this flow">
+              Salesforce entry
+            </span>
+          )
         )}
         {canEdit && versions.length > 0 && (
           <select

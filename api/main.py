@@ -306,7 +306,7 @@ def node_types() -> dict:
 def list_flows(c: Caller = Depends(caller)) -> list[dict]:
     rows = (
         c.sb.table("flows")
-        .select("flow_id, tenant_id, team, name, status, version, published_version, updated_at")
+        .select("flow_id, tenant_id, team, name, status, version, published_version, sf_entry, updated_at")
         .order("tenant_id").order("team").execute().data
         or []
     )
@@ -448,6 +448,7 @@ def get_flow(flow_id: str, c: Caller = Depends(caller)) -> dict:
     except FlowNotFound:
         raise HTTPException(404, "flow not found")
     d["published_version"] = meta.get("published_version")
+    d["sf_entry"] = meta.get("sf_entry", False)
     return d
 
 
@@ -617,6 +618,24 @@ def delete_flow(flow_id: str, c: Caller = Depends(caller)) -> None:
     c.sb.table("flows").delete().eq("flow_id", flow_id).execute()  # cascades nodes/edges
 
 
+class SfEntryIn(BaseModel):
+    sf_entry: bool
+
+
+@app.put("/api/flows/{flow_id}/sf-entry")
+def set_sf_entry(flow_id: str, body: SfEntryIn, c: Caller = Depends(caller)) -> dict:
+    """Mark (or unmark) this flow as the one `POST /api/hooks/salesforce/case`
+    runs. At most one per tenant (migration 042's partial-unique index) — so
+    turning it on clears the flag on the tenant's other flows first."""
+    meta = _require_visible(c, flow_id)
+    _require_editor(c, meta["tenant_id"])
+    if body.sf_entry:
+        c.sb.table("flows").update({"sf_entry": False}) \
+            .eq("tenant_id", meta["tenant_id"]).neq("flow_id", flow_id).execute()
+    c.sb.table("flows").update({"sf_entry": body.sf_entry}).eq("flow_id", flow_id).execute()
+    return {"sf_entry": body.sf_entry}
+
+
 @app.post("/api/flows/{flow_id}/run")
 def run_flow(
     flow_id: str,
@@ -691,7 +710,7 @@ def enqueue_run(flow_id: str, body: EnqueueIn, c: Caller = Depends(caller)) -> d
 
 class SFCaseHookIn(BaseModel):
     case_id: str
-    flow_id: str | None = None       # optional override; else the published 'router' flow
+    flow_id: str | None = None       # optional override; else the flow marked `sf_entry`
 
 
 @app.post("/api/hooks/salesforce/case", status_code=202)
@@ -701,8 +720,9 @@ def salesforce_case_hook(
 ) -> dict:
     """Salesforce → automation **push**. A record-triggered Flow on Case
     (After Save, on Create, Status='New', not bot-created) POSTs `{case_id}`
-    here; we pull the Case, resolve the published router flow, and queue a
-    `run_flow` job (deduped on the Case Id). No user auth — a shared secret
+    here; we pull the Case, resolve the flow marked `sf_entry` (the one the
+    editor's "Salesforce entry" toggle points at), and queue a `run_flow`
+    job (deduped on the Case Id). No user auth — a shared secret
     (`SF_HOOK_SECRET`) gates it. Returns 202."""
     want = os.environ.get("SF_HOOK_SECRET")
     if not want or secret != want:
@@ -711,9 +731,13 @@ def salesforce_case_hook(
     flow_id = body.flow_id
     if not flow_id:
         rows = (_service.table("flows").select("flow_id")
-                .eq("team", "router").eq("status", "published").execute().data or [])
+                .eq("sf_entry", True).eq("status", "published").execute().data or [])
         if len(rows) != 1:
-            raise HTTPException(500, f"expected exactly one published 'router' flow, found {len(rows)}")
+            raise HTTPException(
+                500,
+                f"expected exactly one published flow marked 'Salesforce entry', found {len(rows)} "
+                "— set one with the toggle in the flow editor (PUT /api/flows/{id}/sf-entry)",
+            )
         flow_id = rows[0]["flow_id"]
 
     # Enqueue a bare Case Id — the worker hydrates it via `salesforce.get_case`

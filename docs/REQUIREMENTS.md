@@ -115,6 +115,11 @@ planned future channel — it must slot in as another adapter, not a rewrite
 ### Platform
 - **FR-17** Flows, thresholds, KB sources, and channel config MUST be
   editable in the web UI without code. _(built)_
+- **FR-17a** Exactly one flow per workspace is the **Salesforce entry
+  flow** — the one `POST /api/hooks/salesforce/case` runs. It MUST be
+  selectable in the web UI (a toggle), not hard-coded to a team.
+  _(built — `flows.sf_entry`, migration `042`; interim for the full
+  queue → flow binding, which stays a future phase.)_
 - **FR-18** All tenant data MUST be RLS-isolated. Mailbox / CRM secrets MUST
   live in Supabase Vault, never returned to the browser. _(built)_
 - **FR-19** Every run MUST be recorded — trace, gate math, retrieval,
@@ -246,7 +251,7 @@ Tracked in `PROJECT_SCOPE.md`; summary as of 2026-08-30.
 | **FR-21** Team routing | `team_route` node → `state.routed_team` ∈ {support, csm, sales, offboarding} from keyword rules (renewal/expansion → csm, pricing/pre-sales → sales, cancellation/data-export → offboarding, else support). The design doc's "One team, one flow" as a routing step. |
 | **FR-22** Team-aware escalation | `ask_human` / `handover` resolve `Case.OwnerId` to the routed team's queue (`queue_by_team`); a `support` billing escalation → `Billing_Escalations`; enterprise → `Enterprise_Support`. |
 | **FR-23** Team roster in SF | `Contact.Team__c` + `Contact.TeamRole__c`; 2 real Users (Support/CSM managers) + 13 Contacts, 1 Manager + 2 Members per team. `scripts/sf_seed_teams.py`. |
-| **FR-24** Salesforce → automation push | `POST /api/hooks/salesforce/case` (shared secret) pulls the Case and queues the router flow. SF side: a record-triggered Flow → HTTP Callout (no Apex). |
+| **FR-24** Salesforce → automation push | `POST /api/hooks/salesforce/case` (shared secret) pulls the Case and queues the flow marked **`sf_entry`** (FR-17a; was hard-coded `team='router'`). SF side: a record-triggered Flow / Apex trigger → HTTP Callout (`scripts/sf_deploy_case_hook.py`), fires on a new `Status='New'`, non-Email Case. Still request/response — no durable retry; CDC + Pub/Sub API is the planned upgrade (covers new-email-on-Case + queue-change events too). |
 
 **Still open:**
 

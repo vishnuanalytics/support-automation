@@ -703,12 +703,14 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**Phases 0–20 built. No open phase.** Migrations `001`–`040` applied
+**Phases 0–20 built. No open phase.** Migrations `001`–`042` applied
 (`034`/`035` = Phase 20a: `tenant_integrations` poller columns + the
 Supabase-Vault `integration_secret_*` RPCs; `036` = Phase 20e: the
 "Email L0/L1 — inbound to Salesforce" flow, team `email`, tenant Acme;
-`037` = Phase 20f: that flow's `sf_case` → thread-based Case reuse).
-160 offline pytest tests + web tsc/vitest (6)/build +
+`037` = Phase 20f: that flow's `sf_case` → thread-based Case reuse;
+`042` = Phase 20k: the `flows.sf_entry` flag — applied 2026-08-31 via the
+Supabase SQL editor, `f0f0f0f0-…` (router) backfilled `sf_entry=true`).
+162 offline pytest tests + web tsc/vitest (6)/build +
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
 Phase 18d's button is built but signing in with Google needs the Supabase
@@ -716,6 +718,31 @@ dashboard Google provider enabled first (`docs/GOOGLE_SETUP.md`
 §"Google sign-in"); the Phase 20 Gmail *provider* needs the same
 `GOOGLE_CLIENT_ID`/`SECRET` + a redirect registered (the IMAP path needs
 nothing server-side).
+
+**2026-08-31 — Phase 20k: pick which flow the Salesforce hook runs.**
+- **Migration `042`** (applied 2026-08-31): `flows.sf_entry boolean`
+  + partial-unique `uq_one_sf_entry_flow_per_tenant` (`where sf_entry`).
+  Backfilled `sf_entry = true` on the published `team='router'` flow
+  (`f0f0f0f0-…`, tenant `00000000-…`) so behaviour is unchanged.
+- **`POST /api/hooks/salesforce/case`** now resolves the entry flow by
+  `sf_entry = true and status = 'published'` (was: hard-coded
+  `team = 'router'`). Zero/many matches → a 500 that tells you to set the
+  toggle.
+- **`PUT /api/flows/{id}/sf-entry {sf_entry: bool}`** (editor-role) — sets
+  the flag, first clearing it on the tenant's other flows so there's
+  always ≤1. `sf_entry` is surfaced in `GET /api/flows` + `GET
+  /api/flows/{id}`.
+- **Web**: a **Salesforce entry** checkbox-pill in the flow editor
+  toolbar (green when on); read-only viewers see a static pill when set.
+  `api.setSfEntry()`, `FlowMeta.sf_entry`.
+- **Scope note:** deliberately *not* the full `flow_bindings`
+  (queue → flow) design — that stays a future phase. This is the
+  one-flow-for-all-teams interim: mark one flow, delete or ignore the
+  rest.
+- **Verify:** 162 offline pytest (2 new — the SF hook needs its shared
+  secret; `/sf-entry` needs a token) + an integration test
+  (`test_sf_entry_is_one_per_tenant`: flipping the flag on flow B clears
+  it on flow A); web tsc/vitest (6)/build green.
 
 **2026-08-30 — Phase 20j: local Docker runtime + SMTP outbound (no cloud,
 no credit card).**

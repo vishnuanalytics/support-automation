@@ -27,6 +27,7 @@ export interface FlowMeta {
   status: "draft" | "published" | "archived";
   version: number;
   published_version: number | null;
+  sf_entry?: boolean;          // the Salesforce Case hook runs this flow
   updated_at?: string;
 }
 
