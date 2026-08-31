@@ -709,17 +709,17 @@ Supabase-Vault `integration_secret_*` RPCs; `036` = Phase 20e: the
 "Email L0/L1 — inbound to Salesforce" flow, team `email`, tenant Acme;
 `037` = Phase 20f: that flow's `sf_case` → thread-based Case reuse;
 `042` = Phase 20k: the `flows.sf_entry` flag — applied 2026-08-31 via the
-Supabase SQL editor, `f0f0f0f0-…` (router) backfilled `sf_entry=true`).
-**`043` (Phase 20l — `sf_cdc_state`) is written but NOT yet applied** —
-run it in the Supabase SQL editor before starting `ingestion.sf_cdc_watch`.
+Supabase SQL editor, `f0f0f0f0-…` (router) backfilled `sf_entry=true`;
+`043` = Phase 20l: `sf_cdc_state` — applied 2026-08-31 via the SQL editor).
 173 offline pytest tests + web tsc/vitest (6)/build +
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
 
-Phase 20l's CDC subscriber is code-complete but **not live-verified** —
-needs the running process against the org (`Case` + `EmailMessage` are
-already in Setup → Change Data Capture) + a Salesforce JWT session. Same
-"built, pending live creds" status as the other Phase 20 connectors.
+Phase 20l's CDC subscriber is **live-verified** (2026-08-31): a real
+inbound `EmailMessage` on Case `500jV0…` streamed off `/data/
+EmailMessageChangeEvent` → `inbound_email` job enqueued, other events
+ignored, replay cursor persisted for both topics. Run it with
+`python -m ingestion.sf_cdc_watch` (docker-compose `cdc` service).
 Phase 18d's button is built but signing in with Google needs the Supabase
 dashboard Google provider enabled first (`docs/GOOGLE_SETUP.md`
 §"Google sign-in"); the Phase 20 Gmail *provider* needs the same
@@ -764,8 +764,14 @@ Pub/Sub API.**
 - **docker-compose**: a `cdc` service (`restart: unless-stopped`).
   `requirements.txt` += `grpcio` / `protobuf` / `fastavro`.
 - **Verify:** 173 offline pytest (11 new in `test_sf_pubsub_plan.py` —
-  the planner matrix + stub-import + creds-less CLI no-op). **Not**
-  live-verified — needs the subscriber process running against the org.
+  the planner matrix + stub-import + creds-less CLI no-op). **Live e2e
+  (2026-08-31, `--max-events 3`):** subscribed both topics at LATEST; a
+  real inbound `EmailMessage` on Case `500jV000005eD6wQAE` →
+  `plan_events` → one `run_flow` job (`trigger=inbound_email`,
+  deduped `sfemail:{id}`); 3 other change events decoded and correctly
+  ignored (no jobs); `sf_cdc_state` holds a 29-byte replay id per topic
+  → restart resumes. Job left `queued` (no worker was running — that
+  leg is Phase 10/20i).
 - **Transition note:** with both push paths live a new Case dedupes
   (shared `sfcase:{id}` key); once CDC is confirmed, retire the Apex
   trigger from `scripts/sf_deploy_case_hook.py` (or keep it as a
