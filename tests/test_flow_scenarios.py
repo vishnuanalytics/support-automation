@@ -77,7 +77,7 @@ def test_flow_compiles_and_gate_is_exhaustive():
         ("how-to KB-covered / basic",      "zap-activation",             "basic",      0.92, "auto_reply"),
         ("vague no detail / basic",        "unclear",                    "basic",      0.10, "clarify"),
         ("billing double charge / basic",  "billing-refund",             "basic",      0.20, "notify"),
-        ("account-login SSO / basic",      "account-access-sso",         "basic",      0.20, "notify"),
+        ("account-login SSO / basic",      "sso-login",         "basic",      0.20, "notify"),
         ("bug KB-thin / basic",            "webhook-error",              "basic",      0.15, "clarify"),
         ("renewal + seats / premium",      "contract-renewal",           "premium",    0.30, "ask_human"),
         ("pre-sales pricing / basic",      "pricing-quote",              "basic",      0.30, "ask_human"),

@@ -26,8 +26,8 @@
         "weights": { "retrieval": 0.55, "draft": 0.1, "groundedness": 0.35 },
         "default_threshold": 0.5,
         "tier_overrides": { "basic": 0.5, "premium": 0.6, "enterprise": 0.75 },
-        "escalate_topics": ["billing", "refund", "pricing", "legal", "compliance", "account-access", "data-export", "partner-api", "cancellation"],
-        "escalate_modules": ["Billing & Plans"],
+        "escalate_topics": ["billing", "refund", "pricing", "legal", "compliance", "account-access", "data-export", "partner-api", "cancellation", "sso", "saml", "login", "locked out", "lockout", "2fa", "mfa", "password reset"],
+        "escalate_modules": ["Billing & Plans", "Account & Login"],
         "escalate_types": ["Billing", "Account / Login"]
       } },
     { "node_id": "auto_reply", "type": "auto_reply", "label": "Send the drafted reply", "config": { "channel": "email" } },

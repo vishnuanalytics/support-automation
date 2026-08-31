@@ -50,7 +50,7 @@ SCENARIOS = [
     ("03 billing double charge / basic",     "Charged twice",
      "you charged my card twice for the annual plan, refund one", "basic", "billing-refund", 0.20, "notify"),
     ("04 account/login SSO / basic",         "Locked out",
-     "cannot log in, our SSO SAML with Okta stopped working", "basic", "account-access-sso", 0.20, "notify"),
+     "cannot log in, our SSO SAML with Okta stopped working", "basic", "sso-login", 0.20, "notify"),
     ("05 bug webhook 500 KB-thin / basic",   "Webhook 500",
      "our webhook endpoint intermittently returns a 500 error since yesterday", "basic", "webhook-error", 0.15, "clarify"),
     ("06 renewal + add seats / premium",     "Renew contract and add seats",

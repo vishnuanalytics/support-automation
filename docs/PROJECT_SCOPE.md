@@ -724,6 +724,22 @@ the single comprehensive workflow (`team_route` + 5-way gate) — **applied
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
 
+**2026-08-31 — live scenario sweep (7 real Cases through v6).** Drove
+`scripts/drive_live_scenarios.py` (A–G, senders mapped to the tier
+accounts). **6/7 correct first pass:** how-to→`auto_reply` (real draft, SMTP
+sent); billing→`notify` "Billing team [table:sf_queue]" **owner unchanged**;
+renewal→`ask_human`→**Team_CSM**; cancel/GDPR→`handover`→**Team_Offboarding**;
+enterprise-tier→`handover`→**Enterprise_Support**; `Case.Type` set on every
+Case. **One miss → fixed:** "Locked out, SSO/Okta" was LLM-typed `Problem /
+Bug`, so it missed `escalate_types` and the topic `sso-login` didn't
+token-match `account-access` → it went to `clarify`. **Migration `047`**
+widened the gate: `escalate_modules += "Account & Login"`, `escalate_topics
++= sso/saml/login/locked out/lockout/2fa/mfa/password reset`. Re-drove C →
+`notify` (`forced: topic 'sso-login' ~ 'sso'`). (It resolves to the Support
+eng lead via the `Problem / Bug` `notify_targets` row — an SSO outage as a
+technical incident; add a classify override or a topic-keyed row if login
+issues should always hit the identity rep.)
+
 **2026-08-31 — case study: "sent a mail, no automation response".** Root
 cause: **Groq free-tier daily token quota (200K TPD) exhausted** by the
 day's testing — every `run_flow` job was failing 3× with `RateLimitError
