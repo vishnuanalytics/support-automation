@@ -724,6 +724,26 @@ the single comprehensive workflow (`team_route` + 5-way gate) — **applied
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
 
+**Phase 22 (2026-08-31): one timeline per Case.** `GET /api/trace/{key}`
+(`key` = Salesforce Case number / Case id / run_id / job_id; a bare Case
+number is resolved to its Id via SOQL) stitches **`jobs` + `runs` + every
+trace node + errors** into one time-ordered story — so "why did the bot do
+this / why did the Case fail / why these labels / why did it go stale" is
+one lookup, not a SQL hunt across three tables + `docker logs`.
+`api/trace.py::build_timeline` (pure) flags: `degraded_llm` (any node ran in
+stub mode — the Groq-quota tell), `stale_jobs` (stuck `running` past the
+10-min reclaim window), `failed_jobs` (+ the error text), `labels_written`
+/ `labels_skipped` (from `sf_writeback`), `final_queue`, total ms / tokens.
+`?format=md` → a plain-text report to paste into a demo. Web **Trace** tab
+(`web/src/trace/TraceView.tsx`): a search box → the timeline, each node
+expandable to its full `data` (gate math, retrieval, SF payload); errors in
+red, a "LLM STUB (quota)" badge, "copy as text". Read-only, auth-gated, uses
+the service client (to join `jobs`). 4 new tests (`test_trace.py`); 222
+offline pytest. **Verified live** against Case `500jV0…5y4DxQAI` — shows the
+3 Groq-429 job failures, the manual-retry run, every node with timings, the
+`classify [stub]` flag, `team_route` "matched 'account manager' → csm",
+`sf_writeback` labels, gate `0.573 vs 0.50 → PASS`, `ask_human → Team_CSM`.
+
 **Phase 21 (2026-08-31): Case-resolution memory — answer from past
 resolutions, not just docs.** Migrations `048` (`case_memory` table: one row
 per resolved Case + a 384-d embedding + `match_case_memory` pgvector kNN,

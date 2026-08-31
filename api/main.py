@@ -26,10 +26,13 @@ Run:  uvicorn api.main:app --reload
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import uuid
 from typing import Any
+
+log = logging.getLogger("api")
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -838,6 +841,86 @@ def get_run(run_id: str, c: Caller = Depends(caller)) -> dict:
     if not rows:
         raise HTTPException(404, "run not found")
     return rows[0]
+
+
+# ── Phase 22: one timeline per Case (jobs + runs + nodes + errors) ─────
+def _q(fn):
+    """run a supabase query, swallow any error -> []."""
+    try:
+        return fn() or []
+    except Exception as e:  # noqa: BLE001
+        log.warning("trace query failed: %s", e)
+        return []
+
+
+@app.get("/api/trace/{key}")
+def get_trace(key: str, format: str = "json", c: Caller = Depends(caller)):
+    """Everything that happened for a Case, in order. `key` = a Salesforce
+    Case id, a Case number, a run_id, or a job_id. `?format=md` -> plain text.
+    Read-only, auth-gated; uses the service client so it can join `jobs`."""
+    from api.trace import build_timeline, render_markdown
+
+    key = key.strip()
+    S = _service
+
+    runs: dict[str, dict] = {}
+    for r in (_q(lambda: S.table("runs").select("*").eq("run_id", key).execute().data)
+              + _q(lambda: S.table("runs").select("*").eq("case_id", key).execute().data)
+              + _q(lambda: S.table("runs").select("*").eq("case_payload->>sf_id", key).execute().data)
+              + _q(lambda: S.table("runs").select("*").eq("case_payload->>case_number", key).execute().data)):
+        runs[r["run_id"]] = r
+
+    # widen: every case id / number / idempotency key those runs touched
+    ids: set[str] = {key}
+    ikeys: set[str] = set()
+    for r in runs.values():
+        cp = r.get("case_payload") or {}
+        for v in (r.get("case_id"), cp.get("sf_id"), cp.get("case_number")):
+            if v:
+                ids.add(str(v))
+        if r.get("idempotency_key"):
+            ikeys.add(r["idempotency_key"])
+
+    # a bare Case number typed straight from Salesforce -> resolve to its Id
+    if key.isdigit() and len(key) >= 5:
+        try:
+            from interpreter import salesforce as _sf
+            if _sf.available():
+                rec = _sf.client_for(None).query(
+                    f"SELECT Id FROM Case WHERE CaseNumber = '{_sf._soql_lit(key)}' LIMIT 1"
+                ).get("records", [])
+                if rec:
+                    ids.add(rec[0]["Id"])
+        except Exception as e:  # noqa: BLE001
+            log.warning("trace: CaseNumber->Id lookup failed: %s", e)
+
+    for i in list(ids):
+        for r in _q(lambda i=i: S.table("runs").select("*").eq("case_id", i).execute().data):
+            runs.setdefault(r["run_id"], r)
+        for r in _q(lambda i=i: S.table("runs").select("*").eq("case_payload->>sf_id", i).execute().data):
+            runs.setdefault(r["run_id"], r)
+
+    jobs: dict[str, dict] = {}
+    for jid in list(ids) + [key]:
+        for j in (_q(lambda jid=jid: S.table("jobs").select("*").eq("job_id", jid).execute().data)
+                  + _q(lambda jid=jid: S.table("jobs").select("*").ilike("dedupe_key", f"%{jid}%").execute().data)
+                  + _q(lambda jid=jid: S.table("jobs").select("*").eq("payload->case->>sf_id", jid).execute().data)):
+            jobs[j["job_id"]] = j
+    for ik in ikeys:
+        for j in _q(lambda ik=ik: S.table("jobs").select("*").eq("payload->>idempotency_key", ik).execute().data):
+            jobs[j["job_id"]] = j
+
+    if not runs and not jobs:
+        raise HTTPException(404, f"nothing found for {key!r} (Case id / number / run_id / job_id)")
+
+    channel_rows = _q(lambda: S.table("tenant_integrations")
+                      .select("kind,status,last_error,last_poll_at").execute().data)
+
+    t = build_timeline(key=key, runs=list(runs.values()), jobs=list(jobs.values()),
+                       channel_errors=[r for r in channel_rows if r.get("last_error")])
+    if format == "md":
+        return PlainTextResponse(render_markdown(t))
+    return t
 
 
 # ── Phase 14: self-serve internal knowledge base ──────────────────────
