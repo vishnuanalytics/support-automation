@@ -34,13 +34,13 @@ export function toReactFlow(flow: Flow): { nodes: RFNode[]; edges: RFEdge[] } {
 
 export function layout(nodes: RFNode[], edges: RFEdge[]): RFNode[] {
   const g = new Dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
-  g.setGraph({ rankdir: "LR", nodesep: 40, ranksep: 90 });
-  nodes.forEach((n) => g.setNode(n.id, { width: 170, height: 48 }));
+  g.setGraph({ rankdir: "LR", nodesep: 70, ranksep: 140, edgesep: 30 });
+  nodes.forEach((n) => g.setNode(n.id, { width: 200, height: 56 }));
   edges.forEach((e) => g.setEdge(e.source, e.target));
   Dagre.layout(g);
   return nodes.map((n) => {
     const p = g.node(n.id);
-    return { ...n, position: { x: Math.round(p.x - 85), y: Math.round(p.y - 24) } };
+    return { ...n, position: { x: Math.round(p.x - 100), y: Math.round(p.y - 28) } };
   });
 }
 

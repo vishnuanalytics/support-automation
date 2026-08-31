@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   addEdge,
   Background,
@@ -65,7 +65,78 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
   const [assistBusy, setAssistBusy] = useState(false);
 
   const nodeTypes = useMemo(() => ({ flowNode: NodeCard }), []);
-  const mark = useCallback(() => setDirty(true), []);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [nodeFilter, setNodeFilter] = useState("");
+
+  // ── undo / redo (Ctrl/Cmd+Z) ───────────────────────────────────────
+  type Snap = { nodes: RFNode[]; edges: RFEdge[]; cfg: Record<string, Record<string, unknown>> };
+  const cur = useRef<Snap>({ nodes: [], edges: [], cfg: {} });
+  const past = useRef<Snap[]>([]);
+  const future = useRef<Snap[]>([]);
+  const applyingHistory = useRef(false);
+  useEffect(() => {
+    cur.current = { nodes, edges, cfg: configById };
+  }, [nodes, edges, configById]);
+
+  const snapshot = useCallback(() => {
+    if (applyingHistory.current) return;
+    past.current.push({
+      nodes: cur.current.nodes,
+      edges: cur.current.edges,
+      cfg: cur.current.cfg,
+    });
+    if (past.current.length > 60) past.current.shift();
+    future.current = [];
+  }, []);
+
+  const mark = useCallback(() => {
+    snapshot();
+    setDirty(true);
+  }, [snapshot]);
+
+  const restore = useCallback(
+    (s: Snap) => {
+      applyingHistory.current = true;
+      setNodes(s.nodes);
+      setEdges(s.edges);
+      setConfigById(s.cfg);
+      setDirty(true);
+      setSelNode(null);
+      setSelEdge(null);
+      requestAnimationFrame(() => (applyingHistory.current = false));
+    },
+    [setNodes, setEdges],
+  );
+  const undo = useCallback(() => {
+    const prev = past.current.pop();
+    if (!prev) return;
+    future.current.push(cur.current);
+    restore(prev);
+  }, [restore]);
+  const redo = useCallback(() => {
+    const next = future.current.pop();
+    if (!next) return;
+    past.current.push(cur.current);
+    restore(next);
+  }, [restore]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!canEdit) return;
+      const el = e.target as HTMLElement | null;
+      if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return;
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        e.shiftKey ? redo() : undo();
+      } else if (mod && e.key.toLowerCase() === "y") {
+        e.preventDefault();
+        redo();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [canEdit, undo, redo]);
 
   // Phase 19 — drop a proposed graph (Mermaid import / AI assist) onto the
   // canvas as unsaved state. Nothing is persisted until the user hits Save.
@@ -173,17 +244,22 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
 
   function addNode(t: string) {
     const id = uuid();
-    setNodes((ns) => [
-      ...ns,
-      {
-        id,
-        type: "flowNode",
-        position: { x: 60, y: 40 + ns.length * 16 },
-        data: { label: t, nodeType: t, terminal: TERMINAL.has(t) },
-      },
-    ]);
-    setConfigById((m) => ({ ...m, [id]: structuredClone(types?.defaults[t] ?? {}) }));
     mark();
+    setNodes((ns) => {
+      const k = ns.length;
+      return [
+        ...ns,
+        {
+          id,
+          type: "flowNode",
+          // spread new nodes on a clear grid away from the palette / controls
+          position: { x: 220 + (k % 4) * 210, y: 90 + (k % 6) * 90 },
+          data: { label: t, nodeType: t, terminal: TERMINAL.has(t) },
+        },
+      ];
+    });
+    setConfigById((m) => ({ ...m, [id]: structuredClone(types?.defaults[t] ?? {}) }));
+    setSelNode(id);
   }
 
   const onNodesDelete = useCallback(
@@ -434,8 +510,13 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
               setSelEdge(null);
             }}
             edgesFocusable
+            nodesDraggable={canEdit}
+            nodesConnectable={canEdit}
+            elementsSelectable
             defaultEdgeOptions={{ interactionWidth: 24 }}
-            onNodeDragStop={mark}
+            onNodeDragStart={() => canEdit && snapshot()}
+            onNodeDragStop={() => canEdit && setDirty(true)}
+            deleteKeyCode={canEdit ? ["Backspace", "Delete"] : null}
             fitView
             proOptions={{ hideAttribution: true }}
           >
@@ -450,22 +531,63 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
                 position: "absolute",
                 left: 10,
                 top: 10,
+                width: paletteOpen ? 210 : "auto",
+                maxHeight: "calc(100% - 20px)",
                 display: "flex",
-                flexWrap: "wrap",
+                flexDirection: "column",
                 gap: 6,
-                maxWidth: 260,
                 padding: 8,
                 borderRadius: 8,
-                background: "color-mix(in srgb, var(--panel) 92%, transparent)",
+                background: "color-mix(in srgb, var(--panel) 96%, transparent)",
                 border: "1px solid var(--border)",
                 zIndex: 5,
               }}
             >
-              {(types?.types ?? []).map((t) => (
-                <button key={t} onClick={() => addNode(t)} title={`add ${t}`}>
-                  ＋ {t}
+              <div className="row" style={{ gap: 6, justifyContent: "space-between" }}>
+                <button
+                  className={paletteOpen ? "primary" : ""}
+                  onClick={() => setPaletteOpen((o) => !o)}
+                >
+                  {paletteOpen ? "✕ close" : "＋ add node"}
                 </button>
-              ))}
+              </div>
+              {paletteOpen && (
+                <>
+                  <input
+                    autoFocus
+                    value={nodeFilter}
+                    placeholder="filter…"
+                    onChange={(e) => setNodeFilter(e.target.value)}
+                  />
+                  <div style={{ overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
+                    {(types?.types ?? [])
+                      .filter((t) => t.includes(nodeFilter.trim().toLowerCase()))
+                      .map((t) => (
+                        <button
+                          key={t}
+                          onClick={() => addNode(t)}
+                          title={`add a ${t} node`}
+                          style={{ textAlign: "left" }}
+                        >
+                          ＋ {t}
+                        </button>
+                      ))}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {canEdit && (past.current.length > 0 || future.current.length > 0) && (
+            <div
+              style={{ position: "absolute", right: 10, top: 10, display: "flex", gap: 4, zIndex: 5 }}
+            >
+              <button onClick={undo} disabled={past.current.length === 0} title="Ctrl/Cmd+Z">
+                undo
+              </button>
+              <button onClick={redo} disabled={future.current.length === 0} title="Ctrl/Cmd+Shift+Z">
+                redo
+              </button>
             </div>
           )}
 

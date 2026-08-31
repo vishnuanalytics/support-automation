@@ -72,7 +72,7 @@ def build_timeline(
         status = j.get("status")
         err = j.get("error") or None
         if err:
-            errors.append(f"job {j.get('kind')} ({j.get('job_id', '')[:8]}): {err[:400]}")
+            errors.append(f"job {j.get('kind')} ({j.get('job_id', '')[:8]}): {err[:6000]}")
         if status == "failed":
             failed_jobs.append(j.get("job_id"))
         if status == "running":
@@ -123,7 +123,7 @@ def build_timeline(
                 degraded = True
             nerr = _node_error(data)
             if nerr:
-                errors.append(f"{node.get('type')}: {nerr[:300]}")
+                errors.append(f"{node.get('type')}: {nerr[:6000]}")
             if node.get("type") == "sf_writeback":
                 labels_written = data.get("written") or labels_written
                 labels_skipped = data.get("skipped") or labels_skipped

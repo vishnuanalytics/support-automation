@@ -24,12 +24,14 @@ export function TraceView() {
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState<Set<number>>(new Set());
   const [copied, setCopied] = useState(false);
+  const [raw, setRaw] = useState<string | null>(null);
 
   const load = () => {
     if (!key.trim()) return;
     setBusy(true);
     setErr(null);
     setT(null);
+    setRaw(null);
     setOpen(new Set());
     api.trace
       .get(key)
@@ -38,16 +40,23 @@ export function TraceView() {
       .finally(() => setBusy(false));
   };
 
+  const asText = async (): Promise<string> => {
+    const md = await api.trace.md(key);
+    return typeof md === "string" ? md : JSON.stringify(md, null, 2);
+  };
+
   const copyText = async () => {
     try {
-      const md = await api.trace.md(key);
-      await navigator.clipboard.writeText(typeof md === "string" ? md : JSON.stringify(md, null, 2));
+      await navigator.clipboard.writeText(await asText());
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
-      /* clipboard blocked — ignore */
+      // clipboard API blocked (http / permissions) — fall back to the raw panel
+      setRaw(await asText().catch(() => "could not load report"));
     }
   };
+
+  const showRaw = async () => setRaw(raw == null ? await asText().catch(() => "") : null);
 
   const toggle = (i: number) =>
     setOpen((s) => {
@@ -57,7 +66,7 @@ export function TraceView() {
     });
 
   return (
-    <div className="col" style={{ gap: 12, maxWidth: 980 }}>
+    <div className="col" style={{ gap: 12, maxWidth: 980, height: "100%", overflow: "auto", padding: "4px 4px 40px" }}>
       <div className="muted" style={{ fontSize: 12 }}>
         One timeline per Case — every job, run, node and error, in order. Enter a Salesforce
         Case number, Case id, run id, or job id.
@@ -74,9 +83,25 @@ export function TraceView() {
           {busy ? "…" : "trace"}
         </button>
         {t && <button onClick={copyText}>{copied ? "copied ✓" : "copy as text"}</button>}
+        {t && <button onClick={showRaw}>{raw == null ? "raw report" : "hide raw"}</button>}
       </div>
 
       {err && <div className="banner err">{err}</div>}
+
+      {raw != null && (
+        <textarea
+          readOnly
+          value={raw}
+          onFocus={(e) => e.currentTarget.select()}
+          style={{
+            width: "100%",
+            minHeight: 320,
+            fontFamily: "var(--mono, monospace)",
+            fontSize: 12,
+            whiteSpace: "pre",
+          }}
+        />
+      )}
 
       {t && (
         <>
@@ -114,7 +139,11 @@ export function TraceView() {
             {t.errors.length > 0 && (
               <div className="col" style={{ gap: 2 }}>
                 {t.errors.map((e, i) => (
-                  <div key={i} className="err" style={{ fontSize: 12 }}>
+                  <div
+                    key={i}
+                    className="err"
+                    style={{ fontSize: 12, whiteSpace: "pre-wrap", wordBreak: "break-word" }}
+                  >
                     ⚠ {e}
                   </div>
                 ))}
@@ -160,7 +189,10 @@ export function TraceView() {
                     </div>
                   )}
                   {e.error && (
-                    <div className="err" style={{ marginLeft: 183 }}>
+                    <div
+                      className="err"
+                      style={{ marginLeft: 183, whiteSpace: "pre-wrap", wordBreak: "break-word" }}
+                    >
                       {e.error}
                     </div>
                   )}
