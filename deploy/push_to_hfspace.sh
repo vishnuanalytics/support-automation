@@ -30,8 +30,9 @@ cp deploy/README.hfspace.md   "$work/README.md"
   git add -A
   git -c user.email=deploy@local -c user.name=deploy \
       commit -qm "runtime: worker + cdc + poller (deploy/run_all.py) @ ${branch} $(git -C "$OLDPWD" rev-parse --short HEAD)"
+  hf_user="${SPACE%%/*}"
   echo "→ pushing to https://huggingface.co/spaces/${SPACE}"
-  git push -f "https://user:${HF_TOKEN}@huggingface.co/spaces/${SPACE}.git" main
+  git push -f "https://${hf_user}:${HF_TOKEN}@huggingface.co/spaces/${SPACE}.git" main
 )
 
 cat <<EOF
