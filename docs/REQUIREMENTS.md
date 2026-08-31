@@ -111,6 +111,14 @@ planned future channel — it must slot in as another adapter, not a rewrite
   the human did with the draft (sent as-is / edited / rewrote / no reply)
   and feed accepted drafts to the eval set. _(built for CRM Cases; the
   email-origin path needs the EmailMessage reply source wired in.)_
+- **FR-16a** After `ask_human` / `handover`, the system MUST act on the
+  human's response, not just record it: an agent's **CaseComment** is
+  treated as the answer — the bot polishes it into a customer-facing reply
+  and sends it (subject to the channel's auto-send switch); an agent's
+  **outbound email** means the agent handled it directly (score only). The
+  resolution check polls (`FEEDBACK_POLL_MIN` × `FEEDBACK_MAX_CHECKS`)
+  instead of firing once. _(built — Phase 20m; `guided_resume`
+  `human_action`, `source='agent_resume'` run rows.)_
 
 ### Platform
 - **FR-17** Flows, thresholds, KB sources, and channel config MUST be

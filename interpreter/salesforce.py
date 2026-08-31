@@ -225,6 +225,72 @@ def get_case(case_id: str) -> dict[str, Any]:
     }
 
 
+def latest_inbound_email(case_id: str, *, tenant_id: str | None = None) -> dict[str, Any] | None:
+    """The newest *incoming* EmailMessage on a Case — what the customer last
+    said. Used to re-run the flow on a reply instead of on the (stale) Case
+    Description. None if no creds / no inbound message / query fails."""
+    if not available():
+        return None
+    try:
+        rows = client_for(tenant_id).query(
+            "SELECT Subject, TextBody, FromAddress, MessageIdentifier, MessageDate "
+            f"FROM EmailMessage WHERE ParentId = '{_soql_lit(case_id)}' AND Incoming = true "
+            "ORDER BY MessageDate DESC LIMIT 1"
+        ).get("records", [])
+    except Exception as e:  # noqa: BLE001
+        log.warning("latest_inbound_email(%s): %s", case_id, e)
+        return None
+    if not rows:
+        return None
+    m = rows[0]
+    return {
+        "text": m.get("TextBody") or "",
+        "subject": m.get("Subject") or "",
+        "from_addr": m.get("FromAddress") or "",
+        "message_id": m.get("MessageIdentifier") or "",
+        "at": m.get("MessageDate"),
+    }
+
+
+def agent_response_since(case_id: str, since_iso: str | None = None,
+                         *, tenant_id: str | None = None) -> dict[str, Any]:
+    """What a human has done on a Case since `since_iso` (the bot's run time):
+
+      {"guidance": <newest CaseComment body> | None,
+       "guidance_at": iso | None,
+       "outbound_email": <newest agent reply-to-customer body> | None}
+
+    A CaseComment is treated as *internal guidance the bot should turn into a
+    customer reply*; an outbound EmailMessage means the agent already
+    answered the customer directly. Never raises."""
+    out: dict[str, Any] = {"guidance": None, "guidance_at": None, "outbound_email": None}
+    if not available():
+        return out
+    sf = client_for(tenant_id)
+    cid = _soql_lit(case_id)
+    since = f" AND CreatedDate > {since_iso}" if since_iso else ""
+    try:
+        rows = sf.query(
+            f"SELECT CommentBody, CreatedDate FROM CaseComment WHERE ParentId = '{cid}'{since} "
+            "ORDER BY CreatedDate DESC LIMIT 1"
+        ).get("records", [])
+        if rows and rows[0].get("CommentBody"):
+            out["guidance"] = rows[0]["CommentBody"]
+            out["guidance_at"] = rows[0].get("CreatedDate")
+    except Exception as e:  # noqa: BLE001
+        log.warning("agent_response_since/comment(%s): %s", case_id, e)
+    try:
+        rows = sf.query(
+            f"SELECT TextBody, CreatedDate FROM EmailMessage WHERE ParentId = '{cid}' "
+            f"AND Incoming = false{since} ORDER BY CreatedDate DESC LIMIT 1"
+        ).get("records", [])
+        if rows and rows[0].get("TextBody"):
+            out["outbound_email"] = rows[0]["TextBody"]
+    except Exception as e:  # noqa: BLE001
+        log.warning("agent_response_since/email(%s): %s", case_id, e)
+    return out
+
+
 # --------------------------------------------------------------------------
 # sender identification (Phase 17b)
 # --------------------------------------------------------------------------

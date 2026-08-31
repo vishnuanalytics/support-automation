@@ -711,9 +711,17 @@ Supabase-Vault `integration_secret_*` RPCs; `036` = Phase 20e: the
 `042` = Phase 20k: the `flows.sf_entry` flag — applied 2026-08-31 via the
 Supabase SQL editor, `f0f0f0f0-…` (router) backfilled `sf_entry=true`;
 `043` = Phase 20l: `sf_cdc_state` — applied 2026-08-31 via the SQL editor).
-175 offline pytest tests + web tsc/vitest (6)/build +
+180 offline pytest tests + web tsc/vitest (6)/build +
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
+
+**Phase 20m (2026-08-31): the bot now re-engages after a human** — an
+agent CaseComment on an escalated Case → bot polishes it into a customer
+reply and sends it (`interpreter/agent_reply.py`); `_check_resolution`
+polls instead of firing once; CDC `inbound_email` re-runs use the latest
+message, not the stale Description. Needs the worker running to take
+effect — the queue was found idle (14 stuck `check_resolution` jobs) when
+this was diagnosed.
 
 **Deploy** (`docs/DEPLOY.md`): the runtime = `worker` + `cdc` + `poller`
 (all outbound-only, no public URL) + optional `api`. `docker-compose.yml`
@@ -734,6 +742,35 @@ dashboard Google provider enabled first (`docs/GOOGLE_SETUP.md`
 §"Google sign-in"); the Phase 20 Gmail *provider* needs the same
 `GOOGLE_CLIENT_ID`/`SECRET` + a redirect registered (the IMAP path needs
 nothing server-side).
+
+**2026-08-31 — Phase 20m: the bot re-engages after a human.**
+Bug found in testing: after `ask_human`, an agent answers on the Case and
+the bot never responds. `check_resolution` only *recorded* the human's
+action (Phase 11) and only fired once.
+- **`interpreter/salesforce.py`**: `latest_inbound_email(case_id)` and
+  `agent_response_since(case_id, since_iso)` (newest CaseComment as
+  *guidance*, newest outbound EmailMessage as *agent-handled-it*).
+- **`interpreter/agent_reply.py`** (new): `resume_from_guidance(case,
+  guidance, cfg, tenant_id)` — one LLM polish of the agent's answer into a
+  customer-facing reply, delivered on the case's channel (SMTP + mirror to
+  the Case, or `send_case_reply`); `cfg.auto_send_enabled` off → left as a
+  draft CaseComment.
+- **`api/worker._check_resolution`** reworked into a bounded poller
+  (`FEEDBACK_POLL_MIN`=5 × `FEEDBACK_MAX_CHECKS`=12, after the initial
+  `FEEDBACK_DELAY_MIN`=20): agent CaseComment → `resume_from_guidance` +
+  parent run `human_action='guided_resume'` + a `source='agent_resume'`
+  run row; agent outbound email → score the draft as before; nothing yet →
+  re-enqueue with `checks+1` (`dedupe_key={run_id}:{n}`).
+- **`api/worker._run_flow`**: a CDC `inbound_email` re-run now overlays the
+  newest incoming EmailMessage onto `case.body/subject/from` — was
+  re-triaging the stale Case Description. (The email *poller* path already
+  passed the fresh message.)
+- **Customer replies** re-run the whole flow (poller enqueue already
+  worked; CDC path fixed above). **Agent guidance** takes the focused
+  polish-and-send path (no re-triage — the agent's answer is the truth).
+- **Verify:** 180 offline pytest (6 new in `test_agent_resume.py` — the
+  three `_check_resolution` branches + noop + the two delivery modes).
+  Not yet live-verified (needs the worker running against the org).
 
 **2026-08-31 — Phase 20l: durable Salesforce → engine push via CDC +
 Pub/Sub API.**

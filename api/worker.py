@@ -50,6 +50,18 @@ def _run_flow(payload: dict, sb) -> dict:
     # the full record here (raises -> the job retries with backoff).
     if case.get("sf_id") and not case.get("subject"):
         case = {**salesforce.get_case(case["sf_id"]), "channel": case.get("channel", "salesforce")}
+        # A CDC `inbound_email` event means the *customer replied*. get_case
+        # returns the (stale) Case Description — overlay the newest incoming
+        # message so the flow re-triages what the customer actually just said.
+        if payload.get("trigger") == "inbound_email":
+            m = salesforce.latest_inbound_email(case["sf_id"])
+            if m and m.get("text"):
+                case.update(body=m["text"], channel="email",
+                            subject=m.get("subject") or case.get("subject"))
+                if m.get("from_addr"):
+                    case["from"] = m["from_addr"]
+                if m.get("message_id"):
+                    case["message_id"] = m["message_id"]
 
     flow = load_flow(flow_id=flow_id, sb=sb, status="published", validate=True)
     final = build_graph(flow).invoke({"case": case, "tenant_id": flow["tenant_id"], "team": flow.get("team"), "trace": []})
@@ -127,30 +139,88 @@ def _email_post_run(final: dict, case: dict, flow: dict, sb) -> dict:
         return {"error": str(e)}
 
 
+_FEEDBACK_POLL_MIN = int(os.environ.get("FEEDBACK_POLL_MIN", "5"))
+_FEEDBACK_MAX_CHECKS = int(os.environ.get("FEEDBACK_MAX_CHECKS", "12"))
+
+
 def _check_resolution(payload: dict, sb) -> dict:
-    """Phase 11 — what did the human do with the draft?"""
+    """After an `ask_human` / `handover` on a real Case, poll for what the
+    human did (Phase 11) — and *act on it* (Phase 20m):
+
+      * an agent left a CaseComment  -> treat it as the answer: polish it
+        into a customer reply and send it (`interpreter.agent_reply`), mark
+        the run `guided_resume`, record the resume as its own run.
+      * the agent emailed the customer directly -> just score the draft
+        (`sent_as_is` / `edited` / `rewrote`).
+      * nothing yet -> re-poll every FEEDBACK_POLL_MIN up to
+        FEEDBACK_MAX_CHECKS, then give up as `no_reply`.
+    """
     run_id = payload["run_id"]
-    rows = sb.table("runs").select("case_payload, draft").eq("run_id", run_id).execute().data
+    checks = int(payload.get("checks", 0))
+    rows = (sb.table("runs")
+            .select("case_payload, draft, created_at, human_action, tenant_id, flow_id, team")
+            .eq("run_id", run_id).execute().data)
     if not rows:
         return {"run_id": run_id, "skipped": "run gone"}
-    case = rows[0].get("case_payload") or {}
-    case_id = case.get("sf_id") or case.get("id")
-    draft = rows[0].get("draft") or ""
+    row = rows[0]
+    if row.get("human_action") not in (None, "pending"):
+        return {"run_id": run_id, "skipped": f"already {row['human_action']}"}
 
-    reply = None
+    case = row.get("case_payload") or {}
+    case_id = case.get("sf_id") or case.get("id")
+    draft = row.get("draft") or ""
+    tenant_id = row.get("tenant_id")
+    since = row.get("created_at")
+
+    resp = {"guidance": None, "guidance_at": None, "outbound_email": None}
     if case_id and salesforce.available():
-        reply = feedback.fetch_human_reply(salesforce._client(), case_id)
-    action, dist = feedback.classify_edit(draft, reply or "")
-    if reply is None:
-        dist = None
+        resp = salesforce.agent_response_since(case_id, since, tenant_id=tenant_id)
+
+    # 1. an agent left internal guidance -> the bot composes + sends the reply
+    if resp.get("guidance"):
+        from interpreter import agent_reply, mailbox
+
+        cfg = mailbox.load_channel(tenant_id, sb) if tenant_id else None
+        out = agent_reply.resume_from_guidance(case, resp["guidance"], cfg=cfg, tenant_id=tenant_id)
+        try:
+            sb.table("runs").insert({
+                "flow_id": row["flow_id"], "tenant_id": tenant_id, "team": row["team"],
+                "source": "agent_resume", "case_id": (str(case_id)[:200] if case_id else None),
+                "subject": (str(case.get("subject") or "")[:500] or None),
+                "outcome": "auto_reply" if out.get("auto_sent") else "draft",
+                "draft": out.get("reply"), "case_payload": case,
+            }).execute()
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not record agent_resume run for %s: %s", run_id, e)
+        sb.table("runs").update({
+            "human_action": "guided_resume",
+            "human_reply": resp["guidance"][:8000],
+            "feedback_checked_at": "now()",
+        }).eq("run_id", run_id).execute()
+        return {"run_id": run_id, "human_action": "guided_resume", "resume": out}
+
+    # 2. the agent already replied to the customer -> just score the draft
+    if resp.get("outbound_email"):
+        action, dist = feedback.classify_edit(draft, resp["outbound_email"])
+        sb.table("runs").update({
+            "human_action": action, "human_reply": resp["outbound_email"][:8000],
+            "edit_distance": dist, "feedback_checked_at": "now()",
+        }).eq("run_id", run_id).execute()
+        return {"run_id": run_id, "human_action": action, "edit_distance": dist}
+
+    # 3. nothing yet -> re-poll, or give up
+    if checks + 1 < _FEEDBACK_MAX_CHECKS:
+        import datetime as _dt
+        nxt = (_dt.datetime.now(_dt.timezone.utc)
+               + _dt.timedelta(minutes=_FEEDBACK_POLL_MIN)).isoformat()
+        jobs.enqueue("check_resolution", {"run_id": run_id, "checks": checks + 1},
+                     dedupe_key=f"{run_id}:{checks + 1}", run_after=nxt, sb=sb)
+        return {"run_id": run_id, "waiting": True, "checks": checks + 1}
 
     sb.table("runs").update({
-        "human_action": action,
-        "human_reply": (reply or "")[:8000] or None,
-        "edit_distance": dist,
-        "feedback_checked_at": "now()",
+        "human_action": "no_reply", "feedback_checked_at": "now()",
     }).eq("run_id", run_id).execute()
-    return {"run_id": run_id, "human_action": action, "edit_distance": dist}
+    return {"run_id": run_id, "human_action": "no_reply"}
 
 
 def _embed_kb_entry(payload: dict, sb) -> dict:
