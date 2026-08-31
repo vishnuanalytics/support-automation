@@ -5,14 +5,15 @@ flow from the support design doc:
   identify -> sf_case -> retrieve -> classify -> team_route -> sf_writeback
     -> draft -> confidence_gate
         -> auto_reply                     (gate passes, not enterprise, not offboarding)
-        -> ask_human   (queue_by_team)    (gate fails / forced topic — the "doubt" path)
+        -> ask_human   (queue_by_team)    (gate fails + routed to csm/sales — that team owns it, Case reassigned)
+        -> notify      (target_by_type)   (gate fails + support + forced escalation — ping the Type's rep, Case stays put)
+        -> clarify     (handover_queue)   (gate fails + support + not forced — ask the customer, then hand to Team_Support)
         -> handover    (queue_by_team)    (enterprise, or routed to offboarding — "dead end")
 
 `team_route` picks support | csm | sales | offboarding from keyword rules
-over the case; `ask_human` / `handover` resolve the target Salesforce queue
-from `routed_team` (Team_CSM / Team_Sales / Team_Offboarding / Support_Tier2,
-Enterprise_Support for enterprise, Billing_Escalations for a forced billing
-escalation).
+over the case; `classify` also sets `Case.Type` and `sf_writeback` writes it
+every pass. `ask_human` / `handover` resolve the target Salesforce queue from
+`routed_team`; `notify` pings the `Case.Type` rep WITHOUT changing the owner.
 
     python scripts/seed_router_flow.py            # upsert + publish v-next
     python scripts/seed_router_flow.py --print    # dump the flow JSON, touch nothing
@@ -43,13 +44,14 @@ TENANT = "00000000-0000-0000-0000-000000000000"
 TEAM = "router"
 NAME = "Case router — team routing + tag manager"
 
-QUEUE_BY_TEAM = {
-    "support": "Support_Tier2", "csm": "Team_CSM",
-    "sales": "Team_Sales", "offboarding": "Team_Offboarding",
-}
+# csm / sales own their Cases (reassigned); offboarding is a handover target.
+ASK_QUEUE_BY_TEAM = {"csm": "Team_CSM", "sales": "Team_Sales"}
+HANDOVER_QUEUE_BY_TEAM = {"offboarding": "Team_Offboarding"}
+CLARIFY_HANDOVER_QUEUE = "Team_Support"
 
 n_identify, n_sf_case, n_retrieve, n_classify, n_route, n_writeback, \
-    n_draft, n_gate, n_auto, n_ask, n_handover = (_nid(i) for i in range(1, 12))
+    n_draft, n_gate, n_auto, n_ask, n_handover, n_notify, n_clarify = (
+        _nid(i) for i in range(1, 14))
 
 NODES = [
     (n_identify, "identify", "Resolve the sender",
@@ -58,12 +60,13 @@ NODES = [
      {"origin": "Web", "status": "New", "reuse": "thread"}),
     (n_retrieve, "retrieve", "Retrieve KB context",
      {"source": ["supabase"], "top_k": 5, "use_rerank": True}),
-    (n_classify, "classify", "Classify tier / topic / urgency",
+    (n_classify, "classify", "Classify tier / type / topic / urgency",
      {"tier_field": "account.customer_type", "region_field": "account.region",
       "default_tier": "basic"}),
     (n_route, "team_route", "Route to a team (design-doc rules)",
      {"default": "support"}),
-    (n_writeback, "sf_writeback", "Write triage fields to the Case", {}),
+    (n_writeback, "sf_writeback",
+     "Write triage fields to the Case (Type, Module, Priority…)", {}),
     (n_draft, "draft", "Draft the reply from context",
      {"model": "openai/gpt-oss-120b", "max_tokens": 700}),
     (n_gate, "confidence_gate", "Tag manager — score & decide",
@@ -72,17 +75,26 @@ NODES = [
       "tier_overrides": {"basic": 0.5, "premium": 0.6, "enterprise": 0.75},
       "escalate_topics": ["billing", "refund", "pricing", "legal", "compliance",
                           "account-access", "data-export", "cancellation"],
-      "escalate_modules": ["Billing & Plans"]}),
+      "escalate_modules": ["Billing & Plans"],
+      "escalate_types": ["Billing", "Account / Login"]}),
     (n_auto, "auto_reply", "Auto-reply to the customer", {"channel": "email"}),
-    (n_ask, "ask_human", "Escalate — ask a human on the Case",
-     {"channel": "salesforce_chatter", "queue_by_team": QUEUE_BY_TEAM,
+    (n_ask, "ask_human",
+     "Escalate to the owning team (csm / sales) — reassigns the Case",
+     {"channel": "salesforce_chatter", "queue_by_team": ASK_QUEUE_BY_TEAM,
       "escalate_queue": "Billing_Escalations"}),
-    (n_handover, "handover", "Full handover to the team",
-     {"reason": "enterprise_or_offboarding", "queue_by_team": QUEUE_BY_TEAM,
+    (n_handover, "handover", "Full handover (enterprise / offboarding)",
+     {"reason": "enterprise_or_offboarding", "queue_by_team": HANDOVER_QUEUE_BY_TEAM,
       "enterprise_queue": "Enterprise_Support"}),
+    (n_notify, "notify", "Ping the Type's internal rep (Case stays in the queue)",
+     {"channel": "salesforce_chatter", "target_by_type": {},
+      "target_by_module": {}, "fallback_target": None}),
+    (n_clarify, "clarify", "Ask the customer for missing detail",
+     {"max_questions": 3, "max_rounds": 2, "auto_send": False, "channel": "email",
+      "handover_queue": CLARIFY_HANDOVER_QUEUE}),
 ]
 
-_NOT_TERMINAL = "tier != 'enterprise' and routed_team != 'offboarding'"
+_LIVE = "tier != 'enterprise' and routed_team != 'offboarding'"
+_SUPPORT_FAIL = "not confidence_gate.pass and tier != 'enterprise' and routed_team == 'support'"
 EDGES = [
     (n_identify, n_sf_case, {}),
     (n_sf_case, n_retrieve, {}),
@@ -91,9 +103,11 @@ EDGES = [
     (n_route, n_writeback, {}),
     (n_writeback, n_draft, {}),
     (n_draft, n_gate, {}),
-    (n_gate, n_auto, {"if": f"confidence_gate.pass and {_NOT_TERMINAL}"}),
-    (n_gate, n_ask, {"if": f"not confidence_gate.pass and {_NOT_TERMINAL}"}),
     (n_gate, n_handover, {"if": "tier == 'enterprise' or routed_team == 'offboarding'"}),
+    (n_gate, n_auto, {"if": f"confidence_gate.pass and {_LIVE}"}),
+    (n_gate, n_ask, {"if": f"not confidence_gate.pass and {_LIVE} and routed_team in ('csm', 'sales')"}),
+    (n_gate, n_notify, {"if": f"{_SUPPORT_FAIL} and confidence_gate.forced_escalation"}),
+    (n_gate, n_clarify, {"if": f"{_SUPPORT_FAIL} and not confidence_gate.forced_escalation"}),
 ]
 
 

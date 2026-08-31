@@ -16,6 +16,13 @@ groq
 anthropic
 simple-salesforce
 
+# Salesforce CDC subscriber (Phase 20l — ingestion/sf_pubsub)
+# gRPC + Avro for the Pub/Sub API stream. grpcio-tools is only needed to
+# regenerate pubsub_api_pb2*.py from the vendored proto (dev-time, not here).
+grpcio
+protobuf
+fastavro
+
 # Google Docs connector (Phase 15; optional — no-op unless GOOGLE_CLIENT_ID set)
 google-auth
 google-auth-oauthlib

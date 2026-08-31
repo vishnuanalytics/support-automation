@@ -45,7 +45,7 @@ from interpreter.flows.validate_flow import Flow, check_flow  # noqa: E402
 from interpreter.loader import (  # noqa: E402
     FlowInvalid, FlowNotFound, definition_hash as flow_definition_hash, load_flow,
 )
-from interpreter import jobs  # noqa: E402
+from interpreter import jobs, sf_ingest  # noqa: E402
 from interpreter.registry import known_types  # noqa: E402
 from interpreter.runs import record_run  # noqa: E402
 from interpreter import gdrive, github as githubmod, slack as slackmod  # noqa: E402
@@ -302,11 +302,30 @@ def node_types() -> dict:
     return {"types": sorted(known_types()), "defaults": NODE_DEFAULTS}
 
 
+_SF_META_CACHE: dict = {"at": 0.0, "data": None}
+
+
+@app.get("/api/salesforce/meta")
+def salesforce_meta(c: Caller = Depends(caller)) -> dict:
+    """Salesforce routing queues + the Case.Type / Module__c picklists, for the
+    flow editor's dropdowns (notify / clarify node forms). Cached 5 min in
+    process. `available:false` + empty lists when the API has no SF creds."""
+    import time
+
+    from interpreter import salesforce as _sf
+
+    now = time.time()
+    if _SF_META_CACHE["data"] is None or now - _SF_META_CACHE["at"] > 300:
+        _SF_META_CACHE["data"] = _sf.org_metadata()
+        _SF_META_CACHE["at"] = now
+    return _SF_META_CACHE["data"]
+
+
 @app.get("/api/flows")
 def list_flows(c: Caller = Depends(caller)) -> list[dict]:
     rows = (
         c.sb.table("flows")
-        .select("flow_id, tenant_id, team, name, status, version, published_version, updated_at")
+        .select("flow_id, tenant_id, team, name, status, version, published_version, sf_entry, updated_at")
         .order("tenant_id").order("team").execute().data
         or []
     )
@@ -448,6 +467,7 @@ def get_flow(flow_id: str, c: Caller = Depends(caller)) -> dict:
     except FlowNotFound:
         raise HTTPException(404, "flow not found")
     d["published_version"] = meta.get("published_version")
+    d["sf_entry"] = meta.get("sf_entry", False)
     return d
 
 
@@ -617,6 +637,24 @@ def delete_flow(flow_id: str, c: Caller = Depends(caller)) -> None:
     c.sb.table("flows").delete().eq("flow_id", flow_id).execute()  # cascades nodes/edges
 
 
+class SfEntryIn(BaseModel):
+    sf_entry: bool
+
+
+@app.put("/api/flows/{flow_id}/sf-entry")
+def set_sf_entry(flow_id: str, body: SfEntryIn, c: Caller = Depends(caller)) -> dict:
+    """Mark (or unmark) this flow as the one `POST /api/hooks/salesforce/case`
+    runs. At most one per tenant (migration 042's partial-unique index) — so
+    turning it on clears the flag on the tenant's other flows first."""
+    meta = _require_visible(c, flow_id)
+    _require_editor(c, meta["tenant_id"])
+    if body.sf_entry:
+        c.sb.table("flows").update({"sf_entry": False}) \
+            .eq("tenant_id", meta["tenant_id"]).neq("flow_id", flow_id).execute()
+    c.sb.table("flows").update({"sf_entry": body.sf_entry}).eq("flow_id", flow_id).execute()
+    return {"sf_entry": body.sf_entry}
+
+
 @app.post("/api/flows/{flow_id}/run")
 def run_flow(
     flow_id: str,
@@ -691,7 +729,7 @@ def enqueue_run(flow_id: str, body: EnqueueIn, c: Caller = Depends(caller)) -> d
 
 class SFCaseHookIn(BaseModel):
     case_id: str
-    flow_id: str | None = None       # optional override; else the published 'router' flow
+    flow_id: str | None = None       # optional override; else the flow marked `sf_entry`
 
 
 @app.post("/api/hooks/salesforce/case", status_code=202)
@@ -701,33 +739,28 @@ def salesforce_case_hook(
 ) -> dict:
     """Salesforce → automation **push**. A record-triggered Flow on Case
     (After Save, on Create, Status='New', not bot-created) POSTs `{case_id}`
-    here; we pull the Case, resolve the published router flow, and queue a
-    `run_flow` job (deduped on the Case Id). No user auth — a shared secret
+    here; we pull the Case, resolve the flow marked `sf_entry` (the one the
+    editor's "Salesforce entry" toggle points at), and queue a `run_flow`
+    job (deduped on the Case Id). No user auth — a shared secret
     (`SF_HOOK_SECRET`) gates it. Returns 202."""
     want = os.environ.get("SF_HOOK_SECRET")
     if not want or secret != want:
         raise HTTPException(401, "bad or missing X-SF-Hook-Secret")
 
-    flow_id = body.flow_id
-    if not flow_id:
-        rows = (_service.table("flows").select("flow_id")
-                .eq("team", "router").eq("status", "published").execute().data or [])
-        if len(rows) != 1:
-            raise HTTPException(500, f"expected exactly one published 'router' flow, found {len(rows)}")
-        flow_id = rows[0]["flow_id"]
-
     # Enqueue a bare Case Id — the worker hydrates it via `salesforce.get_case`
     # (with retries). Doing the SF read here would call *back* into Salesforce
     # while the triggering @future callout is still blocked on our response,
-    # which fails intermittently.
-    job_id = jobs.enqueue(
-        "run_flow",
-        {"flow_id": flow_id,
-         "case": {"sf_id": body.case_id, "id": body.case_id, "channel": "salesforce"},
-         "idempotency_key": body.case_id},
-        dedupe_key=f"sfcase:{body.case_id}", sb=_service,
-    )
-    return {"job_id": job_id, "deduped": job_id is None, "flow_id": flow_id}
+    # which fails intermittently. Same enqueue path (+ dedupe keys) as the
+    # CDC subscriber (`ingestion.sf_cdc_watch`).
+    try:
+        job_id = sf_ingest.enqueue_case_run(
+            _service, body.case_id,
+            dedupe_key=f"sfcase:{body.case_id}", idempotency_key=body.case_id,
+            trigger="case_created", flow_id=body.flow_id,
+        )
+    except sf_ingest.EntryFlowError as e:
+        raise HTTPException(500, str(e))
+    return {"job_id": job_id, "deduped": job_id is None}
 
 
 @app.get("/api/jobs/{job_id}")

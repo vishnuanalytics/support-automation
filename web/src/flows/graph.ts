@@ -5,7 +5,7 @@ import type { Flow, FlowEdge, FlowNode } from "../types";
 export type RFNode = Node<{ label: string; nodeType: string; terminal: boolean }>;
 export type RFEdge = Edge<{ condition: Record<string, unknown> }>;
 
-const TERMINAL = new Set(["auto_reply", "ask_human", "handover", "clarify"]);
+const TERMINAL = new Set(["auto_reply", "ask_human", "handover", "clarify", "notify"]);
 
 export function toReactFlow(flow: Flow): { nodes: RFNode[]; edges: RFEdge[] } {
   const needsLayout = flow.nodes.some(

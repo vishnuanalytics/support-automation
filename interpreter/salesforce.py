@@ -122,6 +122,35 @@ def _client():
     return _client_obj
 
 
+def reset_client() -> None:
+    """Drop the cached client so the next call mints a fresh session token.
+    Used by the long-lived CDC subscriber when Salesforce returns
+    UNAUTHENTICATED mid-stream (the JWT bearer token has expired)."""
+    global _client_obj
+    _client_obj = None
+    _tenant_clients.clear()
+
+
+_org_id: str | None = None
+
+
+def pubsub_auth(*, refresh: bool = False) -> tuple[str, str, str]:
+    """`(access_token, instance_url, org_id)` for the Salesforce Pub/Sub API
+    gRPC metadata headers (`accesstoken` / `instanceurl` / `tenantid`).
+    Reuses the env client's session; `refresh=True` forces a new token."""
+    global _org_id
+    if refresh:
+        reset_client()
+        _org_id = None
+    if not available():
+        raise RuntimeError("pubsub_auth needs Salesforce creds in the env (SF_USERNAME / SF_CONSUMER_KEY / …)")
+    sf = _client()
+    instance_url = f"https://{sf.sf_instance}".rstrip("/")
+    if _org_id is None:
+        _org_id = sf.query("SELECT Id FROM Organization LIMIT 1")["records"][0]["Id"]
+    return sf.session_id, instance_url, _org_id
+
+
 def client_for(tenant_id: str | None, sb=None):
     """Per-tenant client from `tenant_integrations` if a row exists, else the
     env client. (Phase 12 — real multi-tenancy.)"""
@@ -194,6 +223,72 @@ def get_case(case_id: str) -> dict[str, Any]:
         },
         "contact": {"name": con.get("Name"), "email": con.get("Email")},
     }
+
+
+def latest_inbound_email(case_id: str, *, tenant_id: str | None = None) -> dict[str, Any] | None:
+    """The newest *incoming* EmailMessage on a Case — what the customer last
+    said. Used to re-run the flow on a reply instead of on the (stale) Case
+    Description. None if no creds / no inbound message / query fails."""
+    if not available():
+        return None
+    try:
+        rows = client_for(tenant_id).query(
+            "SELECT Subject, TextBody, FromAddress, MessageIdentifier, MessageDate "
+            f"FROM EmailMessage WHERE ParentId = '{_soql_lit(case_id)}' AND Incoming = true "
+            "ORDER BY MessageDate DESC LIMIT 1"
+        ).get("records", [])
+    except Exception as e:  # noqa: BLE001
+        log.warning("latest_inbound_email(%s): %s", case_id, e)
+        return None
+    if not rows:
+        return None
+    m = rows[0]
+    return {
+        "text": m.get("TextBody") or "",
+        "subject": m.get("Subject") or "",
+        "from_addr": m.get("FromAddress") or "",
+        "message_id": m.get("MessageIdentifier") or "",
+        "at": m.get("MessageDate"),
+    }
+
+
+def agent_response_since(case_id: str, since_iso: str | None = None,
+                         *, tenant_id: str | None = None) -> dict[str, Any]:
+    """What a human has done on a Case since `since_iso` (the bot's run time):
+
+      {"guidance": <newest CaseComment body> | None,
+       "guidance_at": iso | None,
+       "outbound_email": <newest agent reply-to-customer body> | None}
+
+    A CaseComment is treated as *internal guidance the bot should turn into a
+    customer reply*; an outbound EmailMessage means the agent already
+    answered the customer directly. Never raises."""
+    out: dict[str, Any] = {"guidance": None, "guidance_at": None, "outbound_email": None}
+    if not available():
+        return out
+    sf = client_for(tenant_id)
+    cid = _soql_lit(case_id)
+    since = f" AND CreatedDate > {since_iso}" if since_iso else ""
+    try:
+        rows = sf.query(
+            f"SELECT CommentBody, CreatedDate FROM CaseComment WHERE ParentId = '{cid}'{since} "
+            "ORDER BY CreatedDate DESC LIMIT 1"
+        ).get("records", [])
+        if rows and rows[0].get("CommentBody"):
+            out["guidance"] = rows[0]["CommentBody"]
+            out["guidance_at"] = rows[0].get("CreatedDate")
+    except Exception as e:  # noqa: BLE001
+        log.warning("agent_response_since/comment(%s): %s", case_id, e)
+    try:
+        rows = sf.query(
+            f"SELECT TextBody, CreatedDate FROM EmailMessage WHERE ParentId = '{cid}' "
+            f"AND Incoming = false{since} ORDER BY CreatedDate DESC LIMIT 1"
+        ).get("records", [])
+        if rows and rows[0].get("TextBody"):
+            out["outbound_email"] = rows[0]["TextBody"]
+    except Exception as e:  # noqa: BLE001
+        log.warning("agent_response_since/email(%s): %s", case_id, e)
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -420,6 +515,24 @@ def post_chatter(case_id: str, body: str, *, mention_id: str | None = None, tena
                 "feed_element_id": res.get("id"), "mention_failed": True}
 
 
+def add_case_comment(case_id: str, body: str, *, published: bool = False,
+                     tenant_id: str | None = None) -> dict[str, Any]:
+    """Add a `CaseComment` (internal by default). Used for the bot's
+    suggested-reply draft — Salesforce won't take an API-created outbound
+    draft `EmailMessage`. Dry-run with no creds; never raises."""
+    if not available():
+        log.info("[sf dry-run] CaseComment on %s (published=%s): %r", case_id, published, body[:80])
+        return {"created": False, "dry_run": True, "id": None}
+    try:
+        res = client_for(tenant_id).CaseComment.create(
+            {"ParentId": case_id, "CommentBody": body[:4000], "IsPublished": bool(published)}
+        )
+        return {"created": True, "dry_run": False, "id": res.get("id")}
+    except Exception as e:  # noqa: BLE001
+        log.warning("add_case_comment(%s): %s", case_id, e)
+        return {"created": False, "dry_run": False, "id": None, "error": str(e)}
+
+
 # --------------------------------------------------------------------------
 # case bootstrap from an inbound message (Phase 20e / 20f)
 # --------------------------------------------------------------------------
@@ -596,6 +709,111 @@ def map_case_fields(topic: str | None, country: str | None) -> dict[str, str]:
     if region:
         out["Region__c"] = region
     return out
+
+
+# ── classifier -> Case.Type (Phase 20n) ─────────────────────────────────────
+# The standard `Case.Type` picklist (scripts/sf_support_setup.py CASE_TYPE_VALUES).
+# It is the field queue owners scan a list view by, and it maps to a support
+# *function* (billing / login / bug / product) — so it, not `Module__c`, is the
+# key the `notify` node routes an internal ping on.
+CASE_TYPE_VALUES = [
+    "Question", "How-to", "Problem / Bug", "Billing",
+    "Account / Login", "Feature Request", "Other",
+]
+
+# keyword -> Case.Type, first match wins. Deterministic fallback for when the
+# classifier LLM is stubbed (quota) or returns something off-list.
+_CASE_TYPE_RULES: "list[tuple[tuple[str, ...], str]]" = [
+    (("refund", "chargeback", "charge", "billed", "invoice", "receipt", "billing",
+      "payment", "pricing", "proration", "subscription", "coupon", "plan change"),
+     "Billing"),
+    (("sso", "saml", "okta", "login", "log in", "log-in", "signin", "sign in",
+      "sign-in", "password", "2fa", "mfa", "two-factor", "locked out", "lockout",
+      "can't access my account", "cannot access my account", "account access"),
+     "Account / Login"),
+    (("bug", "error", "broken", "not working", "isn't working", "stopped working",
+      "fails", "failing", "failure", "exception", "500 error", "crash", "crashing",
+      "regression", "unexpected"),
+     "Problem / Bug"),
+    (("feature request", "feature-request", "would be nice", "please add",
+      "can you add", "roadmap", "suggestion", "enhancement", "wishlist"),
+     "Feature Request"),
+    (("how do i", "how do we", "how can i", "how to", "how-to", "step by step",
+      "step-by-step", "walk me through", "tutorial", "is it possible to"),
+     "How-to"),
+]
+
+
+def normalize_case_type(value: str | None) -> str:
+    """Coerce a free-form / LLM `type` string to an exact `Case.Type` picklist
+    value, or `""` if it doesn't map. Pure."""
+    if not value:
+        return ""
+    s = str(value).strip().lower().replace("_", " ").replace("-", " ")
+    s = " ".join(s.split())
+    for canon in CASE_TYPE_VALUES:
+        c = canon.lower().replace(" / ", " ").replace("-", " ")
+        if s in (canon.lower(), c) or s.replace(" ", "") == c.replace(" ", ""):
+            return canon
+    if "bill" in s or "refund" in s or "invoice" in s:
+        return "Billing"
+    if "login" in s or "log in" in s or "auth" in s or ("account" in s and "access" in s):
+        return "Account / Login"
+    if "bug" in s or "problem" in s or "error" in s or "broken" in s:
+        return "Problem / Bug"
+    if "feature" in s:
+        return "Feature Request"
+    if s.startswith("how"):
+        return "How-to"
+    if "question" in s:
+        return "Question"
+    return ""
+
+
+def map_case_type(topic: str | None, text: str | None = None) -> str:
+    """Best-effort `Case.Type` from the classifier `topic` slug (+ optional raw
+    case text). Returns `"Question"` for any non-empty input that matches no
+    rule, `""` for empty. Pure."""
+    hay = " ".join(x for x in ((topic or ""), (text or "")) if x).strip().lower()
+    if not hay:
+        return ""
+    for keys, t in _CASE_TYPE_RULES:
+        if any(k in hay for k in keys):
+            return t
+    return "Question"
+
+
+def org_metadata(tenant_id: str | None = None) -> dict[str, Any]:
+    """Routing queues + the `Case.Type` / `Case.Module__c` picklist values —
+    for the flow editor's dropdowns (Phase 20o). `available=False` with empty
+    lists when there are no Salesforce creds; never raises. The API layer
+    caches this."""
+    empty = {"available": False, "queues": [], "case_types": [], "modules": []}
+    if not available():
+        return empty
+    try:
+        sf = client_for(tenant_id)
+        queues = [
+            {"id": r["Id"], "name": r["Name"], "developer_name": r.get("DeveloperName")}
+            for r in sf.query(
+                "SELECT Id, Name, DeveloperName FROM Group WHERE Type = 'Queue' ORDER BY Name"
+            ).get("records", [])
+        ]
+        fields = {f["name"]: f for f in sf.Case.describe()["fields"]}
+
+        def _picklist(name: str) -> list[str]:
+            return [v["value"] for v in fields.get(name, {}).get("picklistValues", [])
+                    if v.get("active", True)]
+
+        return {
+            "available": True,
+            "queues": queues,
+            "case_types": _picklist("Type"),
+            "modules": _picklist("Module__c"),
+        }
+    except Exception as e:  # noqa: BLE001
+        log.warning("org_metadata: %s", e)
+        return {**empty, "error": str(e)}
 
 
 def assign_case(

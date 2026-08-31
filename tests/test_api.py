@@ -148,6 +148,19 @@ def test_email_channel_endpoints_need_a_token():
     assert r.status_code == 200 and "failed" in r.text
 
 
+def test_salesforce_case_hook_needs_the_shared_secret():
+    # no X-SF-Hook-Secret header -> 401, never reaches flow resolution
+    r = client.post("/api/hooks/salesforce/case", json={"case_id": "500xx"})
+    assert r.status_code == 401
+    r = client.post("/api/hooks/salesforce/case", json={"case_id": "500xx"},
+                    headers={"X-SF-Hook-Secret": "wrong"})
+    assert r.status_code == 401
+
+
+def test_sf_entry_endpoint_needs_a_token():
+    assert client.put("/api/flows/some-id/sf-entry", json={"sf_entry": True}).status_code == 401
+
+
 def test_structural_errors_passes_a_linear_flow():
     flow = {
         "flow_id": "f", "tenant_id": "t", "team": "support", "name": "n",
@@ -295,6 +308,31 @@ def test_create_flow_infers_the_tenant_when_omitted(auth_headers):
     finally:
         create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"]) \
             .table("flows").delete().eq("flow_id", fid).execute()
+
+
+@pytest.mark.integration
+def test_sf_entry_is_one_per_tenant(auth_headers):
+    """Phase 20k — setting the Salesforce-entry flag on one flow clears it
+    on the tenant's others."""
+    from supabase import create_client
+
+    svc = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"])
+    a = client.post("/api/flows", headers=auth_headers,
+                    json={"team": "csm", "name": "pytest-sfentry-a"}).json()["flow_id"]
+    b = client.post("/api/flows", headers=auth_headers,
+                    json={"team": "csm", "name": "pytest-sfentry-b"}).json()["flow_id"]
+    try:
+        assert client.put(f"/api/flows/{a}/sf-entry", headers=auth_headers,
+                          json={"sf_entry": True}).status_code == 200
+        assert client.get(f"/api/flows/{a}", headers=auth_headers).json()["sf_entry"] is True
+
+        # flipping b on takes the flag away from a
+        assert client.put(f"/api/flows/{b}/sf-entry", headers=auth_headers,
+                          json={"sf_entry": True}).status_code == 200
+        assert client.get(f"/api/flows/{a}", headers=auth_headers).json()["sf_entry"] is False
+        assert client.get(f"/api/flows/{b}", headers=auth_headers).json()["sf_entry"] is True
+    finally:
+        svc.table("flows").delete().in_("flow_id", [a, b]).execute()
 
 
 GLOBEX_OWNER_UID = "57c26330-cb98-475a-875f-8f8a925672fd"

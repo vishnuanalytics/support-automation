@@ -167,6 +167,34 @@ Wire it from Salesforce (no Apex), once the API has a public URL
 Now a Case created in Salesforce triggers the router in seconds. Until the
 URL is public, test with `curl` against `localhost:8000` (see above).
 
+The flow this runs is whichever one carries the **Salesforce entry**
+toggle in the editor (`flows.sf_entry`, Phase 20k) — not a fixed team.
+
+## 2e. Salesforce → automation **push** via CDC (Phase 20l — durable)
+
+The HTTP callout above is fire-and-forget (an API outage loses the event)
+and only covers *new* Cases. `ingestion.sf_cdc_watch` is the durable
+alternative: a long-lived gRPC client on the **Pub/Sub API** that streams
+Change Data Capture for `Case` + `EmailMessage` and enqueues a `run_flow`
+job for **a new Case**, **a new inbound email on an existing Case**, and
+**a Case whose queue (OwnerId) changed**. Every event's `replay_id` is
+stored in `sf_cdc_state`, so a restart resumes where it stopped (72h
+retention).
+
+Setup:
+
+1. **Setup → Change Data Capture** — add **Case** and **EmailMessage** to
+   *Selected Entities*. (No Apex, no Named Credential, no public URL.)
+2. Apply migration `043` (`sf_cdc_state`).
+3. Run it: `python -m ingestion.sf_cdc_watch` (docker-compose service
+   `cdc`). Smoke test: `python -m ingestion.sf_cdc_watch --max-events 3`,
+   then create/modify a Case and watch the job land.
+
+Auth reuses the JWT bearer app (`SF_*` in `.env`). Running both push paths
+at once is safe — a new Case dedupes on the shared `sfcase:{id}` key.
+Once CDC is confirmed, you can retire the Apex trigger (§2d) or keep it as
+a fallback.
+
 ## 3. Chatter "ask human"
 
 When `confidence_gate` fails for a non-enterprise tier, `ask_human` posts a

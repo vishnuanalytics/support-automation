@@ -703,19 +703,245 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**Phases 0–20 built. No open phase.** Migrations `001`–`040` applied
+**Phases 0–20 built. No open phase.** Migrations `001`–`044`
 (`034`/`035` = Phase 20a: `tenant_integrations` poller columns + the
 Supabase-Vault `integration_secret_*` RPCs; `036` = Phase 20e: the
 "Email L0/L1 — inbound to Salesforce" flow, team `email`, tenant Acme;
-`037` = Phase 20f: that flow's `sf_case` → thread-based Case reuse).
-149 offline pytest tests + web tsc/vitest (6)/build +
+`037` = Phase 20f: that flow's `sf_case` → thread-based Case reuse;
+`042` = Phase 20k: the `flows.sf_entry` flag — applied 2026-08-31 via the
+Supabase SQL editor, `f0f0f0f0-…` (router) backfilled `sf_entry=true`;
+`043` = Phase 20l: `sf_cdc_state` — applied 2026-08-31 via the SQL editor;
+`044` = Phase 20n: the `notify` node + `Case.Type` triage — **applied
+2026-08-31** via `apply_migration` to the email L0/L1 flow (the only flow in
+this DB; it's the `sf_entry` flow), published as **v3**. The Case-router
+flow `f0f0f0f0…` was never seeded to this DB — migration `044`'s router half
+lives in `scripts/seed_router_flow.py` + the portable JSON for whenever it
+is stood up; `045` = Phase 20o: `notify_targets` — **applied 2026-08-31**,
+seeded 7 rows for tenant `00000000…`).
+193 offline pytest tests + web tsc/vitest (6)/build +
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
+
+**Phase 20o (2026-08-31): `notify` targets come from a central table, not
+node config.** So a flow editor never pastes Salesforce ids. Migration `045`
+= `notify_targets` (tenant-scoped, RLS via `is_tenant_member`/`is_tenant_editor`):
+`(match_kind ∈ {case_type, module}, match_value, resolver ∈ {static,
+sf_team_role, sf_queue}, sf_target_id, sf_team/sf_role, sf_queue, label,
+active)`. `interpreter/routing.py::resolve_notify_target(tenant_id, case_type,
+module)` reads it — `sf_team_role` does a **live** two-hop SOQL (Queue Group
+id → its member User; single-level, SOQL forbids nested semi-joins),
+`sf_queue` resolves the Queue Group id. `h_notify` consults it when the
+node's own `target_by_type`/`target_by_module` have no match (an override
+still wins); then `fallback_target`. Seeded 7 `case_type` rows for tenant
+`00000000…`: Billing→`Billing_Escalations` queue, Feature Request→`Support_Tier2`
+queue, the rest→Support team lead (`sf_team_role`). **Live-verified 2026-08-31**
+against the org — Billing→`00GjV0…` (queue), Account/Login·Bug·How-to·Question·Other
+→ User `005jV0…` (the roster member, resolved live). 3 new tests
+(`test_notify_and_type.py`, 13 total in the file; 193 offline).
+- **Editor pickers (2026-08-31):** `GET /api/salesforce/meta` (`api/main.py`,
+  5-min in-proc cache → `salesforce.org_metadata()`) returns the org's live
+  **queues + `Case.Type` / `Module__c` picklists**. The flow editor's Inspector
+  wires them in — `clarify`'s *handover queue* is now a `<select>` of real
+  queues (`QueuePicker`), `notify`'s *override by Case.Type* rows come from the
+  live picklist; both degrade to a text box / hardcoded list when the API has
+  no SF creds, and keep any value not in the list. `web/src/api.ts`
+  `api.salesforce.meta()`, `SfMeta` type, `useSfMeta()` hook.
+- Still **no standalone `notify_targets` admin screen** — table rows are
+  managed via SQL; the pickers above live in the flow-node forms.
+
+**Phase 20n (2026-08-31): ask an internal rep without handing off the Case
++ `Case.Type` on every pass.** The "what happens after we're not confident"
+branch was under-specified: every low-confidence Case went to `ask_human`,
+which reassigns the Case out of its queue.
+- **`Case.Type`** — `classify` now emits `case_type` (LLM `type` →
+  `salesforce.normalize_case_type`, else `map_case_type` keyword fallback,
+  stub-safe); `sf_writeback` default field-map gained `case_type → Type`,
+  written at first triage and on every customer-reply re-run. It was never
+  populated before — the field a queue owner filters by was blank. FR-26.
+- **`notify` node** (`interpreter/registry.h_notify`) — Chatter ping
+  (@mention when the target is a real User/Group id) + draft `CaseComment`,
+  **no `OwnerId` change**. Target: `Case.Type` → `Module__c` →
+  `fallback_target`. `confidence_gate` gained `escalate_types`
+  (`["Billing", "Account / Login"]`). FR-27.
+- **`clarify` `handover_queue`** — round cap (2) exhausted → reassign to
+  `Team_Support` so a human owns it. FR-28.
+- **Flows**: `flow_email_l0l1.json` v2 — `ask_human` **removed**; gate splits
+  `enterprise → handover / pass → auto_reply / fail+forced → notify /
+  fail+benign → clarify`. `flow_case_router.json` v2 — `notify` + `clarify`
+  added; `ask_human` kept for csm/sales (they own the Case), `handover` for
+  enterprise/offboarding. Migration `044`; seeder `scripts/seed_router_flow.py`
+  regenerated (portable JSON == seeder output verified). Web Inspector: a
+  `notify` target-by-Type form + a `clarify` handover-queue field;
+  `graph.ts` TERMINAL += `notify`.
+- **Re-engagement after the rep answers** = the existing Phase 20m resume
+  poller (agent CaseComment → `agent_reply.resume_from_guidance`), unchanged.
+- **Verify:** 190 offline pytest (10 new in `tests/test_notify_and_type.py`);
+  web tsc + vitest + build green. Migration `044` **applied 2026-08-31** —
+  email flow `e5e5e5e5…` now published **v3** (`ask_human` removed; `notify`
+  + `clarify` added; gate 4-way); the live v3 snapshot was pulled back and
+  re-checked with `build_graph` + a route smoke (Billing→`notify`,
+  vague→`clarify`, how-to→`auto_reply`; `Case.Type` populated). **Not yet
+  live-verified end to end** — needs the deployed `worker`/`cdc` restarted
+  (they cache the flow per process) and a real Case through it.
+
+**Phase 20m (2026-08-31): the bot now re-engages after a human** — an
+agent CaseComment on an escalated Case → bot polishes it into a customer
+reply and sends it (`interpreter/agent_reply.py`); `_check_resolution`
+polls instead of firing once; CDC `inbound_email` re-runs use the latest
+message, not the stale Description. Needs the worker running to take
+effect — the queue was found idle (14 stuck `check_resolution` jobs) when
+this was diagnosed.
+
+**Deploy** (`docs/DEPLOY.md`): the runtime = `worker` + `cdc` + `poller`
+(all outbound-only, no public URL) + optional `api`. `docker-compose.yml`
+runs them locally / on a VM; `Procfile` + `railway.json` for Railway
+(paid — no free tier); `deploy/run_all.py` + `deploy/Dockerfile` bundle
+all three under one supervisor + health port for a single-container free
+host (Hugging Face Spaces, no card). Git-based deploys need
+`SF_PRIVATE_KEY` inline (the `sf_jwt/` file is git-ignored). API is on
+Vercel (`support-automation-ashy.vercel.app`); set `WEB_ORIGINS` there.
+
+Phase 20l's CDC subscriber is **live-verified** (2026-08-31): a real
+inbound `EmailMessage` on Case `500jV0…` streamed off `/data/
+EmailMessageChangeEvent` → `inbound_email` job enqueued, other events
+ignored, replay cursor persisted for both topics. Run it with
+`python -m ingestion.sf_cdc_watch` (docker-compose `cdc` service).
 Phase 18d's button is built but signing in with Google needs the Supabase
 dashboard Google provider enabled first (`docs/GOOGLE_SETUP.md`
 §"Google sign-in"); the Phase 20 Gmail *provider* needs the same
 `GOOGLE_CLIENT_ID`/`SECRET` + a redirect registered (the IMAP path needs
 nothing server-side).
+
+**2026-08-31 — Phase 20m: the bot re-engages after a human.**
+Bug found in testing: after `ask_human`, an agent answers on the Case and
+the bot never responds. `check_resolution` only *recorded* the human's
+action (Phase 11) and only fired once.
+- **`interpreter/salesforce.py`**: `latest_inbound_email(case_id)` and
+  `agent_response_since(case_id, since_iso)` (newest CaseComment as
+  *guidance*, newest outbound EmailMessage as *agent-handled-it*).
+- **`interpreter/agent_reply.py`** (new): `resume_from_guidance(case,
+  guidance, cfg, tenant_id)` — one LLM polish of the agent's answer into a
+  customer-facing reply, delivered on the case's channel (SMTP + mirror to
+  the Case, or `send_case_reply`); `cfg.auto_send_enabled` off → left as a
+  draft CaseComment.
+- **`api/worker._check_resolution`** reworked into a bounded poller
+  (`FEEDBACK_POLL_MIN`=5 × `FEEDBACK_MAX_CHECKS`=12, after the initial
+  `FEEDBACK_DELAY_MIN`=20): agent CaseComment → `resume_from_guidance` +
+  parent run `human_action='guided_resume'` + a `source='agent_resume'`
+  run row; agent outbound email → score the draft as before; nothing yet →
+  re-enqueue with `checks+1` (`dedupe_key={run_id}:{n}`).
+- **`api/worker._run_flow`**: a CDC `inbound_email` re-run now overlays the
+  newest incoming EmailMessage onto `case.body/subject/from` — was
+  re-triaging the stale Case Description. (The email *poller* path already
+  passed the fresh message.)
+- **Customer replies** re-run the whole flow (poller enqueue already
+  worked; CDC path fixed above). **Agent guidance** takes the focused
+  polish-and-send path (no re-triage — the agent's answer is the truth).
+- **Verify:** 180 offline pytest (6 new in `test_agent_resume.py` — the
+  three `_check_resolution` branches + noop + the two delivery modes).
+  Not yet live-verified (needs the worker running against the org).
+
+**2026-08-31 — Phase 20l: durable Salesforce → engine push via CDC +
+Pub/Sub API.**
+- **Why:** the Phase 20i Apex HTTP callout is fire-and-forget (an API
+  outage loses the event) and covers only *new* Cases. CDC covers new
+  Cases, **inbound emails on an existing Case**, and **queue (owner)
+  changes** in one subscription, and every event has a `replay_id` we
+  persist so a restart resumes (72h retention).
+- **`ingestion/sf_pubsub/`** — vendored `pubsub_api.proto` (Salesforce
+  Pub/Sub API v1) + generated `pubsub_api_pb2*.py` (regen recipe in the
+  package `__init__`); **`plan.py`** — pure `plan_events(payload,
+  replay_hex) → [RunSpec]` (Case CREATE → `case_created`, Case UPDATE with
+  a moved `OwnerId` → `case_owner_changed`, inbound `EmailMessage` CREATE
+  → `inbound_email` for its `ParentId`; DELETE/GAP/outbound ignored);
+  **`subscriber.py`** — `PubSubSubscriber`: one gRPC `Subscribe` stream
+  per topic (thread each), Avro decode via `fastavro` + `GetSchema`
+  cache, flow-control window, `UNAUTHENTICATED` → mint a fresh JWT token
+  and resubscribe, exponential backoff, `run(max_events=…)` for a smoke
+  drain.
+- **`ingestion/sf_cdc_watch.py`** — `python -m ingestion.sf_cdc_watch`
+  (`--topics`, `--max-events`); no SF creds → exits 0 with a notice.
+- **`interpreter/sf_ingest.py`** — `resolve_entry_flow_id(sb)` +
+  `enqueue_case_run(sb, case_id, *, dedupe_key, idempotency_key,
+  trigger, flow_id?)`, the **one enqueue path** now shared by the HTTP
+  hook and the CDC subscriber. Per-event dedupe keys: `sfcase:{id}` (new
+  Case — same key the hook already used, so both push paths can run
+  during a migration without double-processing), `sfowner:{id}:{replay}`,
+  `sfemail:{msgId}`.
+- **`interpreter/salesforce.pubsub_auth(refresh=?)`** → `(access_token,
+  instance_url, org_id)` for the gRPC metadata; `reset_client()` forces a
+  new session.
+- **Migration `043`** (written, not yet applied): `sf_cdc_state (topic pk,
+  replay_id bytea, event_count, updated_at)` — service-role only, like
+  `jobs`.
+- **`api/main.salesforce_case_hook`** refactored onto `sf_ingest`
+  (response drops the unused `flow_id` field; still `{job_id, deduped}`).
+- **docker-compose**: a `cdc` service (`restart: unless-stopped`).
+  `requirements.txt` += `grpcio` / `protobuf` / `fastavro`.
+- **Verify:** 173 offline pytest (11 new in `test_sf_pubsub_plan.py` —
+  the planner matrix + stub-import + creds-less CLI no-op). **Live e2e
+  (2026-08-31, `--max-events 3`):** subscribed both topics at LATEST; a
+  real inbound `EmailMessage` on Case `500jV000005eD6wQAE` →
+  `plan_events` → one `run_flow` job (`trigger=inbound_email`,
+  deduped `sfemail:{id}`); 3 other change events decoded and correctly
+  ignored (no jobs); `sf_cdc_state` holds a 29-byte replay id per topic
+  → restart resumes. Job left `queued` (no worker was running — that
+  leg is Phase 10/20i).
+- **Transition note:** with both push paths live a new Case dedupes
+  (shared `sfcase:{id}` key); once CDC is confirmed, retire the Apex
+  trigger from `scripts/sf_deploy_case_hook.py` (or keep it as a
+  belt-and-braces fallback — the dedupe makes that safe).
+
+**2026-08-31 — Phase 20k: pick which flow the Salesforce hook runs.**
+- **Migration `042`** (applied 2026-08-31): `flows.sf_entry boolean`
+  + partial-unique `uq_one_sf_entry_flow_per_tenant` (`where sf_entry`).
+  Backfilled `sf_entry = true` on the published `team='router'` flow
+  (`f0f0f0f0-…`, tenant `00000000-…`) so behaviour is unchanged.
+- **`POST /api/hooks/salesforce/case`** now resolves the entry flow by
+  `sf_entry = true and status = 'published'` (was: hard-coded
+  `team = 'router'`). Zero/many matches → a 500 that tells you to set the
+  toggle.
+- **`PUT /api/flows/{id}/sf-entry {sf_entry: bool}`** (editor-role) — sets
+  the flag, first clearing it on the tenant's other flows so there's
+  always ≤1. `sf_entry` is surfaced in `GET /api/flows` + `GET
+  /api/flows/{id}`.
+- **Web**: a **Salesforce entry** checkbox-pill in the flow editor
+  toolbar (green when on); read-only viewers see a static pill when set.
+  `api.setSfEntry()`, `FlowMeta.sf_entry`.
+- **Scope note:** deliberately *not* the full `flow_bindings`
+  (queue → flow) design — that stays a future phase. This is the
+  one-flow-for-all-teams interim: mark one flow, delete or ignore the
+  rest.
+- **Verify:** 162 offline pytest (2 new — the SF hook needs its shared
+  secret; `/sf-entry` needs a token) + an integration test
+  (`test_sf_entry_is_one_per_tenant`: flipping the flag on flow B clears
+  it on flow A); web tsc/vitest (6)/build green.
+
+**2026-08-30 — Phase 20j: local Docker runtime + SMTP outbound (no cloud,
+no credit card).**
+- **`docker-compose.yml`** (+ `Dockerfile`, `.dockerignore`) — one image,
+  three `restart: unless-stopped` services on the dev box:
+  `poller` (`ingestion.email_watch --interval 15`), `worker`
+  (`api.worker`), `api` (`uvicorn api.main:app`, `:8000`, `/api/health`
+  healthcheck). `./sf_jwt` bind-mounted `:ro`; compose overrides
+  `SF_PRIVATE_KEY_FILE=/app/sf_jwt/server.key` (the `.env` value is a host
+  path). `model-cache` named volume keeps the fastembed ONNX model across
+  rebuilds. Replaces the opaque GitHub-Actions cron for NFR-2. Usage +
+  the Cloudflare-tunnel wiring for the SF push: **`docs/LOCAL_RUNTIME.md`**.
+  *Not built/run here:* Docker isn't on this box — compose YAML + anchor
+  merge validated, image build is the user's `docker compose up -d --build`.
+- **Outbound reply now goes over SMTP** (FR-12 revised).
+  `api/worker._email_post_run._deliver` calls `emailer.send_reply` (SMTP
+  from the mailbox — what actually reaches the customer), then best-effort
+  mirrors it onto the Case as an outbound `EmailMessage`
+  (`salesforce.log_email_message`, `Incoming=false`, `status=_EM_SENT`).
+  `salesforce.send_case_reply()` / the `emailSimple` action dropped from
+  this path: this DE org has no Org-Wide Email Address and Deliverability =
+  "System email only", so `emailSimple` returned `sent=true` while
+  delivering nothing (that was the "no reply in mail" bug). `send_case_reply`
+  is now only referenced by `registry.h_clarify` (Phase 17c). **160 offline
+  pytest** green (`test_emailer.py`: the SF-reply test replaced by an
+  SMTP-send + Case-mirror test and a send-failure test).
 
 **2026-08-30 — Phase 20e: the email channel is LIVE-CONFIGURED for
 `gundamvishnu7@gmail.com` (tenant Acme `00000000-…`, team `email`).**

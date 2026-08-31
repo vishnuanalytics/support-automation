@@ -151,24 +151,47 @@ class _NoDup:
     def execute(self): return type("R", (), {"data": []})()
 
 
-def test_post_run_replies_through_salesforce_when_the_case_has_an_sf_id(monkeypatch):
-    # FR-12: reply via Salesforce so the outbound is an EmailMessage on the
-    # Case; the SMTP path must not be taken.
+def test_post_run_replies_over_smtp_and_mirrors_onto_the_case(monkeypatch):
+    # FR-12: the reply goes out over SMTP (that is what reaches the
+    # customer); when the case has an sf_id the sent reply is *also*
+    # mirrored onto the Case as an outbound EmailMessage, best-effort.
     monkeypatch.setattr(mailbox, "load_channel",
                         lambda tid, sb: _cfg(auto_send=True, secret={"password": "pw"}))
     monkeypatch.setattr(worker.salesforce, "available", lambda *a, **k: True)
-    seen = {}
-    monkeypatch.setattr(worker.salesforce, "send_case_reply",
-                        lambda cid, body, **k: (seen.update(case=cid, body=body) or
-                                                {"sent": True, "dry_run": False, "via": "email"}))
+    sent = {}
     monkeypatch.setattr(emailer, "send_reply",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("used SMTP")))
+                        lambda cfg, **kw: (sent.update(kw) or
+                                           {"sent": True, "dry_run": False, "to": kw["to"],
+                                            "message_id": "<reply@acme.com>"}))
+    mirrored = {}
+    monkeypatch.setattr(worker.salesforce, "log_email_message",
+                        lambda cid, **k: (mirrored.update(case=cid, **k) or
+                                          {"created": True, "id": "02sCASE"}))
 
     final = {"outcome": {"action": "auto_reply", "reply": "Here's the fix."}}
     res = worker._email_post_run(final, {**_CASE, "sf_id": "500CASE"}, _FLOW, sb=object())
     assert res["decision"] == "send_reply"
-    assert res["delivery"]["via"] == "salesforce" and res["delivery"]["sent"] is True
-    assert seen == {"case": "500CASE", "body": "Here's the fix."}
+    assert res["delivery"]["sent"] is True
+    assert res["delivery"]["case_email"] == "02sCASE"
+    assert sent["to"] == "jane@x.com" and sent["body"] == "Here's the fix."
+    assert mirrored["case"] == "500CASE" and mirrored["incoming"] is False
+    assert mirrored["message_id"] == "<reply@acme.com>"
+
+
+def test_post_run_smtp_send_failure_skips_the_case_mirror(monkeypatch):
+    # a failed SMTP send must not be mirrored onto the Case as "sent".
+    monkeypatch.setattr(mailbox, "load_channel",
+                        lambda tid, sb: _cfg(auto_send=True, secret={"password": "pw"}))
+    monkeypatch.setattr(worker.salesforce, "available", lambda *a, **k: True)
+    monkeypatch.setattr(emailer, "send_reply",
+                        lambda cfg, **kw: {"sent": False, "dry_run": False, "error": "smtp down"})
+    called = {"mirror": False}
+    monkeypatch.setattr(worker.salesforce, "log_email_message",
+                        lambda *a, **k: called.update(mirror=True))
+
+    final = {"outcome": {"action": "auto_reply", "reply": "Here's the fix."}}
+    res = worker._email_post_run(final, {**_CASE, "sf_id": "500CASE"}, _FLOW, sb=object())
+    assert res["delivery"]["sent"] is False and called["mirror"] is False
 
 
 def test_run_flow_records_and_posts_the_case_mutated_in_flight(monkeypatch):
