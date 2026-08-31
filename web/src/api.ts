@@ -16,6 +16,7 @@ import type {
   Member,
   PolicyRule,
   NodeTypesResp,
+  SfMeta,
   RunDetail,
   RunResult,
   RunRow,
@@ -149,6 +150,10 @@ export const api = {
         { method: "POST", body: JSON.stringify(b) },
       ),
     googleAuthorize: () => req<{ url: string }>("/integrations/email/google/authorize"),
+  },
+
+  salesforce: {
+    meta: () => req<SfMeta>("/salesforce/meta"),
   },
 
   acceptInvitations: () =>

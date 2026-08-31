@@ -161,7 +161,10 @@ def h_classify(state: CaseState, config: dict) -> dict:
     raw = llm.complete(
         system=(
             "You triage inbound support cases. Return a JSON object with keys: "
-            "topic (short slug), urgency (one of low|normal|high|critical), "
+            "topic (short slug), "
+            "type (one of: Question | How-to | Problem / Bug | Billing | "
+            "Account / Login | Feature Request | Other), "
+            "urgency (one of low|normal|high|critical), "
             "summary (<=200 chars)."
         ),
         user=body or "(empty case)",
@@ -170,8 +173,15 @@ def h_classify(state: CaseState, config: dict) -> dict:
         max_tokens=300,
     )
     parsed = _safe_json(raw)
+    topic = parsed.get("topic", "unknown")
+    # Case.Type — the field queue owners scan by and the key `notify` routes on
+    # (Phase 20n). Trust the classifier's `type` when it maps to a real picklist
+    # value; else derive deterministically from the topic/body (stub-safe).
+    case_type = (salesforce.normalize_case_type(parsed.get("type"))
+                 or salesforce.map_case_type(topic, body))
     classification = {
-        "topic": parsed.get("topic", "unknown"),
+        "topic": topic,
+        "case_type": case_type,
         "urgency": str(parsed.get("urgency", "normal")).lower(),
         "summary": parsed.get("summary", body[:200]),
         "tier_raw": tier_raw,
@@ -184,7 +194,8 @@ def h_classify(state: CaseState, config: dict) -> dict:
         "classification": classification,
         **_trace(
             config["_node_id"], "classify",
-            f"tier={tier} region={region} urgency={classification['urgency']} topic={classification['topic']}",
+            f"tier={tier} region={region} urgency={classification['urgency']} "
+            f"topic={topic} type={case_type or '-'}",
             {**classification, "tokens": llm.last_usage},
         ),
     }
@@ -271,6 +282,11 @@ def h_sf_writeback(state: CaseState, config: dict) -> dict:
         classification.get("topic"),
         state.get("region") or _dig(case, "account.region"),
     )
+    # Phase 20n — Case.Type: the classifier's mapped value, else derived from
+    # the topic. Written on every pass so it is set at first triage and kept
+    # current on each customer-reply re-run while the Case sits in the queue.
+    case_type = (classification.get("case_type")
+                 or salesforce.map_case_type(classification.get("topic")))
     ctx: dict[str, Any] = {
         "classification": classification,
         "tier": state.get("tier"),
@@ -278,6 +294,7 @@ def h_sf_writeback(state: CaseState, config: dict) -> dict:
         "urgency": classification.get("urgency"),
         "topic": classification.get("topic"),
         "summary": classification.get("summary"),
+        "case_type": case_type,
         "case_topic": derived.get("Topic__c"),
         "case_module": derived.get("Module__c"),
         "case_submodule": derived.get("SubModule__c"),
@@ -285,8 +302,9 @@ def h_sf_writeback(state: CaseState, config: dict) -> dict:
     }
 
     field_map = config.get("field_map") or {
-        "urgency": "Priority", "case_topic": "Topic__c", "case_module": "Module__c",
-        "case_submodule": "SubModule__c", "case_region": "Region__c",
+        "urgency": "Priority", "case_type": "Type", "case_topic": "Topic__c",
+        "case_module": "Module__c", "case_submodule": "SubModule__c",
+        "case_region": "Region__c",
     }
     value_maps = config.get("value_maps") or {
         "Priority": {"critical": "High", "high": "High", "normal": "Medium", "low": "Low"},
@@ -734,6 +752,15 @@ def h_confidence_gate(state: CaseState, config: dict) -> dict:
         mod = salesforce.map_case_fields(topic, None).get("Module__c")
         if mod and mod in esc_mods:
             forced = f"module '{mod}'"
+    # Case.Type escalation (Phase 20n): a whole class of request (Billing,
+    # Account / Login, …) that is never a docs answer, keyed on the field a
+    # human filters by. Opt-in via `escalate_types`.
+    if not forced:
+        esc_types = config.get("escalate_types", [])
+        ctype = ((state.get("classification") or {}).get("case_type")
+                 or salesforce.map_case_type(topic))
+        if ctype and ctype in esc_types:
+            forced = f"type '{ctype}'"
     if forced:
         passed = False
 
@@ -772,6 +799,115 @@ def h_auto_reply(state: CaseState, config: dict) -> dict:
         "channel": config.get("channel", "email"),
     }
     return {"outcome": outcome, **_trace(config["_node_id"], "auto_reply", "reply sent automatically")}
+
+
+def _looks_like_sf_id(v: Any) -> bool:
+    """A 15- or 18-char Salesforce record id (safe to pass to a Chatter
+    @mention). A configured target that is a plain Name is not."""
+    return isinstance(v, str) and len(v) in (15, 18) and v.isalnum()
+
+
+@register("notify")
+def h_notify(state: CaseState, config: dict) -> dict:
+    """Ping an internal party on the Case **without changing ownership**
+    (Phase 20n). The Case stays in whatever queue it is already in; the
+    routed rep gets a Chatter note (an @mention when the target is a real
+    User/Group id) plus the suggested reply as a private CaseComment.
+
+    Target is resolved from `Case.Type` first (the field queue owners scan
+    by), then `Module__c`. The node's own `target_by_type` / `target_by_module`
+    win when they have an entry; otherwise the per-tenant `notify_targets`
+    table (`interpreter.routing.resolve_notify_target` — live SF lookup for
+    `sf_team_role` / `sf_queue` rows); otherwise `fallback_target`. Terminal —
+    Phase 20m's resume poller picks up the rep's CaseComment and continues.
+
+    config: {
+      channel: "salesforce_chatter",
+      target_by_type:   {"Billing": "<User/Group id or name>", ...},   # optional override
+      target_by_module: {"API & Webhooks": "...", ...},                # optional override
+      fallback_target:  null,
+      use_table:        true,   # consult notify_targets when no override matches (default true)
+      note_tmpl?: "... {label} ... {confidence} ... {draft} ...",
+    }
+    """
+    nid = config["_node_id"]
+    case = state.get("case", {})
+    sf_id = case.get("sf_id") or case.get("id")
+    cls = state.get("classification") or {}
+    confidence = state.get("confidence")
+    draft = state.get("draft", "")
+
+    case_type = cls.get("case_type") or salesforce.map_case_type(cls.get("topic"))
+    written = (state.get("sf_writeback") or {}).get("written") or {}
+    module = written.get("Module__c") or salesforce.map_case_fields(
+        cls.get("topic"), None).get("Module__c")
+
+    by_type = config.get("target_by_type") or {}
+    by_module = config.get("target_by_module") or {}
+    label = case_type or module or "support"
+    target = by_type.get(case_type) or by_module.get(module)
+    target_type = None
+    resolved_via = "node_config" if target else None
+
+    # no per-flow override matched → the central tenant routing table
+    if not target and config.get("use_table", True):
+        from interpreter.routing import resolve_notify_target
+
+        row = resolve_notify_target(
+            state.get("tenant_id"), case_type, module, sb=config.get("_sb")
+        )
+        if row:
+            target, target_type = row.get("id"), row.get("type")
+            label = row.get("label") or label
+            resolved_via = f"table:{row.get('resolver')}"
+
+    if not target:
+        target = config.get("fallback_target")
+        resolved_via = resolved_via or ("fallback" if target else "none")
+
+    outcome = {
+        "action": "notify",
+        "channel": config.get("channel", "salesforce_chatter"),
+        "target": target,
+        "target_type": target_type,
+        "resolved_via": resolved_via,
+        "label": label,
+        "case_type": case_type,
+        "module": module,
+        "draft": draft,
+        "confidence": confidence,
+        "reassigned": False,
+    }
+
+    tmpl = config.get("note_tmpl") or (
+        "{label} case — support bot needs input from the {label} team "
+        "(confidence {confidence}). The Case stays in this queue; suggested "
+        "draft below, please review before it goes to the customer.\n\n{draft}"
+    )
+    body = tmpl.format(label=label, confidence=confidence, draft=draft or "(no draft yet)")
+
+    if sf_id and outcome["channel"] == "salesforce_chatter":
+        # @mention a User/Group id only — a Queue group id isn't mentionable.
+        mention = (target if _looks_like_sf_id(target)
+                   and target_type in (None, "user", "group") else None)
+        chatter = salesforce.post_chatter(
+            sf_id, body, mention_id=mention, tenant_id=state.get("tenant_id")
+        )
+        outcome["chatter"] = chatter
+        mode = "dry-run" if chatter.get("dry_run") else "posted"
+        summary = f"Chatter {mode} → {label} [{resolved_via}] (no reassign)"
+        if draft.strip():
+            note = salesforce.add_case_comment(
+                sf_id, f"[bot draft — {label}; review before sending]\n\n{draft}",
+                published=False, tenant_id=state.get("tenant_id"),
+            )
+            outcome["draft_comment"] = note
+            if note.get("created"):
+                summary += " + draft comment"
+    else:
+        summary = f"notify {label!r} (no sf_id — not posted)"
+
+    return {"outcome": outcome, **_trace(nid, "notify", summary, outcome)}
 
 
 @register("ask_human")
@@ -1034,6 +1170,18 @@ def h_clarify(state: CaseState, config: dict) -> dict:
 
     auto_sent = bool(auto_send and delivery and delivery.get("sent"))
     posted_internal = bool(not auto_send and delivery and not delivery.get("dry_run"))
+
+    # Phase 20n — round-cap reached and still unclear: hand the Case to the
+    # general support queue (owner change), so it stops being the bot's and
+    # a human owns it. The questions we could not get answered ride along in
+    # the Chatter note above.
+    handover_queue = config.get("handover_queue")
+    handover_assignment = None
+    if exhausted and sf_id and handover_queue:
+        handover_assignment = salesforce.assign_case(
+            sf_id, queue=handover_queue, tenant_id=state.get("tenant_id")
+        )
+
     clarification = {
         "questions": questions,
         "missing": missing,
@@ -1047,6 +1195,8 @@ def h_clarify(state: CaseState, config: dict) -> dict:
         "round": clarify_round,
         "max_rounds": max_rounds,
         "exhausted": exhausted,
+        "handover_queue": handover_queue if exhausted else None,
+        "handover_assignment": handover_assignment,
     }
     outcome = {
         "action": "ask_human" if exhausted else "need_info",
@@ -1061,9 +1211,16 @@ def h_clarify(state: CaseState, config: dict) -> dict:
     }
     if delivery:
         outcome["delivery"] = delivery
+    if handover_assignment:
+        outcome["handover_queue"] = handover_queue
+        outcome["handover_assignment"] = handover_assignment
     rnd = f"round {clarify_round}/{max_rounds}"
     if exhausted:
-        where = (f"{rnd} — exhausted, handing to a human"
+        handed = ""
+        if handover_assignment:
+            handed = (f" → {handover_queue}" if handover_assignment.get("assigned")
+                      else f" (handover: {handover_assignment.get('reason') or handover_assignment.get('error') or 'queued'})")
+        where = (f"{rnd} — exhausted, handing to a human{handed}"
                  + (f" (Chatter {'posted' if posted_internal else 'dry-run'} on Case {sf_id})"
                     if sf_id else ""))
     elif not sf_id:

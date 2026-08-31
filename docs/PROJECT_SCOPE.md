@@ -703,17 +703,86 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**Phases 0–20 built. No open phase.** Migrations `001`–`043`
+**Phases 0–20 built. No open phase.** Migrations `001`–`044`
 (`034`/`035` = Phase 20a: `tenant_integrations` poller columns + the
 Supabase-Vault `integration_secret_*` RPCs; `036` = Phase 20e: the
 "Email L0/L1 — inbound to Salesforce" flow, team `email`, tenant Acme;
 `037` = Phase 20f: that flow's `sf_case` → thread-based Case reuse;
 `042` = Phase 20k: the `flows.sf_entry` flag — applied 2026-08-31 via the
 Supabase SQL editor, `f0f0f0f0-…` (router) backfilled `sf_entry=true`;
-`043` = Phase 20l: `sf_cdc_state` — applied 2026-08-31 via the SQL editor).
-180 offline pytest tests + web tsc/vitest (6)/build +
+`043` = Phase 20l: `sf_cdc_state` — applied 2026-08-31 via the SQL editor;
+`044` = Phase 20n: the `notify` node + `Case.Type` triage — **applied
+2026-08-31** via `apply_migration` to the email L0/L1 flow (the only flow in
+this DB; it's the `sf_entry` flow), published as **v3**. The Case-router
+flow `f0f0f0f0…` was never seeded to this DB — migration `044`'s router half
+lives in `scripts/seed_router_flow.py` + the portable JSON for whenever it
+is stood up; `045` = Phase 20o: `notify_targets` — **applied 2026-08-31**,
+seeded 7 rows for tenant `00000000…`).
+193 offline pytest tests + web tsc/vitest (6)/build +
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
+
+**Phase 20o (2026-08-31): `notify` targets come from a central table, not
+node config.** So a flow editor never pastes Salesforce ids. Migration `045`
+= `notify_targets` (tenant-scoped, RLS via `is_tenant_member`/`is_tenant_editor`):
+`(match_kind ∈ {case_type, module}, match_value, resolver ∈ {static,
+sf_team_role, sf_queue}, sf_target_id, sf_team/sf_role, sf_queue, label,
+active)`. `interpreter/routing.py::resolve_notify_target(tenant_id, case_type,
+module)` reads it — `sf_team_role` does a **live** two-hop SOQL (Queue Group
+id → its member User; single-level, SOQL forbids nested semi-joins),
+`sf_queue` resolves the Queue Group id. `h_notify` consults it when the
+node's own `target_by_type`/`target_by_module` have no match (an override
+still wins); then `fallback_target`. Seeded 7 `case_type` rows for tenant
+`00000000…`: Billing→`Billing_Escalations` queue, Feature Request→`Support_Tier2`
+queue, the rest→Support team lead (`sf_team_role`). **Live-verified 2026-08-31**
+against the org — Billing→`00GjV0…` (queue), Account/Login·Bug·How-to·Question·Other
+→ User `005jV0…` (the roster member, resolved live). 3 new tests
+(`test_notify_and_type.py`, 13 total in the file; 193 offline).
+- **Editor pickers (2026-08-31):** `GET /api/salesforce/meta` (`api/main.py`,
+  5-min in-proc cache → `salesforce.org_metadata()`) returns the org's live
+  **queues + `Case.Type` / `Module__c` picklists**. The flow editor's Inspector
+  wires them in — `clarify`'s *handover queue* is now a `<select>` of real
+  queues (`QueuePicker`), `notify`'s *override by Case.Type* rows come from the
+  live picklist; both degrade to a text box / hardcoded list when the API has
+  no SF creds, and keep any value not in the list. `web/src/api.ts`
+  `api.salesforce.meta()`, `SfMeta` type, `useSfMeta()` hook.
+- Still **no standalone `notify_targets` admin screen** — table rows are
+  managed via SQL; the pickers above live in the flow-node forms.
+
+**Phase 20n (2026-08-31): ask an internal rep without handing off the Case
++ `Case.Type` on every pass.** The "what happens after we're not confident"
+branch was under-specified: every low-confidence Case went to `ask_human`,
+which reassigns the Case out of its queue.
+- **`Case.Type`** — `classify` now emits `case_type` (LLM `type` →
+  `salesforce.normalize_case_type`, else `map_case_type` keyword fallback,
+  stub-safe); `sf_writeback` default field-map gained `case_type → Type`,
+  written at first triage and on every customer-reply re-run. It was never
+  populated before — the field a queue owner filters by was blank. FR-26.
+- **`notify` node** (`interpreter/registry.h_notify`) — Chatter ping
+  (@mention when the target is a real User/Group id) + draft `CaseComment`,
+  **no `OwnerId` change**. Target: `Case.Type` → `Module__c` →
+  `fallback_target`. `confidence_gate` gained `escalate_types`
+  (`["Billing", "Account / Login"]`). FR-27.
+- **`clarify` `handover_queue`** — round cap (2) exhausted → reassign to
+  `Team_Support` so a human owns it. FR-28.
+- **Flows**: `flow_email_l0l1.json` v2 — `ask_human` **removed**; gate splits
+  `enterprise → handover / pass → auto_reply / fail+forced → notify /
+  fail+benign → clarify`. `flow_case_router.json` v2 — `notify` + `clarify`
+  added; `ask_human` kept for csm/sales (they own the Case), `handover` for
+  enterprise/offboarding. Migration `044`; seeder `scripts/seed_router_flow.py`
+  regenerated (portable JSON == seeder output verified). Web Inspector: a
+  `notify` target-by-Type form + a `clarify` handover-queue field;
+  `graph.ts` TERMINAL += `notify`.
+- **Re-engagement after the rep answers** = the existing Phase 20m resume
+  poller (agent CaseComment → `agent_reply.resume_from_guidance`), unchanged.
+- **Verify:** 190 offline pytest (10 new in `tests/test_notify_and_type.py`);
+  web tsc + vitest + build green. Migration `044` **applied 2026-08-31** —
+  email flow `e5e5e5e5…` now published **v3** (`ask_human` removed; `notify`
+  + `clarify` added; gate 4-way); the live v3 snapshot was pulled back and
+  re-checked with `build_graph` + a route smoke (Billing→`notify`,
+  vague→`clarify`, how-to→`auto_reply`; `Case.Type` populated). **Not yet
+  live-verified end to end** — needs the deployed `worker`/`cdc` restarted
+  (they cache the flow per process) and a real Case through it.
 
 **Phase 20m (2026-08-31): the bot now re-engages after a human** — an
 agent CaseComment on an escalated Case → bot polishes it into a customer

@@ -1,7 +1,65 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import type { KbCollection } from "../types";
+import type { KbCollection, SfMeta } from "../types";
 import type { RFEdge, RFNode } from "./graph";
+
+// Salesforce routing metadata (queues + Case.Type / Module picklists) — fetched
+// once per editor session, shared by the notify / clarify forms.
+const _EMPTY_META: SfMeta = { available: false, queues: [], case_types: [], modules: [] };
+let _metaCache: SfMeta | null = null;
+let _metaPromise: Promise<SfMeta> | null = null;
+
+function useSfMeta(): SfMeta {
+  const [meta, setMeta] = useState<SfMeta>(_metaCache ?? _EMPTY_META);
+  useEffect(() => {
+    if (_metaCache) return;
+    _metaPromise =
+      _metaPromise ||
+      api.salesforce.meta().catch(() => _EMPTY_META);
+    _metaPromise.then((m) => {
+      _metaCache = m;
+      setMeta(m);
+    });
+  }, []);
+  return meta;
+}
+
+/** A Salesforce-Queue picker: a <select> of the org's queues when the API
+ *  could reach Salesforce, otherwise a plain text box. Keeps the current
+ *  value even if it is not (yet) in the list. */
+function QueuePicker({
+  value,
+  onChange,
+  placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+}) {
+  const meta = useSfMeta();
+  if (!meta.available || meta.queues.length === 0) {
+    return (
+      <input
+        value={value}
+        placeholder={placeholder || "queue DeveloperName"}
+        onChange={(e) => onChange(e.target.value)}
+      />
+    );
+  }
+  const names = meta.queues.map((q) => q.developer_name || q.name);
+  const known = value === "" || names.includes(value);
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)}>
+      <option value="">— none —</option>
+      {!known && <option value={value}>{value} (not in org)</option>}
+      {meta.queues.map((q) => (
+        <option key={q.id} value={q.developer_name || q.name}>
+          {q.name}
+        </option>
+      ))}
+    </select>
+  );
+}
 
 export function NodeInspector({
   node,
@@ -40,6 +98,10 @@ export function NodeInspector({
 
       {node.data.nodeType === "clarify" && (
         <ClarifyForm config={config} onConfig={onConfig} />
+      )}
+
+      {node.data.nodeType === "notify" && (
+        <NotifyForm config={config} onConfig={onConfig} />
       )}
 
       {node.data.nodeType === "identify" && (
@@ -166,7 +228,10 @@ function ClarifyForm({
 }) {
   const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
   const maxQ = typeof config.max_questions === "number" ? config.max_questions : 3;
+  const maxRounds = typeof config.max_rounds === "number" ? config.max_rounds : 2;
   const autoSend = config.auto_send === true;
+  const handoverQueue =
+    typeof config.handover_queue === "string" ? config.handover_queue : "";
 
   return (
     <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
@@ -183,11 +248,31 @@ function ClarifyForm({
         />
       </div>
       <div className="row">
+        <span className="muted" style={{ width: 110 }}>max rounds</span>
+        <input
+          type="number" min="1" max="5"
+          value={maxRounds}
+          onChange={(e) => set({ max_rounds: parseInt(e.target.value, 10) || 1 })}
+        />
+      </div>
+      <div className="row">
         <span className="muted" style={{ width: 110 }}>channel</span>
         <input
           value={typeof config.channel === "string" ? config.channel : "email"}
           onChange={(e) => set({ channel: e.target.value })}
         />
+      </div>
+      <div className="row">
+        <span className="muted" style={{ width: 110 }}>handover queue</span>
+        <QueuePicker
+          value={handoverQueue}
+          placeholder="Team_Support"
+          onChange={(v) => set({ handover_queue: v || undefined })}
+        />
+      </div>
+      <div className="muted" style={{ fontSize: 11 }}>
+        after <code>max rounds</code> of asking the customer, the Case is
+        reassigned to this queue (blank = stay put, note only).
       </div>
       <label className="row" style={{ gap: 6, marginTop: 4 }}>
         <input
@@ -202,6 +287,77 @@ function ClarifyForm({
         {autoSend
           ? "emails the questions to the customer (falls back to a public case comment); run is marked awaiting_customer."
           : "off: posts the questions to Chatter for an agent to send."}
+      </div>
+    </div>
+  );
+}
+
+const CASE_TYPES_FALLBACK = [
+  "Billing",
+  "Account / Login",
+  "Problem / Bug",
+  "Feature Request",
+  "How-to",
+  "Question",
+  "Other",
+];
+
+function NotifyForm({
+  config,
+  onConfig,
+}: {
+  config: Record<string, unknown>;
+  onConfig: (v: Record<string, unknown>) => void;
+}) {
+  const meta = useSfMeta();
+  const caseTypes = meta.case_types.length ? meta.case_types : CASE_TYPES_FALLBACK;
+  const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
+  const byType = (config.target_by_type as Record<string, string>) || {};
+  const setTarget = (t: string, v: string) => {
+    const next = { ...byType };
+    if (v) next[t] = v;
+    else delete next[t];
+    set({ target_by_type: next });
+  };
+
+  return (
+    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+      <div className="muted" style={{ fontSize: 11 }}>
+        pings an internal rep on the Case <strong>without changing the owner</strong> —
+        the Case stays in its current queue. Terminal; the resume poller
+        re-engages the bot on the rep's CaseComment.
+      </div>
+      <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
+        Targets normally come from the tenant <strong>notify_targets</strong> table
+        (resolved from <code>Case.Type</code>, then <code>Module__c</code>, with a
+        live Salesforce lookup for team / queue rows). Leave the rows below blank
+        unless this flow needs an <em>override</em> for a specific Type.
+      </div>
+      <label style={{ marginTop: 6, display: "block" }}>
+        override target by Case.Type{" "}
+        {meta.available && <span className="muted">(picklist from Salesforce)</span>}
+      </label>
+      <div className="muted" style={{ fontSize: 11 }}>
+        a Salesforce User / Group id (15–18 chars) → real @mention; any other
+        text just names them in the note.
+      </div>
+      {caseTypes.map((t) => (
+        <div className="row" key={t} style={{ gap: 4 }}>
+          <span className="muted" style={{ width: 110 }}>{t}</span>
+          <input
+            value={byType[t] ?? ""}
+            placeholder="User/Group id or name"
+            onChange={(e) => setTarget(t, e.target.value.trim())}
+          />
+        </div>
+      ))}
+      <div className="row" style={{ marginTop: 6 }}>
+        <span className="muted" style={{ width: 110 }}>fallback target</span>
+        <input
+          value={typeof config.fallback_target === "string" ? config.fallback_target : ""}
+          placeholder="(optional)"
+          onChange={(e) => set({ fallback_target: e.target.value.trim() || null })}
+        />
       </div>
     </div>
   );

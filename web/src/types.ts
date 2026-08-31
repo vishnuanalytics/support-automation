@@ -1,6 +1,7 @@
 export type NodeType =
   | "retrieve" | "classify" | "sf_writeback" | "draft"
   | "confidence_gate" | "auto_reply" | "ask_human" | "handover"
+  | "team_route" | "notify" | "clarify" | "identify"
   | string;
 
 export interface FlowNode {
@@ -48,6 +49,16 @@ export interface FlowVersion {
 export interface NodeTypesResp {
   types: string[];
   defaults: Record<string, Record<string, unknown>>;
+}
+
+/** Phase 20o — Salesforce routing metadata for the flow editor's dropdowns
+ *  (notify / clarify node forms). `available:false` when the API has no SF creds. */
+export interface SfMeta {
+  available: boolean;
+  queues: { id: string; name: string; developer_name: string | null }[];
+  case_types: string[];
+  modules: string[];
+  error?: string;
 }
 
 /** Phase 19 — a proposed flow graph (from Mermaid import or AI assist),

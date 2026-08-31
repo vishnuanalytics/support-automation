@@ -4,7 +4,7 @@ The **what and why**. `PROJECT_SCOPE.md` is the build log (what's done, what's
 next); this file is the spec every phase is measured against. When a new
 requirement surfaces, add it here first, then build.
 
-Last updated 2026-08-30.
+Last updated 2026-08-31.
 
 ---
 
@@ -261,6 +261,18 @@ Tracked in `PROJECT_SCOPE.md`; summary as of 2026-08-30.
 | **FR-23** Team roster in SF | `Contact.Team__c` + `Contact.TeamRole__c`; 2 real Users (Support/CSM managers) + 13 Contacts, 1 Manager + 2 Members per team. `scripts/sf_seed_teams.py`. |
 | **FR-24** Salesforce → automation push (callout) | `POST /api/hooks/salesforce/case` (shared secret) pulls the Case and queues the flow marked **`sf_entry`** (FR-17a; was hard-coded `team='router'`). SF side: an Apex trigger → HTTP Callout (`scripts/sf_deploy_case_hook.py`), fires on a new `Status='New'`, non-Email Case. Request/response — no durable retry, new-Case only. Superseded by FR-25 for durability; safe to keep as a fallback (shared dedupe key). |
 | **FR-25** Salesforce → automation push (CDC, Phase 20l) | `ingestion.sf_cdc_watch` — a long-lived gRPC client on the **Pub/Sub API** streaming `Case` + `EmailMessage` Change Data Capture. Enqueues a `run_flow` job for a new Case, a new **inbound email on an existing Case**, and a **queue (OwnerId) change**. Durable: last `replay_id` per topic persisted in `sf_cdc_state` (migration `043`) → restart resumes (72h retention). Shares `interpreter.sf_ingest.enqueue_case_run` with FR-24. **Live-verified 2026-08-31** — real inbound-email event → `inbound_email` job, other events ignored, replay cursor persisted. docker-compose `cdc` service. |
+
+**Added + built in Phase 20n (2026-08-31):**
+
+| Req | How |
+|---|---|
+| **FR-26** Case.Type on every pass | `classify` now also emits `case_type` (LLM `type`, constrained to the 7 `Case.Type` picklist values, with a deterministic keyword fallback — `salesforce.normalize_case_type` / `map_case_type`). `sf_writeback`'s default field-map gained `case_type → Type`, so the Case's `Type` is set at first triage and refreshed on every customer-reply re-run while it sits in the queue — the field a queue owner scans a list view by is no longer blank. `Module__c` is still written (finer product-area tag). |
+| **FR-27** Ask an internal rep without a hand-off | New **`notify`** node (`interpreter/registry.h_notify`): posts a Chatter note (an @mention when the target is a real User/Group id, else names them) + the draft as a private `CaseComment`, and **never changes `Case.OwnerId`** — the Case stays in its open queue. Target resolves from `Case.Type` → `Module__c` → `fallback_target`. `confidence_gate` gained `escalate_types` (`["Billing", "Account / Login"]`) beside `escalate_topics` / `escalate_modules`. The email flow routes a forced escalation here; the router flow routes `support`-team forced escalations here (csm / sales still reassign via `ask_human`). Re-engagement after the rep answers is the existing Phase 20m resume poller. |
+| **FR-27a** Central `notify` routing (Phase 20o) | The `Case.Type` → rep mapping lives in a per-tenant table **`notify_targets`** (migration `045`, RLS), not per-flow node config — a flow editor never pastes ids. `interpreter/routing.resolve_notify_target` reads it; a row resolves `static` (fixed id), `sf_queue` (Queue by name → id), or `sf_team_role` (the current member of `Team_<team>` — a **live** SOQL lookup, so it follows Salesforce roster changes). `h_notify` still lets a node-level `target_by_type` override win. Seeded for tenant `00000000…`; live-verified against the org. |
+| **FR-27b** Editor pickers from live SF metadata | `GET /api/salesforce/meta` (`salesforce.org_metadata`, 5-min cache) serves the org's queues + `Case.Type` / `Module__c` picklists to the flow editor. The Inspector's `clarify` *handover queue* and `notify` *Case.Type overrides* use them (`QueuePicker` / `useSfMeta`), degrading to free text when SF is unreachable. No standalone `notify_targets` admin screen yet — rows managed via SQL. |
+| **FR-28** Round-capped clarify → support queue | `clarify` gained `handover_queue`: once `max_rounds` (2) of asking the customer is exhausted it reassigns the Case to that queue (`Team_Support`) so a human owns it. The email + router flows send a non-forced low-confidence Case to `clarify` instead of a blind `ask_human`. |
+
+Flows updated: `flow_email_l0l1.json` (`ask_human` removed, `notify` + `clarify` added, gate split 4-way) and `flow_case_router.json` (`notify` + `clarify` added, gate split 5-way). Migration `044` **applied 2026-08-31** to the live email flow → published **v3** (the router flow isn't seeded to this DB — its change stays in `scripts/seed_router_flow.py` + the portable JSON). Web Inspector gains a `notify` form + `clarify` handover-queue field.
 
 **Still open:**
 

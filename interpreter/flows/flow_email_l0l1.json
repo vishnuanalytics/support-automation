@@ -3,9 +3,9 @@
   "tenant_id": "00000000-0000-0000-0000-000000000000",
   "team": "email",
   "name": "Email L0/L1 — inbound to Salesforce",
-  "version": 1,
+  "version": 2,
   "status": "draft",
-  "_doc": "The flow the email-channel poller (ingestion/email_watch.py) runs against. identify (resolve the sender: contact / email-domain->account / unknown, Phase 17b) -> sf_case (create-or-reuse a real Salesforce Case; write case.sf_id + the Account tier/region back into state, Phase 20e) -> retrieve -> classify -> sf_writeback (triage fields onto the Case) -> draft -> confidence_gate: (enterprise) handover ; (pass) auto_reply (the worker's hard guard actually sends the email) ; (fail) ask_human -> a Chatter request on the Case for an agent.",
+  "_doc": "Phase 20n redesign. identify -> sf_case -> retrieve -> classify -> sf_writeback -> draft -> confidence_gate. classify now also sets Case.Type; sf_writeback writes it on every pass (kept current on each customer-reply re-run). confidence_gate: (enterprise) handover ; (pass) auto_reply ; (fail + forced escalation — Billing / Account-Login type, a billing topic, or the Billing & Plans module) notify — ping the Type's internal rep on the Case WITHOUT reassigning it, the Case stays in its open queue ; (fail + not forced) clarify — ask the customer targeted questions, still in the open queue; after max_rounds it hands the Case to Team_Support. After notify/clarify the Phase 20m resume poller re-engages the bot when the rep or agent leaves a CaseComment.",
   "nodes": [
     {
       "node_id": "identify",
@@ -28,13 +28,13 @@
     {
       "node_id": "classify",
       "type": "classify",
-      "label": "Classify tier / topic / urgency",
+      "label": "Classify tier / type / topic / urgency",
       "config": { "tier_field": "account.customer_type", "region_field": "account.region", "default_tier": "basic" }
     },
     {
       "node_id": "sf_writeback",
       "type": "sf_writeback",
-      "label": "Write triage fields to the Case",
+      "label": "Write triage fields to the Case (Type, Module, Priority…)",
       "config": {}
     },
     {
@@ -51,15 +51,28 @@
         "weights": { "retrieval": 0.55, "draft": 0.1, "groundedness": 0.35 },
         "default_threshold": 0.5,
         "tier_overrides": { "basic": 0.5, "premium": 0.6, "enterprise": 0.75 },
-        "escalate_topics": ["billing", "refund", "pricing", "legal", "compliance", "account-access", "data-export", "partner-api", "cancellation"]
+        "escalate_topics": ["billing", "refund", "pricing", "legal", "compliance", "account-access", "data-export", "partner-api", "cancellation"],
+        "escalate_modules": ["Billing & Plans"],
+        "escalate_types": ["Billing", "Account / Login"]
       }
     },
     { "node_id": "auto_reply", "type": "auto_reply", "label": "Send the drafted reply", "config": { "channel": "email" } },
     {
-      "node_id": "ask_human",
-      "type": "ask_human",
-      "label": "Raise a human request on the Case",
-      "config": { "channel": "salesforce_chatter", "reason": "below_confidence_or_forced_escalation", "queue": "Support_L0L1", "escalate_queue": "Billing_Escalations" }
+      "node_id": "notify",
+      "type": "notify",
+      "label": "Ping the Type's internal rep (Case stays in the queue)",
+      "config": {
+        "channel": "salesforce_chatter",
+        "target_by_type": {},
+        "target_by_module": {},
+        "fallback_target": null
+      }
+    },
+    {
+      "node_id": "clarify",
+      "type": "clarify",
+      "label": "Ask the customer for missing detail",
+      "config": { "max_questions": 3, "max_rounds": 2, "auto_send": false, "channel": "email", "handover_queue": "Team_Support" }
     },
     {
       "node_id": "handover",
@@ -88,8 +101,13 @@
     },
     {
       "source_node_id": "confidence_gate",
-      "target_node_id": "ask_human",
-      "condition": { "if": "not confidence_gate.pass and tier != 'enterprise'" }
+      "target_node_id": "notify",
+      "condition": { "if": "not confidence_gate.pass and tier != 'enterprise' and confidence_gate.forced_escalation" }
+    },
+    {
+      "source_node_id": "confidence_gate",
+      "target_node_id": "clarify",
+      "condition": { "if": "not confidence_gate.pass and tier != 'enterprise' and not confidence_gate.forced_escalation" }
     }
   ]
 }

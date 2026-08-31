@@ -302,6 +302,25 @@ def node_types() -> dict:
     return {"types": sorted(known_types()), "defaults": NODE_DEFAULTS}
 
 
+_SF_META_CACHE: dict = {"at": 0.0, "data": None}
+
+
+@app.get("/api/salesforce/meta")
+def salesforce_meta(c: Caller = Depends(caller)) -> dict:
+    """Salesforce routing queues + the Case.Type / Module__c picklists, for the
+    flow editor's dropdowns (notify / clarify node forms). Cached 5 min in
+    process. `available:false` + empty lists when the API has no SF creds."""
+    import time
+
+    from interpreter import salesforce as _sf
+
+    now = time.time()
+    if _SF_META_CACHE["data"] is None or now - _SF_META_CACHE["at"] > 300:
+        _SF_META_CACHE["data"] = _sf.org_metadata()
+        _SF_META_CACHE["at"] = now
+    return _SF_META_CACHE["data"]
+
+
 @app.get("/api/flows")
 def list_flows(c: Caller = Depends(caller)) -> list[dict]:
     rows = (
