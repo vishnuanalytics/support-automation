@@ -54,6 +54,40 @@ around $6–12/month total.
 The earlier "No start command detected" build error was just the missing
 `Procfile` / `railway.json` — fixed by this commit.
 
+## Hugging Face Spaces ($0, no card — good for a ~30-day bridge)
+
+Free Docker container, no credit card, ~16 GB RAM. Runs all three daemons
+in one container via `deploy/run_all.py` (supervisor + health port 7860).
+
+1. Make sure the code is reachable. Either:
+   - **make this GitHub repo public**, then create a 3-line Space whose
+     `Dockerfile` clones it:
+     ```dockerfile
+     FROM python:3.12-slim
+     RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates
+     WORKDIR /app
+     RUN git clone --depth 1 https://github.com/<you>/support-automation.git .
+     RUN pip install --no-cache-dir -r requirements.txt
+     RUN useradd -m -u 1000 app; USER app
+     ENV PYTHONUNBUFFERED=1 HF_HOME=/tmp/hf HF_HUB_CACHE=/tmp/hf FASTEMBED_CACHE_PATH=/tmp/fastembed PORT=7860
+     EXPOSE 7860
+     CMD ["python", "deploy/run_all.py"]
+     ```
+   - **or** push this repo to the Space and copy `deploy/Dockerfile` to the
+     Space repo root (HF only builds a root `Dockerfile`).
+2. The Space's `README.md` needs HF front-matter — use
+   `deploy/README.hfspace.md` as the template (`sdk: docker`,
+   `app_port: 7860`).
+3. **Settings → Variables and secrets**: every var from `.env`, and use
+   the inline `SF_PRIVATE_KEY` (not `SF_PRIVATE_KEY_FILE`).
+4. Free Spaces **pause after 48 h with no HTTP hit** — add a free
+   UptimeRobot / cron-job.org monitor on the Space URL every 30 min. The
+   health page (`GET /`) is the target; it 200s when all three procs are
+   alive, 503 otherwise.
+
+`deploy/run_all.py` restarts any crashed child (backoff, reset after 60 s
+healthy), so a transient Groq/Supabase blip self-heals.
+
 ## Oracle Cloud Always Free VM ($0)
 
 A real always-on VM. See the step list in the deploy discussion / project
