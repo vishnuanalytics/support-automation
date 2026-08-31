@@ -703,21 +703,73 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**Phases 0–20 built. No open phase.** Migrations `001`–`042` applied
+**Phases 0–20 built. No open phase.** Migrations `001`–`043`
 (`034`/`035` = Phase 20a: `tenant_integrations` poller columns + the
 Supabase-Vault `integration_secret_*` RPCs; `036` = Phase 20e: the
 "Email L0/L1 — inbound to Salesforce" flow, team `email`, tenant Acme;
 `037` = Phase 20f: that flow's `sf_case` → thread-based Case reuse;
 `042` = Phase 20k: the `flows.sf_entry` flag — applied 2026-08-31 via the
 Supabase SQL editor, `f0f0f0f0-…` (router) backfilled `sf_entry=true`).
-162 offline pytest tests + web tsc/vitest (6)/build +
+**`043` (Phase 20l — `sf_cdc_state`) is written but NOT yet applied** —
+run it in the Supabase SQL editor before starting `ingestion.sf_cdc_watch`.
+173 offline pytest tests + web tsc/vitest (6)/build +
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
+
+Phase 20l's CDC subscriber is code-complete but **not live-verified** —
+needs the running process against the org (`Case` + `EmailMessage` are
+already in Setup → Change Data Capture) + a Salesforce JWT session. Same
+"built, pending live creds" status as the other Phase 20 connectors.
 Phase 18d's button is built but signing in with Google needs the Supabase
 dashboard Google provider enabled first (`docs/GOOGLE_SETUP.md`
 §"Google sign-in"); the Phase 20 Gmail *provider* needs the same
 `GOOGLE_CLIENT_ID`/`SECRET` + a redirect registered (the IMAP path needs
 nothing server-side).
+
+**2026-08-31 — Phase 20l: durable Salesforce → engine push via CDC +
+Pub/Sub API.**
+- **Why:** the Phase 20i Apex HTTP callout is fire-and-forget (an API
+  outage loses the event) and covers only *new* Cases. CDC covers new
+  Cases, **inbound emails on an existing Case**, and **queue (owner)
+  changes** in one subscription, and every event has a `replay_id` we
+  persist so a restart resumes (72h retention).
+- **`ingestion/sf_pubsub/`** — vendored `pubsub_api.proto` (Salesforce
+  Pub/Sub API v1) + generated `pubsub_api_pb2*.py` (regen recipe in the
+  package `__init__`); **`plan.py`** — pure `plan_events(payload,
+  replay_hex) → [RunSpec]` (Case CREATE → `case_created`, Case UPDATE with
+  a moved `OwnerId` → `case_owner_changed`, inbound `EmailMessage` CREATE
+  → `inbound_email` for its `ParentId`; DELETE/GAP/outbound ignored);
+  **`subscriber.py`** — `PubSubSubscriber`: one gRPC `Subscribe` stream
+  per topic (thread each), Avro decode via `fastavro` + `GetSchema`
+  cache, flow-control window, `UNAUTHENTICATED` → mint a fresh JWT token
+  and resubscribe, exponential backoff, `run(max_events=…)` for a smoke
+  drain.
+- **`ingestion/sf_cdc_watch.py`** — `python -m ingestion.sf_cdc_watch`
+  (`--topics`, `--max-events`); no SF creds → exits 0 with a notice.
+- **`interpreter/sf_ingest.py`** — `resolve_entry_flow_id(sb)` +
+  `enqueue_case_run(sb, case_id, *, dedupe_key, idempotency_key,
+  trigger, flow_id?)`, the **one enqueue path** now shared by the HTTP
+  hook and the CDC subscriber. Per-event dedupe keys: `sfcase:{id}` (new
+  Case — same key the hook already used, so both push paths can run
+  during a migration without double-processing), `sfowner:{id}:{replay}`,
+  `sfemail:{msgId}`.
+- **`interpreter/salesforce.pubsub_auth(refresh=?)`** → `(access_token,
+  instance_url, org_id)` for the gRPC metadata; `reset_client()` forces a
+  new session.
+- **Migration `043`** (written, not yet applied): `sf_cdc_state (topic pk,
+  replay_id bytea, event_count, updated_at)` — service-role only, like
+  `jobs`.
+- **`api/main.salesforce_case_hook`** refactored onto `sf_ingest`
+  (response drops the unused `flow_id` field; still `{job_id, deduped}`).
+- **docker-compose**: a `cdc` service (`restart: unless-stopped`).
+  `requirements.txt` += `grpcio` / `protobuf` / `fastavro`.
+- **Verify:** 173 offline pytest (11 new in `test_sf_pubsub_plan.py` —
+  the planner matrix + stub-import + creds-less CLI no-op). **Not**
+  live-verified — needs the subscriber process running against the org.
+- **Transition note:** with both push paths live a new Case dedupes
+  (shared `sfcase:{id}` key); once CDC is confirmed, retire the Apex
+  trigger from `scripts/sf_deploy_case_hook.py` (or keep it as a
+  belt-and-braces fallback — the dedupe makes that safe).
 
 **2026-08-31 — Phase 20k: pick which flow the Salesforce hook runs.**
 - **Migration `042`** (applied 2026-08-31): `flows.sf_entry boolean`

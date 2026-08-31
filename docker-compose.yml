@@ -37,6 +37,14 @@ services:
     <<: *svc
     command: python -m api.worker
 
+  # Salesforce -> automation push via CDC: streams Case + EmailMessage change
+  # events off the Pub/Sub API (new Case / inbound email / queue change) and
+  # enqueues run_flow jobs. Resumes from the stored replay id. No-op without
+  # SF creds. Needs `Case` + `EmailMessage` in Setup -> Change Data Capture.
+  cdc:
+    <<: *svc
+    command: python -m ingestion.sf_cdc_watch
+
   # receives the Salesforce -> automation push (POST /api/hooks/salesforce/case).
   # Expose it to Salesforce with a Cloudflare quick tunnel (scripts/dev_serve.sh).
   api:

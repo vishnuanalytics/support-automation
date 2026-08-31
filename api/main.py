@@ -45,7 +45,7 @@ from interpreter.flows.validate_flow import Flow, check_flow  # noqa: E402
 from interpreter.loader import (  # noqa: E402
     FlowInvalid, FlowNotFound, definition_hash as flow_definition_hash, load_flow,
 )
-from interpreter import jobs  # noqa: E402
+from interpreter import jobs, sf_ingest  # noqa: E402
 from interpreter.registry import known_types  # noqa: E402
 from interpreter.runs import record_run  # noqa: E402
 from interpreter import gdrive, github as githubmod, slack as slackmod  # noqa: E402
@@ -728,30 +728,20 @@ def salesforce_case_hook(
     if not want or secret != want:
         raise HTTPException(401, "bad or missing X-SF-Hook-Secret")
 
-    flow_id = body.flow_id
-    if not flow_id:
-        rows = (_service.table("flows").select("flow_id")
-                .eq("sf_entry", True).eq("status", "published").execute().data or [])
-        if len(rows) != 1:
-            raise HTTPException(
-                500,
-                f"expected exactly one published flow marked 'Salesforce entry', found {len(rows)} "
-                "— set one with the toggle in the flow editor (PUT /api/flows/{id}/sf-entry)",
-            )
-        flow_id = rows[0]["flow_id"]
-
     # Enqueue a bare Case Id — the worker hydrates it via `salesforce.get_case`
     # (with retries). Doing the SF read here would call *back* into Salesforce
     # while the triggering @future callout is still blocked on our response,
-    # which fails intermittently.
-    job_id = jobs.enqueue(
-        "run_flow",
-        {"flow_id": flow_id,
-         "case": {"sf_id": body.case_id, "id": body.case_id, "channel": "salesforce"},
-         "idempotency_key": body.case_id},
-        dedupe_key=f"sfcase:{body.case_id}", sb=_service,
-    )
-    return {"job_id": job_id, "deduped": job_id is None, "flow_id": flow_id}
+    # which fails intermittently. Same enqueue path (+ dedupe keys) as the
+    # CDC subscriber (`ingestion.sf_cdc_watch`).
+    try:
+        job_id = sf_ingest.enqueue_case_run(
+            _service, body.case_id,
+            dedupe_key=f"sfcase:{body.case_id}", idempotency_key=body.case_id,
+            trigger="case_created", flow_id=body.flow_id,
+        )
+    except sf_ingest.EntryFlowError as e:
+        raise HTTPException(500, str(e))
+    return {"job_id": job_id, "deduped": job_id is None}
 
 
 @app.get("/api/jobs/{job_id}")

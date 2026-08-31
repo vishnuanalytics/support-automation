@@ -122,6 +122,35 @@ def _client():
     return _client_obj
 
 
+def reset_client() -> None:
+    """Drop the cached client so the next call mints a fresh session token.
+    Used by the long-lived CDC subscriber when Salesforce returns
+    UNAUTHENTICATED mid-stream (the JWT bearer token has expired)."""
+    global _client_obj
+    _client_obj = None
+    _tenant_clients.clear()
+
+
+_org_id: str | None = None
+
+
+def pubsub_auth(*, refresh: bool = False) -> tuple[str, str, str]:
+    """`(access_token, instance_url, org_id)` for the Salesforce Pub/Sub API
+    gRPC metadata headers (`accesstoken` / `instanceurl` / `tenantid`).
+    Reuses the env client's session; `refresh=True` forces a new token."""
+    global _org_id
+    if refresh:
+        reset_client()
+        _org_id = None
+    if not available():
+        raise RuntimeError("pubsub_auth needs Salesforce creds in the env (SF_USERNAME / SF_CONSUMER_KEY / …)")
+    sf = _client()
+    instance_url = f"https://{sf.sf_instance}".rstrip("/")
+    if _org_id is None:
+        _org_id = sf.query("SELECT Id FROM Organization LIMIT 1")["records"][0]["Id"]
+    return sf.session_id, instance_url, _org_id
+
+
 def client_for(tenant_id: str | None, sb=None):
     """Per-tenant client from `tenant_integrations` if a row exists, else the
     env client. (Phase 12 — real multi-tenancy.)"""
