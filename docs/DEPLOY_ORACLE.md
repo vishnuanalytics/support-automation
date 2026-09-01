@@ -224,3 +224,9 @@ The pipeline itself needs none of this.
 - The `sf_entry` flag is currently on **"Email L0/L1 — inbound to
   Salesforce"**; move it to the router flow in the editor if that's not
   what you want the hook to run.
+- **Intake is Salesforce Email-to-Case (SF-1).** `SF_INTAKE_MODE` is unset,
+  so it defaults to `salesforce_e2c` and the `poller` service starts, logs
+  `email poller idle: SF_INTAKE_MODE=salesforce_e2c`, and does nothing. Leave
+  it — CDC (`cdc` service) is the intake. Only set `SF_INTAKE_MODE=poller` in
+  `.env` if you deliberately want the IMAP poller to open Cases instead; never
+  run both (`=both`) against a live mailbox — you get duplicate Cases.

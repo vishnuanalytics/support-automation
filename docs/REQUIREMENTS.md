@@ -201,12 +201,18 @@ planned future channel — it must slot in as another adapter, not a rewrite
 - EmailMessage on the Case (in + out); thread-based Case reuse.
 - Web config UI; KB ingestion; run observability; human feedback loop.
 
+**Decided — one intake path (SF-1, 2026-09-01)**
+- **Salesforce native Email-to-Case (Path B) is the intake.** The mail routes
+  straight to Salesforce, which opens the Case; CDC fires `case_created`. The
+  platform-owned IMAP poller (Path A) is off. Enforced by `SF_INTAKE_MODE`
+  (default `salesforce_e2c`): `mailbox.list_pollable_channels` / `email_watch.
+  tick` yield nothing unless the mode is `poller` or `both`, so a channel row
+  left `active` in the DB can't silently double-create Cases.
+
 **Later**
 - Freshworks chat channel (FR-20).
 - Dedicated support mailbox (OD-2).
 - Persistent-worker deployment (OD-1).
-- Salesforce native Email-to-Case *intake* (Path B) as an alternative to the
-  platform-owned poller.
 - Other channels (phone, web form, Slack).
 
 **Explicitly out**

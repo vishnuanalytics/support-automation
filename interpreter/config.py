@@ -61,6 +61,11 @@ def validate_env(*, strict: bool = True) -> list[str]:
         warn.append("no LLM key (GROQ_API_KEY / OPENROUTER_API_KEY / ANTHROPIC_API_KEY) "
                     "— the pipeline will run on the deterministic stub only")
 
+    im = os.environ.get("SF_INTAKE_MODE")
+    if im and im.strip().lower() not in ("salesforce_e2c", "poller", "both"):
+        warn.append(f"SF_INTAKE_MODE={im!r} is not one of salesforce_e2c / poller / both "
+                    "— falling back to salesforce_e2c (the IMAP poller stays off)")
+
     for w in warn:
         print(f"[config] warning: {w}", file=sys.stderr)
     if fatal and strict:

@@ -743,6 +743,14 @@ offline pytest + web build green.
   "Direct connection" (IPv6-only on the free tier; the Always-Free VM has no
   IPv6) and not the transaction pooler (`pg_dump` needs session state). See
   `docs/DEPLOY_ORACLE.md`.
+- **SF-1** — one intake path, decided **and enforced**: Salesforce native
+  Email-to-Case (Path B) opens the Case, CDC fires `case_created`; the IMAP
+  poller (Path A) is off. New `SF_INTAKE_MODE` env (default `salesforce_e2c`;
+  `poller` / `both` opt in): `mailbox.poller_is_intake()` gates
+  `list_pollable_channels` **and** `email_watch.tick` → both return nothing
+  unless the poller is in the mode, so an `active` channel row can't silently
+  double-create Cases. `config.validate_env` warns on a bad value; `.env.example`
+  documents it. (The DB channel row is also `status='inactive'` today.)
 - **SB-5** — CLAUDE.md: migrations are applied by hand only (Supabase MCP
   `apply_migration` / SQL editor), never the CLI; `.sql` files are the source
   of truth, `supabase_migrations` is not kept in sync.
@@ -750,8 +758,7 @@ offline pytest + web build green.
   free tier has no PITR), `chmod 600` on the copied secrets, `fastembed`
   pre-warm after `up -d`, and a "stop the API / Caddy-for-TLS" note since
   nothing needs the API inbound (CDC, not HTTP callout).
-- Still open, lower priority: SF-1 (pick one intake path; email channel is
-  currently inactive).
+- All audit items (WF / NEO / SB / SF / Oracle) are now closed.
 
 **Phase 26 done (2026-09-01) — live free-model roster + signature/logo filter.**
 OpenRouter's free tier churns weekly (all classic `:free` slugs already gone),
@@ -1057,9 +1064,10 @@ is now fully non-raising. 236 offline pytest (2 new). **Operator TODO:** set
   Email Alert (OD-4: Connect @mention 404s on this DE org).
 - **`scripts/sf_support_setup.py --only permset`** — a least-privilege
   `Support_Bot_Integration` Permission Set for the integration user.
-- 234 offline pytest (5 new). **Operator TODO:** keep the Gmail poller channel
-  `inactive` while Email-to-Case is the intake (don't forward AND poll);
-  assign the permset + downgrade the integration user's profile.
+- 234 offline pytest (5 new). **Operator TODO:** assign the permset + downgrade
+  the integration user's profile. (The "keep the Gmail poller `inactive`" TODO
+  is now enforced in code — see SF-1 under the 2026-09-01 audit pass: default
+  `SF_INTAKE_MODE=salesforce_e2c` keeps the poller off regardless of the DB row.)
 
 **Phase 23 (2026-08-31): resilience — Tier 1 + Tier 2.**
 - **LLM fallback chain** (`interpreter/llm.py`): `complete()` tries the chosen

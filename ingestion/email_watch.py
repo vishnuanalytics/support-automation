@@ -136,6 +136,13 @@ def poll_channel(sb, cfg: "mailbox.MailboxConfig", *, lookback_days: int,
 
 def tick(*, tenant: str | None, lookback_days: int, limit: int, dry_run: bool,
          only_from: "set[str] | None" = None) -> int:
+    if not mailbox.poller_is_intake():
+        if not getattr(tick, "_idle_logged", False):
+            log.info("email poller idle: SF_INTAKE_MODE=%s — Salesforce Email-to-Case is "
+                     "the intake (SF-1). Set SF_INTAKE_MODE=poller (or =both) to enable.",
+                     mailbox.intake_mode())
+            tick._idle_logged = True
+        return 0
     sb = get_supabase()
     channels = mailbox.list_pollable_channels(sb)   # active + errored-and-due (auto-recovery)
     if tenant:

@@ -197,11 +197,44 @@ def _error_backoff_minutes(retries: int) -> int:
     return min(2 ** max(0, int(retries)), 30)
 
 
+# ── SF-1: one email intake path, enforced ────────────────────────────────
+# An inbound support email can reach a Salesforce Case two ways:
+#   * "salesforce_e2c" — Salesforce native Email-to-Case opens the Case and
+#     CDC fires `case_created`. This is the chosen intake (REQUIREMENTS C-1,
+#     enabled 2026-08-30); the IMAP poller stays dark.
+#   * "poller" — this app's IMAP poller fetches the mail and the `sf_case`
+#     node opens the Case.
+#   * "both" — explicit opt-in to run the two together, leaning on cross-path
+#     Case dedup (`salesforce._thread_msg_ids` matches the mail's own
+#     Message-ID). Not recommended — races and double "mark read".
+# `SF_INTAKE_MODE` (default "salesforce_e2c") is the switch. `list_pollable_
+# channels` yields nothing unless the poller is part of the mode, so a
+# channel row left `active` in the DB can't silently double-create Cases.
+INTAKE_MODES = ("salesforce_e2c", "poller", "both")
+
+
+def intake_mode() -> str:
+    m = (os.environ.get("SF_INTAKE_MODE") or "salesforce_e2c").strip().lower()
+    return m if m in INTAKE_MODES else "salesforce_e2c"
+
+
+def poller_is_intake() -> bool:
+    """True when the IMAP poller is (part of) the configured email intake."""
+    return intake_mode() in ("poller", "both")
+
+
 def list_pollable_channels(sb) -> list["MailboxConfig"]:
     """`active` channels + `error` channels whose backoff window has elapsed
     (Phase-23 auto-recovery — one transient IMAP timeout no longer parks a
-    channel permanently)."""
+    channel permanently).
+
+    Returns `[]` outright when `SF_INTAKE_MODE` keeps the poller out of the
+    intake (SF-1) — the single source of truth for "should the poller run".
+    """
     from datetime import datetime, timedelta, timezone
+
+    if not poller_is_intake():
+        return []
 
     rows = (sb.table("tenant_integrations")
             .select("tenant_id,status,last_poll_at,config")

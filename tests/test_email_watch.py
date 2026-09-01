@@ -189,11 +189,21 @@ def test_fetch_failure_is_caught_and_recorded(patched, monkeypatch):
     assert patched["status"][-1][1] == "error" and "imap down" in patched["status"][-1][2]
 
 
+def test_tick_is_a_noop_when_salesforce_e2c_is_the_intake(monkeypatch):
+    """SF-1 — with the default intake mode `tick` returns 0 without ever
+    touching Supabase or a channel."""
+    monkeypatch.setenv("SF_INTAKE_MODE", "salesforce_e2c")
+    monkeypatch.setattr(email_watch, "get_supabase",
+                        lambda: (_ for _ in ()).throw(AssertionError("must not be called")))
+    assert email_watch.tick(tenant=None, lookback_days=1, limit=5, dry_run=False) == 0
+
+
 # ── integration: live Supabase + Vault ───────────────────────────
 @pytest.mark.integration
-def test_tick_finds_an_active_channel_and_records_a_fetch_error():
+def test_tick_finds_an_active_channel_and_records_a_fetch_error(monkeypatch):
     if not os.environ.get("SUPABASE_SERVICE_KEY"):
         pytest.skip("no SUPABASE_SERVICE_KEY")
+    monkeypatch.setenv("SF_INTAKE_MODE", "poller")   # SF-1: exercise the poller path
     from supabase import create_client
 
     sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"])

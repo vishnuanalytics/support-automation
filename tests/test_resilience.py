@@ -113,6 +113,7 @@ class _SB:
 
 
 def test_list_pollable_skips_a_not_due_errored_channel(monkeypatch):
+    monkeypatch.setenv("SF_INTAKE_MODE", "poller")   # SF-1: the poller is the intake here
     now = datetime.now(timezone.utc)
     rows = [
         {"tenant_id": "A", "status": "active", "last_poll_at": now.isoformat(), "config": {}},
@@ -125,6 +126,18 @@ def test_list_pollable_skips_a_not_due_errored_channel(monkeypatch):
                         lambda tid, sb: type("MC", (), {"tenant_id": tid})())
     out = {c.tenant_id for c in mailbox.list_pollable_channels(_SB(rows))}
     assert out == {"A", "C"}
+
+
+def test_list_pollable_is_empty_when_e2c_is_the_intake(monkeypatch):
+    """SF-1 — the default intake is Salesforce Email-to-Case, so the IMAP
+    poller yields nothing even with an `active` channel row in the DB."""
+    monkeypatch.setenv("SF_INTAKE_MODE", "salesforce_e2c")
+    rows = [{"tenant_id": "A", "status": "active",
+             "last_poll_at": datetime.now(timezone.utc).isoformat(), "config": {}}]
+    assert mailbox.list_pollable_channels(_SB(rows)) == []
+    assert mailbox.poller_is_intake() is False
+    monkeypatch.setenv("SF_INTAKE_MODE", "both")
+    assert mailbox.poller_is_intake() is True
 
 
 # --------------------------------------------------------------------------
