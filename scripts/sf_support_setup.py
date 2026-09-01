@@ -269,6 +269,8 @@ def stage_cp_fields(sf, dry: bool) -> None:
         elif f["type"] == "Picklist":
             vsd = md.ValueSetValuesDefinition(sorted=False, value=[_cv(md, v) for v in f["values"]])
             kw["valueSet"] = md.ValueSet(restricted=True, valueSetDefinition=vsd)
+        elif f["type"] == "Checkbox":
+            kw["defaultValue"] = "false"
         note = _create_ok(md.CustomField.create, md.CustomField(**kw))
         print(f"  {f['api']}: {note} {f['type']}")
 
