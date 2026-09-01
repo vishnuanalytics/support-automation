@@ -7,9 +7,10 @@
 FROM python:3.12-slim
 
 # curl: compose healthcheck for the api service. ca-certificates: TLS to
-# Supabase / Salesforce / Groq / Gmail.
+# Supabase / Salesforce / Groq / Gmail. libgl1 / libglib2.0-0 / libxcb1:
+# OpenCV runtime, pulled in by RapidOCR (Phase 25 image OCR).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl ca-certificates \
+        curl ca-certificates libgl1 libglib2.0-0 libxcb1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
