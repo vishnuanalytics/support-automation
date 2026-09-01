@@ -106,7 +106,22 @@ cd ~/support-automation
 docker compose up -d --build
 ```
 First build: a few minutes (arm64 wheels for `grpcio` / `onnxruntime`,
-one‑time fastembed model download into a named volume).
+one‑time fastembed model download into a named volume). ~1.2 GB image.
+
+**Optional — attachment OCR / video (Phase 25).** Off by default to keep the
+build light. If your Cases carry screenshots or screen recordings and you
+want the bot to read them, add `MEDIA=1` to `.env` before `up -d --build`:
+
+```bash
+echo "MEDIA=1" >> .env
+docker compose build --no-cache        # pulls RapidOCR + faster-whisper + ffmpeg
+docker compose up -d
+```
+
+That adds ~10 min to the first build and ~1.5 GB to the image (fine on the
+2 OCPU / 12 GB A1; don't try it on the 1 GB AMD micro). The OCR / Whisper
+models download once into the `model-cache` volume. Without `MEDIA=1` the
+`attachments` node still runs — it just skips text‑in‑image and video.
 
 ### B6. Verify
 ```bash

@@ -32,14 +32,8 @@ google-api-python-client
 requests
 # Slack Socket Mode client (Phase 24c — interpreter/slack_socket)
 websockets
-# Phase 25 — local OCR for image attachments (ONNX, CPU, no torch). Optional:
-# interpreter/attachments guards the import and degrades to "no OCR" if absent.
-rapidocr-onnxruntime
-pillow
-# Phase 25 — video: audio transcript (CTranslate2, CPU, no torch) + ffmpeg
-# keyframes. Also import-guarded; only used when an `attachments` node sets
-# video:true. ffmpeg itself is installed in the Dockerfile.
-faster-whisper
+# Phase 25 media (image OCR / video transcription) is NOT here — it's heavy
+# and opt-in. See requirements-media.txt; build with MEDIA=1 to include it.
 
 # api (Phase 5)
 fastapi

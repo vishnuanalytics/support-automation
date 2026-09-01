@@ -1,0 +1,13 @@
+# Phase 25 — media processing for the `attachments` node. NOT in the base
+# image: build with `--build-arg MEDIA=1` (or MEDIA=1 in .env for compose)
+# only where attachment OCR / video transcription is needed. All three are
+# import-guarded in interpreter/attachments — the stack runs fine without
+# them, it just skips text-in-image / video.
+#
+# Also needs OS packages (Dockerfile installs them when MEDIA=1):
+#   libgl1 libglib2.0-0 libxcb1   (OpenCV runtime for RapidOCR)
+#   ffmpeg                        (video keyframes + audio decode)
+
+rapidocr-onnxruntime      # image OCR — ONNX, CPU, no torch
+pillow
+faster-whisper            # video audio -> text — CTranslate2, CPU, no torch

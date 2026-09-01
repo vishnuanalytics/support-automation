@@ -6,19 +6,26 @@
 # no cloud account, no credit card.
 FROM python:3.12-slim
 
-# curl: compose healthcheck for the api service. ca-certificates: TLS to
-# Supabase / Salesforce / Groq / Gmail. libgl1 / libglib2.0-0 / libxcb1:
-# OpenCV runtime for RapidOCR (Phase 25 image OCR). ffmpeg: video keyframe
-# extraction + audio decode for faster-whisper (Phase 25 video).
+# MEDIA=1 pulls in the Phase 25 attachment OCR / video stack (RapidOCR,
+# faster-whisper, OpenCV libs, ffmpeg). Off by default — keeps the image
+# light and the build fast (matters on the Oracle free VM). The code is
+# import-guarded, so MEDIA=0 just means "no text-in-image / no video".
+ARG MEDIA=0
+
+# curl: compose healthcheck for the api service. ca-certificates: TLS.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl ca-certificates libgl1 libglib2.0-0 libxcb1 ffmpeg \
+        curl ca-certificates \
+    && if [ "$MEDIA" = "1" ]; then \
+         apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libxcb1 ffmpeg ; \
+       fi \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 # deps first so a code change doesn't reinstall the world
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements-media.txt ./
+RUN pip install --no-cache-dir -r requirements.txt \
+    && if [ "$MEDIA" = "1" ]; then pip install --no-cache-dir -r requirements-media.txt ; fi
 
 COPY . .
 

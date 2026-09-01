@@ -14,7 +14,11 @@
 name: support-automation
 
 x-svc: &svc
-  build: .
+  build:
+    context: .
+    args:
+      # set MEDIA=1 in .env to bake in the Phase 25 image-OCR / video stack
+      MEDIA: "${MEDIA:-0}"
   env_file: .env
   environment:
     # the .env path is a host path; the key is bind-mounted at /app/sf_jwt
