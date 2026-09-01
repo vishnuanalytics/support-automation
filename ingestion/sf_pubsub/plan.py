@@ -52,6 +52,14 @@ def _owner_changed(payload: dict) -> bool:
     return bool(payload.get("OwnerId"))
 
 
+def _send_draft_armed(payload: dict) -> bool:
+    """The "Send Bot Draft to Customer" quick action (Phase 23h) sets
+    `Case.Bot_Send_Draft__c = true`. A changed boolean is always populated in
+    the CDC payload with its new value, so `is True` is the reliable signal
+    (and it never fires when the worker clears the box back to false)."""
+    return payload.get("Bot_Send_Draft__c") is True
+
+
 def plan_events(payload: dict, replay_hex: str, *, bot_user_id: str | None = None) -> list[RunSpec]:
     """Return the RunSpec(s) for one decoded change event. Empty list = ignore.
 
@@ -75,6 +83,11 @@ def plan_events(payload: dict, replay_hex: str, *, bot_user_id: str | None = Non
                 # push paths during a migration never double-processes a
                 # new Case.
                 specs.append(RunSpec(rid, f"sfcase:{rid}", rid, "case_created"))
+            elif change_type == "UPDATE" and _send_draft_armed(payload) and not self_write:
+                # the "Send Bot Draft to Customer" button — not a flow run;
+                # the worker sends the pending draft and clears the flag.
+                key = f"sfsenddraft:{rid}:{replay_hex}"
+                specs.append(RunSpec(rid, key, key, "bot_send_draft"))
             elif change_type == "UPDATE" and _owner_changed(payload) and not self_write:
                 key = f"sfowner:{rid}:{replay_hex}"
                 specs.append(RunSpec(rid, key, key, "case_owner_changed"))

@@ -722,7 +722,7 @@ the single comprehensive workflow (`team_route` + 5-way gate) — **applied
 2026-08-31**, published **v4**). Migrations `047`–`053` land the resilience
 work and the `notify_human` / double-tag fixes — see the Phase 23* entries
 below; the email `sf_entry` flow is now at **v9**.
-242 offline pytest tests + web tsc/vitest (6)/build +
+250 offline pytest tests + web tsc/vitest (6)/build +
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
 
@@ -739,6 +739,30 @@ customer" sends the bot's stored draft as-is; a substantive note is applied
 to that draft first. Requires the email channel's `auto_send_enabled=true`
 (it is, for tenant `00000000…`), else the polished reply is only left as a
 draft CaseComment.
+
+**Phase 23h (2026-09-01): "Send Bot Draft to Customer" quick action + stop
+accidental sends.** Two problems: (a) humans use Chatter for internal
+cross-talk / investigation notes, and `check_resolution` was turning *any*
+new comment into a customer email; (b) there was no one-click "send it".
+- **`salesforce.looks_like_send_command`** + `agent_response_since` now
+  returns `is_send_command`. `_check_resolution` only emails on an **explicit**
+  directive (`send` / `send: <edits>` / `lgtm` / `approved` …); a plain note is
+  appended to the run's `human_reply` as context and polling continues. On
+  give-up: `human_handling` if a human left notes or owns the Case (owner id
+  starts `005`), else `no_reply`.
+- **Quick action** (`scripts/sf_deploy_send_draft_action.py`): the button
+  can't call our API (this org's outbound callouts 503 through a proxy — same
+  reason the Phase 20i Apex hook was retired), so it **arms a Case field**.
+  Deploys `Case.Bot_Send_Draft__c` (checkbox) + `Bot_Send_Note__c` (long text)
+  + a system-context Screen Flow `Send_Bot_Draft_to_Customer` + a Flow quick
+  action. CDC (`plan._send_draft_armed` → `RunSpec(trigger="bot_send_draft")`)
+  picks up the change; `worker._send_bot_draft` emails the newest run's draft
+  (folding in `Bot_Send_Note__c` edits), records a `quick_action` run, marks
+  the escalated run `guided_resume`, and clears the field (a self-write, so
+  CDC's `bot_user_id` filter stops a loop).
+- **Operator step:** run the deploy script, then Setup → Object Manager →
+  Case → Page Layouts → drag "Send Bot Draft to Customer" onto the action bar.
+- No DB migration (the fields live in Salesforce). 250 offline pytest (11 new).
 
 **Phase 23g (2026-09-01): `notify_human` → a real Slack channel (live test prep).**
 Slack was already connected for tenant `00000000…` (`tenant_integrations`
@@ -773,7 +797,7 @@ place to answer since that is where the @mention lives.
   draft **verbatim, no LLM call**. `_check_resolution` passes `row["draft"]`.
 - Verified live: the queued `check_resolution` tick picked up the FeedComment
   and emailed the original draft to the customer (SMTP, mirrored to the Case
-  as an outbound EmailMessage); run → `guided_resume`. 242 offline pytest.
+  as an outbound EmailMessage); run → `guided_resume`. 250 offline pytest.
 
 **Phase 23e (2026-09-01): stop the double Chatter tag on an escalated Case.**
 Case 00001184 showed 3 bot feed posts and the rep @mentioned twice: `ask_human`
