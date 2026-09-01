@@ -703,6 +703,46 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**Audit remediation pass done (2026-09-01) — WF / NEO / SB / Oracle items.**
+One batch closing the yellow/green items from the deployment audit. 291
+offline pytest + web build green.
+- **24d** (committed `57c9bbc`): removed the Salesforce "approve" shortcuts —
+  `_send_bot_draft` / `bot_send_draft` trigger / `looks_like_send_command` /
+  the `Send_Bot_Draft_to_Customer` QuickAction + `Bot_*` fields in the SF org.
+  Slack reasoning is the only send path now.
+- **WF-1** — migration `061`: the email flow's `confidence_gate` now carves
+  `answer_mode == 'action'` out of every self-serve branch → `handover`
+  (a human performs the action). `escalate_answer_modes: ["action"]` on the
+  node; email `sf_entry` flow → **v13**; portable `flow_email_l0l1.json` updated.
+- **WF-3** — `h_clarify`'s round counter keys on `runs.case_payload->>'sf_id'`,
+  not `runs.case_id` (which `get_case` fills with the CaseNumber → the counter
+  silently reset every pass, so `max_rounds` never bit).
+- **WF-4** — `scripts/health_check.py`: alerts when >30 % of the last hour's
+  runs fell back to the offline LLM stub, and when a `neo4j` heartbeat exists
+  but has gone stale (graph enrichment silently off).
+- **WF-5** — `POST /api/trace/{key}/retry` (auth + tenant-scoped): re-enqueues
+  the flow for the Case behind a run/case/sf_id/case-number key. Editor gets a
+  **retry** button on the trace view (`web/src/trace/TraceView.tsx`).
+- **WF-6 / NEO-3** — `case_memory_sync` tags same-account near-duplicates and
+  `case_memory.py` MERGEs `(:Case)-[:DUPLICATE_OF]->(:Case)` for score ≥ 0.92
+  same-account pairs where the other case resolved earlier. `_enrich_from_sf`
+  now also pulls `AccountId` / `IsClosed` / `ClosedDate`; a Case that closed
+  and reopened is marked `resolution_kind="reopened"`, `generalizable=False`
+  (dropped from the citable set).
+- **NEO-2** — `neo4j_sync` emits a `beat("neo4j", …)` heartbeat after each sync.
+- **NEO-4** — `neo4j_sync.ensure_constraints` adds uniqueness constraints for
+  `:Case {sf_id}`, `:Reply {case_sf_id}`, `:Module {name}` (try/except).
+- **SB-5** — CLAUDE.md: migrations are applied by hand only (Supabase MCP
+  `apply_migration` / SQL editor), never the CLI; `.sql` files are the source
+  of truth, `supabase_migrations` is not kept in sync.
+- **SB-6 / Oracle** — `docs/DEPLOY_ORACLE.md`: nightly `pg_dump` cron (Supabase
+  free tier has no PITR), `chmod 600` on the copied secrets, `fastembed`
+  pre-warm after `up -d`, and a "stop the API / Caddy-for-TLS" note since
+  nothing needs the API inbound (CDC, not HTTP callout).
+- SB-2 (pooler URL) N/A — every service talks PostgREST HTTP, not a socket.
+  Still open, lower priority: SF-1 (pick one intake path; email channel is
+  currently inactive), NEO-5 (tenant-scope the `_graph_duplicates` traversal).
+
 **Phase 26 done (2026-09-01) — live free-model roster + signature/logo filter.**
 OpenRouter's free tier churns weekly (all classic `:free` slugs already gone),
 so nothing is hardcoded. Migration `060` = `llm_roster` + `signature_hashes`.

@@ -58,6 +58,22 @@ export function TraceView() {
 
   const showRaw = async () => setRaw(raw == null ? await asText().catch(() => "") : null);
 
+  const [retryMsg, setRetryMsg] = useState<string | null>(null);
+  const retry = async () => {
+    if (!key.trim() || busy) return;
+    setBusy(true);
+    setRetryMsg(null);
+    try {
+      const r = await api.trace.retry(key);
+      setRetryMsg(`re-queued Case ${r.sf_id} — job ${r.job_id?.slice(0, 8) ?? "?"}`);
+      setTimeout(load, 1500);
+    } catch (e) {
+      setRetryMsg((e as ApiError).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const toggle = (i: number) =>
     setOpen((s) => {
       const n = new Set(s);
@@ -84,8 +100,14 @@ export function TraceView() {
         </button>
         {t && <button onClick={copyText}>{copied ? "copied ✓" : "copy as text"}</button>}
         {t && <button onClick={showRaw}>{raw == null ? "raw report" : "hide raw"}</button>}
+        {t && (
+          <button onClick={retry} disabled={busy} title="re-enqueue the flow for this Case">
+            retry
+          </button>
+        )}
       </div>
 
+      {retryMsg && <div className="banner">{retryMsg}</div>}
       {err && <div className="banner err">{err}</div>}
 
       {raw != null && (

@@ -996,6 +996,41 @@ def get_trace(key: str, format: str = "json", c: Caller = Depends(caller)):
     return t
 
 
+@app.post("/api/trace/{key}/retry")
+def retry_trace(key: str, c: Caller = Depends(caller)) -> dict:
+    """Re-enqueue the flow for the Case behind `key` (audit WF-5). Auth +
+    tenant-scoped: only works when `key` resolves to a run in the caller's
+    tenant. Returns {job_id, flow_id, sf_id, trigger}."""
+    from interpreter import jobs as _jobs
+    from interpreter.sf_ingest import enqueue_case_run
+
+    key = key.strip()
+    S = _service
+    my_tenants = {
+        str(r["tenant_id"]) for r in
+        (c.sb.table("tenant_members").select("tenant_id").eq("user_id", c.user_id)
+         .execute().data or [])
+    }
+    rows = (_q(lambda: S.table("runs").select("*").eq("run_id", key).execute().data)
+            + _q(lambda: S.table("runs").select("*").eq("case_id", key).execute().data)
+            + _q(lambda: S.table("runs").select("*").eq("case_payload->>sf_id", key).execute().data)
+            + _q(lambda: S.table("runs").select("*").eq("case_payload->>case_number", key).execute().data))
+    rows = [r for r in rows if str(r.get("tenant_id")) in my_tenants]
+    if not rows:
+        raise HTTPException(404, f"no run in your tenant for {key!r}")
+    rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+    r = rows[0]
+    cp = r.get("case_payload") or {}
+    sf_id = cp.get("sf_id") or cp.get("id") or r.get("case_id")
+    if not sf_id or not str(sf_id).startswith("500"):
+        raise HTTPException(422, "this run has no Salesforce Case id to re-run")
+    ik = f"retry:{sf_id}:{int(time.time())}"
+    jid = enqueue_case_run(S, sf_id, dedupe_key=ik, idempotency_key=ik,
+                           trigger="retry", flow_id=r.get("flow_id"))
+    log.info("trace retry by %s: case %s -> job %s", c.user_id, sf_id, jid)
+    return {"job_id": jid, "flow_id": r.get("flow_id"), "sf_id": sf_id, "trigger": "retry"}
+
+
 # ── Phase 14: self-serve internal knowledge base ──────────────────────
 def _caller_tenant(c: Caller, explicit: str | None) -> str:
     """RLS lets a member read only their own tenant_members rows."""

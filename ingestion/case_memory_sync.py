@@ -112,7 +112,8 @@ def _enrich_from_sf(rows: list[dict]) -> None:
         sf = salesforce.client_for(None)
         ids = ", ".join(f"'{salesforce._soql_lit(i)}'" for i in list(want)[:200])
         recs = sf.query(
-            "SELECT Id, CaseNumber, Type, Module__c, Region__c, Account.Tier__c "
+            "SELECT Id, CaseNumber, Type, Module__c, Region__c, AccountId, "
+            "Account.Tier__c, IsClosed, ClosedDate "
             f"FROM Case WHERE Id IN ({ids})"
         ).get("records", [])
         by_id = {c["Id"]: c for c in recs}
@@ -128,6 +129,12 @@ def _enrich_from_sf(rows: list[dict]) -> None:
         r["module"] = r.get("module") or c.get("Module__c")
         r["region"] = r.get("region") or c.get("Region__c")
         r["tier"] = r.get("tier") or (c.get("Account") or {}).get("Tier__c")
+        r["account_id"] = r.get("account_id") or c.get("AccountId")
+        # audit WF-6 — a Case that was closed and is open again means the
+        # resolution didn't hold; drop it from the citable set.
+        if c.get("ClosedDate") and c.get("IsClosed") is False:
+            r["resolution_kind"] = "reopened"
+            r["generalizable"] = False
 
 
 def _sync_rows(rows: list[dict], *, dry: bool) -> int:
@@ -164,6 +171,11 @@ def _sync_rows(rows: list[dict], *, dry: bool) -> int:
                     "p_tenant": str(row["tenant_id"]), "match_count": 8,
                 }).execute().data or []
                 similar = [h for h in hits if h["case_sf_id"] != row["case_sf_id"]][:6]
+                # tag same-account neighbours so sync_graph can MERGE
+                # DUPLICATE_OF for the near-identical ones (audit NEO-3)
+                acc = (row.get("account_id") or "")
+                for h in similar:
+                    h["same_account"] = bool(acc) and h.get("account_id") == acc
             except Exception as e:  # noqa: BLE001
                 log.warning("similar lookup for %s: %s", row["case_sf_id"], e)
         case_memory.sync_graph(row, similar)

@@ -112,8 +112,15 @@ def ensure_constraints(driver):
     for cypher in (
         "CREATE CONSTRAINT doc_url IF NOT EXISTS FOR (d:Doc) REQUIRE d.url IS UNIQUE",
         "CREATE CONSTRAINT section_path IF NOT EXISTS FOR (s:Section) REQUIRE s.path IS UNIQUE",
+        # audit NEO-4 — the case-memory graph MERGEs these every resolution.
+        "CREATE CONSTRAINT case_sf_id IF NOT EXISTS FOR (c:Case) REQUIRE c.sf_id IS UNIQUE",
+        "CREATE CONSTRAINT reply_case_sf_id IF NOT EXISTS FOR (r:Reply) REQUIRE r.case_sf_id IS UNIQUE",
+        "CREATE CONSTRAINT module_name IF NOT EXISTS FOR (m:Module) REQUIRE m.name IS UNIQUE",
     ):
-        driver.execute_query(cypher, database_=NEO4J_DATABASE)
+        try:
+            driver.execute_query(cypher, database_=NEO4J_DATABASE)
+        except Exception as e:  # noqa: BLE001 — an older Aura / existing dupes
+            log.warning("constraint skipped (%s): %s", cypher.split()[2], e)
     log.info("Constraints ensured")
 
 
@@ -225,6 +232,11 @@ def run():
     finally:
         driver.close()
     log.info("Neo4j sync complete.")
+    try:  # audit NEO-2 — a heartbeat health_check can watch for staleness
+        from interpreter.health import beat
+        beat("neo4j", {"docs": len(docs), "links": len(links)}, sb=sb, force=True)
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not beat neo4j health: %s", e)
 
 
 if __name__ == "__main__":

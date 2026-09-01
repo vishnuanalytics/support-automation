@@ -147,6 +147,14 @@ UNWIND $similar AS sim
   MATCH (o:Case {sf_id: sim.sf_id})
   MERGE (c)-[s:SIMILAR_TO]->(o) SET s.score = sim.score
   MERGE (o)-[s2:SIMILAR_TO]->(c) SET s2.score = sim.score
+  // audit NEO-3 — a near-identical case on the same account is a duplicate;
+  // the older one is the canonical resolution. This makes the DUPLICATE_OF
+  // boost in lookup() actually fire.
+  FOREACH (_ IN CASE WHEN sim.score >= $dup_threshold
+                       AND sim.same_account = true
+                       AND coalesce(o.resolved_at,'') < coalesce(c.resolved_at,'~')
+                     THEN [1] ELSE [] END |
+    MERGE (c)-[:DUPLICATE_OF]->(o))
 """
 
 
@@ -170,7 +178,10 @@ def sync_graph(row: dict[str, Any], similar: list[dict] | None = None) -> bool:
             source=row.get("source") or "sync",
             module=row.get("module"), case_type=row.get("case_type"),
             agent=row.get("agent_user_id"),
-            similar=[{"sf_id": s["case_sf_id"], "score": float(s.get("similarity", 0))}
+            dup_threshold=float(os.environ.get("CASE_MEMORY_DUP_THRESHOLD", "0.92")),
+            similar=[{"sf_id": s["case_sf_id"],
+                      "score": float(s.get("similarity", 0)),
+                      "same_account": bool(s.get("same_account"))}
                      for s in (similar or [])],
             database_=db,
         )

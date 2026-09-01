@@ -130,18 +130,25 @@ def test_email_l0l1_portable_flow_compiles_and_routes():
     # classify -> team_route -> sf_writeback
     assert any(e["source_node_id"] == "classify" and e["target_node_id"] == "team_route"
                for e in flow["edges"])
-    # the five confidence_gate branches are mutually exclusive + exhaustive
+    # the five confidence_gate branches are mutually exclusive + exhaustive.
+    # Audit WF-1: an `action` answer_mode (the reply asks us to *do* something,
+    # not just explain) is pulled out of every self-serve branch and routed to
+    # `handover` — a human has to perform the action.
     gate_conds = sorted(
         e["condition"]["if"] for e in flow["edges"]
         if e["source_node_id"] == "confidence_gate"
     )
     assert gate_conds == [
-        "confidence_gate.pass and tier != 'enterprise' and routed_team == 'support'",
-        "not confidence_gate.pass and tier != 'enterprise' and routed_team == 'support' and confidence_gate.forced_escalation",
-        "not confidence_gate.pass and tier != 'enterprise' and routed_team == 'support' and not confidence_gate.forced_escalation",
-        "routed_team in ('csm', 'sales') and tier != 'enterprise'",
-        "tier == 'enterprise' or routed_team == 'offboarding'",
+        "confidence_gate.pass and tier != 'enterprise' and routed_team == 'support' and answer_mode != 'action'",
+        "not confidence_gate.pass and tier != 'enterprise' and routed_team == 'support' and confidence_gate.forced_escalation and answer_mode != 'action'",
+        "not confidence_gate.pass and tier != 'enterprise' and routed_team == 'support' and not confidence_gate.forced_escalation and answer_mode != 'action'",
+        "routed_team in ('csm', 'sales') and tier != 'enterprise' and answer_mode != 'action'",
+        "tier == 'enterprise' or routed_team == 'offboarding' or answer_mode == 'action'",
     ]
+    # the action-mode carve-out lands on handover
+    assert next(e["target_node_id"] for e in flow["edges"]
+                if e["source_node_id"] == "confidence_gate"
+                and "answer_mode == 'action'" in e["condition"]["if"]) == "handover"
 
 
 # --------------------------------------------------------------------------

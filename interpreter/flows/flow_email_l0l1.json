@@ -2,73 +2,295 @@
   "flow_id": "e5e5e5e5-5555-4555-8555-555555555555",
   "tenant_id": "00000000-0000-0000-0000-000000000000",
   "team": "email",
-  "name": "Email L0/L1 — inbound to Salesforce",
+  "name": "Email L0/L1 \u2014 inbound to Salesforce",
   "version": 6,
   "status": "draft",
-  "_doc": "Phase 20p/21/23d — the single comprehensive sf_entry flow. identify -> sf_case -> retrieve -> classify -> team_route -> sf_writeback -> case_lookup -> draft -> confidence_gate. ask_human / handover then -> notify_human, which tags a person on Slack and/or Salesforce Chatter (channel: both|slack|salesforce_chatter). case_lookup (Phase 21) recalls similar resolved Cases into state.prior_resolutions for draft; skipped for answer_mode='action', hints-only for 'diagnostic'. classify sets Case.Type; sf_writeback writes Type/Module/SubModule/Region/Priority every pass. team_route -> routed_team in {support, csm, sales, offboarding}. confidence_gate 5-way: (enterprise tier OR offboarding) handover [Enterprise_Support / Team_Offboarding] ; (csm/sales, non-enterprise) ask_human [Team_CSM / Team_Sales — the team owns the relationship] ; (support + pass) auto_reply ; (support + fail + forced escalation) notify [Case.Type -> notify_targets; Case stays in Team_Email] ; (support + fail + not forced) clarify [ask the customer; 2 rounds -> Team_Support]. After notify/ask_human the Phase 20m resume poller re-engages the bot when a human leaves a CaseComment.",
+  "_doc": "Phase 20p/21/23d \u2014 the single comprehensive sf_entry flow. identify -> sf_case -> retrieve -> classify -> team_route -> sf_writeback -> case_lookup -> draft -> confidence_gate. ask_human / handover then -> notify_human, which tags a person on Slack and/or Salesforce Chatter (channel: both|slack|salesforce_chatter). case_lookup (Phase 21) recalls similar resolved Cases into state.prior_resolutions for draft; skipped for answer_mode='action', hints-only for 'diagnostic'. classify sets Case.Type; sf_writeback writes Type/Module/SubModule/Region/Priority every pass. team_route -> routed_team in {support, csm, sales, offboarding}. confidence_gate 5-way: (enterprise tier OR offboarding) handover [Enterprise_Support / Team_Offboarding] ; (csm/sales, non-enterprise) ask_human [Team_CSM / Team_Sales \u2014 the team owns the relationship] ; (support + pass) auto_reply ; (support + fail + forced escalation) notify [Case.Type -> notify_targets; Case stays in Team_Email] ; (support + fail + not forced) clarify [ask the customer; 2 rounds -> Team_Support]. After notify/ask_human the Phase 20m resume poller re-engages the bot when a human leaves a CaseComment.",
   "nodes": [
-    { "node_id": "identify", "type": "identify", "label": "Resolve the sender",
-      "config": { "email_field": "from", "domain_match": true, "create_lead_if_missing": false } },
-    { "node_id": "sf_case", "type": "sf_case", "label": "Create / reuse the Salesforce Case",
-      "config": { "origin": "Email", "status": "New", "create_contact": true, "create_account": true, "reuse": "thread" } },
-    { "node_id": "retrieve", "type": "retrieve", "label": "Retrieve KB context",
-      "config": { "source": ["supabase"], "top_k": 5, "use_rerank": true } },
-    { "node_id": "classify", "type": "classify", "label": "Classify tier / type / topic / urgency",
-      "config": { "tier_field": "account.customer_type", "region_field": "account.region", "default_tier": "basic" } },
-    { "node_id": "team_route", "type": "team_route", "label": "Route to a team (support / csm / sales / offboarding)",
-      "config": { "default": "support" } },
-    { "node_id": "sf_writeback", "type": "sf_writeback", "label": "Write triage fields to the Case (Type, Module, Priority…)",
-      "config": {} },
-    { "node_id": "case_lookup", "type": "case_lookup", "label": "Recall similar resolved Cases (Phase 21)",
-      "config": { "k": 3, "pool": 10, "min_similarity": 0.35, "min_memories": 3, "use_graph": true, "skip_modes": ["action"] } },
-    { "node_id": "draft", "type": "draft", "label": "Draft the reply from context",
-      "config": { "model": "openai/gpt-oss-120b", "max_tokens": 700 } },
-    { "node_id": "confidence_gate", "type": "confidence_gate", "label": "Gate on answer quality",
+    {
+      "node_id": "identify",
+      "type": "identify",
+      "label": "Resolve the sender",
       "config": {
-        "weights": { "retrieval": 0.55, "draft": 0.1, "groundedness": 0.35 },
+        "email_field": "from",
+        "domain_match": true,
+        "create_lead_if_missing": false
+      }
+    },
+    {
+      "node_id": "sf_case",
+      "type": "sf_case",
+      "label": "Create / reuse the Salesforce Case",
+      "config": {
+        "origin": "Email",
+        "status": "New",
+        "create_contact": true,
+        "create_account": true,
+        "reuse": "thread"
+      }
+    },
+    {
+      "node_id": "retrieve",
+      "type": "retrieve",
+      "label": "Retrieve KB context",
+      "config": {
+        "source": [
+          "supabase"
+        ],
+        "top_k": 5,
+        "use_rerank": true
+      }
+    },
+    {
+      "node_id": "classify",
+      "type": "classify",
+      "label": "Classify tier / type / topic / urgency",
+      "config": {
+        "tier_field": "account.customer_type",
+        "region_field": "account.region",
+        "default_tier": "basic"
+      }
+    },
+    {
+      "node_id": "team_route",
+      "type": "team_route",
+      "label": "Route to a team (support / csm / sales / offboarding)",
+      "config": {
+        "default": "support"
+      }
+    },
+    {
+      "node_id": "sf_writeback",
+      "type": "sf_writeback",
+      "label": "Write triage fields to the Case (Type, Module, Priority\u2026)",
+      "config": {}
+    },
+    {
+      "node_id": "case_lookup",
+      "type": "case_lookup",
+      "label": "Recall similar resolved Cases (Phase 21)",
+      "config": {
+        "k": 3,
+        "pool": 10,
+        "min_similarity": 0.35,
+        "min_memories": 3,
+        "use_graph": true,
+        "skip_modes": [
+          "action"
+        ]
+      }
+    },
+    {
+      "node_id": "draft",
+      "type": "draft",
+      "label": "Draft the reply from context",
+      "config": {
+        "model": "openai/gpt-oss-120b",
+        "max_tokens": 700
+      }
+    },
+    {
+      "node_id": "confidence_gate",
+      "type": "confidence_gate",
+      "label": "Gate on answer quality",
+      "config": {
+        "weights": {
+          "retrieval": 0.55,
+          "draft": 0.1,
+          "groundedness": 0.35
+        },
         "default_threshold": 0.5,
-        "tier_overrides": { "basic": 0.5, "premium": 0.6, "enterprise": 0.75 },
-        "escalate_topics": ["billing", "refund", "pricing", "legal", "compliance", "account-access", "data-export", "partner-api", "cancellation", "sso", "saml", "login", "locked out", "lockout", "2fa", "mfa", "password reset"],
-        "escalate_modules": ["Billing & Plans", "Account & Login"],
-        "escalate_types": ["Billing", "Account / Login"]
-      } },
-    { "node_id": "ask_human", "type": "ask_human", "label": "Escalate to the owning team (csm / sales) — reassigns the Case",
-      "config": { "channel": "salesforce_chatter", "post_note": false, "queue_by_team": { "csm": "Team_CSM", "sales": "Team_Sales" }, "escalate_queue": "Billing_Escalations" } },
-    { "node_id": "notify", "type": "notify", "label": "Ping the Type's internal rep (Case stays in the queue)",
-      "config": { "channel": "salesforce_chatter", "target_by_type": {}, "target_by_module": {}, "fallback_target": null } },
-    { "node_id": "clarify", "type": "clarify", "label": "Ask the customer for missing detail",
-      "config": { "max_questions": 3, "max_rounds": 2, "auto_send": false, "channel": "email", "handover_queue": "Team_Support" } },
-    { "node_id": "handover", "type": "handover", "label": "Full handover (enterprise / offboarding)",
-      "config": { "reason": "enterprise_or_offboarding", "enterprise_queue": "Enterprise_Support", "queue_by_team": { "offboarding": "Team_Offboarding" } } },
-    { "node_id": "notify_human", "type": "notify_human", "label": "Reason with a human in Slack, then reply",
-      "config": { "channel": "both",
+        "tier_overrides": {
+          "basic": 0.5,
+          "premium": 0.6,
+          "enterprise": 0.75
+        },
+        "escalate_topics": [
+          "billing",
+          "refund",
+          "pricing",
+          "legal",
+          "compliance",
+          "account-access",
+          "data-export",
+          "partner-api",
+          "cancellation",
+          "sso",
+          "saml",
+          "login",
+          "locked out",
+          "lockout",
+          "2fa",
+          "mfa",
+          "password reset"
+        ],
+        "escalate_modules": [
+          "Billing & Plans",
+          "Account & Login"
+        ],
+        "escalate_types": [
+          "Billing",
+          "Account / Login"
+        ],
+        "escalate_answer_modes": [
+          "action"
+        ]
+      }
+    },
+    {
+      "node_id": "ask_human",
+      "type": "ask_human",
+      "label": "Escalate to the owning team (csm / sales) \u2014 reassigns the Case",
+      "config": {
+        "channel": "salesforce_chatter",
+        "post_note": false,
+        "queue_by_team": {
+          "csm": "Team_CSM",
+          "sales": "Team_Sales"
+        },
+        "escalate_queue": "Billing_Escalations"
+      }
+    },
+    {
+      "node_id": "notify",
+      "type": "notify",
+      "label": "Ping the Type's internal rep (Case stays in the queue)",
+      "config": {
+        "channel": "salesforce_chatter",
+        "target_by_type": {},
+        "target_by_module": {},
+        "fallback_target": null
+      }
+    },
+    {
+      "node_id": "clarify",
+      "type": "clarify",
+      "label": "Ask the customer for missing detail",
+      "config": {
+        "max_questions": 3,
+        "max_rounds": 2,
+        "auto_send": false,
+        "channel": "email",
+        "handover_queue": "Team_Support"
+      }
+    },
+    {
+      "node_id": "handover",
+      "type": "handover",
+      "label": "Full handover (enterprise / offboarding)",
+      "config": {
+        "reason": "enterprise_or_offboarding",
+        "enterprise_queue": "Enterprise_Support",
+        "queue_by_team": {
+          "offboarding": "Team_Offboarding"
+        }
+      }
+    },
+    {
+      "node_id": "notify_human",
+      "type": "notify_human",
+      "label": "Reason with a human in Slack, then reply",
+      "config": {
+        "channel": "both",
         "slack_channel": "#support-escalations",
-        "slack_channel_by_team": { "csm": "#csm-escalations", "sales": "#sales-escalations", "offboarding": "#retention", "default": "#support-escalations" },
+        "slack_channel_by_team": {
+          "csm": "#csm-escalations",
+          "sales": "#sales-escalations",
+          "offboarding": "#retention",
+          "default": "#support-escalations"
+        },
         "max_rounds": 3,
-        "mention": { "mention_id": "005jV000000fm5WQAQ" } } }
+        "mention": {
+          "mention_id": "005jV000000fm5WQAQ"
+        }
+      }
+    }
   ],
   "edges": [
-    { "source_node_id": "identify", "target_node_id": "sf_case", "condition": {} },
-    { "source_node_id": "sf_case", "target_node_id": "retrieve", "condition": {} },
-    { "source_node_id": "retrieve", "target_node_id": "classify", "condition": {} },
-    { "source_node_id": "classify", "target_node_id": "team_route", "condition": {} },
-    { "source_node_id": "team_route", "target_node_id": "sf_writeback", "condition": {} },
-    { "source_node_id": "sf_writeback", "target_node_id": "case_lookup", "condition": {} },
-    { "source_node_id": "case_lookup", "target_node_id": "draft", "condition": {} },
-    { "source_node_id": "draft", "target_node_id": "confidence_gate", "condition": {} },
-
-    { "source_node_id": "confidence_gate", "target_node_id": "handover",
-      "condition": { "if": "tier == 'enterprise' or routed_team == 'offboarding'" } },
-    { "source_node_id": "confidence_gate", "target_node_id": "ask_human",
-      "condition": { "if": "routed_team in ('csm', 'sales') and tier != 'enterprise'" } },
-    { "source_node_id": "confidence_gate", "target_node_id": "notify_human",
-      "condition": { "if": "confidence_gate.pass and tier != 'enterprise' and routed_team == 'support'" } },
-    { "source_node_id": "confidence_gate", "target_node_id": "notify",
-      "condition": { "if": "not confidence_gate.pass and tier != 'enterprise' and routed_team == 'support' and confidence_gate.forced_escalation" } },
-    { "source_node_id": "confidence_gate", "target_node_id": "clarify",
-      "condition": { "if": "not confidence_gate.pass and tier != 'enterprise' and routed_team == 'support' and not confidence_gate.forced_escalation" } },
-
-    { "source_node_id": "ask_human", "target_node_id": "notify_human", "condition": {} },
-    { "source_node_id": "handover", "target_node_id": "notify_human", "condition": {} }
+    {
+      "source_node_id": "identify",
+      "target_node_id": "sf_case",
+      "condition": {}
+    },
+    {
+      "source_node_id": "sf_case",
+      "target_node_id": "retrieve",
+      "condition": {}
+    },
+    {
+      "source_node_id": "retrieve",
+      "target_node_id": "classify",
+      "condition": {}
+    },
+    {
+      "source_node_id": "classify",
+      "target_node_id": "team_route",
+      "condition": {}
+    },
+    {
+      "source_node_id": "team_route",
+      "target_node_id": "sf_writeback",
+      "condition": {}
+    },
+    {
+      "source_node_id": "sf_writeback",
+      "target_node_id": "case_lookup",
+      "condition": {}
+    },
+    {
+      "source_node_id": "case_lookup",
+      "target_node_id": "draft",
+      "condition": {}
+    },
+    {
+      "source_node_id": "draft",
+      "target_node_id": "confidence_gate",
+      "condition": {}
+    },
+    {
+      "source_node_id": "confidence_gate",
+      "target_node_id": "handover",
+      "condition": {
+        "if": "tier == 'enterprise' or routed_team == 'offboarding' or answer_mode == 'action'"
+      }
+    },
+    {
+      "source_node_id": "confidence_gate",
+      "target_node_id": "ask_human",
+      "condition": {
+        "if": "routed_team in ('csm', 'sales') and tier != 'enterprise' and answer_mode != 'action'"
+      }
+    },
+    {
+      "source_node_id": "confidence_gate",
+      "target_node_id": "notify_human",
+      "condition": {
+        "if": "confidence_gate.pass and tier != 'enterprise' and routed_team == 'support' and answer_mode != 'action'"
+      }
+    },
+    {
+      "source_node_id": "confidence_gate",
+      "target_node_id": "notify",
+      "condition": {
+        "if": "not confidence_gate.pass and tier != 'enterprise' and routed_team == 'support' and confidence_gate.forced_escalation and answer_mode != 'action'"
+      }
+    },
+    {
+      "source_node_id": "confidence_gate",
+      "target_node_id": "clarify",
+      "condition": {
+        "if": "not confidence_gate.pass and tier != 'enterprise' and routed_team == 'support' and not confidence_gate.forced_escalation and answer_mode != 'action'"
+      }
+    },
+    {
+      "source_node_id": "ask_human",
+      "target_node_id": "notify_human",
+      "condition": {}
+    },
+    {
+      "source_node_id": "handover",
+      "target_node_id": "notify_human",
+      "condition": {}
+    }
   ]
 }

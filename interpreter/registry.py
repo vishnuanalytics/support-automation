@@ -1282,7 +1282,10 @@ def h_clarify(state: CaseState, config: dict) -> dict:
     # Phase 17d: how many times have we already gone back to this customer?
     # Past `max_rounds` (default 2) we stop asking and hand to a human.
     max_rounds = max(1, int(config.get("max_rounds", 2)))
-    case_key = case.get("case_id") or sf_id
+    # key on the stable SF record id (`runs.case_payload->>sf_id`), NOT
+    # `runs.case_id` — `get_case` maps the CaseNumber into that field, so a
+    # synthetic-vs-real mismatch used to silently reset the counter (WF-3).
+    case_key = sf_id or case.get("case_id")
     prior_rounds = 0
     if case_key:
         try:
@@ -1290,7 +1293,7 @@ def h_clarify(state: CaseState, config: dict) -> dict:
 
             sb = config.get("_sb") or get_supabase()
             rows = (sb.table("runs").select("clarify_round")
-                    .eq("case_id", str(case_key)).eq("outcome", "need_info")
+                    .eq("case_payload->>sf_id", str(case_key)).eq("outcome", "need_info")
                     .execute().data or [])
             prior_rounds = max((int(r.get("clarify_round") or 1) for r in rows), default=0)
         except Exception as e:  # noqa: BLE001 — best-effort; treat as round 1

@@ -91,10 +91,11 @@ git checkout phase-20h-wire-remaining-flows      # or main once merged
 ```
 
 ### B4. Copy the secrets up (from your laptop, not the VM)
-`.env` and `sf_jwt/` are git‑ignored, so copy them:
+`.env` and `sf_jwt/` are git‑ignored, so copy them out‑of‑band:
 ```bash
 scp .env ubuntu@<PUBLIC_IP>:~/support-automation/.env
 scp -r sf_jwt ubuntu@<PUBLIC_IP>:~/support-automation/sf_jwt
+ssh ubuntu@<PUBLIC_IP> 'chmod 600 ~/support-automation/.env ~/support-automation/sf_jwt/*'
 ```
 `docker-compose.yml` bind‑mounts `sf_jwt/` and overrides
 `SF_PRIVATE_KEY_FILE` to the in‑container path, so the file just needs to
@@ -104,9 +105,12 @@ sit next to `docker-compose.yml`. No inline‑key trick needed here.
 ```bash
 cd ~/support-automation
 docker compose up -d --build
+# pre-warm the embedding model so the first real Case doesn't stall ~1 min
+docker compose exec -T worker python -c "from fastembed import TextEmbedding; TextEmbedding()"
 ```
 First build: a few minutes (arm64 wheels for `grpcio` / `onnxruntime`,
-one‑time fastembed model download into a named volume). ~1.2 GB image.
+one‑time fastembed model download into the `model-cache` volume). ~700 MB
+image (`MEDIA=0`).
 
 **Optional — attachment OCR / video (Phase 25).** Off by default to keep the
 build light. If your Cases carry screenshots or screen recordings and you
@@ -158,7 +162,15 @@ The scheduled jobs that don't run inside the compose stack:
 30 3 * * *   cd /opt/support-automation && venv/bin/python -m ingestion.case_memory_sync --once >> /var/log/sa-sync.log 2>&1
 45 3 * * *   cd /opt/support-automation && venv/bin/python -m scripts.purge_old >> /var/log/sa-sync.log 2>&1
 50 3 * * *   cd /opt/support-automation && venv/bin/python -m scripts.refresh_llm_roster >> /var/log/sa-sync.log 2>&1
+
+# cheap insurance — the Supabase free tier has no PITR, only a daily backup.
+# pg_dump the whole DB to the VM's (200 GB) boot volume, keep 7 days.
+15 4 * * *   pg_dump "$SUPABASE_DB_URL" | gzip > /opt/sa-backups/db-$(date +\%F).sql.gz && find /opt/sa-backups -name 'db-*.sql.gz' -mtime +7 -delete
 ```
+
+`SUPABASE_DB_URL` = the connection string from Supabase → Project Settings →
+Database → *Connection string* (URI). Needs `postgresql-client` on the VM
+(`sudo apt install -y postgresql-client`).
 
 (`daily-sync.yml` on GitHub Actions already runs the docs scrape + Neo4j
 sync + `case_memory_sync` + `purge_old`; the cron above is the belt-and-braces
@@ -166,6 +178,20 @@ copy if you'd rather not depend on Actions, plus `health_check` which only
 makes sense next to the running stack.)
 
 ## Optional — also serve the API from the VM
+
+**Nothing needs the API inbound** — `cdc` / `poller` / `worker` / `slackbot`
+are all outbound‑only. If you don't run the web editor and don't use the SF
+HTTP‑callout push (you don't — it's CDC), just `docker compose stop api` and
+don't open the port. Only if you *do* want it:
+
+1. Put **Caddy** in front for TLS instead of exposing `:8000` raw — one file:
+   ```
+   sa.example.com {
+     reverse_proxy localhost:8000
+   }
+   ```
+   (`sudo apt install -y caddy`; point a DNS A record at the VM's public IP.)
+2. Then follow the VCN / firewall steps below for port `443`, not `8000`.
 
 Only if you don't want the API on Vercel:
 1. **VCN → Security Lists → Add Ingress Rule**: source `0.0.0.0/0`, TCP,
