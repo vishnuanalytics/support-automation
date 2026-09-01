@@ -989,8 +989,18 @@ def get_trace(key: str, format: str = "json", c: Caller = Depends(caller)):
                       .select("kind,status,last_error,last_poll_at,tenant_id")
                       .in_("tenant_id", list(my_tenants)).execute().data)
 
+    # Phase 27 — the Status / routing / breach spine. `sf_ids` come only from
+    # the caller's own runs, so rows keyed on them are already tenant-scoped
+    # (sweep-written events may carry a null tenant_id — don't drop those).
+    sf_ids = [i for i in ids if str(i).startswith("500")]
+    case_events: list[dict] = []
+    if sf_ids:
+        case_events = _q(lambda: S.table("case_events").select("*")
+                         .in_("case_sf_id", sf_ids).order("ts").execute().data)
+
     t = build_timeline(key=key, runs=list(runs.values()), jobs=list(jobs.values()),
-                       channel_errors=[r for r in channel_rows if r.get("last_error")])
+                       channel_errors=[r for r in channel_rows if r.get("last_error")],
+                       case_events=case_events)
     if format == "md":
         return PlainTextResponse(render_markdown(t))
     return t
