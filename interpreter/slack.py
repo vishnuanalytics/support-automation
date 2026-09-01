@@ -129,3 +129,42 @@ def update_message(tenant_id: str, channel: str, ts: str, text: str, sb) -> dict
         "channel": channel, "ts": ts, "text": text,
         "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": text}}],
     })
+
+
+def post_message(text: str, *, tenant_id: str | None = None, channel: str | None = None,
+                 sb=None, webhook: str | None = None) -> dict:
+    """Send a plain message to Slack (Phase 23d — the `notify_human` node).
+
+    Prefers the tenant's bot token (`chat.postMessage` to `channel`, so it can
+    thread / react later); falls back to an incoming webhook
+    (`webhook` arg or `SLACK_ALERT_WEBHOOK`). Returns {sent, via, ...}; never
+    raises."""
+    webhook = webhook or os.environ.get("SLACK_ALERT_WEBHOOK")
+    # bot token path
+    if tenant_id and channel:
+        try:
+            sb = sb or _sb()
+            r = _call("chat.postMessage", _bot_token(tenant_id, sb),
+                      {"channel": channel, "text": text,
+                       "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]})
+            return {"sent": True, "via": "bot", "channel": channel, "ts": r.get("ts")}
+        except Exception as e:  # noqa: BLE001
+            last = str(e)
+    else:
+        last = "no tenant bot token / channel"
+    # webhook fallback
+    if webhook:
+        try:
+            import requests
+            resp = requests.post(webhook, json={"text": text}, timeout=10)
+            return {"sent": resp.status_code // 100 == 2, "via": "webhook",
+                    "status": resp.status_code}
+        except Exception as e:  # noqa: BLE001
+            return {"sent": False, "via": "webhook", "error": str(e)}
+    return {"sent": False, "via": None, "error": last}
+
+
+def _sb():
+    from ingestion.scraper import get_supabase
+
+    return get_supabase()

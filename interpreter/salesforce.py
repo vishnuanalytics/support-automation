@@ -515,10 +515,14 @@ def post_chatter(case_id: str, body: str, *, mention_id: str | None = None, tena
         return {"posted": True, "dry_run": False, "mention_id": mention_id,
                 "feed_element_id": (res or {}).get("id")}
     except Exception as e:  # noqa: BLE001
-        log.warning("Connect API mention failed (%s); falling back to plain FeedItem", e)
+        log.warning("Connect API feed-element post failed (%s); trying a plain FeedItem", e)
+    try:
         res = sf.FeedItem.create({"ParentId": case_id, "Body": body})
         return {"posted": True, "dry_run": False, "mention_id": None,
                 "feed_element_id": res.get("id"), "mention_failed": True}
+    except Exception as e:  # noqa: BLE001 — best-effort, never raise into the flow
+        log.warning("post_chatter(%s) failed: %s", case_id, e)
+        return {"posted": False, "dry_run": False, "mention_id": None, "error": str(e)}
 
 
 def _recent_duplicate(sf, sobject: str, case_id: str, body_field: str, body: str,

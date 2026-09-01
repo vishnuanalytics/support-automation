@@ -78,6 +78,9 @@ class CaseState(TypedDict, total=False):
     prior_resolutions: list[dict[str, Any]]   # citable past resolutions the draft may quote
     investigation_hints: list[str]            # leads for a human / evidence step — never reply copy
 
+    # Phase 23d — notify_human node: {slack: {...}, chatter: {...}, mention: {...}}
+    human_alert: dict[str, Any]
+
     draft: str                 # proposed reply text
     draft_confidence: float    # 0..1, model's own confidence in the draft
     groundedness: dict[str, Any]      # {score 0..1, backend, unsupported[]} — is the draft supported by the context

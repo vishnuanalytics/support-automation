@@ -3,9 +3,9 @@
   "tenant_id": "00000000-0000-0000-0000-000000000000",
   "team": "router",
   "name": "Case router \u2014 team routing + tag manager",
-  "version": 3,
+  "version": 4,
   "status": "draft",
-  "_doc": "Phase 20n/21. identify -> sf_case -> retrieve -> classify -> team_route -> sf_writeback -> case_lookup -> draft -> confidence_gate. case_lookup (Phase 21) recalls similar resolved Cases into prior_resolutions for draft; skipped for answer_mode=action, hints-only for diagnostic. Gate: (enterprise|offboarding) handover ; (pass) auto_reply ; (fail + csm/sales) ask_human ; (fail + support + forced) notify ; (fail + support + not forced) clarify.",
+  "_doc": "The design doc's single end-to-end workflow: identify -> sf_case -> retrieve -> classify -> team_route -> sf_writeback -> draft -> confidence_gate -> {auto_reply | ask_human | handover}. team_route sets routed_team from keyword rules; ask_human/handover resolve the Salesforce queue from it.",
   "nodes": [
     {
       "node_id": "f0000000-0000-4000-8000-000000000001",
@@ -185,6 +185,18 @@
         "channel": "email",
         "handover_queue": "Team_Support"
       }
+    },
+    {
+      "node_id": "f0000000-0000-4000-8000-000000000015",
+      "type": "notify_human",
+      "label": "Tag a human (Slack + / or Chatter)",
+      "config": {
+        "channel": "both",
+        "slack_channel": "#support-escalations",
+        "mention": {
+          "mention_id": "005jV000000fm5WQAQ"
+        }
+      }
     }
   ],
   "edges": [
@@ -262,6 +274,16 @@
       "condition": {
         "if": "not confidence_gate.pass and tier != 'enterprise' and routed_team == 'support' and not confidence_gate.forced_escalation"
       }
+    },
+    {
+      "source_node_id": "f0000000-0000-4000-8000-000000000010",
+      "target_node_id": "f0000000-0000-4000-8000-000000000015",
+      "condition": {}
+    },
+    {
+      "source_node_id": "f0000000-0000-4000-8000-000000000011",
+      "target_node_id": "f0000000-0000-4000-8000-000000000015",
+      "condition": {}
     }
   ]
 }

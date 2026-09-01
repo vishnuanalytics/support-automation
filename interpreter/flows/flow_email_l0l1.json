@@ -3,9 +3,9 @@
   "tenant_id": "00000000-0000-0000-0000-000000000000",
   "team": "email",
   "name": "Email L0/L1 — inbound to Salesforce",
-  "version": 5,
+  "version": 6,
   "status": "draft",
-  "_doc": "Phase 20p/21 — the single comprehensive sf_entry flow. identify -> sf_case -> retrieve -> classify -> team_route -> sf_writeback -> case_lookup -> draft -> confidence_gate. case_lookup (Phase 21) recalls similar resolved Cases (case_memory + Neo4j) into state.prior_resolutions for draft; skipped for answer_mode='action', hints-only for 'diagnostic'. classify sets Case.Type; sf_writeback writes Type/Module/SubModule/Region/Priority every pass. team_route -> routed_team in {support, csm, sales, offboarding}. confidence_gate 5-way: (enterprise tier OR offboarding) handover [Enterprise_Support / Team_Offboarding] ; (csm/sales, non-enterprise) ask_human [Team_CSM / Team_Sales — the team owns the relationship] ; (support + pass) auto_reply ; (support + fail + forced escalation) notify [Case.Type -> notify_targets; Case stays in Team_Email] ; (support + fail + not forced) clarify [ask the customer; 2 rounds -> Team_Support]. After notify/ask_human the Phase 20m resume poller re-engages the bot when a human leaves a CaseComment.",
+  "_doc": "Phase 20p/21/23d — the single comprehensive sf_entry flow. identify -> sf_case -> retrieve -> classify -> team_route -> sf_writeback -> case_lookup -> draft -> confidence_gate. ask_human / handover then -> notify_human, which tags a person on Slack and/or Salesforce Chatter (channel: both|slack|salesforce_chatter). case_lookup (Phase 21) recalls similar resolved Cases into state.prior_resolutions for draft; skipped for answer_mode='action', hints-only for 'diagnostic'. classify sets Case.Type; sf_writeback writes Type/Module/SubModule/Region/Priority every pass. team_route -> routed_team in {support, csm, sales, offboarding}. confidence_gate 5-way: (enterprise tier OR offboarding) handover [Enterprise_Support / Team_Offboarding] ; (csm/sales, non-enterprise) ask_human [Team_CSM / Team_Sales — the team owns the relationship] ; (support + pass) auto_reply ; (support + fail + forced escalation) notify [Case.Type -> notify_targets; Case stays in Team_Email] ; (support + fail + not forced) clarify [ask the customer; 2 rounds -> Team_Support]. After notify/ask_human the Phase 20m resume poller re-engages the bot when a human leaves a CaseComment.",
   "nodes": [
     { "node_id": "identify", "type": "identify", "label": "Resolve the sender",
       "config": { "email_field": "from", "domain_match": true, "create_lead_if_missing": false } },
@@ -40,7 +40,12 @@
     { "node_id": "clarify", "type": "clarify", "label": "Ask the customer for missing detail",
       "config": { "max_questions": 3, "max_rounds": 2, "auto_send": false, "channel": "email", "handover_queue": "Team_Support" } },
     { "node_id": "handover", "type": "handover", "label": "Full handover (enterprise / offboarding)",
-      "config": { "reason": "enterprise_or_offboarding", "enterprise_queue": "Enterprise_Support", "queue_by_team": { "offboarding": "Team_Offboarding" } } }
+      "config": { "reason": "enterprise_or_offboarding", "enterprise_queue": "Enterprise_Support", "queue_by_team": { "offboarding": "Team_Offboarding" } } },
+    { "node_id": "notify_human", "type": "notify_human", "label": "Tag a human (Slack + / or Chatter)",
+      "config": { "channel": "both",
+        "slack_channel": "#support-escalations",
+        "slack_channel_by_team": { "csm": "#csm-escalations", "sales": "#sales-escalations", "offboarding": "#retention", "default": "#support-escalations" },
+        "mention": { "mention_id": "005jV000000fm5WQAQ" } } }
   ],
   "edges": [
     { "source_node_id": "identify", "target_node_id": "sf_case", "condition": {} },
@@ -61,6 +66,9 @@
     { "source_node_id": "confidence_gate", "target_node_id": "notify",
       "condition": { "if": "not confidence_gate.pass and tier != 'enterprise' and routed_team == 'support' and confidence_gate.forced_escalation" } },
     { "source_node_id": "confidence_gate", "target_node_id": "clarify",
-      "condition": { "if": "not confidence_gate.pass and tier != 'enterprise' and routed_team == 'support' and not confidence_gate.forced_escalation" } }
+      "condition": { "if": "not confidence_gate.pass and tier != 'enterprise' and routed_team == 'support' and not confidence_gate.forced_escalation" } },
+
+    { "source_node_id": "ask_human", "target_node_id": "notify_human", "condition": {} },
+    { "source_node_id": "handover", "target_node_id": "notify_human", "condition": {} }
   ]
 }

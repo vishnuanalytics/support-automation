@@ -724,6 +724,23 @@ the single comprehensive workflow (`team_route` + 5-way gate) — **applied
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
 
+**Phase 23d (2026-09-01): `notify_human` node — tag a person, Slack and/or Chatter.**
+The escalation used to *stop* at `ask_human` (SF-Chatter only). New
+`@register("notify_human")` (`interpreter/alert.py::alert_human`,
+`slack.post_message`): posts the Case link + summary + draft to **Slack**
+(tenant bot token + channel, else `SLACK_ALERT_WEBHOOK`) **and/or Salesforce
+Chatter** — `config.channel = both | slack | salesforce_chatter`. Person is
+resolved by the *flow*: `mention.slack_user_id` / `_by_team`,
+`mention.sf_user_id` / `sf_team` (→ a `Team_<team>` queue member via
+`routing.queue_member`) / `mention_id` fallback. Slack channel:
+`slack_channel` / `slack_channel_by_team[routed_team]`. Pass-through (keeps the
+upstream `outcome`), so `record_run` still schedules the resolution check.
+Migration `052`: email flow **v8** — `ask_human → notify_human`,
+`handover → notify_human`. Router flow + seeder carry it too. `post_chatter`
+is now fully non-raising. 236 offline pytest (2 new). **Operator TODO:** set
+`SLACK_ALERT_WEBHOOK` (or connect Slack per-tenant) + edit the
+`slack_channel*` placeholders on the `notify_human` node.
+
 **Phase 23c (2026-09-01): Case 00001182/00001183 debug.**
 - **Double EmailMessage → double run** — `log_email_message` stripped angle
   brackets for its idempotency check but Email-to-Case stores

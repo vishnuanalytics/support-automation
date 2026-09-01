@@ -1083,6 +1083,43 @@ def h_notify(state: CaseState, config: dict) -> dict:
     return {"outcome": outcome, **_trace(nid, "notify", summary, outcome)}
 
 
+@register("notify_human")
+def h_notify_human(state: CaseState, config: dict) -> dict:
+    """Ping a named person about an escalated Case on **Slack and/or
+    Salesforce Chatter** — the flow decides who and where, not hard-coded
+    config. Place it after `ask_human` / `handover` (or on any escalation
+    edge). Pass-through: it doesn't change `outcome`, so a terminal node's
+    action is preserved.
+
+    config: {
+      channel: "both" | "slack" | "salesforce_chatter",
+      slack_channel: "#support-escalations",
+      slack_channel_by_team: {"csm": "#csm", "default": "#support"},
+      slack_webhook: "https://hooks.slack.com/…",     # or SLACK_ALERT_WEBHOOK
+      mention: {
+        slack_user_id: "U123", slack_user_by_team: {...},
+        sf_user_id: "005…", sf_team: "Support",       # -> a queue member
+        mention_id: "005…"                            # final fallback
+      },
+      note_tmpl?: "... {cn} {outcome} {conf} {subject} {who} {draft} {link} ..."
+    }
+    """
+    from interpreter import alert
+
+    res = alert.alert_human(dict(state), config)
+    legs = []
+    for k in ("slack", "chatter"):
+        r = res.get(k) or {}
+        if r.get("sent") or r.get("posted"):
+            legs.append(f"{k}:{r.get('via') or ('mention' if r.get('mention_id') else 'ok')}")
+        elif r:
+            legs.append(f"{k}:skip")
+    summary = "alerted " + (", ".join(legs) or "nobody (no channel configured)")
+    if res.get("mention"):
+        summary += f"  ·  @slack={res['mention'].get('slack')} @sf={res['mention'].get('sf')}"
+    return {"human_alert": res, **_trace(config["_node_id"], "notify_human", summary, res)}
+
+
 @register("ask_human")
 def h_ask_human(state: CaseState, config: dict) -> dict:
     channel = config.get("channel", "salesforce_chatter")

@@ -51,7 +51,7 @@ CLARIFY_HANDOVER_QUEUE = "Team_Support"
 
 n_identify, n_sf_case, n_retrieve, n_classify, n_route, n_writeback, \
     n_draft, n_gate, n_auto, n_ask, n_handover, n_notify, n_clarify, \
-    n_case_lookup = (_nid(i) for i in range(1, 15))
+    n_case_lookup, n_human = (_nid(i) for i in range(1, 16))
 
 NODES = [
     (n_identify, "identify", "Resolve the sender",
@@ -96,6 +96,9 @@ NODES = [
     (n_clarify, "clarify", "Ask the customer for missing detail",
      {"max_questions": 3, "max_rounds": 2, "auto_send": False, "channel": "email",
       "handover_queue": CLARIFY_HANDOVER_QUEUE}),
+    (n_human, "notify_human", "Tag a human (Slack + / or Chatter)",
+     {"channel": "both", "slack_channel": "#support-escalations",
+      "mention": {"mention_id": "005jV000000fm5WQAQ"}}),
 ]
 
 _LIVE = "tier != 'enterprise' and routed_team != 'offboarding'"
@@ -114,6 +117,8 @@ EDGES = [
     (n_gate, n_ask, {"if": f"not confidence_gate.pass and {_LIVE} and routed_team in ('csm', 'sales')"}),
     (n_gate, n_notify, {"if": f"{_SUPPORT_FAIL} and confidence_gate.forced_escalation"}),
     (n_gate, n_clarify, {"if": f"{_SUPPORT_FAIL} and not confidence_gate.forced_escalation"}),
+    (n_ask, n_human, {}),
+    (n_handover, n_human, {}),
 ]
 
 

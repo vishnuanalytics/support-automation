@@ -212,6 +212,51 @@ def test_update_case_fields_append_is_idempotent(monkeypatch):
     assert sum("[triage] hello" in (u.get("Description") or "") for u in updates) == 1
 
 
+def test_notify_human_alerts_slack_and_chatter(monkeypatch):
+    from interpreter import alert, salesforce, slack
+    from interpreter.registry import h_notify_human
+
+    sent = {}
+    monkeypatch.setattr(slack, "post_message",
+                        lambda text, **k: (sent.__setitem__("slack", (text, k)) or
+                                           {"sent": True, "via": "webhook"}))
+    monkeypatch.setattr(salesforce, "post_chatter",
+                        lambda cid, body, **k: (sent.__setitem__("chatter", (cid, k.get("mention_id"))) or
+                                                {"posted": True, "mention_id": k.get("mention_id")}))
+    monkeypatch.setattr(alert, "_sf_link", lambda x: f"link/{x}")
+
+    state = {"case": {"sf_id": "500jV000000000000", "subject": "reconciliation help",
+                      "case_number": "00001183"},
+             "routed_team": "csm", "outcome": {"action": "ask_human"},
+             "draft": "here is a suggested reply", "confidence": 0.31, "tenant_id": "t"}
+    cfg = {"_node_id": "nh", "channel": "both",
+           "slack_channel_by_team": {"csm": "#csm", "default": "#support"},
+           "mention": {"slack_user_id": "U777", "mention_id": "005ABCDEFGHIJ12345"}}
+    out = h_notify_human(state, cfg)
+
+    assert "slack" in sent and sent["slack"][1]["channel"] == "#csm"    # per-team channel
+    assert "<@U777>" in sent["slack"][0]                                # slack mention
+    assert sent["chatter"] == ("500jV000000000000", "005ABCDEFGHIJ12345")  # chatter @mention
+    assert out["human_alert"]["mention"] == {"slack": "U777", "sf": "005ABCDEFGHIJ12345"}
+
+
+def test_notify_human_channel_slack_only(monkeypatch):
+    from interpreter import alert, salesforce, slack
+    from interpreter.registry import h_notify_human
+
+    monkeypatch.setattr(slack, "post_message", lambda *a, **k: {"sent": True, "via": "bot"})
+    monkeypatch.setattr(salesforce, "post_chatter",
+                        lambda *a, **k: pytest.fail("channel=slack must not touch Chatter"))
+    monkeypatch.setattr(alert, "_sf_link", lambda x: x)
+    out = h_notify_human(
+        {"case": {"sf_id": "500X"}, "routed_team": "support", "outcome": {},
+         "draft": "d", "tenant_id": "t"},
+        {"_node_id": "nh", "channel": "slack", "slack_channel": "#s",
+         "mention": {"slack_user_id": "U1"}},
+    )
+    assert "chatter" not in out["human_alert"]
+
+
 def test_routing_cache_hits(monkeypatch):
     from interpreter import routing
 
