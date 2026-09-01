@@ -196,20 +196,27 @@ def sync_graph(row: dict[str, Any], similar: list[dict] | None = None) -> bool:
             pass
 
 
-def _graph_duplicates(sf_ids: list[str]) -> set[str]:
-    """Which of `sf_ids` are the DUPLICATE_OF target of some other Case —
-    their resolution should weigh much more. Best-effort."""
+def _graph_duplicates(sf_ids: list[str], *, tenant_id: str | None = None) -> set[str]:
+    """Which of `sf_ids` are the DUPLICATE_OF target of some other Case *in the
+    same tenant* — their resolution should weigh much more. Best-effort.
+
+    Audit NEO-5: the graph is a single shared store, so both ends of the
+    traversal are pinned to `tenant_id` — a DUPLICATE_OF edge from another
+    tenant's Case must never boost this tenant's ranking.
+    """
     if not sf_ids:
         return set()
     driver = _driver_or_none()
     if driver is None:
         return set()
     db = os.environ.get("NEO4J_DATABASE", "neo4j")
+    tid = str(tenant_id) if tenant_id else None
     try:
         recs = driver.execute_query(
-            "MATCH (:Case)-[:DUPLICATE_OF]->(o:Case) WHERE o.sf_id IN $ids "
+            "MATCH (src:Case)-[:DUPLICATE_OF]->(o:Case) WHERE o.sf_id IN $ids "
+            "AND ($tid IS NULL OR (o.tenant_id = $tid AND src.tenant_id = $tid)) "
             "RETURN DISTINCT o.sf_id AS sf_id",
-            ids=sf_ids, database_=db,
+            ids=sf_ids, tid=tid, database_=db,
         ).records
         return {r["sf_id"] for r in recs}
     except Exception as e:  # noqa: BLE001
@@ -292,7 +299,8 @@ def lookup(
     if not rows:
         return empty
 
-    dups = _graph_duplicates([r["case_sf_id"] for r in rows]) if use_graph else set()
+    dups = (_graph_duplicates([r["case_sf_id"] for r in rows], tenant_id=tenant_id)
+            if use_graph else set())
 
     scored = []
     for r in rows:

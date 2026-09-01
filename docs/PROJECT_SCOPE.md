@@ -732,6 +732,17 @@ offline pytest + web build green.
 - **NEO-2** — `neo4j_sync` emits a `beat("neo4j", …)` heartbeat after each sync.
 - **NEO-4** — `neo4j_sync.ensure_constraints` adds uniqueness constraints for
   `:Case {sf_id}`, `:Reply {case_sf_id}`, `:Module {name}` (try/except).
+- **NEO-5** — `case_memory._graph_duplicates(sf_ids, tenant_id=…)` now pins
+  **both** ends of the `(:Case)-[:DUPLICATE_OF]->(:Case)` traversal to the
+  caller's tenant, so a duplicate edge from another tenant's Case on the
+  shared graph can't boost this tenant's ranking. `lookup()` forwards its
+  `tenant_id`.
+- **SB-2** — the running stack needs no pooler (PostgREST HTTP only). The one
+  direct connection — the nightly `pg_dump` on the Oracle VM — is documented
+  to use the **Session pooler** URI (`…pooler.supabase.com:5432`), not
+  "Direct connection" (IPv6-only on the free tier; the Always-Free VM has no
+  IPv6) and not the transaction pooler (`pg_dump` needs session state). See
+  `docs/DEPLOY_ORACLE.md`.
 - **SB-5** — CLAUDE.md: migrations are applied by hand only (Supabase MCP
   `apply_migration` / SQL editor), never the CLI; `.sql` files are the source
   of truth, `supabase_migrations` is not kept in sync.
@@ -739,9 +750,8 @@ offline pytest + web build green.
   free tier has no PITR), `chmod 600` on the copied secrets, `fastembed`
   pre-warm after `up -d`, and a "stop the API / Caddy-for-TLS" note since
   nothing needs the API inbound (CDC, not HTTP callout).
-- SB-2 (pooler URL) N/A — every service talks PostgREST HTTP, not a socket.
-  Still open, lower priority: SF-1 (pick one intake path; email channel is
-  currently inactive), NEO-5 (tenant-scope the `_graph_duplicates` traversal).
+- Still open, lower priority: SF-1 (pick one intake path; email channel is
+  currently inactive).
 
 **Phase 26 done (2026-09-01) — live free-model roster + signature/logo filter.**
 OpenRouter's free tier churns weekly (all classic `:free` slugs already gone),
@@ -904,9 +914,11 @@ removed. Slack becomes bidirectional via **Socket Mode**.
   - **E4**: `docker-compose.yml` `x-svc` gets `logging: json-file 10m×3`.
   - **E5**: `docs/DEPLOY_ORACLE.md` — VM cron block (health_check /
     case_memory_sync / purge_old).
-  - **C2**: no fix needed — every service uses the PostgREST HTTP client, not
-    a direct `postgresql://` socket, so the direct-connection cap is N/A
-    (documented in DEPLOY_ORACLE.md).
+  - **C2 / SB-2**: the running stack uses the PostgREST HTTP client, not a
+    direct `postgresql://` socket, so the direct-connection cap is N/A. The
+    only direct connection — the Oracle VM's nightly `pg_dump` — is documented
+    to use the **Session pooler** URI (`…pooler.supabase.com:5432`), see
+    DEPLOY_ORACLE.md.
   272 offline pytest.
 - **24d (still pending):** remove the SF shortcuts + the `check_resolution`
   comment-send path.

@@ -145,9 +145,11 @@ Already handled: every service is `restart: unless-stopped` and Docker is
 stack comes back and `cdc` resumes from `sf_cdc_state`. Docker log growth is
 capped in `docker-compose.yml` (`json-file`, 10 MB × 3 per service).
 
-No Postgres connection pooling needed — every service talks to Supabase over
-the PostgREST HTTP API (`supabase-py`), not a direct `postgresql://` socket,
-so the free-tier direct-connection cap doesn't apply.
+No Postgres connection pooling needed for the stack itself — every service
+talks to Supabase over the PostgREST HTTP API (`supabase-py`), not a direct
+`postgresql://` socket, so the free-tier direct-connection cap doesn't apply.
+The **one** exception is the nightly `pg_dump` below: give it the **Session
+pooler** URI, not the "Direct connection" one (see the `SUPABASE_DB_URL` note).
 
 ## VM cron
 
@@ -168,9 +170,17 @@ The scheduled jobs that don't run inside the compose stack:
 15 4 * * *   pg_dump "$SUPABASE_DB_URL" | gzip > /opt/sa-backups/db-$(date +\%F).sql.gz && find /opt/sa-backups -name 'db-*.sql.gz' -mtime +7 -delete
 ```
 
-`SUPABASE_DB_URL` = the connection string from Supabase → Project Settings →
-Database → *Connection string* (URI). Needs `postgresql-client` on the VM
-(`sudo apt install -y postgresql-client`).
+`SUPABASE_DB_URL` = Supabase → Project Settings → Database → *Connection
+string* → the **Session pooler** tab (`...pooler.supabase.com:5432`,
+user `postgres.<project-ref>`), **not** "Direct connection". Two reasons:
+the direct host is IPv6-only on the free tier and the Oracle Always-Free VM
+has no IPv6 route, and the pooler keeps `pg_dump` off the tiny direct-connection
+budget the running stack would otherwise share. Use the *session* pooler
+(port 5432), not the *transaction* pooler (6543) — `pg_dump` needs session
+state the transaction pooler drops. Needs `postgresql-client` on the VM
+(`sudo apt install -y postgresql-client`); match its major version to the
+project's Postgres (15 as of writing) or add `--no-sync` / accept a version
+warning.
 
 (`daily-sync.yml` on GitHub Actions already runs the docs scrape + Neo4j
 sync + `case_memory_sync` + `purge_old`; the cron above is the belt-and-braces

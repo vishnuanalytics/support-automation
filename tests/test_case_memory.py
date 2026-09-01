@@ -87,7 +87,7 @@ def _row(**kw):
 
 
 def test_lookup_boosts_and_splits(monkeypatch):
-    monkeypatch.setattr(case_memory, "_graph_duplicates", lambda ids: set())
+    monkeypatch.setattr(case_memory, "_graph_duplicates", lambda ids, **kw: set())
     rows = [
         _row(case_sf_id="a", case_number="A", similarity=0.60,
              case_type="Problem / Bug", module="API & Webhooks", tier="basic"),   # all boosts
@@ -110,12 +110,23 @@ def test_lookup_boosts_and_splits(monkeypatch):
 
 
 def test_lookup_duplicate_edge_wins(monkeypatch):
-    monkeypatch.setattr(case_memory, "_graph_duplicates", lambda ids: {"b"})
+    monkeypatch.setattr(case_memory, "_graph_duplicates", lambda ids, **kw: {"b"})
     rows = [_row(case_sf_id="a", case_number="A", similarity=0.60),
             _row(case_sf_id="b", case_number="B", similarity=0.45)]
     out = case_memory.lookup(_FakeSB(rows), "q", tenant_id="t", k=2, use_graph=True)
     assert out["citable"][0]["case_number"] == "B"   # 0.45 + 0.30 dup boost
     assert out["citable"][0]["duplicate"] is True
+
+
+def test_lookup_scopes_the_duplicate_traversal_to_the_tenant(monkeypatch):
+    """Audit NEO-5 — the DUPLICATE_OF lookup must be pinned to the caller's
+    tenant, not run cross-tenant against the shared graph."""
+    seen = {}
+    monkeypatch.setattr(case_memory, "_graph_duplicates",
+                        lambda ids, **kw: seen.update(kw) or set())
+    case_memory.lookup(_FakeSB([_row(case_sf_id="a", case_number="A")]),
+                       "q", tenant_id="tenant-42", k=1, use_graph=True)
+    assert seen.get("tenant_id") == "tenant-42"
 
 
 def test_lookup_empty_when_no_rows():
