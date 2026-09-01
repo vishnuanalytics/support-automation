@@ -50,52 +50,82 @@ def alert_human(state: dict, config: dict) -> dict[str, Any]:
     subject = case.get("subject") or "(no subject)"
     cn = (state.get("sf_case") or {}).get("case_number") or case.get("case_number") or sf_id or "?"
 
+    tenant_id = state.get("tenant_id")
     mention = config.get("mention") or {}
     slack_uid = mention.get("slack_user_id") or _pick(mention.get("slack_user_by_team"), team, "default")
     sf_uid = mention.get("sf_user_id")
     if not sf_uid and (mention.get("sf_team") or team):
         from interpreter import routing
         qref = mention.get("sf_queue") or f"Team_{(mention.get('sf_team') or team).capitalize()}"
-        sf_uid = routing.queue_member(qref, state.get("tenant_id"))[0]
+        sf_uid = routing.queue_member(qref, tenant_id)[0]
     sf_uid = sf_uid or mention.get("mention_id")
+    # map the SF agent -> their Slack account by email, so the bot can DM/@them
+    if not slack_uid and sf_uid and _looks_id(sf_uid):
+        slack_uid = slack.lookup_user_by_email(
+            salesforce.user_email(sf_uid, tenant_id=tenant_id) or "", tenant_id=tenant_id)
 
     want = config.get("channel") or "both"
     slack_ch = _pick(config.get("slack_channel_by_team"), team, "default") or config.get("slack_channel")
     out: dict[str, Any] = {"mention": {"slack": slack_uid, "sf": sf_uid}, "channel": want}
 
-    tmpl = config.get("note_tmpl") or (
-        "*Support bot needs a human* — Case *{cn}* ({outcome}, confidence {conf})\n"
-        "> {subject}\n{who}\nSuggested draft:\n```{draft}```\n{link}"
+    # Phase 24 — the bot has NOT answered the customer. The Slack post is the
+    # root of the reasoning thread; the agent replies `take` in it to start.
+    who = f"<@{slack_uid}>" if slack_uid else "the responsible agent"
+    root = (
+        f":thread: {who} — Case *{cn}*  ·  _{subject}_\n"
+        f"Triaged (type/priority written to the Case). *I have not replied to the "
+        f"customer.* Reply `take` in this thread when you want to reason through "
+        f"it with me before we answer.\n{_sf_link(sf_id) if sf_id else ''}"
     )
 
     if want in ("both", "slack") and (slack_ch or config.get("slack_webhook")
                                       or _has_alert_webhook()):
-        who = f"<@{slack_uid}> please take a look" if slack_uid else "please pick this up"
-        text = tmpl.format(cn=cn, outcome=outcome, conf=conf, subject=subject, who=who,
-                           draft=(draft or "(none)")[:2500], link=_sf_link(sf_id) if sf_id else "")
         out["slack"] = slack.post_message(
-            text, tenant_id=state.get("tenant_id"), channel=slack_ch,
+            root, tenant_id=tenant_id, channel=slack_ch,
             webhook=config.get("slack_webhook"),
         )
+        sl = out["slack"]
+        if sl.get("sent") and sl.get("channel") and sl.get("ts"):
+            out["reasoning_session"] = _open_session(
+                state, config, sf_uid=sf_uid, slack_uid=slack_uid,
+                slack_channel=sl["channel"], slack_thread_ts=sl["ts"])
 
     if want in ("both", "salesforce_chatter") and sf_id:
-        who = "please review the suggested reply before it goes to the customer."
-        body = tmpl.format(cn=cn, outcome=outcome, conf=conf, subject=subject, who=who,
-                           draft=(draft or "(none)")[:3000], link="").replace("```", "")
-        mid = sf_uid if salesforce and _looks_id(sf_uid) else None
-        out["chatter"] = salesforce.post_chatter(sf_id, body, mention_id=mid,
-                                                 tenant_id=state.get("tenant_id"))
-
-    # When the upstream ask_human/handover node is routing-only (post_note:false)
-    # the reviewable draft would otherwise be lost — drop it as one private
-    # CaseComment so the agent can copy it into the Email quick action.
-    if config.get("draft_comment") and sf_id and draft.strip():
-        out["draft_comment"] = salesforce.add_case_comment(
-            sf_id, f"[bot draft — review before sending]\n\n{draft}",
-            published=False, tenant_id=state.get("tenant_id"),
-        )
+        mid = sf_uid if _looks_id(sf_uid) else None
+        body = (f"Support bot has triaged this Case and flagged it for you"
+                f"{' in Slack' if out.get('reasoning_session') else ''}. "
+                f"It has **not** replied to the customer — we'll reason through "
+                f"the response together before anything is sent.")
+        out["chatter"] = salesforce.post_chatter(sf_id, body, mention_id=mid, tenant_id=tenant_id)
 
     return out
+
+
+def _open_session(state: dict, config: dict, *, sf_uid, slack_uid,
+                  slack_channel, slack_thread_ts) -> str | None:
+    """Create the reasoning session and stamp the Slack thread on it."""
+    try:
+        from ingestion.scraper import get_supabase
+        from interpreter import reasoning
+
+        sb = get_supabase()
+        case = state.get("case") or {}
+        cls = state.get("classification") or {}
+        sess = reasoning.open_session(
+            sb, case=case, tenant_id=state.get("tenant_id"),
+            run_id=state.get("run_id"),
+            case_type=cls.get("case_type") or state.get("case_type"),
+            case_number=(state.get("sf_case") or {}).get("case_number") or case.get("case_number"),
+            agent_sf_id=sf_uid, agent_slack_id=slack_uid,
+        )
+        sb.table("reasoning_sessions").update({
+            "slack_channel": slack_channel, "slack_thread_ts": slack_thread_ts,
+            "agent_slack_id": slack_uid, "updated_at": "now()",
+        }).eq("session_id", sess["session_id"]).execute()
+        return sess["session_id"]
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not open reasoning session: %s", e)
+        return None
 
 
 def _looks_id(v: Any) -> bool:

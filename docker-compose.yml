@@ -45,6 +45,13 @@ services:
     <<: *svc
     command: python -m ingestion.sf_cdc_watch
 
+  # Phase 24c — Slack Socket Mode. One persistent WebSocket (no public URL):
+  # an agent's in-thread replies drive `reasoning.handle_agent_message`, and on
+  # approval the drafted customer reply is sent. No-op without SLACK_APP_TOKEN.
+  slackbot:
+    <<: *svc
+    command: python -m interpreter.slack_socket
+
   # receives the Salesforce -> automation push (POST /api/hooks/salesforce/case).
   # Expose it to Salesforce with a Cloudflare quick tunnel (scripts/dev_serve.sh).
   api:

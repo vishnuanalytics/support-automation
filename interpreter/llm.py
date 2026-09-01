@@ -88,7 +88,10 @@ def _fallback_chain(model: str) -> list[str]:
 
 
 _RECOVERABLE = ("rate_limit", "ratelimit", "429", "timeout", "timed out",
-                "temporarily", "overloaded", "503", "502", "500", "connection")
+                "temporarily", "overloaded", "503", "502", "500", "connection",
+                # a provider retiring a model (e.g. an OpenRouter :free slug
+                # going paid) 404s — skip it and fall to the next in the chain
+                "404", "unavailable", "not found", "no endpoints", "decommission")
 
 
 def _is_recoverable(e: Exception) -> bool:

@@ -531,6 +531,21 @@ def _current_user_id(sf) -> str | None:
         return None
 
 
+def user_email(user_id: str, *, tenant_id: str | None = None) -> str | None:
+    """Email for a Salesforce User id — used to map an agent to their Slack
+    account (`slack.lookup_user_by_email`). None on any failure."""
+    if not user_id or not available():
+        return None
+    try:
+        rows = client_for(tenant_id).query(
+            f"SELECT Email FROM User WHERE Id = '{_soql_lit(user_id)}' LIMIT 1"
+        ).get("records", [])
+        return rows[0].get("Email") if rows else None
+    except Exception as e:  # noqa: BLE001
+        log.warning("user_email(%s): %s", user_id, e)
+        return None
+
+
 def post_chatter(case_id: str, body: str, *, mention_id: str | None = None, tenant_id: str | None = None) -> dict[str, Any]:
     """
     Post a Chatter FeedItem on the Case, @mentioning `mention_id` (or the

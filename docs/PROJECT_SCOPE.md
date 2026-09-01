@@ -722,7 +722,7 @@ the single comprehensive workflow (`team_route` + 5-way gate) — **applied
 2026-08-31**, published **v4**). Migrations `047`–`053` land the resilience
 work and the `notify_human` / double-tag fixes — see the Phase 23* entries
 below; the email `sf_entry` flow is now at **v9**.
-261 offline pytest (24a+b) tests + web tsc/vitest (6)/build +
+266 offline pytest (24a-c) tests + web tsc/vitest (6)/build +
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
 
@@ -760,9 +760,29 @@ removed. Slack becomes bidirectional via **Socket Mode**.
   sent|abandoned`. It works through **every** pointer (test proves it doesn't
   draft after 3/4 answers), `edit:` re-drafts, `_is_approve` gates the send.
   `handle_agent_message` is the DB-facing wrapper. 11 new tests.
-- **24c (next):** `slackbot` Socket Mode service wired to `handle_agent_message`;
-  `notify_human` opens the session + DMs the agent on handoff; on
-  `action == "send"` deliver `session.draft` via `agent_reply`.
+- **24c done (code):** `interpreter/slack_socket.py` + a `slackbot`
+  compose service — one persistent Socket Mode WebSocket (`apps.connections.open`
+  → `websockets`), acks every envelope, routes `message`/`app_mention` events
+  through `dispatch()` → `reasoning.handle_agent_message` → posts the reply
+  in-thread → on `action == "send"` runs `_deliver` (reuses `agent_reply`,
+  records a `slack_reasoning` run, marks the escalated run `guided_resume`).
+  `alert.alert_human` reworked: the Slack post is now the **thread root**
+  ("*I have not replied to the customer.* Reply `take` …"), it opens the
+  `reasoning_sessions` row and stamps `slack_channel`/`slack_thread_ts`, and it
+  no longer drops a `[bot draft]` CaseComment. `slack.post_message` gained
+  `thread_ts`; `slack.lookup_user_by_email` + `salesforce.user_email` map the
+  SF agent → Slack. **Live-verified**: pointer bank, `build_pointers` (6),
+  `open_session` + dedupe + `not_.in_` filter, one `handle_agent_message`
+  turn, all against the real DB + Groq. Socket connection itself needs the
+  operator's `SLACK_APP_TOKEN`. Also fixed `llm._RECOVERABLE` to skip a
+  retired provider model (OpenRouter `:free` → 404) instead of hard-failing.
+  266 offline pytest.
+- **Operator TODO (24c):** enable Socket Mode + create the `xapp-` token, add
+  bot scopes (`im:history`, `channels:history`, `groups:history`,
+  `app_mentions:read`, `users:read.email`) + event subs (`message.channels`,
+  `message.groups`, `message.im`, `app_mention`), reinstall, put
+  `SLACK_APP_TOKEN` in `.env`, and give the agent's Slack member id for
+  `notify_human`'s `mention.slack_user_id` (or rely on the email lookup).
 - **24d:** remove the SF shortcuts + the `check_resolution` comment-send path.
 
 **Phase 23h (2026-09-01): "Send Bot Draft to Customer" quick action + stop
@@ -787,7 +807,7 @@ new comment into a customer email; (b) there was no one-click "send it".
   CDC's `bot_user_id` filter stops a loop).
 - **Operator step:** run the deploy script, then Setup → Object Manager →
   Case → Page Layouts → drag "Send Bot Draft to Customer" onto the action bar.
-- No DB migration (the fields live in Salesforce). 261 offline pytest (24a+b) (11 new).
+- No DB migration (the fields live in Salesforce). 266 offline pytest (24a-c) (11 new).
 
 **Phase 23g (2026-09-01): `notify_human` → a real Slack channel (live test prep).**
 Slack was already connected for tenant `00000000…` (`tenant_integrations`
@@ -822,7 +842,7 @@ place to answer since that is where the @mention lives.
   draft **verbatim, no LLM call**. `_check_resolution` passes `row["draft"]`.
 - Verified live: the queued `check_resolution` tick picked up the FeedComment
   and emailed the original draft to the customer (SMTP, mirrored to the Case
-  as an outbound EmailMessage); run → `guided_resume`. 261 offline pytest (24a+b).
+  as an outbound EmailMessage); run → `guided_resume`. 266 offline pytest (24a-c).
 
 **Phase 23e (2026-09-01): stop the double Chatter tag on an escalated Case.**
 Case 00001184 showed 3 bot feed posts and the rep @mentioned twice: `ask_human`

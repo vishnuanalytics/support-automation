@@ -1,0 +1,224 @@
+"""
+Phase 24c — the `slackbot` service: a Slack **Socket Mode** client that turns
+an agent's in-thread replies into `reasoning.handle_agent_message` turns.
+
+One persistent WebSocket (no public URL, no polling). `notify_human` posts the
+root message of a per-Case thread and stores its `ts` on the
+`reasoning_sessions` row; the agent replies in that thread; each reply drives
+the dialogue, and on approval the drafted reply is sent to the customer.
+
+    python -m interpreter.slack_socket        # run forever
+    SLACK_APP_TOKEN=xapp-…  (app-level token, scope connections:write)
+
+`dispatch()` is pure given `post` / `deliver` callables — see tests.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import re
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+import requests  # noqa: E402
+import websockets  # noqa: E402
+
+from ingestion.scraper import get_supabase  # noqa: E402
+from interpreter import reasoning, slack  # noqa: E402
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("interpreter.slack_socket")
+
+_OPEN_URL = "https://slack.com/api/apps.connections.open"
+_DEAD_STATES = ("sent", "abandoned")
+_MENTION_RE = re.compile(r"^\s*<@[A-Z0-9]+>\s*")
+# single-tenant deployment — the Slack bot token lives on this tenant's row
+_TENANT = os.environ.get("DEFAULT_TENANT_ID", "00000000-0000-0000-0000-000000000000")
+
+
+# ── session lookup ─────────────────────────────────────────────────
+def _find_session(sb, thread_ts: str):
+    try:
+        rows = (sb.table("reasoning_sessions").select("*")
+                .eq("slack_thread_ts", thread_ts)
+                .not_.in_("state", _DEAD_STATES).execute().data)
+        return rows[0] if rows else None
+    except Exception as e:  # noqa: BLE001
+        log.warning("session lookup failed for thread %s: %s", thread_ts, e)
+        return None
+
+
+# ── deliver the approved draft ─────────────────────────────────────
+def _deliver(sb, session: dict) -> dict:
+    """Send `session['draft']` to the customer via the same path `auto_reply`
+    used, and mark the escalated run resolved. Never raises."""
+    from interpreter import agent_reply, mailbox
+
+    case_id = session["case_id"]
+    tenant_id = session.get("tenant_id")
+    try:
+        runs = (sb.table("runs")
+                .select("run_id, case_payload, draft, tenant_id, flow_id, team, "
+                        "human_action, subject, source, created_at")
+                .eq("case_id", case_id).order("created_at", desc=True)
+                .limit(5).execute().data) or []
+    except Exception as e:  # noqa: BLE001
+        log.warning("run lookup for %s failed: %s", case_id, e)
+        runs = []
+    run = next((r for r in runs if r.get("source") != "agent_resume"),
+              runs[0] if runs else None)
+    case = (run or {}).get("case_payload") or {}
+    case.setdefault("sf_id", case_id)
+
+    cfg = mailbox.load_channel(tenant_id, sb) if tenant_id else None
+    out = agent_reply.resume_from_guidance(
+        case, "send it", cfg=cfg, tenant_id=tenant_id, draft=session.get("draft"))
+
+    if run:
+        try:
+            sb.table("runs").insert({
+                "flow_id": run.get("flow_id"), "tenant_id": tenant_id,
+                "team": run.get("team"), "source": "slack_reasoning",
+                "case_id": str(case_id)[:200],
+                "subject": (str(run.get("subject") or "")[:500] or None),
+                "outcome": "auto_reply" if out.get("auto_sent") else "draft",
+                "draft": out.get("reply"), "case_payload": case,
+            }).execute()
+            sb.table("runs").update({
+                "human_action": "guided_resume",
+                "human_reply": "[slack reasoning: approved]",
+                "feedback_checked_at": "now()",
+            }).eq("run_id", run["run_id"]).execute()
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not record slack_reasoning run for %s: %s", case_id, e)
+
+    return {"sent": bool(out.get("auto_sent")), "via": out.get("via"),
+            "error": out.get("error")}
+
+
+# ── the core (pure given post / deliver) ───────────────────────────
+def dispatch(sb, event: dict, *, post, deliver=None, bot_user_id: str | None = None) -> dict:
+    """Handle one Slack message event. `post(channel, thread_ts, text)` sends a
+    reply; `deliver(sb, session)` ships the approved draft. Returns a summary."""
+    if event.get("type") not in ("message", "app_mention"):
+        return {"skip": f"type={event.get('type')}"}
+    if event.get("bot_id") or event.get("subtype"):
+        return {"skip": "bot or subtype"}
+    if bot_user_id and event.get("user") == bot_user_id:
+        return {"skip": "self"}
+
+    text = _MENTION_RE.sub("", (event.get("text") or "").strip())
+    channel = event.get("channel")
+    thread_ts = event.get("thread_ts") or event.get("ts")
+    if not (text and channel and thread_ts):
+        return {"skip": "incomplete event"}
+
+    session = _find_session(sb, thread_ts)
+    if not session:
+        return {"skip": "no open session for this thread"}
+
+    out = reasoning.handle_agent_message(sb, session, text)
+    post(channel, thread_ts, out["reply"])
+    res = {"session_id": session["session_id"],
+           "state": out["session"]["state"], "action": out.get("action")}
+
+    if out.get("action") == "send":
+        d = (deliver or _deliver)(sb, out["session"])
+        post(channel, thread_ts,
+             ":white_check_mark: Sent to the customer."
+             if d.get("sent") else
+             f":warning: I couldn't send it ({d.get('error') or d.get('via')}). "
+             f"The draft is on the Case.")
+        res["delivery"] = d
+    return res
+
+
+# ── transport ─────────────────────────────────────────────────────
+def _connection_url(app_token: str) -> str:
+    r = requests.post(_OPEN_URL, headers={"Authorization": f"Bearer {app_token}"}, timeout=15)
+    r.raise_for_status()
+    body = r.json()
+    if not body.get("ok"):
+        raise RuntimeError(f"apps.connections.open: {body.get('error')}")
+    return body["url"]
+
+
+def _make_poster(sb):
+    def post(channel: str, thread_ts: str, text: str) -> None:
+        try:
+            slack._call("chat.postMessage", slack._bot_token(_TENANT, sb),
+                        {"channel": channel, "thread_ts": thread_ts, "text": text})
+        except Exception as e:  # noqa: BLE001
+            log.warning("chat.postMessage failed: %s", e)
+    return post
+
+
+def _bot_user_id(sb) -> str | None:
+    try:
+        r = slack._call("auth.test", slack._bot_token(_TENANT, sb), {})
+        return r.get("user_id")
+    except Exception as e:  # noqa: BLE001
+        log.warning("auth.test failed: %s", e)
+        return None
+
+
+async def _run_async() -> None:
+    app_token = os.environ.get("SLACK_APP_TOKEN")
+    if not app_token:
+        log.warning("SLACK_APP_TOKEN (xapp-…) not set — slackbot idle. "
+                    "See docs/SLACK_SETUP.md / .env.example.")
+        while True:                       # idle, don't crash-loop the container
+            await asyncio.sleep(3600)
+    sb = get_supabase()
+    post = _make_poster(sb)
+    bot_uid = _bot_user_id(sb)
+    log.info("slackbot starting (bot user %s)", bot_uid)
+
+    while True:
+        try:
+            url = _connection_url(app_token)
+            async with websockets.connect(url, ping_interval=20, ping_timeout=20,
+                                          open_timeout=20) as ws:
+                log.info("socket connected")
+                try:
+                    from interpreter.health import beat
+                    beat("slackbot", {"status": "connected"}, sb=sb, force=True)
+                except Exception:  # noqa: BLE001
+                    pass
+                async for raw in ws:
+                    msg = json.loads(raw)
+                    kind = msg.get("type")
+                    if msg.get("envelope_id"):
+                        await ws.send(json.dumps({"envelope_id": msg["envelope_id"]}))
+                    if kind == "hello":
+                        continue
+                    if kind == "disconnect":
+                        log.info("server asked us to reconnect (%s)", msg.get("reason"))
+                        break
+                    if kind == "events_api":
+                        ev = ((msg.get("payload") or {}).get("event")) or {}
+                        try:
+                            log.info("dispatch: %s", dispatch(sb, ev, post=post, bot_user_id=bot_uid))
+                        except Exception as e:  # noqa: BLE001
+                            log.exception("dispatch failed: %s", e)
+                    try:
+                        from interpreter.health import beat
+                        beat("slackbot", None, sb=sb)
+                    except Exception:  # noqa: BLE001
+                        pass
+        except Exception as e:  # noqa: BLE001
+            log.warning("socket error (%s); reconnecting in 5s", e)
+            await asyncio.sleep(5)
+
+
+def run() -> None:
+    asyncio.run(_run_async())
+
+
+if __name__ == "__main__":
+    run()

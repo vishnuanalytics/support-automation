@@ -30,6 +30,8 @@ google-api-python-client
 
 # Slack + GitHub connectors (Phase 16; optional — no-op unless creds set)
 requests
+# Slack Socket Mode client (Phase 24c — interpreter/slack_socket)
+websockets
 
 # api (Phase 5)
 fastapi

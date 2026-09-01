@@ -289,45 +289,30 @@ def test_ask_human_post_note_false_is_routing_only(monkeypatch):
     assert "routed only" in out["trace"][0]["summary"]
 
 
-def test_notify_human_draft_comment_adds_one_private_comment(monkeypatch):
-    """draft_comment:true -> alert_human drops the reviewable draft as a single
-    private CaseComment (since ask_human no longer does)."""
+def test_notify_human_opens_a_reasoning_session_and_never_dumps_the_draft(monkeypatch):
+    """Phase 24: the draft is reasoned through in Slack — alert_human posts the
+    thread root + opens a reasoning_sessions row, and never writes the draft to
+    the Case as a CaseComment."""
     from interpreter import alert, salesforce, slack
 
-    monkeypatch.setattr(slack, "post_message", lambda *a, **k: {"sent": True, "via": "bot"})
+    monkeypatch.setattr(slack, "post_message",
+                        lambda *a, **k: {"sent": True, "via": "bot",
+                                         "channel": "C1", "ts": "999.1"})
     monkeypatch.setattr(salesforce, "post_chatter", lambda *a, **k: {"posted": True})
-    monkeypatch.setattr(alert, "_sf_link", lambda x: x)
-    comments = []
     monkeypatch.setattr(salesforce, "add_case_comment",
-                        lambda cid, body, **k: (comments.append((cid, body, k)) or
-                                                {"created": True}))
+                        lambda *a, **k: pytest.fail("Phase 24: no draft comment on the Case"))
+    monkeypatch.setattr(alert, "_sf_link", lambda x: x)
+    opened = {}
+    monkeypatch.setattr(alert, "_open_session",
+                        lambda *a, **k: opened.update(k) or "sess-1")
 
     out = alert.alert_human(
         {"case": {"sf_id": "500DC"}, "routed_team": "csm", "outcome": {"action": "ask_human"},
          "draft": "here is the suggested reply", "tenant_id": "t"},
-        {"channel": "both", "slack_channel": "#s", "draft_comment": True,
-         "mention": {"slack_user_id": "U1"}},
-    )
-    assert len(comments) == 1
-    cid, body, kw = comments[0]
-    assert cid == "500DC" and kw.get("published") is False
-    assert "here is the suggested reply" in body
-    assert out["draft_comment"] == {"created": True}
-
-
-def test_notify_human_no_draft_comment_when_flag_unset(monkeypatch):
-    from interpreter import alert, salesforce, slack
-
-    monkeypatch.setattr(slack, "post_message", lambda *a, **k: {"sent": True})
-    monkeypatch.setattr(salesforce, "post_chatter", lambda *a, **k: {"posted": True})
-    monkeypatch.setattr(alert, "_sf_link", lambda x: x)
-    monkeypatch.setattr(salesforce, "add_case_comment",
-                        lambda *a, **k: pytest.fail("no draft_comment flag -> no comment"))
-    out = alert.alert_human(
-        {"case": {"sf_id": "500X"}, "routed_team": "csm", "outcome": {},
-         "draft": "d", "tenant_id": "t"},
         {"channel": "both", "slack_channel": "#s", "mention": {"slack_user_id": "U1"}},
     )
+    assert out["reasoning_session"] == "sess-1"
+    assert opened["slack_channel"] == "C1" and opened["slack_thread_ts"] == "999.1"
     assert "draft_comment" not in out
 
 
