@@ -739,9 +739,19 @@ Repo side done (branch `phase-27-case-control-plane`, 312 offline pytest):
   root @mentions the usergroup + carries tier/type/team/confidence/nearest
   resolutions.
 
-Not built (needs the org / Slack app — see the SF runbook): **27b**
-Omni-Channel config (Service Channel, Routing/Presence Configs, the
-`Route_Support_Case` Omni-Channel Flow + record-triggered Flow), **27f**
+**27b Omni-Channel — scripted + live (2026-09-01).** No Flow, no Apex, no
+pipeline code. `scripts/sf_omni_setup.py` creates the `Support_Case`
+ServiceChannel, 3 presence statuses + the channel link, `RC_Standard` /
+`RC_Priority` QueueRoutingConfigs attached to the 7 `Team_*` / reason
+queues, and `PC_Support_Agent` (capacity 3). **Key finding:** once a queue
+has a routing config, Salesforce *auto-creates* the PendingServiceRouting
+when a Case's OwnerId is set to it — which `ask_human` / `handover` already
+do via `assign_case(queue=…)`. Verified live (a re-assign to `Team_CSM`
+produced a ready PSR). Two Setup-only bits remain: grant the agent permset
+access to the presence statuses, and add the Omni widget to the console so
+an agent can go "Available".
+
+Still not built (org / Slack app — see the SF runbook): **27f**
 assignment-rule cutover to `→ AI_Intake`, **27g** native Escalation Rule +
 `Closed`-needs-`Type` validation rule + list views, the Slack channels /
 usergroups, and the interactive card buttons (**27h** — needs the Slack app

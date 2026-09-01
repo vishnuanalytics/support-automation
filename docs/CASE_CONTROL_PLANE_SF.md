@@ -31,82 +31,43 @@ Then apply migration `062` (Supabase MCP `apply_migration` or SQL editor) and
 
 ---
 
-## 27b — Omni-Channel
+## 27b — Omni-Channel  ✅ scripted + live-applied (2026-09-01)
 
-All in **Setup**. Omni-Channel is already enabled in the org.
+**No Flow, no Apex, no pipeline code.** `scripts/sf_omni_setup.py` does it
+all through the API, and once a queue has a routing config Salesforce
+**auto-creates** the `PendingServiceRouting` the moment the pipeline's
+`assign_case(queue=…)` sets the Case owner to that queue. Verified live —
+a re-assign to `Team_CSM` produced a ready PSR with zero extra code.
 
-### 1. Service Channel
-Setup → **Omni-Channel Settings** → Enable (confirm). Setup → **Service
-Channels** → New:
-
-| Field | Value |
-|---|---|
-| Service Channel Name | `Support Case` |
-| Developer Name | `Support_Case` |
-| Salesforce Object | `Case` |
-
-### 2. Routing Configurations
-Setup → **Routing Configurations** → New (×2):
-
-| | `RC_Standard` | `RC_Priority` |
-|---|---|---|
-| Routing Priority | 2 | 1 |
-| Routing Model | **Least Active** | Least Active |
-| Units of Capacity | 1 | 1 |
-| Push Time-Out (sec) | 90 | 90 |
-
-### 3. Attach a routing config to each destination queue
-Setup → **Queues** → for each of `Team_Support`, `Support_Tier2`, `Team_CSM`,
-`Team_Sales`, `Team_Offboarding` → set **Routing Configuration = `RC_Standard`**.
-For `Enterprise_Support` and `Billing_Escalations` → **`RC_Priority`**.
-Add the test agents as **members** of the queues they should receive from.
-
-### 4. Presence Configuration + Statuses
-Setup → **Presence Statuses** → New: `Available — Cases` (channel: `Support
-Case`), `Busy`, `Away`.
-Setup → **Presence Configurations** → New `PC_Support_Agent`: Capacity **3**,
-add the presence statuses, **Auto-accept requests = off**.
-
-### 5. Omni-Channel Flow — the routing brain
-Setup → **Flows** → New → **Omni-Channel Flow**, name `Route_Support_Case`.
-Input: the record (`Case`). Logic:
-
-```
-Decision on {!Record.Routed_Team__c}
-  = "support"     -> Route Work: Queue Team_Support        (RC_Standard)
-  = "tier2"       -> Route Work: Queue Support_Tier2       (RC_Standard)
-  = "csm"         -> Route Work: Queue Team_CSM            (RC_Standard)
-  = "sales"       -> Route Work: Queue Team_Sales          (RC_Standard)
-  = "offboarding" -> Route Work: Queue Team_Offboarding    (RC_Standard)
-  = "billing"     -> Route Work: Queue Billing_Escalations (RC_Priority)
-  (default)        -> Route Work: Queue AI_Intake  (no-op — sweep will page)
+```bash
+python scripts/sf_omni_setup.py --dry-run
+python scripts/sf_omni_setup.py
 ```
 
-### 6. Record-triggered Flow — fire the routing on handoff
-Setup → **Flows** → New → **Record-Triggered Flow** on `Case`:
+Creates + wires: `ServiceChannel Support_Case` (Case, TabBased) · presence
+statuses `Available_Cases` / `Busy` / `Away` + the channel-status link ·
+`QueueRoutingConfig` `RC_Standard` (LeastActive, pri 2, 90s) on
+`Team_Support` / `Support_Tier2` / `Team_CSM` / `Team_Sales` /
+`Team_Offboarding` and `RC_Priority` (pri 1) on `Enterprise_Support` /
+`Billing_Escalations` · `PresenceUserConfig PC_Support_Agent` (capacity 3) ·
+running user assigned to it.
 
-| | |
-|---|---|
-| Trigger | A record is updated |
-| Entry conditions | `Status` **Equals** `Escalated` **AND** `Routed_Team__c` **Is Changed** = `true` |
-| Optimize for | Actions and Related Records |
-| Action | Subflow → `Route_Support_Case`, pass `{!$Record}` |
+### The two things the script can't do (once, in Setup)
+1. **Presence-status access** — Setup → Permission Sets → *(your agent
+   permset)* → **Service Presence Statuses** → enable `Available — Cases`
+   etc., and assign the **Presence Configuration** `PC_Support_Agent`.
+   (System Administrators already have status access.)
+2. **The Omni widget** — Setup → App Manager → Service Console → **Utility
+   Items** → add **Omni-Channel** (and optionally **Omni Supervisor** as a
+   tab for leads). An agent opens the console and sets presence to
+   **Available — Cases** — until someone does, PSRs sit *ready and pending*.
 
-### 7. Permission set + console
-Setup → **Permission Sets** → New `Omni_Support_Agent`: enable the **Service
-Presence Statuses** (`Available — Cases`, `Busy`, `Away`), assign the
-**Presence Configuration** `PC_Support_Agent` and the **Routing
-Configuration(s)**. Assign to the test agents.
-
-Setup → **App Manager** → your Service Console app → **Utility Items** → add
-**Omni-Channel**. (Optionally add **Omni Supervisor** as a tab for leads.)
-
-### 8. Smoke test
-1. A test agent opens the console, sets presence to **Available — Cases**.
-2. On any open Case, set `Routed_Team__c = tier2` and `Status = Escalated`.
-3. Within ~seconds the Case pops in that agent's Omni widget → **Accept** →
-   `OwnerId` becomes the agent, capacity drops by 1.
-4. **Decline** instead → it re-routes to the next available agent.
+### Smoke test
+1. An agent goes **Available — Cases** in the console.
+2. Run the pipeline on a case that escalates (or set `Status = Escalated` +
+   `OwnerId` = a routing-configured queue by hand).
+3. The Case pops in that agent's Omni widget → **Accept** → `OwnerId`
+   becomes the agent, capacity −1. **Decline** → re-routes.
 
 ---
 
