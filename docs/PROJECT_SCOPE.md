@@ -740,6 +740,22 @@ to that draft first. Requires the email channel's `auto_send_enabled=true`
 (it is, for tenant `00000000…`), else the polished reply is only left as a
 draft CaseComment.
 
+**Phase 23g (2026-09-01): `notify_human` → a real Slack channel (live test prep).**
+Slack was already connected for tenant `00000000…` (`tenant_integrations`
+kind='slack', workspace **speedy** `T0BTDSDTFB5`, bot `support_automation`
+`U0BT4RG2UP9`, scopes `chat:write` + `chat:write.public`). Migration `054`
+(DB-only — channel ids are workspace-specific, portable JSONs keep the
+`#channel` placeholders) points `notify_human`'s `slack_channel` +
+`slack_channel_by_team.*` at channel id **`C0BTPTFNXS8`** for every team →
+email flow **v10**. Worker restarted to load it. To trigger: an inbound email
+whose subject/body hits a `team_route` csm/sales keyword ("renew", "our
+contract", "add seats" → csm; "pricing", "which plan", "quote" → sales) from a
+non-enterprise sender → gate edge `routed_team in ('csm','sales') and tier !=
+'enterprise'` → `ask_human` → `notify_human` posts to `C0BTPTFNXS8` (bot
+token, `chat.postMessage`) **and** Chatter. Slack @mention still TODO — needs
+the rep's Slack member id (`U…`) in `mention.slack_user_id` (the current
+`mention_id` is a Salesforce id).
+
 **Phase 23f (2026-09-01): the re-engage poller now reads a Chatter reply.**
 Case 00001185 went to `clarify` (`need_info`); the bot @mentioned the rep on
 the Case **feed**; the rep replied *on that feed post* — "send this response
