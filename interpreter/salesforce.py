@@ -263,46 +263,21 @@ def _looks_bot_written(body: str) -> bool:
     return any(b.startswith(p) for p in _BOT_COMMENT_PREFIXES)
 
 
-# An explicit "send this to the customer" directive. Everything else a human
-# writes on the Case (investigation notes, internal cross-talk, a handoff log)
-# is context only — it must NOT trigger a customer email (Phase 23h).
-_SEND_CMD_EXACT = {
-    "send", "sent", "send it", "send this", "send this to the customer",
-    "send this response to customer", "send to customer", "send reply",
-    "send the reply", "send the draft", "send draft", "reply", "lgtm",
-    "looks good", "approved", "approve", "go ahead", "ship it", "send response",
-}
-
-
-def looks_like_send_command(body: str) -> bool:
-    b = (body or "").strip().strip(".!").lower()
-    if b in _SEND_CMD_EXACT:
-        return True
-    # "send: <edits>" / "send - <edits>" / "reply: <edits>" — a directive that
-    # also carries edits to fold into the draft.
-    first = b.split("\n", 1)[0]
-    return (first.startswith(("send:", "send -", "send —", "reply:", "reply -"))
-            or (len(b) <= 60 and first.startswith("send ") and "customer" in first))
-
-
 def agent_response_since(case_id: str, since_iso: str | None = None,
                          *, tenant_id: str | None = None) -> dict[str, Any]:
     """What a human has done on a Case since `since_iso` (the bot's run time):
 
-      {"guidance": <newest human note> | None,
+      {"guidance": <newest human CaseComment / Chatter FeedComment> | None,
        "guidance_at": iso | None,
-       "is_send_command": <the note is an explicit "send it" directive> bool,
        "outbound_email": <newest agent reply-to-customer body> | None}
 
-    "Guidance" is the newest of a **CaseComment** or a **Chatter FeedComment**
-    (a reply on the Case feed — where the bot's @mention lives, so that is the
-    natural place for a rep to answer). The bot's own notes ([bot draft…],
-    [triage]…, the escalation @mention text) are skipped. `is_send_command`
-    tells the caller whether to actually email it (an explicit directive) or
-    just keep it as investigation context. An outbound EmailMessage means the
-    agent already answered the customer directly. Never raises."""
+    Used only for telemetry now — `check_resolution` records the note and
+    scores an agent's direct reply; it never sends (the Slack reasoning
+    dialogue is the only send path — Phase 24). The bot's own notes
+    ([bot draft…], [triage]…, the escalation @mention text) are skipped.
+    Never raises."""
     out: dict[str, Any] = {"guidance": None, "guidance_at": None,
-                           "is_send_command": False, "outbound_email": None}
+                           "outbound_email": None}
     if not available():
         return out
     sf = client_for(tenant_id)
@@ -327,7 +302,6 @@ def agent_response_since(case_id: str, since_iso: str | None = None,
     if cands:
         cands.sort(key=lambda t: t[0], reverse=True)
         out["guidance"], out["guidance_at"] = cands[0][1], cands[0][0]
-        out["is_send_command"] = looks_like_send_command(cands[0][1])
     try:
         rows = sf.query(
             f"SELECT TextBody, CreatedDate FROM EmailMessage WHERE ParentId = '{cid}' "

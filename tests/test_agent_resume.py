@@ -109,25 +109,22 @@ def _no_mailbox(monkeypatch):
     monkeypatch.setattr(worker, "_case_owned_by_user", lambda *_a, **_k: False)
 
 
-def test_explicit_send_command_triggers_a_customer_reply(monkeypatch):
+def test_check_resolution_never_sends_on_a_comment(monkeypatch):
+    """Phase 24d — the only send path is the Slack reasoning dialogue.
+    Even an explicit 'send it' CaseComment is just recorded as context."""
     sb = _seed_run(FakeSB())
     monkeypatch.setattr(worker.salesforce, "agent_response_since",
                         lambda *a, **k: {"guidance": "send this response to customer",
-                                         "guidance_at": "x", "is_send_command": True,
-                                         "outbound_email": None})
+                                         "guidance_at": "x", "outbound_email": None})
     monkeypatch.setattr(agent_reply, "resume_from_guidance",
-                        lambda *a, **k: {"sent": True, "auto_sent": True, "via": "smtp",
-                                         "reply": "Hi! POST a test payload to your webhook URL."})
+                        lambda *a, **k: pytest.fail("check_resolution must never send"))
+    monkeypatch.setattr(worker, "_FEEDBACK_MAX_CHECKS", 3)
 
-    out = worker._check_resolution({"run_id": PARENT_RUN}, sb)
-
-    assert out["human_action"] == "guided_resume"
+    out = worker._check_resolution({"run_id": PARENT_RUN, "checks": 0}, sb)
+    assert out["waiting"] and out["note_seen"] is True
     parent = next(r for r in sb.tables["runs"].rows if r["run_id"] == PARENT_RUN)
-    assert parent["human_action"] == "guided_resume"
-    resume = [r for r in sb.tables["runs"].inserted if r["source"] == "agent_resume"]
-    assert len(resume) == 1
-    assert resume[0]["outcome"] == "auto_reply"
-    assert resume[0]["flow_id"] == parent["flow_id"] and resume[0]["team"] == "email"
+    assert parent["human_action"] == "pending"
+    assert "send this response" in (parent.get("human_reply") or "")
 
 
 def test_a_plain_investigation_note_does_not_email_the_customer(monkeypatch):
@@ -262,67 +259,4 @@ def test_check_resolution_reads_a_chatter_feedcomment_as_guidance(monkeypatch):
     monkeypatch.setattr(salesforce, "client_for", lambda *a, **k: _SF())
     r = salesforce.agent_response_since("500X", "2026-09-01T02:55:00Z")
     assert r["guidance"] == "send this response to customer."   # the bot draft is skipped
-    assert r["is_send_command"] is True
-
-
-# ── explicit-directive detection ────────────────────────────────────
-def test_looks_like_send_command():
-    from interpreter import salesforce
-    for yes in ("send", "send it", "Send it.", "SEND THIS TO THE CUSTOMER",
-                "send: also mention the refund window is 30 days", "lgtm",
-                "approved", "reply:", "send this response to customer"):
-        assert salesforce.looks_like_send_command(yes), yes
-    for no in ("Checking with billing, will update shortly",
-               "I think this is a known issue with SSO", "assigning to me",
-               "customer called, wants a callback", "sent them a Slack ping",
-               "please investigate the logs first"):
-        assert not salesforce.looks_like_send_command(no), no
-
-
-# ── Phase 23h: the "Send Bot Draft to Customer" quick action ────────
-def test_send_bot_draft_quick_action_sends_and_disarms(monkeypatch):
-    sb = _seed_run(FakeSB())
-    monkeypatch.setattr(agent_reply, "resume_from_guidance",
-                        lambda *a, **k: {"sent": True, "auto_sent": True, "via": "smtp",
-                                         "reply": "the sent reply"})
-
-    class _Case:
-        @staticmethod
-        def get(_cid):
-            return {"Bot_Send_Note__c": ""}
-
-    class _SF:
-        Case = _Case()
-
-    monkeypatch.setattr(worker.salesforce, "client_for", lambda *a, **k: _SF())
-    cleared = {}
-    monkeypatch.setattr(worker.salesforce, "update_case_fields",
-                        lambda cid, fields, **k: cleared.update(cid=cid, **fields))
-
-    out = worker._send_bot_draft("500xxTEST", sb)
-
-    assert out["sent"] is True and out["run_id"] == PARENT_RUN
-    parent = next(r for r in sb.tables["runs"].rows if r["run_id"] == PARENT_RUN)
-    assert parent["human_action"] == "guided_resume"
-    assert cleared["Bot_Send_Draft__c"] is False and cleared["Bot_Send_Note__c"] == ""
-    qa = [r for r in sb.tables["runs"].inserted if r.get("source") == "quick_action"]
-    assert len(qa) == 1 and qa[0]["outcome"] == "auto_reply"
-
-
-def test_send_bot_draft_with_no_run_just_disarms(monkeypatch):
-    sb = FakeSB()   # no run seeded
-    cleared = {}
-    monkeypatch.setattr(worker.salesforce, "update_case_fields",
-                        lambda cid, fields, **k: cleared.update(fields))
-    out = worker._send_bot_draft("500NOPE", sb)
-    assert out["skipped"] == "no run for this case"
-    assert cleared["Bot_Send_Draft__c"] is False
-
-
-def test_send_bot_draft_is_idempotent_after_send(monkeypatch):
-    sb = _seed_run(FakeSB(), human_action="guided_resume")
-    monkeypatch.setattr(agent_reply, "resume_from_guidance",
-                        lambda *a, **k: pytest.fail("must not re-send an already-sent draft"))
-    monkeypatch.setattr(worker.salesforce, "update_case_fields", lambda *a, **k: None)
-    out = worker._send_bot_draft("500xxTEST", sb)
-    assert out["skipped"] == "draft already sent"
+    assert "is_send_command" not in r                            # Phase 24d — removed

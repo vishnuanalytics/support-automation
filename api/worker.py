@@ -41,11 +41,6 @@ def _run_flow(payload: dict, sb) -> dict:
     key = payload.get("idempotency_key")
     trigger = payload.get("trigger")
 
-    # Phase 23h — the "Send Bot Draft to Customer" quick action. Not a flow
-    # run: a human explicitly approved the existing draft, so just send it.
-    if trigger == "bot_send_draft":
-        return _send_bot_draft(case.get("sf_id") or case.get("id"), sb)
-
     # Cases pushed by the Salesforce trigger arrive as a bare id — hydrate
     # the full record here (raises -> the job retries with backoff).
     if case.get("sf_id") and not case.get("subject"):
@@ -152,89 +147,20 @@ def _email_post_run(final: dict, case: dict, flow: dict, sb) -> dict:
         return {"error": str(e)}
 
 
-def _send_bot_draft(case_id: str | None, sb) -> dict:
-    """Email the pending run's draft for `case_id` (Phase 23h quick action).
-
-    Reads optional agent edits from `Case.Bot_Send_Note__c`, delivers via the
-    same path `auto_reply` uses, records a `quick_action` run, marks the
-    escalated run `guided_resume`, then clears `Bot_Send_Draft__c` /
-    `Bot_Send_Note__c` so the button can be used again. Never raises."""
-    from interpreter import agent_reply, mailbox
-
-    if not case_id:
-        return {"skipped": "no case id"}
-
-    def _disarm() -> None:
-        try:
-            salesforce.update_case_fields(
-                case_id, {"Bot_Send_Draft__c": False, "Bot_Send_Note__c": ""})
-        except Exception as e:  # noqa: BLE001
-            log.warning("could not clear Bot_Send_Draft__c on %s: %s", case_id, e)
-
-    rows = (sb.table("runs")
-            .select("run_id, case_payload, draft, tenant_id, flow_id, team, "
-                    "human_action, subject, created_at, source")
-            .eq("case_id", case_id).order("created_at", desc=True)
-            .limit(5).execute().data) or []
-    # newest run on the Case that isn't the agent_resume mirror
-    run = next((r for r in rows if r.get("source") != "agent_resume"), rows[0] if rows else None)
-    if not run:
-        _disarm()
-        return {"case_id": case_id, "skipped": "no run for this case"}
-    if run.get("human_action") == "guided_resume":
-        _disarm()
-        return {"case_id": case_id, "skipped": "draft already sent"}
-
-    note = ""
-    try:
-        c = salesforce.client_for(run.get("tenant_id")).Case.get(case_id)
-        note = (c.get("Bot_Send_Note__c") or "").strip()
-    except Exception as e:  # noqa: BLE001
-        log.warning("read Bot_Send_Note__c failed for %s: %s", case_id, e)
-
-    case = run.get("case_payload") or {}
-    case.setdefault("sf_id", case_id)
-    tenant_id = run.get("tenant_id")
-    cfg = mailbox.load_channel(tenant_id, sb) if tenant_id else None
-    out = agent_reply.resume_from_guidance(
-        case, note or "send it", cfg=cfg, tenant_id=tenant_id, draft=run.get("draft"))
-
-    try:
-        sb.table("runs").insert({
-            "flow_id": run["flow_id"], "tenant_id": tenant_id, "team": run.get("team"),
-            "source": "quick_action", "case_id": str(case_id)[:200],
-            "subject": (str(run.get("subject") or "")[:500] or None),
-            "outcome": "auto_reply" if out.get("auto_sent") else "draft",
-            "draft": out.get("reply"), "case_payload": case,
-        }).execute()
-    except Exception as e:  # noqa: BLE001
-        log.warning("could not record quick_action run for %s: %s", case_id, e)
-
-    sb.table("runs").update({
-        "human_action": "guided_resume",
-        "human_reply": (note or "[quick action: send draft]")[:8000],
-        "feedback_checked_at": "now()",
-    }).eq("run_id", run["run_id"]).execute()
-    _disarm()
-    return {"case_id": case_id, "run_id": run["run_id"],
-            "sent": bool(out.get("auto_sent")), "via": out.get("via")}
-
-
 _FEEDBACK_POLL_MIN = int(os.environ.get("FEEDBACK_POLL_MIN", "5"))
 _FEEDBACK_MAX_CHECKS = int(os.environ.get("FEEDBACK_MAX_CHECKS", "12"))
 
 
 def _check_resolution(payload: dict, sb) -> dict:
-    """After an `ask_human` / `handover` on a real Case, poll for what the
-    human did (Phase 11) — and *act on it* (Phase 20m):
+    """Telemetry-only follow-up on an escalated Case that has **no** Slack
+    reasoning session (the normal path is the Slack dialogue — Phase 24). It
+    never sends: it just records what the human did.
 
-      * an agent left a CaseComment  -> treat it as the answer: polish it
-        into a customer reply and send it (`interpreter.agent_reply`), mark
-        the run `guided_resume`, record the resume as its own run.
-      * the agent emailed the customer directly -> just score the draft
+      * a human left a CaseComment -> logged as context on the run.
+      * the agent emailed the customer directly -> score the draft
         (`sent_as_is` / `edited` / `rewrote`).
-      * nothing yet -> re-poll every FEEDBACK_POLL_MIN up to
-        FEEDBACK_MAX_CHECKS, then give up as `no_reply`.
+      * nothing -> re-poll up to FEEDBACK_MAX_CHECKS, then `human_handling`
+        (a human engaged) or `no_reply`.
     """
     run_id = payload["run_id"]
     checks = int(payload.get("checks", 0))
@@ -254,39 +180,11 @@ def _check_resolution(payload: dict, sb) -> dict:
     tenant_id = row.get("tenant_id")
     since = row.get("created_at")
 
-    resp = {"guidance": None, "guidance_at": None, "is_send_command": False,
-            "outbound_email": None}
+    resp = {"guidance": None, "guidance_at": None, "outbound_email": None}
     if case_id and salesforce.available():
         resp = salesforce.agent_response_since(case_id, since, tenant_id=tenant_id)
 
-    # 1. an agent EXPLICITLY said "send it" -> compose + send the reply.
-    #    A plain comment (investigation note, internal cross-talk, handoff
-    #    log) is NOT a send directive — see branch 1b (Phase 23h).
-    if resp.get("guidance") and resp.get("is_send_command"):
-        from interpreter import agent_reply, mailbox
-
-        cfg = mailbox.load_channel(tenant_id, sb) if tenant_id else None
-        out = agent_reply.resume_from_guidance(case, resp["guidance"], cfg=cfg,
-                                               tenant_id=tenant_id, draft=draft)
-        try:
-            sb.table("runs").insert({
-                "flow_id": row["flow_id"], "tenant_id": tenant_id, "team": row["team"],
-                "source": "agent_resume", "case_id": (str(case_id)[:200] if case_id else None),
-                "subject": (str(case.get("subject") or "")[:500] or None),
-                "outcome": "auto_reply" if out.get("auto_sent") else "draft",
-                "draft": out.get("reply"), "case_payload": case,
-            }).execute()
-        except Exception as e:  # noqa: BLE001
-            log.warning("could not record agent_resume run for %s: %s", run_id, e)
-        sb.table("runs").update({
-            "human_action": "guided_resume",
-            "human_reply": resp["guidance"][:8000],
-            "feedback_checked_at": "now()",
-        }).eq("run_id", run_id).execute()
-        return {"run_id": run_id, "human_action": "guided_resume", "resume": out}
-
-    # 1b. a human left a note but not a directive -> record it as context and
-    #     keep waiting; never turn cross-talk into a customer email.
+    # a human left a note -> record it as context on the run; never send.
     note_seen = False
     if resp.get("guidance"):
         note_seen = True
