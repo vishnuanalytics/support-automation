@@ -91,13 +91,15 @@ def record_run(flow: dict, final: dict, *, case: dict, source: str = "api",
 
             from interpreter import jobs
 
-            case_id = row.get("case_id")
+            # reasoning_sessions.case_id is the SF record id (500…); row.case_id
+            # is the CaseNumber, so match on the id from the payload.
+            sf_id = case.get("sf_id") or case.get("id")
             has_session = False
-            if case_id:
+            if sf_id:
                 try:
                     has_session = bool(
                         sb.table("reasoning_sessions").select("session_id")
-                        .eq("case_id", case_id).not_.in_("state", ("sent", "abandoned"))
+                        .eq("case_id", sf_id).not_.in_("state", ("sent", "abandoned"))
                         .limit(1).execute().data)
                 except Exception:  # noqa: BLE001
                     has_session = False

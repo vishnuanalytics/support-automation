@@ -59,23 +59,30 @@ def _deliver(sb, session: dict) -> dict:
     used, and mark the escalated run resolved. Never raises."""
     from interpreter import agent_reply, mailbox
 
-    case_id = session["case_id"]
+    case_id = session["case_id"]            # the SF record id (500…)
     tenant_id = session.get("tenant_id")
-    try:
-        runs = (sb.table("runs")
-                .select("run_id, case_payload, draft, tenant_id, flow_id, team, "
-                        "human_action, subject, source, created_at")
-                .eq("case_id", case_id).order("created_at", desc=True)
-                .limit(5).execute().data) or []
-    except Exception as e:  # noqa: BLE001
-        log.warning("run lookup for %s failed: %s", case_id, e)
-        runs = []
+    _SEL = ("run_id, case_payload, draft, tenant_id, flow_id, team, "
+            "human_action, subject, source, created_at")
+    runs: list = []
+    # runs.case_id holds the CaseNumber (get_case maps it), so match on the
+    # record id inside case_payload first, then fall back.
+    for q in (lambda: sb.table("runs").select(_SEL).eq("case_payload->>sf_id", case_id),
+              lambda: sb.table("runs").select(_SEL).eq("case_id", case_id)):
+        try:
+            runs = q().order("created_at", desc=True).limit(5).execute().data or []
+        except Exception as e:  # noqa: BLE001
+            log.warning("run lookup for %s failed: %s", case_id, e)
+            runs = []
+        if runs:
+            break
     run = next((r for r in runs if r.get("source") != "agent_resume"),
               runs[0] if runs else None)
     case = (run or {}).get("case_payload") or {}
     case.setdefault("sf_id", case_id)
+    if not case.get("channel"):
+        case["channel"] = "salesforce"
 
-    cfg = mailbox.load_channel(tenant_id, sb) if tenant_id else None
+    cfg = mailbox.load_channel(tenant_id or session.get("tenant_id"), sb)
     out = agent_reply.resume_from_guidance(
         case, "send it", cfg=cfg, tenant_id=tenant_id, draft=session.get("draft"))
 
