@@ -1,0 +1,227 @@
+{
+ "fullName": "Case",
+ "assignmentRule": [
+  {
+   "fullName": "Standard",
+   "active": true,
+   "ruleEntry": [
+    {
+     "assignedTo": "epic.1826a83f56c6@orgfarm.salesforce.com",
+     "assignedToType": "User",
+     "booleanFilter": null,
+     "businessHours": null,
+     "businessHoursSource": null,
+     "criteriaItems": [
+      {
+       "field": "Account.BillingCountry",
+       "operation": "equals",
+       "value": "US,USA,United States,United States of America",
+       "valueField": null
+      },
+      {
+       "field": "Account.SLA__c",
+       "operation": "equals",
+       "value": "Gold,Platinum",
+       "valueField": null
+      },
+      {
+       "field": "Account.Type",
+       "operation": "contains",
+       "value": "Customer",
+       "valueField": null
+      }
+     ],
+     "disableEscalationWhenModified": null,
+     "escalationAction": [],
+     "escalationStartTime": null,
+     "formula": null,
+     "notifyCcRecipients": null,
+     "overrideExistingTeams": null,
+     "replyToEmail": null,
+     "senderEmail": null,
+     "senderName": null,
+     "team": [],
+     "template": null
+    },
+    {
+     "assignedTo": "epic.1826a83f56c6@orgfarm.salesforce.com",
+     "assignedToType": "User",
+     "booleanFilter": null,
+     "businessHours": null,
+     "businessHoursSource": null,
+     "criteriaItems": [
+      {
+       "field": "Account.BillingCountry",
+       "operation": "equals",
+       "value": "US,USA,United States,United States of America",
+       "valueField": null
+      },
+      {
+       "field": "Account.SLA__c",
+       "operation": "equals",
+       "value": "Silver,Bronze",
+       "valueField": null
+      },
+      {
+       "field": "Account.Type",
+       "operation": "contains",
+       "value": "Customer",
+       "valueField": null
+      }
+     ],
+     "disableEscalationWhenModified": null,
+     "escalationAction": [],
+     "escalationStartTime": null,
+     "formula": null,
+     "notifyCcRecipients": null,
+     "overrideExistingTeams": null,
+     "replyToEmail": null,
+     "senderEmail": null,
+     "senderName": null,
+     "team": [],
+     "template": null
+    },
+    {
+     "assignedTo": "epic.1826a83f56c6@orgfarm.salesforce.com",
+     "assignedToType": "User",
+     "booleanFilter": null,
+     "businessHours": null,
+     "businessHoursSource": null,
+     "criteriaItems": [
+      {
+       "field": "Account.BillingCountry",
+       "operation": "notEqual",
+       "value": "US,USA,United States,United States of America",
+       "valueField": null
+      },
+      {
+       "field": "Account.SLA__c",
+       "operation": "equals",
+       "value": "Gold,Platinum",
+       "valueField": null
+      },
+      {
+       "field": "Account.Type",
+       "operation": "contains",
+       "value": "Customer",
+       "valueField": null
+      }
+     ],
+     "disableEscalationWhenModified": null,
+     "escalationAction": [],
+     "escalationStartTime": null,
+     "formula": null,
+     "notifyCcRecipients": null,
+     "overrideExistingTeams": null,
+     "replyToEmail": null,
+     "senderEmail": null,
+     "senderName": null,
+     "team": [],
+     "template": null
+    },
+    {
+     "assignedTo": "epic.1826a83f56c6@orgfarm.salesforce.com",
+     "assignedToType": "User",
+     "booleanFilter": null,
+     "businessHours": null,
+     "businessHoursSource": null,
+     "criteriaItems": [
+      {
+       "field": "Account.BillingCountry",
+       "operation": "notEqual",
+       "value": "US,USA,United States,United States of America",
+       "valueField": null
+      },
+      {
+       "field": "Account.SLA__c",
+       "operation": "equals",
+       "value": "Silver,Bronze",
+       "valueField": null
+      },
+      {
+       "field": "Account.Type",
+       "operation": "contains",
+       "value": "Customer",
+       "valueField": null
+      }
+     ],
+     "disableEscalationWhenModified": null,
+     "escalationAction": [],
+     "escalationStartTime": null,
+     "formula": null,
+     "notifyCcRecipients": null,
+     "overrideExistingTeams": null,
+     "replyToEmail": null,
+     "senderEmail": null,
+     "senderName": null,
+     "team": [],
+     "template": null
+    },
+    {
+     "assignedTo": "epic.1826a83f56c6@orgfarm.salesforce.com",
+     "assignedToType": "User",
+     "booleanFilter": null,
+     "businessHours": null,
+     "businessHoursSource": null,
+     "criteriaItems": [
+      {
+       "field": "Account.Type",
+       "operation": "contains",
+       "value": "Partner",
+       "valueField": null
+      }
+     ],
+     "disableEscalationWhenModified": null,
+     "escalationAction": [],
+     "escalationStartTime": null,
+     "formula": null,
+     "notifyCcRecipients": null,
+     "overrideExistingTeams": null,
+     "replyToEmail": null,
+     "senderEmail": null,
+     "senderName": null,
+     "team": [],
+     "template": null
+    }
+   ]
+  },
+  {
+   "fullName": "billing",
+   "active": false,
+   "ruleEntry": [
+    {
+     "assignedTo": "Billing_Escalations",
+     "assignedToType": "Queue",
+     "booleanFilter": null,
+     "businessHours": null,
+     "businessHoursSource": null,
+     "criteriaItems": [
+      {
+       "field": "Case.Origin",
+       "operation": "equals",
+       "value": "Email",
+       "valueField": null
+      },
+      {
+       "field": "Case.IsEscalated",
+       "operation": "equals",
+       "value": "True",
+       "valueField": null
+      }
+     ],
+     "disableEscalationWhenModified": null,
+     "escalationAction": [],
+     "escalationStartTime": null,
+     "formula": null,
+     "notifyCcRecipients": null,
+     "overrideExistingTeams": null,
+     "replyToEmail": null,
+     "senderEmail": null,
+     "senderName": null,
+     "team": [],
+     "template": "unfiled$public/SupportCaseResponse"
+    }
+   ]
+  }
+ ]
+}

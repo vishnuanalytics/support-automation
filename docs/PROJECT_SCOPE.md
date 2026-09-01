@@ -751,11 +751,21 @@ produced a ready PSR). Two Setup-only bits remain: grant the agent permset
 access to the presence statuses, and add the Omni widget to the console so
 an agent can go "Available".
 
-Still not built (org / Slack app — see the SF runbook): **27f**
-assignment-rule cutover to `→ AI_Intake`, **27g** native Escalation Rule +
-`Closed`-needs-`Type` validation rule + list views, the Slack channels /
-usergroups, and the interactive card buttons (**27h** — needs the Slack app
-interactivity endpoint).
+**27f / 27g — scripted, one command each to apply (2026-09-01).**
+- **27f** part A shipped: `salesforce.ensure_case` sets `OwnerId = AI_Intake`
+  on every pipeline-created Case (REST create skips assignment rules). Part B:
+  `scripts/sf_assignment_cutover.py` backs up the live `Standard` rule
+  (`scripts/_assignment_backup/`) and swaps it for one catch-all entry →
+  `AI_Intake`; `--restore` reverts. Dry-run verified (6 stock entries backed
+  up); the live swap is the deliberate low-volume-window step, left to run.
+- **27g**: `scripts/sf_backstops.py` deploys the `Close_Needs_Type`
+  validation rule + the Live Queue / SLA Breach list views. Native Escalation
+  Rule skipped (the `queue_sweep` covers it; add by hand for a worker-outage
+  backstop).
+
+Still not built: the Slack channels / usergroups (needs Slack admin) and the
+interactive card buttons (**27h** — needs the Slack app interactivity
+endpoint).
 
 **27a live-applied + 27a/c/d live-verified (2026-09-01).** Migrations `062`/
 `063` applied; `sf_support_setup.py --only queues --only cp_fields --only

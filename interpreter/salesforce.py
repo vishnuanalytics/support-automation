@@ -937,6 +937,26 @@ def assign_case(
         return {"assigned": False, "error": str(e)}
 
 
+_INTAKE_QUEUE = os.environ.get("SF_INTAKE_QUEUE", "AI_Intake")
+_intake_queue_cache: dict[str, str | None] = {}
+
+
+def _intake_queue_id(sf) -> str | None:
+    """The `AI_Intake` queue Group id (Phase 27f), cached. None if it doesn't
+    exist yet (run sf_support_setup.py --only queues) or lookup fails."""
+    if _INTAKE_QUEUE not in _intake_queue_cache:
+        try:
+            rows = sf.query(
+                f"SELECT Id FROM Group WHERE Type = 'Queue' AND "
+                f"DeveloperName = '{_soql_lit(_INTAKE_QUEUE)}' LIMIT 1"
+            ).get("records", [])
+            _intake_queue_cache[_INTAKE_QUEUE] = rows[0]["Id"] if rows else None
+        except Exception as e:  # noqa: BLE001
+            log.warning("_intake_queue_id lookup failed: %s", e)
+            _intake_queue_cache[_INTAKE_QUEUE] = None
+    return _intake_queue_cache[_INTAKE_QUEUE]
+
+
 def _account_snapshot(sf, account_id: str) -> dict[str, Any]:
     """{name, customer_type, region} for the classify node — tolerates an org
     with no custom `Account.Tier__c` (falls back to the standard Type)."""
@@ -1091,9 +1111,15 @@ def ensure_case(
                 payload["AccountId"] = aid
             if email:
                 payload["SuppliedEmail"] = email
+            # Phase 27f — every pipeline-created Case starts in the one intake
+            # queue (a REST create doesn't run assignment rules).
+            iq = _intake_queue_id(sf)
+            if iq:
+                payload["OwnerId"] = iq
             cres = sf.Case.create(payload)
             out["sf_id"], out["created"] = cres.get("id"), True
             out["status"] = status
+            out["owner_id"] = iq
 
         if aid:
             out["account"] = _account_snapshot(sf, aid)

@@ -73,50 +73,48 @@ running user assigned to it.
 
 ## 27f — Cutover (one entry queue)
 
-The one hard-to-reverse step. Do it in a low-volume window.
+Two parts. Part A (code) shipped; part B is the one hard-to-reverse step —
+run it in a low-volume window.
 
-1. Setup → **Case Assignment Rules** → export / screenshot the current active
-   rule's entries (so you can restore).
-2. Edit the active rule: delete every entry, add **one**:
-   - Criteria: (no criteria — matches all), Assign to **Queue `AI_Intake`**,
-     do not notify.
-3. Confirm Email-to-Case / Web-to-Case still point at the standard intake (they
-   feed the assignment rule, which now always lands in `AI_Intake`).
-4. Create a Case from each channel → it lands in `AI_Intake`, owner = the
-   integration user once the pipeline's first pass runs; escalations route via
-   Omni (27b), not the assignment rule.
+**A. Pipeline-created Cases** — done. `salesforce.ensure_case` now sets
+`OwnerId = AI_Intake` on every Case it creates (a REST create doesn't run
+assignment rules), so CDC / email-poller Cases already start in the one queue.
 
-Rollback: re-add the old rule entries.
+**B. Email-to-Case / Web-to-Case / manual Cases** — `scripts/sf_assignment_cutover.py`:
+
+```bash
+python scripts/sf_assignment_cutover.py --dry-run   # backs up the current rule, shows the diff
+python scripts/sf_assignment_cutover.py             # replace 'Standard' with one entry -> AI_Intake
+python scripts/sf_assignment_cutover.py --restore   # redeploy the backup
+```
+
+The backup is written to `scripts/_assignment_backup/Case.assignmentRules.json`.
+After the cutover, create a Case from each channel → it lands in `AI_Intake`;
+the pipeline drives from there and escalations route via Omni (27b).
 
 ---
 
 ## 27g — Backstops
 
-### Native Case Escalation Rule (belt-and-braces to the app sweep)
-Setup → **Escalation Rules** → new rule, one entry:
-- Criteria: `Status` equals `Escalated` **AND** `Owner` = a Queue.
-- Escalation time: **60 minutes** after `Case: Last Modified`.
-- Action: re-assign to `SLA_Breach`, notify the support manager.
+**`scripts/sf_backstops.py`** deploys the two low-risk ones via metadata:
 
-(The app's `queue_sweep` acts at 30 min; this fires only if the worker is down.)
-
-### Validation rule — no undocumented close
-Setup → **Object Manager → Case → Validation Rules** → New:
+```bash
+python scripts/sf_backstops.py --dry-run
+python scripts/sf_backstops.py            # validation rule + 2 list views
+python scripts/sf_backstops.py --remove
 ```
-AND(
-  ISPICKVAL(Status, "Closed"),
-  OR(ISBLANK(TEXT(Type)), ISBLANK(Description))
-)
-```
-Error: "Set a Case Type and a resolution summary before closing."
 
-### List views
-Object Manager → Case → **List View Controls** (or the Cases tab):
-- **Live Queue** — filter `Closed = false`; group/sort by `Status`, then
-  `Next_Action_Due__c` ascending; columns: Case #, Subject, `Status`,
-  `Routed_Team__c`, `Next_Action__c`, `Next_Action_Due__c`, `AI_Confidence__c`,
-  Owner.
-- **SLA Breach** — filter `SLA_Breach__c = true` AND `Closed = false`.
+- **`Close_Needs_Type`** validation rule — a Case can't be `Closed` without a
+  `Type` and a non-blank `Description`.
+- **Live Queue** list view — open Cases; columns Case # / Subject / Status /
+  `Routed_Team__c` / `Next_Action__c` / `Next_Action_Due__c` / `AI_Confidence__c` / Owner.
+- **SLA Breach** list view — `SLA_Breach__c = true` AND not closed.
+
+### Native Case Escalation Rule — skipped (do by hand if wanted)
+The app `queue_sweep` acts at 30 min and is the primary path. If you want a
+worker-outage backstop: Setup → **Escalation Rules** → new rule, `Status`
+equals `Escalated` AND `Owner` = a Queue, escalate 60 min after Last
+Modified → re-assign to `SLA_Breach`.
 
 ---
 
