@@ -104,6 +104,22 @@ NODE_DEFAULTS: dict[str, dict[str, Any]] = {
     "handover": {"reason": "policy"},
     "team_route": {"default": "support"},
     "case_lookup": {"k": 3, "pool": 10, "min_similarity": 0.35},
+    # Phase 25 — image attachments, Salesforce context, generic AI prompt
+    "attachments": {"source": "salesforce", "max_images": 5, "ocr": True},
+    "sf_context": {"want": ["account", "contacts", "leads", "cases", "team"]},
+    "ai_prompt": {
+        "system": "You are a support triage assistant.",
+        "user": "Case: {case.subject}\n{case.body}\n\nAccount: {sf_context.account.name} "
+                "(tier {sf_context.account.tier})\nImage text: {attachment_text}",
+        "model": "openai/gpt-oss-120b",
+        "temperature": 0.2,
+        "max_tokens": 600,
+        "output_key": "ai_output",
+        "json_schema": None,
+        "images": "none",
+        "cache": True,
+        "on_error": "passthrough",
+    },
     "notify": {"channel": "salesforce_chatter", "target_by_type": {}, "fallback_target": None},
     "clarify": {"max_questions": 3, "max_rounds": 2, "auto_send": False, "channel": "email"},
     # Phase 24 — every path ends here: tag the agent + open the Slack reasoning

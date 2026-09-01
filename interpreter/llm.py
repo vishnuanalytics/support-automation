@@ -56,6 +56,18 @@ FAST_MODEL = os.environ.get("LLM_FAST_MODEL", "openai/gpt-oss-20b")
 FALLBACK_MODEL = os.environ.get("LLM_FALLBACK_MODEL",
                                 "meta-llama/llama-3.3-70b-instruct:free")
 
+# Vision (Phase 25 — the `ai_prompt` node with images). Free-first, then paid:
+# OpenRouter :free vision models, falling back to Anthropic Haiku if a key is
+# set. Groq gpt-oss is text-only and never in this chain. Override the free
+# list with LLM_VISION_MODELS="a,b" and the paid tail with LLM_VISION_PAID.
+VISION_MODELS = [m.strip() for m in os.environ.get(
+    "LLM_VISION_MODELS",
+    "meta-llama/llama-3.2-11b-vision-instruct:free,"
+    "qwen/qwen2.5-vl-32b-instruct:free,"
+    "google/gemini-2.0-flash-exp:free",
+).split(",") if m.strip()]
+VISION_PAID = os.environ.get("LLM_VISION_PAID", "claude-haiku-4-5").strip()
+
 _groq_client = None
 _anthropic_client = None
 
@@ -84,6 +96,23 @@ def _fallback_chain(model: str) -> list[str]:
     for cand in (FALLBACK_MODEL, DEFAULT_MODEL, FAST_MODEL):
         if cand not in chain and available(cand):
             chain.append(cand)
+    return chain
+
+
+def _vision_chain(model: str | None = None) -> list[str]:
+    """Models to try for a call that includes images — the chosen model (if it
+    is vision-capable), then the free OpenRouter vision list, then the paid
+    tail. Only providers with a key survive."""
+    chain: list[str] = []
+    if model and model not in VISION_MODELS and model != VISION_PAID and available(model) \
+            and provider(model) in ("anthropic", "openrouter"):
+        chain.append(model)
+    for m in VISION_MODELS:
+        MODELS.setdefault(m, "openrouter")
+        if m not in chain and available(m):
+            chain.append(m)
+    if VISION_PAID and VISION_PAID not in chain and available(VISION_PAID):
+        chain.append(VISION_PAID)
     return chain
 
 
@@ -146,12 +175,15 @@ def _ckey(model: str, system: str, user: str, max_tokens: int) -> str:
 
 
 def _dispatch(model: str, system: str, user: str, max_tokens: int,
-              temperature: float, json_object: bool) -> str:
+              temperature: float, json_object: bool, images=None) -> str:
     prov = provider(model)
     if prov == "anthropic":
-        return _anthropic_complete(system, user, model, max_tokens, json_object)
+        return _anthropic_complete(system, user, model, max_tokens, json_object, images=images)
     if prov == "openrouter":
-        return _openrouter_complete(system, user, model, max_tokens, temperature, json_object)
+        return _openrouter_complete(system, user, model, max_tokens, temperature, json_object,
+                                    images=images)
+    if images:
+        raise RuntimeError(f"model {model!r} ({prov}) has no vision support")
     return _groq_complete(system, user, model, max_tokens, temperature, json_object)
 
 
@@ -164,6 +196,7 @@ def complete(
     temperature: float = 0.2,
     json_object: bool = False,
     cache: bool = False,
+    images: "list[tuple[bytes, str]] | None" = None,
 ) -> str:
     """
     One-shot completion. Returns the assistant text (a JSON string when
@@ -174,11 +207,24 @@ def complete(
     that rate-limits or errors — and only falls back to the deterministic
     stub when every provider is unavailable. `cache=True` memoises the
     result in-process (used by `classify`).
+
+    `images` = a list of `(bytes, mime)`. When given, the call goes through
+    the **vision** chain instead (free OpenRouter vision models → paid
+    Anthropic), and `cache` is ignored.
     """
     global last_usage
     model = model or DEFAULT_MODEL
-    if model not in MODELS:
+    if model not in MODELS and not images:
         raise ValueError(f"model {model!r} is not in the roster {sorted(MODELS)}")
+
+    if images:
+        chain = _vision_chain(model if model in MODELS else None)
+        if not chain:
+            last_usage = None
+            return _stub(system, user + "\n[image omitted — no vision model]",
+                         json_object=json_object)
+        return _run_chain(chain, system, user, max_tokens, temperature, json_object,
+                          images=images)
 
     if cache and _CACHE_ON:
         ck = _ckey(model, system, user, max_tokens)
@@ -193,16 +239,23 @@ def complete(
         last_usage = None
         return _stub(system, user, json_object=json_object)
 
+    out = _run_chain(chain, system, user, max_tokens, temperature, json_object)
+    if cache and _CACHE_ON:
+        _cache[ck] = out
+        if len(_cache) > _CACHE_MAX:
+            _cache.popitem(last=False)
+    return out
+
+
+def _run_chain(chain: list[str], system: str, user: str, max_tokens: int,
+               temperature: float, json_object: bool, *, images=None) -> str:
+    global last_usage
     last_err: Exception | None = None
     for i, m in enumerate(chain):
         try:
-            out = _dispatch(m, system, user, max_tokens, temperature, json_object)
+            out = _dispatch(m, system, user, max_tokens, temperature, json_object, images=images)
             if i > 0:
                 log.warning("llm: %s failed — served by fallback %s", chain[0], m)
-            if cache and _CACHE_ON:
-                _cache[ck] = out
-                if len(_cache) > _CACHE_MAX:
-                    _cache.popitem(last=False)
             return out
         except Exception as e:  # noqa: BLE001
             last_err = e
@@ -334,18 +387,29 @@ _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _OPENROUTER_TIMEOUT = float(os.environ.get("OPENROUTER_TIMEOUT_S", "45"))
 
 
+def _img_data_url(data: bytes, mime: str) -> str:
+    import base64
+    return f"data:{mime or 'image/png'};base64,{base64.b64encode(data).decode()}"
+
+
 def _openrouter_complete(system: str, user: str, model: str, max_tokens: int,
-                         temperature: float, json_object: bool) -> str:
+                         temperature: float, json_object: bool, images=None) -> str:
     """OpenAI-compatible call to OpenRouter (free `:free` models). Plain httpx
     — no extra SDK. Raises on 429 / 5xx so `complete()` moves to the next
     model in the chain."""
     global last_usage
     import httpx
 
+    user_content: Any = user
+    if images:
+        user_content = [{"type": "text", "text": user}] + [
+            {"type": "image_url", "image_url": {"url": _img_data_url(d, m)}}
+            for d, m in images
+        ]
     body: dict[str, Any] = {
         "model": model,
         "messages": [{"role": "system", "content": system},
-                     {"role": "user", "content": user}],
+                     {"role": "user", "content": user_content}],
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
@@ -374,18 +438,28 @@ def _openrouter_complete(system: str, user: str, model: str, max_tokens: int,
 
 
 def _anthropic_complete(system: str, user: str, model: str, max_tokens: int,
-                        json_object: bool) -> str:
+                        json_object: bool, images=None) -> str:
     global last_usage
+    import base64
+
     sys_prompt = system
     if json_object:
         sys_prompt += "\n\nRespond with only the JSON object — no prose, no code fences."
+    content: Any = user
+    if images:
+        content = [
+            {"type": "image", "source": {"type": "base64",
+                                         "media_type": m or "image/png",
+                                         "data": base64.b64encode(d).decode()}}
+            for d, m in images
+        ] + [{"type": "text", "text": user}]
     # No `temperature` / `thinking` / `effort`: sampling params are rejected on
     # the Claude 5 family; defaults are fine for classify/draft.
     resp = _anthropic().messages.create(
         model=model,
         max_tokens=max_tokens,
         system=sys_prompt,
-        messages=[{"role": "user", "content": user}],
+        messages=[{"role": "user", "content": content}],
     )
     u = getattr(resp, "usage", None)
     last_usage = (

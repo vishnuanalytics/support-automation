@@ -108,6 +108,18 @@ export function NodeInspector({
         <NotifyHumanForm config={config} onConfig={onConfig} />
       )}
 
+      {node.data.nodeType === "ai_prompt" && (
+        <AiPromptForm config={config} onConfig={onConfig} />
+      )}
+
+      {node.data.nodeType === "sf_context" && (
+        <SfContextForm config={config} onConfig={onConfig} />
+      )}
+
+      {node.data.nodeType === "attachments" && (
+        <AttachmentsForm config={config} onConfig={onConfig} />
+      )}
+
       {node.data.nodeType === "identify" && (
         <IdentifyForm config={config} onConfig={onConfig} />
       )}
@@ -363,6 +375,161 @@ function NotifyForm({
           onChange={(e) => set({ fallback_target: e.target.value.trim() || null })}
         />
       </div>
+    </div>
+  );
+}
+
+function AiPromptForm({
+  config,
+  onConfig,
+}: {
+  config: Record<string, unknown>;
+  onConfig: (v: Record<string, unknown>) => void;
+}) {
+  const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
+  const str = (k: string, d = "") => (typeof config[k] === "string" ? (config[k] as string) : d);
+  const num = (k: string, d: number) => (typeof config[k] === "number" ? (config[k] as number) : d);
+  const images = str("images", "none");
+
+  return (
+    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+      <div className="muted" style={{ fontSize: 11 }}>
+        Runs one LLM call and writes the result to <code>state.{str("output_key", "ai_output")}</code>.
+        Templates interpolate <code>{"{case.subject}"}</code>,{" "}
+        <code>{"{sf_context.account.tier}"}</code>, <code>{"{attachment_text}"}</code>,{" "}
+        <code>{"{classification.topic}"}</code> … Edges branch on the output; the
+        routing stays a plain expression.
+      </div>
+
+      <label style={{ marginTop: 6, display: "block" }}>system prompt</label>
+      <textarea rows={3} value={str("system")} onChange={(e) => set({ system: e.target.value })} />
+
+      <label style={{ marginTop: 4, display: "block" }}>user prompt (template)</label>
+      <textarea rows={4} value={str("user")} onChange={(e) => set({ user: e.target.value })} />
+
+      <div className="row" style={{ marginTop: 4 }}>
+        <span className="muted" style={{ width: 90 }}>output key</span>
+        <input value={str("output_key", "ai_output")}
+               onChange={(e) => set({ output_key: e.target.value.trim() || "ai_output" })} />
+      </div>
+      <div className="row" style={{ marginTop: 4 }}>
+        <span className="muted" style={{ width: 90 }}>model</span>
+        <input value={str("model", "openai/gpt-oss-120b")}
+               onChange={(e) => set({ model: e.target.value.trim() })} />
+      </div>
+      <div className="row" style={{ marginTop: 4 }}>
+        <span className="muted" style={{ width: 90 }}>max tokens</span>
+        <input type="number" value={num("max_tokens", 600)}
+               onChange={(e) => set({ max_tokens: Number(e.target.value) || 600 })} />
+        <span className="muted" style={{ width: 44, marginLeft: 8 }}>temp</span>
+        <input type="number" step={0.1} min={0} max={1} value={num("temperature", 0.2)}
+               onChange={(e) => set({ temperature: Number(e.target.value) })} />
+      </div>
+
+      <label style={{ marginTop: 6, display: "block" }}>images (vision)</label>
+      <select value={images} onChange={(e) => set({ images: e.target.value })}>
+        <option value="none">none — text only</option>
+        <option value="auto">auto — send every image attachment</option>
+      </select>
+      <div className="muted" style={{ fontSize: 11 }}>
+        with images set, the call goes to a vision model (free OpenRouter →
+        paid Anthropic). OCR text is already in <code>{"{attachment_text}"}</code>{" "}
+        for free — only turn this on for visual understanding.
+      </div>
+
+      <label className="row" style={{ gap: 6, marginTop: 6 }}>
+        <input type="checkbox" style={{ width: "auto" }}
+               checked={config.json_schema != null && config.json_schema !== ""}
+               onChange={(e) => set({ json_schema: e.target.checked ? { type: "object", properties: {} } : null })} />
+        parse the reply as JSON (edit the schema in the raw config below)
+      </label>
+      <div className="row" style={{ marginTop: 4 }}>
+        <span className="muted" style={{ width: 90 }}>on error</span>
+        <select value={str("on_error", "passthrough")}
+                onChange={(e) => set({ on_error: e.target.value })}>
+          <option value="passthrough">passthrough (output = null)</option>
+          <option value="fail">fail the run</option>
+        </select>
+      </div>
+    </div>
+  );
+}
+
+function SfContextForm({
+  config,
+  onConfig,
+}: {
+  config: Record<string, unknown>;
+  onConfig: (v: Record<string, unknown>) => void;
+}) {
+  const want = Array.isArray(config.want)
+    ? (config.want as string[])
+    : ["account", "contacts", "leads", "cases", "team"];
+  const toggle = (k: string) =>
+    onConfig({
+      ...config,
+      want: want.includes(k) ? want.filter((x) => x !== k) : [...want, k],
+    });
+  const OPTS: [string, string][] = [
+    ["account", "Account + parent hierarchy (organization)"],
+    ["contacts", "Contact + siblings on the Account"],
+    ["leads", "Lead (when the sender isn't a Contact)"],
+    ["cases", "Related Cases (open / total + recent)"],
+    ["team", "Account team / owner (Users)"],
+  ];
+  return (
+    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+      <div className="muted" style={{ fontSize: 11 }}>
+        Loads the Salesforce picture around the Case into{" "}
+        <code>state.sf_context</code>. Put it right after <code>identify</code>.
+      </div>
+      {OPTS.map(([k, label]) => (
+        <label className="row" key={k} style={{ gap: 6, marginTop: 4 }}>
+          <input type="checkbox" style={{ width: "auto" }}
+                 checked={want.includes(k)} onChange={() => toggle(k)} />
+          {label}
+        </label>
+      ))}
+    </div>
+  );
+}
+
+function AttachmentsForm({
+  config,
+  onConfig,
+}: {
+  config: Record<string, unknown>;
+  onConfig: (v: Record<string, unknown>) => void;
+}) {
+  const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
+  return (
+    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+      <div className="muted" style={{ fontSize: 11 }}>
+        Fetches image attachments on the Case and runs local OCR → folded into{" "}
+        <code>classify</code> / <code>draft</code> automatically, and available
+        to <code>ai_prompt</code>’s vision mode. Videos are captured but not
+        processed.
+      </div>
+      <div className="row" style={{ marginTop: 6 }}>
+        <span className="muted" style={{ width: 90 }}>source</span>
+        <select value={typeof config.source === "string" ? config.source : "salesforce"}
+                onChange={(e) => set({ source: e.target.value })}>
+          <option value="salesforce">Salesforce (ContentDocument)</option>
+          <option value="email">inbound email</option>
+          <option value="auto">both</option>
+        </select>
+      </div>
+      <div className="row" style={{ marginTop: 4 }}>
+        <span className="muted" style={{ width: 90 }}>max images</span>
+        <input type="number" min={1} max={10}
+               value={typeof config.max_images === "number" ? config.max_images : 5}
+               onChange={(e) => set({ max_images: Math.max(1, Math.min(10, Number(e.target.value) || 5)) })} />
+      </div>
+      <label className="row" style={{ gap: 6, marginTop: 4 }}>
+        <input type="checkbox" style={{ width: "auto" }}
+               checked={config.ocr !== false} onChange={(e) => set({ ocr: e.target.checked })} />
+        run OCR
+      </label>
     </div>
   );
 }

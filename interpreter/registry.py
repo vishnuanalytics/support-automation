@@ -85,6 +85,15 @@ def _dig(obj: Any, dotted: str) -> Any:
     return cur
 
 
+def _with_ocr(state: "CaseState", body: str) -> str:
+    """Fold any OCR'd text from image attachments (Phase 25) into the message
+    a classify / draft prompt sees — free, no vision model."""
+    at = (state.get("attachment_text") or "").strip()
+    if not at:
+        return body
+    return f"{body}\n\n--- text read from attached image(s) ---\n{at[:4000]}"
+
+
 _TIER_ALIASES = {
     "basic": "basic", "free": "basic", "starter": "basic", "standard": "basic",
     "premium": "premium", "professional": "premium", "pro": "premium", "team": "premium",
@@ -147,8 +156,12 @@ def h_retrieve(state: CaseState, config: dict) -> dict:
 @register("classify")
 def h_classify(state: CaseState, config: dict) -> dict:
     case = state.get("case", {})
-    tier_raw = _dig(case, config.get("tier_field", "account.customer_type"))
-    region = _dig(case, config.get("region_field", "account.region"))
+    # tier_field / region_field resolve against state first (so an `sf_context`
+    # node's `sf_context.account.tier` works), then the case.
+    _tf = config.get("tier_field", "account.customer_type")
+    _rf = config.get("region_field", "account.region")
+    tier_raw = _dig(state, _tf) if _dig(state, _tf) is not None else _dig(case, _tf)
+    region = _dig(state, _rf) if _dig(state, _rf) is not None else _dig(case, _rf)
     # When the CRM gives no *recognisable* tier for this sender — missing, or a
     # value like the SF standard `Account.Type` ("Customer") that isn't one of
     # basic/premium/enterprise — `_norm_tier` fails *closed* to `enterprise`
@@ -157,7 +170,7 @@ def h_classify(state: CaseState, config: dict) -> dict:
     tier_defaulted = bool(config.get("default_tier")) and not _tier_known(tier_raw)
     tier = _norm_tier(config["default_tier"] if tier_defaulted else tier_raw)
 
-    body = f"{case.get('subject', '')}\n\n{case.get('body', '')}".strip()
+    body = _with_ocr(state, f"{case.get('subject', '')}\n\n{case.get('body', '')}".strip())
     raw = llm.complete(
         system=(
             "You triage inbound support cases. Return a JSON object with keys: "
@@ -725,7 +738,7 @@ def h_draft(state: CaseState, config: dict) -> dict:
     case = state.get("case", {})
     retrieval = state.get("retrieval", [])
     context = _context_block(retrieval) or "(no retrieved context)"
-    body = f"Subject: {case.get('subject','')}\n\n{case.get('body','')}".strip()
+    body = _with_ocr(state, f"Subject: {case.get('subject','')}\n\n{case.get('body','')}".strip())
 
     # Phase 14: internal-runbook context from a kb_lookup node upstream wins
     # over the public docs.
@@ -1482,3 +1495,169 @@ def _safe_json(s: str) -> dict:
             except json.JSONDecodeError:
                 pass
     return {}
+
+
+# ==========================================================================
+# Phase 25 — image attachments, Salesforce context, generic AI-prompt node
+# ==========================================================================
+def _flat(state: CaseState) -> dict:
+    """A flat view of the bits a prompt template interpolates: `case.subject`,
+    `sf_context.account.tier`, `attachment_text`, `classification.topic`, …"""
+    return {
+        "case": state.get("case", {}),
+        "sf_context": state.get("sf_context", {}),
+        "sender": state.get("sender", {}),
+        "classification": state.get("classification", {}),
+        "attachment_text": state.get("attachment_text", ""),
+        "attachments": state.get("attachments", []),
+        "ai": state.get("ai", {}),
+        "retrieval": state.get("retrieval", {}),
+        "draft": state.get("draft", ""),
+        "tier": state.get("tier"),
+        "region": state.get("region"),
+        "routed_team": state.get("routed_team"),
+    }
+
+
+def _render(tmpl: str, flat: dict) -> str:
+    """`{case.subject}` / `{sf_context.account.name}` -> value; unknown -> ''."""
+    if not tmpl:
+        return ""
+
+    def sub(m: "re.Match") -> str:
+        v = _dig(flat, m.group(1).strip())
+        if v is None:
+            return ""
+        return v if isinstance(v, str) else __import__("json").dumps(v, default=str)[:4000]
+
+    return re.sub(r"\{([a-zA-Z0-9_.]+)\}", sub, tmpl)
+
+
+@register("attachments")
+def h_attachments(state: CaseState, config: dict) -> dict:
+    """Fetch image attachments on the Case + local OCR (Phase 25). Writes
+    `state.attachments` (list) + `state.attachment_text` (OCR, folded into
+    classify/draft) + `state._attachment_blobs` (raw bytes, for `ai_prompt`
+    vision; not persisted). Pass-through, best-effort.
+
+    config: {source="salesforce"|"email"|"auto", max_images=5, ocr=true}
+    """
+    from interpreter import attachments as att
+
+    nid = config["_node_id"]
+    try:
+        out = att.extract(state.get("case", {}), tenant_id=state.get("tenant_id"),
+                          limit=int(config.get("max_images", att.MAX_IMAGES)),
+                          do_ocr=config.get("ocr", True) is not False,
+                          source=config.get("source", "salesforce"))
+    except Exception as e:  # noqa: BLE001
+        log.warning("attachments node failed: %s", e)
+        out = {"attachments": [], "attachment_text": "", "_blobs": {}}
+
+    n = len(out["attachments"])
+    chars = len(out["attachment_text"])
+    return {
+        "attachments": out["attachments"],
+        "attachment_text": out["attachment_text"],
+        "_attachment_blobs": out["_blobs"],
+        **_trace(nid, "attachments", f"{n} image(s), {chars} chars OCR",
+                 {"count": n, "ocr_chars": chars,
+                  "files": [a["filename"] for a in out["attachments"]]}),
+    }
+
+
+@register("sf_context")
+def h_sf_context(state: CaseState, config: dict) -> dict:
+    """Load the Salesforce picture around the Case — Account (+ parent =
+    organization), Contact + siblings, Lead, Case history, Account team —
+    into `state.sf_context` (Phase 25). Put it after `identify`. Pass-through.
+
+    config: {want: ["account","contacts","leads","cases","team"]}
+    """
+    from interpreter import sf_context as sfc
+
+    nid = config["_node_id"]
+    want = config.get("want") or list(sfc.ALL_WANT)
+    try:
+        ctx = sfc.load(state.get("sender") or {}, want=set(want),
+                       tenant_id=state.get("tenant_id"))
+    except Exception as e:  # noqa: BLE001
+        log.warning("sf_context node failed: %s", e)
+        ctx = {}
+    acc = (ctx.get("account") or {}).get("name")
+    cs = ctx.get("cases") or {}
+    summary = (f"{acc or 'no account'}"
+               + (f" · {cs.get('open')} open / {cs.get('total')} cases" if cs else "")
+               + (f" · team {len(ctx.get('account_team') or [])}" if ctx.get("account_team") else ""))
+    return {"sf_context": ctx, **_trace(nid, "sf_context", summary,
+                                        {"keys": sorted(ctx)})}
+
+
+@register("ai_prompt")
+def h_ai_prompt(state: CaseState, config: dict) -> dict:
+    """Run a configurable LLM prompt and write the result to `state[output_key]`
+    (Phase 25). Templates interpolate `{case.subject}` /
+    `{sf_context.account.tier}` / `{attachment_text}` etc. With `images` set it
+    sends image attachments to a vision model (free OpenRouter → paid
+    Anthropic). Edges then branch on the structured output — the routing stays
+    a plain expression, the intelligence is this (traced, cached) node.
+
+    config: {
+      system, user,                 # prompt templates
+      model?, temperature=0.2, max_tokens=600,
+      output_key="ai_output",
+      json_schema?: {...},          # ask for + parse JSON
+      images: "none" | "auto" | ["attachments"],   # attachment blobs to send
+      cache=true, on_error="passthrough" | "fail"
+    }
+    """
+    nid = config["_node_id"]
+    flat = _flat(state)
+    system = _render(config.get("system", ""), flat)
+    user = _render(config.get("user", ""), flat) or _render("{case.subject}\n{case.body}", flat)
+    out_key = config.get("output_key") or "ai_output"
+    want_json = bool(config.get("json_schema"))
+    if want_json:
+        system += ("\n\nReturn ONLY a JSON object matching this schema:\n"
+                   + __import__("json").dumps(config["json_schema"])[:2000])
+
+    imgs: list[tuple[bytes, str]] = []
+    mode = config.get("images", "none")
+    if mode and mode != "none":
+        blobs = state.get("_attachment_blobs") or {}
+        by_key = {a.get("blob_key"): a for a in (state.get("attachments") or [])}
+        for k, data in blobs.items():
+            mime = (by_key.get(k) or {}).get("mime", "image/png")
+            imgs.append((data, mime))
+        imgs = imgs[:4]
+
+    try:
+        raw = llm.complete(
+            system=system or "You are a helpful support assistant.",
+            user=user, model=config.get("model") or llm.DEFAULT_MODEL,
+            temperature=float(config.get("temperature", 0.2)),
+            max_tokens=int(config.get("max_tokens", 600)),
+            json_object=want_json,
+            cache=bool(config.get("cache", True)) and not imgs,
+            images=imgs or None,
+        )
+    except Exception as e:  # noqa: BLE001
+        if config.get("on_error") == "fail":
+            raise
+        log.warning("ai_prompt %s failed: %s", out_key, e)
+        return {"ai": {out_key: None}, **_trace(nid, "ai_prompt", f"error → ai.{out_key}=None",
+                                                {"error": str(e)[:300]})}
+
+    value: Any = raw
+    if want_json:
+        value = _safe_json(raw) or {}
+    usage = llm.last_usage or {}
+    return {
+        "ai": {out_key: value},            # declared channel -> merged, not dropped
+        **_trace(nid, "ai_prompt",
+                 f"ai.{out_key} ← {len(raw)} chars"
+                 + (f", {len(imgs)} image(s)" if imgs else "")
+                 + (f", {usage.get('total')} tok" if usage.get("total") else ""),
+                 {"output_key": out_key, "value": value, "images": len(imgs),
+                  "json": want_json, "tokens": usage or None}),
+    }

@@ -32,6 +32,10 @@ google-api-python-client
 requests
 # Slack Socket Mode client (Phase 24c — interpreter/slack_socket)
 websockets
+# Phase 25 — local OCR for image attachments (ONNX, CPU, no torch). Optional:
+# interpreter/attachments guards the import and degrades to "no OCR" if absent.
+rapidocr-onnxruntime
+pillow
 
 # api (Phase 5)
 fastapi
