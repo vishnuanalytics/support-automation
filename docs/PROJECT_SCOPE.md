@@ -719,10 +719,33 @@ lives in `scripts/seed_router_flow.py` + the portable JSON for whenever it
 is stood up; `045` = Phase 20o: `notify_targets` — **applied 2026-08-31**,
 seeded 7 rows for tenant `00000000…`; `046` = Phase 20p: the email flow →
 the single comprehensive workflow (`team_route` + 5-way gate) — **applied
-2026-08-31**, published **v4**).
-205 offline pytest tests + web tsc/vitest (6)/build +
+2026-08-31**, published **v4**). Migrations `047`–`053` land the resilience
+work and the `notify_human` / double-tag fixes — see the Phase 23* entries
+below; the email `sf_entry` flow is now at **v9**.
+243 offline pytest tests + web tsc/vitest (6)/build +
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
+
+**Next test email should show:** exactly 1 run, 1 inbound EmailMessage, and
+— on an `ask_human`/`handover` escalation — ONE Chatter @mention (from
+`notify_human`) plus ONE private `[bot draft …]` CaseComment. If Slack is
+wired (`SLACK_ALERT_WEBHOOK` or per-tenant OAuth) the same escalation also
+posts to `#support-escalations` (or the per-team channel).
+
+**Phase 23e (2026-09-01): stop the double Chatter tag on an escalated Case.**
+Case 00001184 showed 3 bot feed posts and the rep @mentioned twice: `ask_human`
+posted its *own* @mention Chatter note + a private draft `CaseComment`, **and**
+the downstream `notify_human` (`channel: both`) posted a *second* @mention note.
+Fix — `ask_human`/`handover` gain `config.post_note` (default `true` for
+back-compat); when `false` the node is **routing-only** (still reassigns the
+queue) and `notify_human` owns the single human ping. `notify_human`/`alert_human`
+gain `config.draft_comment` — when `true` it drops the reviewable draft as **one**
+private `CaseComment` (so the draft survives `ask_human` going quiet). Migration
+`053`: email flow **v9** — `post_note:false` on `ask_human`, `draft_comment:true`
+on `notify_human`. Portable JSONs + `seed_router_flow.py` carry it. Also fixed a
+non-hermetic test (`test_notify_human_alerts_slack_and_chatter` was resolving a
+live queue member). 243 offline pytest (4 new). Expected on the next test email:
+**1 run, 1 inbound EmailMessage, ONE @mention, ONE draft comment.**
 
 **Phase 23d (2026-09-01): `notify_human` node — tag a person, Slack and/or Chatter.**
 The escalation used to *stop* at `ask_human` (SF-Chatter only). New

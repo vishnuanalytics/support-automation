@@ -86,6 +86,15 @@ def alert_human(state: dict, config: dict) -> dict[str, Any]:
         out["chatter"] = salesforce.post_chatter(sf_id, body, mention_id=mid,
                                                  tenant_id=state.get("tenant_id"))
 
+    # When the upstream ask_human/handover node is routing-only (post_note:false)
+    # the reviewable draft would otherwise be lost — drop it as one private
+    # CaseComment so the agent can copy it into the Email quick action.
+    if config.get("draft_comment") and sf_id and draft.strip():
+        out["draft_comment"] = salesforce.add_case_comment(
+            sf_id, f"[bot draft — review before sending]\n\n{draft}",
+            published=False, tenant_id=state.get("tenant_id"),
+        )
+
     return out
 
 

@@ -34,7 +34,7 @@
       } },
     { "node_id": "auto_reply", "type": "auto_reply", "label": "Send the drafted reply", "config": { "channel": "email" } },
     { "node_id": "ask_human", "type": "ask_human", "label": "Escalate to the owning team (csm / sales) — reassigns the Case",
-      "config": { "channel": "salesforce_chatter", "queue_by_team": { "csm": "Team_CSM", "sales": "Team_Sales" }, "escalate_queue": "Billing_Escalations" } },
+      "config": { "channel": "salesforce_chatter", "post_note": false, "queue_by_team": { "csm": "Team_CSM", "sales": "Team_Sales" }, "escalate_queue": "Billing_Escalations" } },
     { "node_id": "notify", "type": "notify", "label": "Ping the Type's internal rep (Case stays in the queue)",
       "config": { "channel": "salesforce_chatter", "target_by_type": {}, "target_by_module": {}, "fallback_target": null } },
     { "node_id": "clarify", "type": "clarify", "label": "Ask the customer for missing detail",
@@ -45,6 +45,7 @@
       "config": { "channel": "both",
         "slack_channel": "#support-escalations",
         "slack_channel_by_team": { "csm": "#csm-escalations", "sales": "#sales-escalations", "offboarding": "#retention", "default": "#support-escalations" },
+        "draft_comment": true,
         "mention": { "mention_id": "005jV000000fm5WQAQ" } } }
   ],
   "edges": [

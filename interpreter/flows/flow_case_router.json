@@ -144,6 +144,7 @@
       "label": "Escalate to the owning team (csm / sales) \u2014 reassigns the Case",
       "config": {
         "channel": "salesforce_chatter",
+        "post_note": false,
         "queue_by_team": {
           "csm": "Team_CSM",
           "sales": "Team_Sales"
@@ -193,6 +194,7 @@
       "config": {
         "channel": "both",
         "slack_channel": "#support-escalations",
+        "draft_comment": true,
         "mention": {
           "mention_id": "005jV000000fm5WQAQ"
         }

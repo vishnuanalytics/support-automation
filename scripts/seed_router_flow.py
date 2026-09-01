@@ -85,7 +85,8 @@ NODES = [
     (n_auto, "auto_reply", "Auto-reply to the customer", {"channel": "email"}),
     (n_ask, "ask_human",
      "Escalate to the owning team (csm / sales) — reassigns the Case",
-     {"channel": "salesforce_chatter", "queue_by_team": ASK_QUEUE_BY_TEAM,
+     {"channel": "salesforce_chatter", "post_note": False,
+      "queue_by_team": ASK_QUEUE_BY_TEAM,
       "escalate_queue": "Billing_Escalations"}),
     (n_handover, "handover", "Full handover (enterprise / offboarding)",
      {"reason": "enterprise_or_offboarding", "queue_by_team": HANDOVER_QUEUE_BY_TEAM,
@@ -98,7 +99,7 @@ NODES = [
       "handover_queue": CLARIFY_HANDOVER_QUEUE}),
     (n_human, "notify_human", "Tag a human (Slack + / or Chatter)",
      {"channel": "both", "slack_channel": "#support-escalations",
-      "mention": {"mention_id": "005jV000000fm5WQAQ"}}),
+      "draft_comment": True, "mention": {"mention_id": "005jV000000fm5WQAQ"}}),
 ]
 
 _LIVE = "tier != 'enterprise' and routed_team != 'offboarding'"

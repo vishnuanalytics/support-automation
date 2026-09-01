@@ -1135,7 +1135,10 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
     }
 
     draft = state.get("draft", "")
-    if channel == "salesforce_chatter" and sf_id:
+    # `post_note: false` -> this node only routes the Case; a downstream
+    # `notify_human` does the Chatter/Slack alert (avoids a double post).
+    post_note = config.get("post_note", True)
+    if post_note and channel == "salesforce_chatter" and sf_id:
         body = (
             f"Support bot needs a human on this case (confidence {confidence}). "
             f"Suggested draft below — please review before sending.\n\n{draft}"
@@ -1147,10 +1150,6 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
         mode = "dry-run" if chatter.get("dry_run") else "posted"
         summary = f"Chatter {mode} on Case {sf_id}"
 
-        # FR-13: the suggested reply rides in the Chatter note above. Salesforce
-        # rejects an API-created outbound draft EmailMessage (Incoming=false is
-        # UI-composer-only), so also drop it as a private CaseComment — the
-        # agent copies it into the Email quick action and sends.
         if draft.strip():
             note = salesforce.add_case_comment(
                 sf_id, f"[bot draft — review before sending]\n\n{draft}",
@@ -1160,8 +1159,9 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
             if note.get("created"):
                 summary += " + draft comment"
     else:
-        summary = f"handed to human via {channel}"
-        if channel == "salesforce_chatter":
+        summary = ("routed only (alert deferred to notify_human)" if not post_note
+                   else f"handed to human via {channel}")
+        if post_note and channel == "salesforce_chatter":
             summary += " (no sf_id — not posted)"
 
     # Phase 20g/h/i: drop the Case into a human queue. Billing/forced -> the

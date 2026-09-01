@@ -213,8 +213,13 @@ def test_update_case_fields_append_is_idempotent(monkeypatch):
 
 
 def test_notify_human_alerts_slack_and_chatter(monkeypatch):
-    from interpreter import alert, salesforce, slack
+    from interpreter import alert, routing, salesforce, slack
     from interpreter.registry import h_notify_human
+
+    # hermetic: no queue-member lookup against live routing data -> the
+    # Chatter @mention falls through to mention.mention_id
+    routing._cache.clear()
+    monkeypatch.setattr(routing, "queue_member", lambda *a, **k: (None, None))
 
     sent = {}
     monkeypatch.setattr(slack, "post_message",
@@ -255,6 +260,75 @@ def test_notify_human_channel_slack_only(monkeypatch):
          "mention": {"slack_user_id": "U1"}},
     )
     assert "chatter" not in out["human_alert"]
+
+
+def test_ask_human_post_note_false_is_routing_only(monkeypatch):
+    """With post_note:false the escalation node reassigns the queue but does
+    NOT post its own Chatter note / draft comment — notify_human owns that."""
+    from interpreter import salesforce
+    from interpreter.registry import h_ask_human
+
+    monkeypatch.setattr(salesforce, "post_chatter",
+                        lambda *a, **k: pytest.fail("post_note:false must not post Chatter"))
+    monkeypatch.setattr(salesforce, "add_case_comment",
+                        lambda *a, **k: pytest.fail("post_note:false must not add a comment"))
+    assigned = {}
+    monkeypatch.setattr(salesforce, "assign_case",
+                        lambda cid, **k: (assigned.update(cid=cid, **k) or
+                                          {"assigned": True, "owner_type": "queue"}))
+
+    out = h_ask_human(
+        {"case": {"sf_id": "500ROUTINGONLY"}, "confidence": 0.27,
+         "routed_team": "csm", "draft": "d", "tenant_id": "t"},
+        {"_node_id": "ah", "channel": "salesforce_chatter", "post_note": False,
+         "queue_by_team": {"csm": "Team_CSM"}},
+    )
+    assert assigned["queue"] == "Team_CSM"                 # still routed
+    assert "chatter" not in out["outcome"]
+    assert "draft_comment" not in out["outcome"]
+    assert "routed only" in out["trace"][0]["summary"]
+
+
+def test_notify_human_draft_comment_adds_one_private_comment(monkeypatch):
+    """draft_comment:true -> alert_human drops the reviewable draft as a single
+    private CaseComment (since ask_human no longer does)."""
+    from interpreter import alert, salesforce, slack
+
+    monkeypatch.setattr(slack, "post_message", lambda *a, **k: {"sent": True, "via": "bot"})
+    monkeypatch.setattr(salesforce, "post_chatter", lambda *a, **k: {"posted": True})
+    monkeypatch.setattr(alert, "_sf_link", lambda x: x)
+    comments = []
+    monkeypatch.setattr(salesforce, "add_case_comment",
+                        lambda cid, body, **k: (comments.append((cid, body, k)) or
+                                                {"created": True}))
+
+    out = alert.alert_human(
+        {"case": {"sf_id": "500DC"}, "routed_team": "csm", "outcome": {"action": "ask_human"},
+         "draft": "here is the suggested reply", "tenant_id": "t"},
+        {"channel": "both", "slack_channel": "#s", "draft_comment": True,
+         "mention": {"slack_user_id": "U1"}},
+    )
+    assert len(comments) == 1
+    cid, body, kw = comments[0]
+    assert cid == "500DC" and kw.get("published") is False
+    assert "here is the suggested reply" in body
+    assert out["draft_comment"] == {"created": True}
+
+
+def test_notify_human_no_draft_comment_when_flag_unset(monkeypatch):
+    from interpreter import alert, salesforce, slack
+
+    monkeypatch.setattr(slack, "post_message", lambda *a, **k: {"sent": True})
+    monkeypatch.setattr(salesforce, "post_chatter", lambda *a, **k: {"posted": True})
+    monkeypatch.setattr(alert, "_sf_link", lambda x: x)
+    monkeypatch.setattr(salesforce, "add_case_comment",
+                        lambda *a, **k: pytest.fail("no draft_comment flag -> no comment"))
+    out = alert.alert_human(
+        {"case": {"sf_id": "500X"}, "routed_team": "csm", "outcome": {},
+         "draft": "d", "tenant_id": "t"},
+        {"channel": "both", "slack_channel": "#s", "mention": {"slack_user_id": "U1"}},
+    )
+    assert "draft_comment" not in out
 
 
 def test_routing_cache_hits(monkeypatch):
