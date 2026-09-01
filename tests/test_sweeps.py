@@ -103,6 +103,39 @@ def test_queue_sweep_dry_run_changes_nothing(monkeypatch):
     assert sf.updates == [] and sf.assigns == []
 
 
+def test_queue_sweep_stuck_check_uses_last_run_not_created_date(monkeypatch):
+    """A Case re-triaged on a customer reply has an old CreatedDate but a
+    fresh Last_AI_Run_At__c — must not read as stuck."""
+    now = datetime.now(timezone.utc)
+    sf = _SF([{
+        "Id": "500Y", "CaseNumber": "0008", "Status": "Triaged", "OwnerId": "00Gx",
+        "Routed_Team__c": "support", "Next_Action_Due__c": None,
+        "Last_AI_Run_At__c": _iso(now - timedelta(minutes=1)),
+        "SLA_Breach__c": False, "CreatedDate": _iso(now - timedelta(days=10)),
+        "LastModifiedDate": _iso(now - timedelta(minutes=1)),
+    }])
+    _sf_patch(monkeypatch, sf)
+    out = sweeps.queue_sweep(sf, dry_run=False)
+    assert out["nudged"] == [] and out["breached"] == []
+
+
+def test_queue_sweep_ignores_cases_the_pipeline_never_touched(monkeypatch):
+    """A Case with none of the control-plane fields set predates the Phase
+    27c cutover (or CDC hasn't run its first pass yet) — not the sweep's to
+    judge. Regression: this used to breach an entire pre-existing backlog."""
+    now = datetime.now(timezone.utc)
+    sf = _SF([{
+        "Id": "500Z", "CaseNumber": "0009", "Status": "New", "OwnerId": "00Gx",
+        "Routed_Team__c": None, "Next_Action_Due__c": None, "Last_AI_Run_At__c": None,
+        "SLA_Breach__c": False, "CreatedDate": _iso(now - timedelta(days=30)),
+        "LastModifiedDate": _iso(now - timedelta(days=30)),
+    }])
+    _sf_patch(monkeypatch, sf)
+    out = sweeps.queue_sweep(sf, dry_run=False)
+    assert out["nudged"] == [] and out["breached"] == []
+    assert sf.updates == [] and sf.assigns == []
+
+
 def test_queue_sweep_no_creds_is_a_clean_skip(monkeypatch):
     monkeypatch.setattr(salesforce, "available", lambda *a, **k: False)
     assert sweeps.queue_sweep(object())["skipped"].startswith("no Salesforce")
