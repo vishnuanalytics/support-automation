@@ -770,7 +770,25 @@ reply updates `Routed_Team__c` + re-assigns the queue + writes a
 routing-correction `case_events` row. One Slack-app toggle to activate:
 Interactivity ON (no request URL under Socket Mode). 319 offline pytest.
 
-Still not built: the Slack `#cx-*` channels / usergroups (needs Slack admin).
+**Design gaps closed (2026-09-01) — every "Closed by" in the artifact's Gaps
+table is now real code:**
+- The Slack reasoning dialogue's delivery (`slack_socket._deliver`) sets
+  `Status = Resolved` + a `case_events` `action=send` row when the reply
+  actually lands.
+- `_check_resolution`'s final give-up (`no_reply`) now flips
+  `SLA_Breach__c` + pages + writes a `breach` event — not just a `runs` row.
+- `queue_sweep` gained two branches: a stale `Waiting on Customer` Case
+  auto-resolves (design state-machine WOC→Resolved timer) with a "reply to
+  reopen" Chatter note; an `Escalated` Case that Omni never routed
+  (`Routed_Team__c` empty / still `AI_Intake`-owned) is dead-lettered to
+  `Unrouted_Review` + paged.
+- `slack_socket` re-drives every open `reasoning_sessions` thread on a WSS
+  reconnect (a dropped socket no longer strands a dialogue mid-turn).
+- `/api/trace/<case>` folds in `case_events` as the timeline spine.
+
+Still not built (org / Slack admin — you're doing these): an Omni agent
+going "Available" + the Slack `#cx-*` channels / usergroups. Everything
+upstream is code-complete.
 
 **27a live-applied + 27a/c/d live-verified (2026-09-01).** Migrations `062`/
 `063` applied; `sf_support_setup.py --only queues --only cp_fields --only

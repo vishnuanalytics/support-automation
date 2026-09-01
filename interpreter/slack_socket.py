@@ -106,6 +106,23 @@ def _deliver(sb, session: dict) -> dict:
         except Exception as e:  # noqa: BLE001
             log.warning("could not record slack_reasoning run for %s: %s", case_id, e)
 
+    # Phase 27 — the reply landed: move the Case to Resolved + audit the send.
+    if out.get("auto_sent"):
+        try:
+            from interpreter import case_events, salesforce
+
+            salesforce.update_case_fields(case_id, {
+                "Status": "Resolved", "Next_Action__c": "resolved via Slack reasoning",
+            }, tenant_id=tenant_id)
+            case_events.record(
+                sb, tenant_id=tenant_id, case_sf_id=str(case_id),
+                case_number=session.get("case_number"),
+                actor=f"agent:{session.get('agent_slack_id') or '?'}",
+                action="send", to_status="Resolved", slack_ts=session.get("slack_thread_ts"),
+                reason="approved in the Slack reasoning dialogue")
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not mark %s Resolved after send: %s", case_id, e)
+
     return {"sent": bool(out.get("auto_sent")), "via": out.get("via"),
             "error": out.get("error")}
 
@@ -187,6 +204,34 @@ def _reassign(sb, session: dict, team: str) -> dict:
     except Exception as e:  # noqa: BLE001
         log.warning("_reassign(%s -> %s): %s", sf_id, team, e)
         return {"ok": False, "error": str(e)[:120]}
+
+
+_REDRIVE_MSG = (":arrows_counterclockwise: (reconnected) I'm still here — reply to "
+                "continue, or @mention me.")
+
+
+def _redrive_open_sessions(sb, post) -> None:
+    """Phase 27 — after a WSS reconnect, re-post a short nudge into every
+    reasoning thread that's still open, so a dialogue that stalled while the
+    socket was down comes back to life. Best-effort, once per connect."""
+    try:
+        rows = (sb.table("reasoning_sessions")
+                .select("session_id,slack_channel,slack_thread_ts,state")
+                .not_.in_("state", _DEAD_STATES).execute().data or [])
+    except Exception as e:  # noqa: BLE001
+        log.warning("redrive: session query failed: %s", e)
+        return
+    n = 0
+    for s in rows:
+        ch, ts = s.get("slack_channel"), s.get("slack_thread_ts")
+        if ch and ts:
+            try:
+                post(ch, ts, _REDRIVE_MSG)
+                n += 1
+            except Exception as e:  # noqa: BLE001
+                log.warning("redrive post failed for %s: %s", s.get("session_id"), e)
+    if n:
+        log.info("redrive: nudged %d open reasoning thread(s)", n)
 
 
 def dispatch_action(sb, payload: dict, *, post, deliver=None) -> dict:
@@ -289,6 +334,8 @@ async def _run_async() -> None:
                                           open_timeout=20) as ws:
                 log.info("socket connected")
                 hb = asyncio.create_task(_heartbeat())
+                _redrive_open_sessions(sb, post)   # Phase 27 — a dropped socket
+                #   can strand a dialogue mid-turn; nudge the threads back to life.
                 async for raw in ws:
                     msg = json.loads(raw)
                     kind = msg.get("type")

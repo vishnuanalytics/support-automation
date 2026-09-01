@@ -221,6 +221,25 @@ def _check_resolution(payload: dict, sb) -> dict:
     sb.table("runs").update({
         "human_action": final_action, "feedback_checked_at": "now()",
     }).eq("run_id", run_id).execute()
+
+    # Phase 27 — a genuinely dropped escalation: flip SLA_Breach__c + page,
+    # so it isn't just a no_reply row nobody watches.
+    if final_action == "no_reply" and str(case_id or "").startswith("500"):
+        try:
+            from interpreter import case_events, sweeps
+
+            salesforce.update_case_fields(case_id, {"SLA_Breach__c": True},
+                                          tenant_id=tenant_id)
+            sweeps._page(f":rotating_light: *Dropped escalation* — Case {case_id} had no "
+                         f"human response after {_FEEDBACK_MAX_CHECKS} checks. SLA_Breach set.",
+                         sb=sb)
+            case_events.record(sb, tenant_id=tenant_id, case_sf_id=str(case_id),
+                               case_number=(case.get("case_number")),
+                               actor="system:sweep", action="breach",
+                               reason="check_resolution gave up — no human response")
+        except Exception as e:  # noqa: BLE001
+            log.warning("check_resolution SLA_Breach for %s failed: %s", case_id, e)
+
     return {"run_id": run_id, "human_action": final_action}
 
 
