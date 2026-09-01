@@ -722,7 +722,7 @@ the single comprehensive workflow (`team_route` + 5-way gate) — **applied
 2026-08-31**, published **v4**). Migrations `047`–`053` land the resilience
 work and the `notify_human` / double-tag fixes — see the Phase 23* entries
 below; the email `sf_entry` flow is now at **v9**.
-243 offline pytest tests + web tsc/vitest (6)/build +
+242 offline pytest tests + web tsc/vitest (6)/build +
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
 
@@ -731,6 +731,33 @@ the spec; its §9 tracks gaps.
 `notify_human`) plus ONE private `[bot draft …]` CaseComment. If Slack is
 wired (`SLACK_ALERT_WEBHOOK` or per-tenant OAuth) the same escalation also
 posts to `#support-escalations` (or the per-team channel).
+
+**To resume the bot after a human:** reply either as a **Case Comment** or as
+a **reply on the bot's Chatter @mention post** — both are picked up within
+`FEEDBACK_POLL_MIN` (5 min, up to 12 checks). "send it" / "send this to the
+customer" sends the bot's stored draft as-is; a substantive note is applied
+to that draft first. Requires the email channel's `auto_send_enabled=true`
+(it is, for tenant `00000000…`), else the polished reply is only left as a
+draft CaseComment.
+
+**Phase 23f (2026-09-01): the re-engage poller now reads a Chatter reply.**
+Case 00001185 went to `clarify` (`need_info`); the bot @mentioned the rep on
+the Case **feed**; the rep replied *on that feed post* — "send this response
+to customer." — and nothing happened, the run went stale. Cause:
+`salesforce.agent_response_since` only read the **`CaseComment`** object, never
+a Chatter **`FeedComment`** (a reply on a feed item), which is the natural
+place to answer since that is where the @mention lives.
+- `agent_response_since` now takes the newest of a `CaseComment` **or** a
+  `FeedComment` since the run time, strips rich-text HTML, and skips the bot's
+  own notes (`[bot draft…]`, `[triage]…`, the escalation @mention text) via
+  `_looks_bot_written` / `_BOT_COMMENT_PREFIXES`.
+- `agent_reply.resume_from_guidance` / `polish` gain a `draft` arg — the
+  guidance is applied *on top of* the bot's original draft; a bare approval
+  ("send it", "send this response to customer", "lgtm", …) sends the stored
+  draft **verbatim, no LLM call**. `_check_resolution` passes `row["draft"]`.
+- Verified live: the queued `check_resolution` tick picked up the FeedComment
+  and emailed the original draft to the customer (SMTP, mirrored to the Case
+  as an outbound EmailMessage); run → `guided_resume`. 242 offline pytest.
 
 **Phase 23e (2026-09-01): stop the double Chatter tag on an escalated Case.**
 Case 00001184 showed 3 bot feed posts and the rep @mentioned twice: `ask_human`

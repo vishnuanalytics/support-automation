@@ -189,7 +189,8 @@ def _check_resolution(payload: dict, sb) -> dict:
         from interpreter import agent_reply, mailbox
 
         cfg = mailbox.load_channel(tenant_id, sb) if tenant_id else None
-        out = agent_reply.resume_from_guidance(case, resp["guidance"], cfg=cfg, tenant_id=tenant_id)
+        out = agent_reply.resume_from_guidance(case, resp["guidance"], cfg=cfg,
+                                               tenant_id=tenant_id, draft=draft)
         try:
             sb.table("runs").insert({
                 "flow_id": row["flow_id"], "tenant_id": tenant_id, "team": row["team"],

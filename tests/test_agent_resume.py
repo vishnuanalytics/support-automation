@@ -187,3 +187,47 @@ def test_resume_sends_via_salesforce_when_no_mailbox(monkeypatch):
     assert out["auto_sent"] is True and out["via"] == "email"
     assert calls["cid"] == "500y" and calls["body"] == "polished reply"
     assert calls["k"].get("to_email") == "c@x.com"
+
+
+# ── guidance applied on top of the bot's own draft ──────────────────
+def test_bare_approval_sends_the_bot_draft_verbatim(monkeypatch):
+    # no LLM call for a plain "send it" — the stored draft goes out as-is
+    monkeypatch.setattr(agent_reply.llm, "complete",
+                        lambda *a, **k: pytest.fail("approval must not call the LLM"))
+    for note in ("send it", "Send this response to customer.", "LGTM", "approved"):
+        assert agent_reply.polish(note, {"subject": "s", "body": "b"},
+                                  draft="Hi Vishnu, here is the full answer.") == \
+            "Hi Vishnu, here is the full answer."
+
+
+def test_substantive_note_is_applied_to_the_draft(monkeypatch):
+    got = {}
+    monkeypatch.setattr(agent_reply.llm, "complete",
+                        lambda *a, **k: got.update(k) or "final reply")
+    out = agent_reply.polish("also mention the SLA is 24h",
+                             {"subject": "s", "body": "b"}, draft="Hi, draft body.")
+    assert out == "final reply"
+    assert "draft body" in got["user"] and "SLA is 24h" in got["user"]
+
+
+def test_check_resolution_reads_a_chatter_feedcomment_as_guidance(monkeypatch):
+    """The bot @mentions on the Case *feed*, so a rep's reply is a FeedComment,
+    not a CaseComment — agent_response_since must see both."""
+    from interpreter import salesforce
+
+    class _SF:
+        def query(self, soql):
+            if "FROM CaseComment" in soql:
+                return {"records": [
+                    {"CommentBody": "[bot draft — review before sending]\n\nx",
+                     "CreatedDate": "2026-09-01T02:56:00.000+0000"}]}
+            if "FROM FeedComment" in soql:
+                return {"records": [
+                    {"CommentBody": "<p>send this response to customer.</p>",
+                     "CreatedDate": "2026-09-01T02:57:23.000+0000"}]}
+            return {"records": []}
+
+    monkeypatch.setattr(salesforce, "available", lambda: True)
+    monkeypatch.setattr(salesforce, "client_for", lambda *a, **k: _SF())
+    r = salesforce.agent_response_since("500X", "2026-09-01T02:55:00Z")
+    assert r["guidance"] == "send this response to customer."   # the bot draft is skipped

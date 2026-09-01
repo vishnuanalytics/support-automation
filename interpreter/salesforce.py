@@ -253,33 +253,55 @@ def latest_inbound_email(case_id: str, *, tenant_id: str | None = None) -> dict[
     }
 
 
+# the bot's own Case writes — never mistake one of these for a human's answer
+_BOT_COMMENT_PREFIXES = ("[bot draft", "[triage]", "support bot needs a human",
+                         "support bot could not")
+
+
+def _looks_bot_written(body: str) -> bool:
+    b = (body or "").lstrip().lower()
+    return any(b.startswith(p) for p in _BOT_COMMENT_PREFIXES)
+
+
 def agent_response_since(case_id: str, since_iso: str | None = None,
                          *, tenant_id: str | None = None) -> dict[str, Any]:
     """What a human has done on a Case since `since_iso` (the bot's run time):
 
-      {"guidance": <newest CaseComment body> | None,
+      {"guidance": <newest human note the bot should turn into a reply> | None,
        "guidance_at": iso | None,
        "outbound_email": <newest agent reply-to-customer body> | None}
 
-    A CaseComment is treated as *internal guidance the bot should turn into a
-    customer reply*; an outbound EmailMessage means the agent already
-    answered the customer directly. Never raises."""
+    "Guidance" is the newest of a **CaseComment** or a **Chatter FeedComment**
+    (a reply on the Case feed — where the bot's @mention lives, so that is the
+    natural place for a rep to answer). The bot's own notes ([bot draft…],
+    [triage]…, the escalation @mention text) are skipped. An outbound
+    EmailMessage means the agent already answered the customer directly.
+    Never raises."""
     out: dict[str, Any] = {"guidance": None, "guidance_at": None, "outbound_email": None}
     if not available():
         return out
     sf = client_for(tenant_id)
     cid = _soql_lit(case_id)
     since = f" AND CreatedDate > {since_iso}" if since_iso else ""
-    try:
-        rows = sf.query(
-            f"SELECT CommentBody, CreatedDate FROM CaseComment WHERE ParentId = '{cid}'{since} "
-            "ORDER BY CreatedDate DESC LIMIT 1"
-        ).get("records", [])
-        if rows and rows[0].get("CommentBody"):
-            out["guidance"] = rows[0]["CommentBody"]
-            out["guidance_at"] = rows[0].get("CreatedDate")
-    except Exception as e:  # noqa: BLE001
-        log.warning("agent_response_since/comment(%s): %s", case_id, e)
+    from interpreter.mailbox import _strip_html
+
+    cands: list[tuple[str, str]] = []  # (created_date, text)
+    for obj, col in (("CaseComment", "CommentBody"), ("FeedComment", "CommentBody")):
+        try:
+            rows = sf.query(
+                f"SELECT {col}, CreatedDate FROM {obj} WHERE ParentId = '{cid}'{since} "
+                "ORDER BY CreatedDate DESC LIMIT 5"
+            ).get("records", [])
+        except Exception as e:  # noqa: BLE001
+            log.warning("agent_response_since/%s(%s): %s", obj, case_id, e)
+            continue
+        for r in rows:
+            txt = _strip_html(r.get(col) or "").strip()
+            if txt and not _looks_bot_written(txt):
+                cands.append((r.get("CreatedDate") or "", txt))
+    if cands:
+        cands.sort(key=lambda t: t[0], reverse=True)
+        out["guidance"], out["guidance_at"] = cands[0][1], cands[0][0]
     try:
         rows = sf.query(
             f"SELECT TextBody, CreatedDate FROM EmailMessage WHERE ParentId = '{cid}' "

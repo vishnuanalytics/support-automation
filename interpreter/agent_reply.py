@@ -27,9 +27,43 @@ _SYSTEM = (
     "'Here is the reply'. Return plain text."
 )
 
+_SYSTEM_WITH_DRAFT = (
+    "The support bot drafted a reply to a customer. An agent reviewed it and "
+    "left a short note. Produce the FINAL customer-facing reply: start from the "
+    "bot's draft and apply the agent's note. If the note is just approval "
+    "('send it', 'send this', 'lgtm', 'approved'), return the draft essentially "
+    "unchanged (only fix obvious typos). Use ONLY the draft and the note for "
+    "facts -- add nothing. No preamble. Return plain text."
+)
 
-def polish(guidance: str, case: dict, *, model: str | None = None) -> str:
+# a bare approval -> just send the bot's own draft
+_APPROVAL = {
+    "send it", "send this", "send this response to customer", "send the reply",
+    "send the draft", "send", "sent", "lgtm", "looks good", "approved", "approve",
+    "ok", "okay", "yes", "go ahead", "ship it", "send to customer",
+    "send this response", "send response", "send the response to customer",
+}
+
+
+def _is_approval(note: str) -> bool:
+    n = (note or "").strip().strip(".!").lower()
+    return n in _APPROVAL or (len(n) <= 40 and n.startswith("send ") and "customer" in n)
+
+
+def polish(guidance: str, case: dict, *, draft: str | None = None,
+           model: str | None = None) -> str:
     body = f"Subject: {case.get('subject', '')}\n\n{case.get('body', '')}".strip()
+    if draft and draft.strip():
+        if _is_approval(guidance):
+            return draft.strip()
+        out = llm.complete(
+            system=_SYSTEM_WITH_DRAFT,
+            user=(f"# Customer's case\n{body}\n\n# Bot's draft reply\n{draft.strip()}"
+                  f"\n\n# Agent's note\n{guidance}"),
+            model=model or llm.DEFAULT_MODEL,
+            max_tokens=700,
+        )
+        return (out or draft).strip()
     out = llm.complete(
         system=_SYSTEM,
         user=f"# Customer's case\n{body}\n\n# Agent's answer (authoritative)\n{guidance}",
@@ -40,14 +74,16 @@ def polish(guidance: str, case: dict, *, model: str | None = None) -> str:
 
 
 def resume_from_guidance(case: dict, guidance: str, *, cfg=None,
-                         tenant_id: str | None = None) -> dict:
+                         tenant_id: str | None = None, draft: str | None = None) -> dict:
     """Polish `guidance` into a reply and deliver it on `case`'s channel.
+    When `draft` is given (the bot's original reply), the guidance is applied
+    *on top of* it — a bare "send it" just sends the draft.
     Returns {sent, via, auto_sent, reply}. Never raises."""
     try:
-        reply = polish(guidance, case)
+        reply = polish(guidance, case, draft=draft)
     except Exception as e:  # noqa: BLE001
-        log.warning("polish failed (%s); sending the guidance verbatim", e)
-        reply = guidance.strip()
+        log.warning("polish failed (%s); falling back", e)
+        reply = (draft or guidance).strip()
 
     case_id = case.get("sf_id") or case.get("id")
     to_email = (case.get("from") or (case.get("contact") or {}).get("email")
