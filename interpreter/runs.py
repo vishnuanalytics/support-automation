@@ -82,6 +82,20 @@ def record_run(flow: dict, final: dict, *, case: dict, source: str = "api",
         except Exception as e:  # noqa: BLE001
             log.warning("could not link action_request %s to run %s: %s", ar_id, run_id, e)
 
+    # Phase 27c — the flow's nodes wrote `case_events` rows with no run_id
+    # (the run didn't exist yet). Stamp them now, best-effort.
+    sf_id = case.get("sf_id") or case.get("id")
+    if run_id and sf_id:
+        try:
+            import datetime as _dt
+
+            from interpreter import case_events
+
+            since = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(minutes=15)).isoformat()
+            case_events.link_run(sb, case_sf_id=str(sf_id), run_id=run_id, since_iso=since)
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not link case_events to run %s: %s", run_id, e)
+
     # close the loop later: if this went to a human on a real Case, schedule a
     # resolution check (Phase 11). Best-effort. Phase 24: skipped when a Slack
     # reasoning session owns the case — that dialogue is the resolution path.

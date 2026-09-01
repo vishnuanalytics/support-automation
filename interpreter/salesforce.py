@@ -178,13 +178,13 @@ def client_for(tenant_id: str | None, sb=None):
 # Prefer a custom Account.Tier__c (basic|premium|enterprise) if the org has
 # one; fall back to the standard restricted Account.Type picklist otherwise.
 _CASE_SOQL_TIER = (
-    "SELECT Id, CaseNumber, Subject, Description, Status, Priority, "
+    "SELECT Id, CaseNumber, Subject, Description, Status, Priority, OwnerId, "
     "Account.Name, Account.Tier__c, Account.Type, Account.BillingCountry, "
     "Contact.Name, Contact.Email "
     "FROM Case WHERE Id = '{cid}'"
 )
 _CASE_SOQL_BASE = (
-    "SELECT Id, CaseNumber, Subject, Description, Status, Priority, "
+    "SELECT Id, CaseNumber, Subject, Description, Status, Priority, OwnerId, "
     "Account.Name, Account.Type, Account.BillingCountry, "
     "Contact.Name, Contact.Email "
     "FROM Case WHERE Id = '{cid}'"
@@ -214,6 +214,9 @@ def get_case(case_id: str) -> dict[str, Any]:
     return {
         "sf_id": r["Id"],
         "case_id": r.get("CaseNumber") or r["Id"],
+        "case_number": r.get("CaseNumber"),
+        "status": r.get("Status"),
+        "owner_id": r.get("OwnerId"),
         "subject": r.get("Subject") or "",
         "body": r.get("Description") or "",
         "account": {
@@ -1063,6 +1066,17 @@ def ensure_case(
                 out["sf_id"] = match["sf_id"]
                 out["case_number"] = match.get("case_number")
                 out["reused"] = True
+                # Phase 27c — carry the current Status/Owner so the pipeline
+                # doesn't downgrade a Case a human has already moved on.
+                try:
+                    cur = sf.query(
+                        "SELECT Status, OwnerId FROM Case WHERE Id = "
+                        f"'{_soql_lit(out['sf_id'])}' LIMIT 1"
+                    ).get("records", [])
+                    if cur:
+                        out["status"], out["owner_id"] = cur[0].get("Status"), cur[0].get("OwnerId")
+                except Exception:  # noqa: BLE001
+                    pass
 
         if not out["sf_id"]:
             payload = {
@@ -1079,6 +1093,7 @@ def ensure_case(
                 payload["SuppliedEmail"] = email
             cres = sf.Case.create(payload)
             out["sf_id"], out["created"] = cres.get("id"), True
+            out["status"] = status
 
         if aid:
             out["account"] = _account_snapshot(sf, aid)

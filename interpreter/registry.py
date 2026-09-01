@@ -122,6 +122,87 @@ def _trace(node_id: str, type_: str, msg: str, data: dict[str, Any] | None = Non
 
 
 # --------------------------------------------------------------------------
+# Phase 27c — the case-control-plane writes: Status / Routed_Team__c /
+# Next_Action_Due__c on the Salesforce Case, plus one `case_events` audit row.
+# --------------------------------------------------------------------------
+# `sf_writeback` won't downgrade a Case a human has already moved on.
+_ADVANCED_STATUS = {"in progress", "escalated", "resolved", "closed"}
+_ACK_MINUTES = 30      # design decision: ack SLA is 30 min across the board
+
+
+def _iso_in(minutes: float) -> str:
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
+
+
+def _cp_fields(*, status=None, routed_team=None, next_action=None, due_minutes=None,
+               escalation_reason=None, confidence=None, slack_ts=None,
+               last_run_id=None, stamp_run_at=False) -> dict[str, Any]:
+    """Build the Case field dict for a control-plane write. Only non-empty keys."""
+    f: dict[str, Any] = {}
+    if status:
+        f["Status"] = status
+    if routed_team:
+        f["Routed_Team__c"] = routed_team
+    if next_action:
+        f["Next_Action__c"] = str(next_action)[:255]
+    if due_minutes is not None:
+        f["Next_Action_Due__c"] = _iso_in(due_minutes)
+    if escalation_reason:
+        f["Escalation_Reason__c"] = str(escalation_reason)[:255]
+    if confidence is not None:
+        try:
+            f["AI_Confidence__c"] = round(float(confidence), 2)
+        except (TypeError, ValueError):
+            pass
+    if slack_ts:
+        f["Handoff_Slack_Ts__c"] = str(slack_ts)[:64]
+    if last_run_id:
+        f["Last_Run_Id__c"] = str(last_run_id)[:40]
+    if stamp_run_at:
+        f["Last_AI_Run_At__c"] = _iso_in(0)
+    return f
+
+
+def _cp_write(state: CaseState, config: dict, *, action: str, actor: str = "ai",
+              fields: dict[str, Any] | None = None, reason: str | None = None,
+              routed_team: str | None = None, confidence: float | None = None,
+              slack_ts: str | None = None, slack_channel: str | None = None) -> dict[str, Any]:
+    """Push `fields` to the Case (one API call) and append a `case_events`
+    row. Best-effort — never raises, never blocks the node. Returns the
+    fields actually attempted."""
+    case = state.get("case", {})
+    sf_id = case.get("sf_id") or case.get("id")
+    fields = {k: v for k, v in (fields or {}).items() if v not in (None, "")}
+    prior = str(case.get("status") or "").strip().lower()
+    if fields.get("Status") == "Triaged" and prior in _ADVANCED_STATUS:
+        fields.pop("Status")     # don't stomp a human's In Progress / Escalated
+    if sf_id and fields:
+        try:
+            salesforce.update_case_fields(sf_id, fields, tenant_id=state.get("tenant_id"))
+        except Exception as e:  # noqa: BLE001
+            log.warning("cp_write(%s): %s", sf_id, e)
+    try:
+        from interpreter import case_events
+
+        case_events.record(
+            config.get("_sb"), tenant_id=state.get("tenant_id"),
+            case_sf_id=str(sf_id) if sf_id else "",
+            case_number=case.get("case_number") or (case.get("case_id") if str(case.get("case_id") or "").isdigit() else None),
+            actor=actor, action=action,
+            from_status=case.get("status"),
+            to_status=fields.get("Status"),
+            reason=reason, routed_team=routed_team or fields.get("Routed_Team__c"),
+            slack_ts=slack_ts, slack_channel=slack_channel, run_id=state.get("_run_id"),
+            confidence=confidence if confidence is not None else fields.get("AI_Confidence__c"),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("cp_write case_events(%s): %s", sf_id, e)
+    return fields
+
+
+# --------------------------------------------------------------------------
 # handlers
 # --------------------------------------------------------------------------
 @register("retrieve")
@@ -375,6 +456,16 @@ def h_sf_writeback(state: CaseState, config: dict) -> dict:
         if text:
             append[dest] = f"[triage] {text}"
 
+    # Phase 27c — case-control-plane fields, folded into the same write:
+    # Status -> Triaged (unless a human already advanced it), the routed team,
+    # and the run linkage. `Next_Action_Due__c` is set by the terminal node.
+    prior_status = str(case.get("status") or "").strip().lower()
+    if config.get("advance_status", True) and prior_status not in _ADVANCED_STATUS:
+        fields.setdefault("Status", "Triaged")
+    if state.get("routed_team"):
+        fields.setdefault("Routed_Team__c", state["routed_team"])
+    fields.update(_cp_fields(stamp_run_at=True, last_run_id=state.get("_run_id")))
+
     if not sf_id:
         info = {
             "target": None, "written": {}, "skipped": {}, "dry_run": True,
@@ -395,6 +486,20 @@ def h_sf_writeback(state: CaseState, config: dict) -> dict:
         summary = f"Case {sf_id} [live] wrote {list(result['written'])}"
         if result["skipped"]:
             summary += f", skipped {list(result['skipped'])}"
+    try:
+        from interpreter import case_events
+
+        case_events.record(
+            config.get("_sb"), tenant_id=state.get("tenant_id"),
+            case_sf_id=str(sf_id),
+            case_number=case.get("case_number") or ctx.get("case_number"),
+            actor="ai", action="route",
+            to_status=fields.get("Status"),
+            routed_team=fields.get("Routed_Team__c"),
+            run_id=state.get("_run_id"),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("sf_writeback case_events(%s): %s", sf_id, e)
     return {
         "sf_writeback": result,
         **_trace(config["_node_id"], "sf_writeback", summary, result),
@@ -430,6 +535,12 @@ def h_sf_case(state: CaseState, config: dict) -> dict:
 
     if info.get("sf_id"):
         case["sf_id"] = info["sf_id"]
+        if info.get("case_number"):
+            case["case_number"] = info["case_number"]
+        if info.get("status"):
+            case["status"] = info["status"]          # Phase 27c — don't downgrade
+        if info.get("owner_id"):
+            case["owner_id"] = info["owner_id"]
         # FR-7: the customer's email itself, on the Case (not just Description)
         if case.get("channel") == "email" and not info.get("dry_run"):
             info["inbound_email"] = salesforce.log_email_message(
@@ -945,6 +1056,10 @@ def h_confidence_gate(state: CaseState, config: dict) -> dict:
         gate["forced_escalation"] = forced
     reason = (f"forced escalate ({gate['forced_escalation']})" if forced
               else f"score={score:.3f} vs threshold={threshold:.2f} ({tier})")
+    # Phase 27c — surface the gate score on the Case (no status change here).
+    _cp_write(state, config, action="gate",
+              fields=_cp_fields(confidence=score),
+              reason=reason, confidence=score)
     return {
         "confidence": score,
         "confidence_gate": gate,
@@ -1093,6 +1208,14 @@ def h_notify(state: CaseState, config: dict) -> dict:
     else:
         summary = f"notify {label!r} (no sf_id — not posted)"
 
+    # Phase 27c — someone's been pinged; the Case is being worked but stays
+    # where it is (no reassign). Ack clock so the sweep notices if ignored.
+    _cp_write(state, config, action="notify",
+              fields=_cp_fields(status="In Progress",
+                                next_action=f"{label} rep to respond in Chatter",
+                                due_minutes=_ACK_MINUTES, confidence=confidence),
+              reason=f"notify {label}", confidence=confidence)
+
     return {"outcome": outcome, **_trace(nid, "notify", summary, outcome)}
 
 
@@ -1130,6 +1253,21 @@ def h_notify_human(state: CaseState, config: dict) -> dict:
     summary = "alerted " + (", ".join(legs) or "nobody (no channel configured)")
     if res.get("mention"):
         summary += f"  ·  @slack={res['mention'].get('slack')} @sf={res['mention'].get('sf')}"
+
+    # Phase 27c — stamp the reasoning-thread ts on the Case and record the
+    # handoff. If we arrived here straight from the gate (support + PASS, no
+    # ask_human) also move the Case to In Progress with an ack clock.
+    sl = res.get("slack") or {}
+    prior = str(state.get("case", {}).get("status") or "").strip().lower()
+    cp = _cp_fields(slack_ts=sl.get("ts"))
+    if prior not in _ADVANCED_STATUS and prior != "escalated":
+        cp.update(_cp_fields(status="In Progress",
+                             next_action="agent to reason through the reply in Slack",
+                             due_minutes=_ACK_MINUTES))
+    _cp_write(state, config, action="notify_human", fields=cp,
+              reason="slack reasoning handoff", slack_ts=sl.get("ts"),
+              slack_channel=sl.get("channel"))
+
     return {"human_alert": res, **_trace(config["_node_id"], "notify_human", summary, res)}
 
 
@@ -1189,6 +1327,18 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
         elif assignment.get("reason"):
             summary += f" (queue: {assignment['reason']})"
 
+    # Phase 27c — Status = Escalated, the routed team (Omni routes on it), and
+    # a 30-min ack clock. Escalation_Reason__c carries the gate's why.
+    team = state.get("routed_team") or "support"
+    esc_reason = ((state.get("confidence_gate") or {}).get("forced_escalation")
+                  or outcome.get("reason"))
+    _cp_write(state, config, action="ask_human",
+              fields=_cp_fields(status="Escalated", routed_team=team,
+                                next_action=f"pick up in {team} queue",
+                                due_minutes=_ACK_MINUTES, escalation_reason=esc_reason,
+                                confidence=confidence),
+              reason=esc_reason, routed_team=team, confidence=confidence)
+
     return {"outcome": outcome, **_trace(config["_node_id"], "ask_human", summary, outcome)}
 
 
@@ -1224,6 +1374,18 @@ def h_handover(state: CaseState, config: dict) -> dict:
             summary += f" → reassigned ({assignment.get('owner_type')})"
         elif assignment.get("reason"):
             summary += f" (not reassigned: {assignment['reason']})"
+
+    # Phase 27c — Status = Escalated + routed team + ack clock (Omni routes
+    # on Routed_Team__c; the queue assign above is the interim + fallback).
+    team = state.get("routed_team") or "support"
+    _cp_write(state, config, action="handover",
+              fields=_cp_fields(status="Escalated", routed_team=team,
+                                next_action=f"pick up in {team} queue",
+                                due_minutes=_ACK_MINUTES,
+                                escalation_reason=outcome["reason"],
+                                confidence=state.get("confidence")),
+              reason=outcome["reason"], routed_team=team,
+              confidence=state.get("confidence"))
     return {"outcome": outcome, **_trace(config["_node_id"], "handover", summary, outcome)}
 
 
@@ -1452,6 +1614,25 @@ def h_clarify(state: CaseState, config: dict) -> dict:
     if handover_assignment:
         outcome["handover_queue"] = handover_queue
         outcome["handover_assignment"] = handover_assignment
+    # Phase 27c — when the ball is with the customer, the Case says so and a
+    # 3-business-day clock runs; when exhausted we've escalated, so it's a
+    # 30-min ack clock against the routed team instead.
+    if exhausted:
+        _team = state.get("routed_team") or "support"
+        _cp_write(state, config, action="ask_human",
+                  fields=_cp_fields(status="Escalated", routed_team=_team,
+                                    next_action="clarify exhausted — human to take over",
+                                    due_minutes=_ACK_MINUTES,
+                                    escalation_reason="clarify_exhausted",
+                                    confidence=state.get("confidence")),
+                  reason="clarify_exhausted", routed_team=_team)
+    else:
+        _cp_write(state, config, action="clarify",
+                  fields=_cp_fields(status="Waiting on Customer",
+                                    next_action=f"awaiting customer reply ({len(questions)} q)",
+                                    due_minutes=int(config.get("customer_wait_hours", 72)) * 60),
+                  reason="kb_insufficient")
+
     rnd = f"round {clarify_round}/{max_rounds}"
     if exhausted:
         handed = ""
