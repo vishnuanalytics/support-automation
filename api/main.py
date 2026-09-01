@@ -105,7 +105,8 @@ NODE_DEFAULTS: dict[str, dict[str, Any]] = {
     "team_route": {"default": "support"},
     "case_lookup": {"k": 3, "pool": 10, "min_similarity": 0.35},
     # Phase 25 — image attachments, Salesforce context, generic AI prompt
-    "attachments": {"source": "salesforce", "max_images": 5, "ocr": True},
+    "attachments": {"source": "salesforce", "max_images": 5, "ocr": True,
+                    "video": False, "video_frames": 4, "video_max_seconds": 300},
     "sf_context": {"want": ["account", "contacts", "leads", "cases", "team"]},
     "ai_prompt": {
         "system": "You are a support triage assistant.",

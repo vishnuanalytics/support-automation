@@ -505,10 +505,9 @@ function AttachmentsForm({
   return (
     <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
       <div className="muted" style={{ fontSize: 11 }}>
-        Fetches image attachments on the Case and runs local OCR → folded into{" "}
-        <code>classify</code> / <code>draft</code> automatically, and available
-        to <code>ai_prompt</code>’s vision mode. Videos are captured but not
-        processed.
+        Fetches image (and, opt-in, video) attachments on the Case → local OCR
+        / transcription → folded into <code>classify</code> / <code>draft</code>{" "}
+        automatically, and available to <code>ai_prompt</code>’s vision mode.
       </div>
       <div className="row" style={{ marginTop: 6 }}>
         <span className="muted" style={{ width: 90 }}>source</span>
@@ -528,8 +527,32 @@ function AttachmentsForm({
       <label className="row" style={{ gap: 6, marginTop: 4 }}>
         <input type="checkbox" style={{ width: "auto" }}
                checked={config.ocr !== false} onChange={(e) => set({ ocr: e.target.checked })} />
-        run OCR
+        run OCR on images
       </label>
+      <label className="row" style={{ gap: 6, marginTop: 4 }}>
+        <input type="checkbox" style={{ width: "auto" }}
+               checked={config.video === true} onChange={(e) => set({ video: e.target.checked })} />
+        process video (transcribe audio + OCR keyframes)
+      </label>
+      {config.video === true && (
+        <div className="row" style={{ marginTop: 4 }}>
+          <span className="muted" style={{ width: 90 }}>keyframes</span>
+          <input type="number" min={1} max={12}
+                 value={typeof config.video_frames === "number" ? config.video_frames : 4}
+                 onChange={(e) => set({ video_frames: Math.max(1, Math.min(12, Number(e.target.value) || 4)) })} />
+          <span className="muted" style={{ width: 70, marginLeft: 8 }}>max secs</span>
+          <input type="number" min={30} max={1800}
+                 value={typeof config.video_max_seconds === "number" ? config.video_max_seconds : 300}
+                 onChange={(e) => set({ video_max_seconds: Math.max(30, Math.min(1800, Number(e.target.value) || 300)) })} />
+        </div>
+      )}
+      {config.video === true && (
+        <div className="muted" style={{ fontSize: 11 }}>
+          adds the image-heavy <code>faster-whisper</code> + <code>ffmpeg</code>{" "}
+          path; leave off unless screen recordings are common. Only the first{" "}
+          <em>max secs</em> is processed.
+        </div>
+      )}
     </div>
   );
 }

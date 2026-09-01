@@ -14,8 +14,9 @@
     { "node_id": "c5000002", "type": "sf_context", "label": "Load the Salesforce picture (org / people / cases)",
       "config": { "want": ["account", "contacts", "leads", "cases", "team"] } },
 
-    { "node_id": "c5000003", "type": "attachments", "label": "Fetch Case images + OCR",
-      "config": { "source": "salesforce", "max_images": 5, "ocr": true } },
+    { "node_id": "c5000003", "type": "attachments", "label": "Fetch Case images + video → OCR / transcript",
+      "config": { "source": "salesforce", "max_images": 5, "ocr": true,
+        "video": false, "video_frames": 4, "video_max_seconds": 300 } },
 
     { "node_id": "c5000004", "type": "retrieve", "label": "Retrieve KB context",
       "config": { "source": ["supabase", "neo4j"], "top_k": 6, "use_rerank": true, "min_score": 0.0 } },

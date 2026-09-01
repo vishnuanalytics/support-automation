@@ -67,12 +67,68 @@ def test_extract_pulls_images_and_ocr(monkeypatch):
 
 def test_h_attachments_writes_state(monkeypatch):
     monkeypatch.setattr(attachments, "extract",
-                        lambda *a, **k: {"attachments": [{"filename": "a.png", "blob_key": "068"}],
+                        lambda *a, **k: {"attachments": [{"filename": "a.png", "kind": "image",
+                                                          "blob_key": "068"}],
                                          "attachment_text": "hello", "_blobs": {"068": b"x"}})
     out = h_attachments({"case": {"sf_id": "500X"}, "tenant_id": "t"}, {"_node_id": "n"})
     assert out["attachment_text"] == "hello"
     assert out["_attachment_blobs"] == {"068": b"x"}
     assert out["trace"][0]["type"] == "attachments"
+
+
+# ── video ─────────────────────────────────────────────────────────
+def test_transcribe_no_whisper_is_empty(monkeypatch):
+    monkeypatch.setattr(attachments, "_whisper_model", lambda: None)
+    assert attachments.transcribe(b"\x00\x00moov") == ""
+
+
+def test_video_frames_no_ffmpeg_is_empty(monkeypatch):
+    monkeypatch.setattr(attachments, "_ffmpeg", lambda: None)
+    assert attachments.video_frames(b"data") == []
+
+
+def test_process_video_combines_transcript_and_frame_ocr(monkeypatch):
+    monkeypatch.setattr(attachments, "transcribe", lambda d, **k: "so I click submit and it 500s")
+    monkeypatch.setattr(attachments, "video_frames", lambda d, **k: [b"F1", b"F2"])
+    monkeypatch.setattr(attachments, "ocr_bytes",
+                        lambda fr: "HTTP 500 Internal Server Error" if fr == b"F2" else "")
+    v = attachments.process_video(b"vid", "repro.mp4")
+    assert v["transcript"].startswith("so I click")
+    assert "HTTP 500" in v["frame_ocr"] and v["frames"] == [b"F1", b"F2"]
+
+
+class _VidSF(_SF):
+    def query(self, soql):
+        if "ContentVersion" in soql:
+            return {"records": [{"Id": "068VID", "Title": "repro", "FileExtension": "mp4",
+                                 "FileType": "MP4", "ContentSize": 2048}]}
+        return super().query(soql)
+
+
+def test_extract_processes_video_when_opted_in(monkeypatch):
+    from interpreter import salesforce
+    monkeypatch.setattr(salesforce, "available", lambda: True)
+    monkeypatch.setattr(salesforce, "client_for", lambda *a, **k: _VidSF())
+    monkeypatch.setattr(attachments, "process_video",
+                        lambda data, name, **k: {"transcript": "the button does nothing",
+                                                 "frame_ocr": "Save failed", "frames": [b"K0", b"K1"]})
+
+    out = attachments.extract({"sf_id": "500X"}, tenant_id="t", do_video=True)
+    a = out["attachments"][0]
+    assert a["kind"] == "video" and a["transcript"] == "the button does nothing"
+    assert "narration: the button does nothing" in out["attachment_text"]
+    assert "on-screen text: Save failed" in out["attachment_text"]
+    assert set(out["_blobs"].values()) == {b"K0", b"K1"}          # keyframes for vision
+
+
+def test_extract_skips_video_by_default(monkeypatch):
+    from interpreter import salesforce
+    monkeypatch.setattr(salesforce, "available", lambda: True)
+    monkeypatch.setattr(salesforce, "client_for", lambda *a, **k: _VidSF())
+    monkeypatch.setattr(attachments, "process_video",
+                        lambda *a, **k: pytest.fail("video processing must be opt-in"))
+    out = attachments.extract({"sf_id": "500X"}, tenant_id="t")   # do_video defaults False
+    assert out["attachments"] == []
 
 
 # ── sf_context ────────────────────────────────────────────────────

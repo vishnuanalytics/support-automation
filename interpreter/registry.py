@@ -1535,12 +1535,14 @@ def _render(tmpl: str, flat: dict) -> str:
 
 @register("attachments")
 def h_attachments(state: CaseState, config: dict) -> dict:
-    """Fetch image attachments on the Case + local OCR (Phase 25). Writes
-    `state.attachments` (list) + `state.attachment_text` (OCR, folded into
-    classify/draft) + `state._attachment_blobs` (raw bytes, for `ai_prompt`
+    """Fetch image (and, opt-in, video) attachments on the Case + local
+    OCR / transcription (Phase 25). Writes `state.attachments` +
+    `state.attachment_text` (folded into classify/draft) +
+    `state._attachment_blobs` (image bytes + video keyframes, for `ai_prompt`
     vision; not persisted). Pass-through, best-effort.
 
-    config: {source="salesforce"|"email"|"auto", max_images=5, ocr=true}
+    config: {source="salesforce"|"email"|"auto", max_images=5, ocr=true,
+             video=false, video_frames=4, video_max_seconds=300}
     """
     from interpreter import attachments as att
 
@@ -1549,19 +1551,26 @@ def h_attachments(state: CaseState, config: dict) -> dict:
         out = att.extract(state.get("case", {}), tenant_id=state.get("tenant_id"),
                           limit=int(config.get("max_images", att.MAX_IMAGES)),
                           do_ocr=config.get("ocr", True) is not False,
+                          do_video=bool(config.get("video", False)),
+                          video_frames_n=int(config.get("video_frames", att.VIDEO_FRAMES)),
+                          video_max_seconds=int(config.get("video_max_seconds",
+                                                           att.VIDEO_MAX_SECONDS)),
                           source=config.get("source", "salesforce"))
     except Exception as e:  # noqa: BLE001
         log.warning("attachments node failed: %s", e)
         out = {"attachments": [], "attachment_text": "", "_blobs": {}}
 
-    n = len(out["attachments"])
+    kinds = [a.get("kind", "image") for a in out["attachments"]]
+    n_img, n_vid = kinds.count("image"), kinds.count("video")
     chars = len(out["attachment_text"])
     return {
         "attachments": out["attachments"],
         "attachment_text": out["attachment_text"],
         "_attachment_blobs": out["_blobs"],
-        **_trace(nid, "attachments", f"{n} image(s), {chars} chars OCR",
-                 {"count": n, "ocr_chars": chars,
+        **_trace(nid, "attachments",
+                 f"{n_img} image(s)" + (f" + {n_vid} video(s)" if n_vid else "")
+                 + f", {chars} chars extracted",
+                 {"images": n_img, "videos": n_vid, "chars": chars,
                   "files": [a["filename"] for a in out["attachments"]]}),
     }
 

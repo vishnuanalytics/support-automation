@@ -36,6 +36,10 @@ websockets
 # interpreter/attachments guards the import and degrades to "no OCR" if absent.
 rapidocr-onnxruntime
 pillow
+# Phase 25 — video: audio transcript (CTranslate2, CPU, no torch) + ffmpeg
+# keyframes. Also import-guarded; only used when an `attachments` node sets
+# video:true. ffmpeg itself is installed in the Dockerfile.
+faster-whisper
 
 # api (Phase 5)
 fastapi

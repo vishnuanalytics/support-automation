@@ -8,9 +8,10 @@ FROM python:3.12-slim
 
 # curl: compose healthcheck for the api service. ca-certificates: TLS to
 # Supabase / Salesforce / Groq / Gmail. libgl1 / libglib2.0-0 / libxcb1:
-# OpenCV runtime, pulled in by RapidOCR (Phase 25 image OCR).
+# OpenCV runtime for RapidOCR (Phase 25 image OCR). ffmpeg: video keyframe
+# extraction + audio decode for faster-whisper (Phase 25 video).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl ca-certificates libgl1 libglib2.0-0 libxcb1 \
+        curl ca-certificates libgl1 libglib2.0-0 libxcb1 ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
