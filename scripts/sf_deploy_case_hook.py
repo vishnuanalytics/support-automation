@@ -12,9 +12,16 @@ Named Credential URL in Setup; no redeploy.
 
     python scripts/sf_deploy_case_hook.py https://webhook.site/<uuid>
     python scripts/sf_deploy_case_hook.py --url https://my-api.example.com
+    python scripts/sf_deploy_case_hook.py --remove   # delete the trigger + class + cred
 
 Needs SF creds + "Author Apex" / "Modify Metadata". Works on Developer
 Edition without test coverage.
+
+REMOVE this when the CDC / Pub-Sub subscriber (Phase 20l) is your
+Salesforce -> app push path: that one is outbound-only and needs no public
+URL, so the Apex @future callout here is redundant and — with the API
+unreachable — throws `CalloutException: Unable to tunnel through proxy` and
+emails the org admin on every Case.
 """
 
 from __future__ import annotations
@@ -111,6 +118,29 @@ PACKAGE = """\
 """ % {"api": API}
 
 
+_EMPTY_PACKAGE = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+                  '<Package xmlns="http://soap.sforce.com/2006/04/metadata">'
+                  f'<version>{API}</version></Package>\n')
+# trigger before class (it references the class); cred last.
+_DESTRUCTIVE = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+                '<Package xmlns="http://soap.sforce.com/2006/04/metadata">\n'
+                '  <types><members>SupportAutomationCaseTrigger</members>'
+                '<name>ApexTrigger</name></types>\n'
+                '  <types><members>SupportAutomationHook</members>'
+                '<name>ApexClass</name></types>\n'
+                '  <types><members>SupportAutomation</members>'
+                '<name>NamedCredential</name></types>\n'
+                f'  <version>{API}</version>\n</Package>\n')
+
+
+def _remove_zip() -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("package.xml", _EMPTY_PACKAGE)
+        z.writestr("destructiveChanges.xml", _DESTRUCTIVE)
+    return buf.getvalue()
+
+
 def _zip(secret: str, url: str) -> bytes:
     meta = ('<?xml version="1.0" encoding="UTF-8"?>\n'
             f'<ApexClass xmlns="http://soap.sforce.com/2006/04/metadata">'
@@ -131,19 +161,44 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("url", nargs="?", help="the automation's public base URL")
     ap.add_argument("--url", dest="url_opt")
+    ap.add_argument("--remove", action="store_true",
+                    help="delete the trigger + class + Named Credential")
     args = ap.parse_args()
-    url = (args.url or args.url_opt or "").rstrip("/")
-    if not url:
-        sys.exit("pass the public base URL (e.g. https://webhook.site/<uuid>)")
-    secret = os.environ.get("SF_HOOK_SECRET")
-    if not secret:
-        sys.exit("SF_HOOK_SECRET not in .env")
     if not available():
         sys.exit("no SF creds in .env")
 
     sf = _client()
     import tempfile
     zpath = pathlib.Path(tempfile.gettempdir()) / "sf_case_hook.zip"
+
+    if args.remove:
+        zpath.write_bytes(_remove_zip())
+        print("removing SupportAutomationCaseTrigger + SupportAutomationHook + "
+              "SupportAutomation Named Credential …")
+        dep = sf.deploy(str(zpath), sandbox=False, testLevel="NoTestRun")
+        aid = dep["asyncId"] if isinstance(dep, dict) else dep[0]
+        res: dict = {}
+        for _ in range(40):
+            time.sleep(3)
+            res = sf.checkDeployStatus(aid, include_details=True)
+            if (res or {}).get("state") not in (None, "", "InProgress", "Pending", "Queued"):
+                break
+        print(f"deploy: state={res.get('state')} success={res.get('success')}")
+        for f in (res.get("deployment_detail", {}) or {}).get("componentFailures", []) or []:
+            print("  FAIL", f.get("fullName"), "-", f.get("problem"))
+        ok = res.get("state") in ("Succeeded", "Completed")
+        print("\ndone — the Apex push path is gone; CDC / Pub-Sub is now the only "
+              "Salesforce -> app push." if ok else "\nremoval did not fully succeed — "
+              "delete the trigger/class/cred in Setup manually.")
+        return 0 if ok else 1
+
+    url = (args.url or args.url_opt or "").rstrip("/")
+    if not url:
+        sys.exit("pass the public base URL (e.g. https://webhook.site/<uuid>), or --remove")
+    secret = os.environ.get("SF_HOOK_SECRET")
+    if not secret:
+        sys.exit("SF_HOOK_SECRET not in .env")
+
     zpath.write_bytes(_zip(secret, url))
     print(f"deploying push trigger -> {url}")
     dep = sf.deploy(str(zpath), sandbox=False, testLevel="NoTestRun")
