@@ -27,6 +27,7 @@ for _k in _KEYS:
 def _clean(monkeypatch):
     for k in _KEYS:
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.delenv("SF_DEDUP_WRITES", raising=False)   # don't inherit .env
     llm._cache.clear()
 
 

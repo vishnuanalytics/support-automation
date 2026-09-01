@@ -1040,9 +1040,15 @@ def h_notify(state: CaseState, config: dict) -> dict:
     body = tmpl.format(label=label, confidence=confidence, draft=draft or "(no draft yet)")
 
     if sf_id and outcome["channel"] == "salesforce_chatter":
-        # @mention a User/Group id only — a Queue group id isn't mentionable.
-        mention = (target if _looks_like_sf_id(target)
-                   and target_type in (None, "user", "group") else None)
+        # @mention a real person. A User/Group id is mentionable directly; a
+        # Queue isn't, so mention one of its members; else the fallback id.
+        if _looks_like_sf_id(target) and target_type in (None, "user", "group"):
+            mention = target
+        elif target_type == "queue" and target:
+            from interpreter import routing
+            mention = routing.queue_member(target, state.get("tenant_id"))[0] or config.get("mention_id")
+        else:
+            mention = config.get("mention_id")
         chatter = salesforce.post_chatter(
             sf_id, body, mention_id=mention, tenant_id=state.get("tenant_id")
         )
@@ -1328,9 +1334,21 @@ def h_clarify(state: CaseState, config: dict) -> dict:
              "information from the customer. Suggested questions to send:\n\n")
             + numbered
         )
+        # @mention a real person: a queue member (Chatter can't mention a
+        # Queue), the routed team's lead, else the configured fallback id.
+        mention = config.get("mention_id")
+        try:
+            from interpreter import routing
+            qref = config.get("mention_queue") or (
+                f"Team_{(state.get('routed_team') or '').capitalize()}"
+                if config.get("mention_team") else None)
+            if qref:
+                uid, _ = routing.queue_member(qref, state.get("tenant_id"))
+                mention = uid or mention
+        except Exception:  # noqa: BLE001
+            pass
         delivery = salesforce.post_chatter(
-            sf_id, note, mention_id=config.get("mention_id"),
-            tenant_id=state.get("tenant_id"),
+            sf_id, note, mention_id=mention, tenant_id=state.get("tenant_id"),
         )
 
     auto_sent = bool(auto_send and delivery and delivery.get("sent"))

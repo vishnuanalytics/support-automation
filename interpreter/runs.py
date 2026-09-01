@@ -29,8 +29,12 @@ def build_row(flow: dict, final: dict, *, case: dict, source: str,
     outcome = final.get("outcome") or {}
     case_id = case.get("case_id") or case.get("sf_id") or case.get("id")
     action = outcome.get("action")
-    # a run that went to a human, on a real Case, will get a resolution check
-    pending = action in ("ask_human", "handover") and bool(case.get("sf_id") or case.get("id"))
+    # a run that went to a human, on a real Case, gets a resolution check
+    # (Phase 20m: an agent CaseComment -> the bot polishes it into a customer
+    # reply and sends it). `notify` and `clarify`/`need_info` count too — a rep
+    # answering in Chatter/comments should still reach the customer.
+    pending = (action in ("ask_human", "handover", "notify", "need_info")
+               and bool(case.get("sf_id") or case.get("id")))
     return {
         "flow_id": flow["flow_id"],
         "flow_version": flow.get("flow_version"),

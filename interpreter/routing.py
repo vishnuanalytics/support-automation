@@ -90,6 +90,40 @@ def _sf_team_member(team: str | None, tenant_id: str | None) -> tuple[str | None
     return None, None
 
 
+def queue_member(queue_ref: str | None, tenant_id: str | None = None) -> tuple[str | None, str | None]:
+    """(user_id, name) of an active member of the queue — Chatter can't
+    @mention a Queue group, so `notify` / `clarify` mention a person in it.
+    `queue_ref` = a Queue DeveloperName / Name / Id. Cached; best-effort."""
+    if not queue_ref or not salesforce.available():
+        return None, None
+    ck = f"qm:{queue_ref}"
+    hit = _cache_get(ck)
+    if hit is not None:
+        return hit
+    try:
+        sf = salesforce.client_for(tenant_id)
+        gid = queue_ref
+        if not (len(queue_ref) in (15, 18) and queue_ref[:3] in ("00G",)):
+            q = salesforce._soql_lit(queue_ref)
+            rows = sf.query("SELECT Id FROM Group WHERE Type = 'Queue' AND "
+                            f"(DeveloperName = '{q}' OR Name = '{q}') LIMIT 1").get("records", [])
+            gid = rows[0]["Id"] if rows else None
+        if gid:
+            g = salesforce._soql_lit(gid)
+            rows = sf.query(
+                "SELECT Id, Name FROM User WHERE IsActive = true AND Id IN "
+                f"(SELECT UserOrGroupId FROM GroupMember WHERE GroupId = '{g}') LIMIT 1"
+            ).get("records", [])
+            if rows:
+                out = (rows[0]["Id"], rows[0].get("Name"))
+                _cache_put(ck, out)
+                return out
+    except Exception as e:  # noqa: BLE001
+        log.warning("queue_member(%s): %s", queue_ref, e)
+    _cache_put(ck, (None, None))
+    return None, None
+
+
 def _sf_queue_id(name: str | None, tenant_id: str | None) -> str | None:
     if not (name and salesforce.available()):
         return None

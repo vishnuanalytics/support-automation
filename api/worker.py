@@ -57,12 +57,13 @@ def _run_flow(payload: dict, sb) -> dict:
                             subject=m.get("subject") or case.get("subject"))
                 if m.get("from_addr"):
                     case["from"] = m["from_addr"]
-                mid = m.get("message_id")
-                if mid:
-                    case["message_id"] = mid
-                    # collapse the CaseChangeEvent + EmailMessageChangeEvent
-                    # for the same mail onto one run: both use `email:<mid>`.
-                    key = f"email:{mid}"
+                if m.get("message_id"):
+                    case["message_id"] = m["message_id"]
+                # collapse the CaseChangeEvent + EmailMessageChangeEvent for
+                # the same mail onto one run: `plan_events` keys the inbound
+                # spec on the EmailMessage *record id*, so match that.
+                if m.get("id"):
+                    key = f"email:{m['id']}"
 
     if key:
         dup = sb.table("runs").select("run_id").eq("flow_id", flow_id) \

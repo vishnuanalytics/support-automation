@@ -233,7 +233,7 @@ def latest_inbound_email(case_id: str, *, tenant_id: str | None = None) -> dict[
         return None
     try:
         rows = client_for(tenant_id).query(
-            "SELECT Subject, TextBody, FromAddress, MessageIdentifier, MessageDate "
+            "SELECT Id, Subject, TextBody, FromAddress, MessageIdentifier, MessageDate "
             f"FROM EmailMessage WHERE ParentId = '{_soql_lit(case_id)}' AND Incoming = true "
             "ORDER BY MessageDate DESC LIMIT 1"
         ).get("records", [])
@@ -244,6 +244,7 @@ def latest_inbound_email(case_id: str, *, tenant_id: str | None = None) -> dict[
         return None
     m = rows[0]
     return {
+        "id": m.get("Id"),
         "text": m.get("TextBody") or "",
         "subject": m.get("Subject") or "",
         "from_addr": m.get("FromAddress") or "",
@@ -526,7 +527,7 @@ def _recent_duplicate(sf, sobject: str, case_id: str, body_field: str, body: str
     in the last `minutes` — so a re-run of the same flow doesn't stack a
     second identical Chatter note / draft CaseComment (Phase 23). Set
     SF_DEDUP_WRITES=0 to skip the check (saves one SOQL per escalation)."""
-    if os.environ.get("SF_DEDUP_WRITES") == "0":
+    if os.environ.get("SF_DEDUP_WRITES", "").strip() == "0":
         return False
     try:
         from datetime import datetime, timedelta, timezone
@@ -651,9 +652,12 @@ def log_email_message(
     sf = client_for(tenant_id)
     try:
         if mid:
+            # Salesforce Email-to-Case stores MessageIdentifier WITH angle
+            # brackets; match both forms or `sf_case` records a duplicate.
+            forms = ", ".join(f"'{_soql_lit(v)}'" for v in (mid, f"<{mid}>"))
             dup = sf.query(
                 f"SELECT Id FROM EmailMessage WHERE ParentId = '{_soql_lit(case_id)}' "
-                f"AND MessageIdentifier = '{_soql_lit(mid)}' LIMIT 1"
+                f"AND MessageIdentifier IN ({forms}) LIMIT 1"
             ).get("records", [])
             if dup:
                 return {"created": False, "dry_run": False, "id": dup[0]["Id"], "idempotent": True}

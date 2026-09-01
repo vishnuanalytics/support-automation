@@ -907,13 +907,17 @@ def test_build_row_persists_clarify_round():
     assert build_row(flow, final, case={"sf_id": "500Z"}, source="api")["clarify_round"] == 2
 
 
-def test_build_row_need_info_is_recorded_but_not_pending():
+def test_build_row_need_info_on_a_real_case_schedules_a_resolution_check():
     flow = {"flow_id": "f", "tenant_id": "t", "team": "support-triage"}
     final = {"outcome": {"action": "need_info", "questions": ["what plan?"]},
              "trace": [], "confidence": 0.1}
+    # Phase 23c: need_info / notify on a real Case are now `pending` too — a
+    # rep answering in Chatter/comments should still reach the customer.
     row = build_row(flow, final, case={"sf_id": "500X"}, source="api")
-    assert row["outcome"] == "need_info"
-    assert row["human_action"] is None
+    assert row["outcome"] == "need_info" and row["human_action"] == "pending"
+    # no sf_id -> nothing to watch
+    row2 = build_row(flow, final, case={"case_id": "synthetic"}, source="api")
+    assert row2["human_action"] is None
 
 
 @register("_t_gate17")
