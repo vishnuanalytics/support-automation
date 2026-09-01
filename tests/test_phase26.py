@@ -59,6 +59,9 @@ def test_build_video_needs_explicit_video_modality():
 
 # ── llm.py reads the roster ──────────────────────────────────────
 def test_fallback_chain_uses_the_roster(monkeypatch):
+    # both providers "configured" -> the chosen (Groq) model survives
+    # _dedup_available's availability filter and leads the chain.
+    monkeypatch.setenv("GROQ_API_KEY", "x")
     monkeypatch.setenv("OPENROUTER_API_KEY", "x")
     monkeypatch.setattr(roster, "chain",
                         lambda cap: (["free/a:free", "free/b:free"], ["paid/c"])

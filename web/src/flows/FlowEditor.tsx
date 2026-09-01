@@ -15,6 +15,7 @@ import type { Flow, FlowCandidate, NodeTypesResp } from "../types";
 import {
   candidateToCanvas,
   layout,
+  TERMINAL,
   toFlowPayload,
   toReactFlow,
   uuid,
@@ -24,8 +25,6 @@ import {
 import { NodeCard } from "./NodeCard";
 import { EdgeInspector, NodeInspector } from "./Inspector";
 import { RunPanel } from "./RunPanel";
-
-const TERMINAL = new Set(["auto_reply", "ask_human", "handover", "clarify"]);
 
 export function FlowEditor(props: {
   flowId: string;
