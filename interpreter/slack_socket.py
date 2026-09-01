@@ -37,6 +37,8 @@ log = logging.getLogger("interpreter.slack_socket")
 _OPEN_URL = "https://slack.com/api/apps.connections.open"
 _DEAD_STATES = ("sent", "abandoned")
 _MENTION_RE = re.compile(r"^\s*<@[A-Z0-9]+>\s*")
+_ROUTE_RE = re.compile(r"^\s*route:\s*(support|tier2|csm|sales|offboarding|billing)\b",
+                       re.IGNORECASE)
 # single-tenant deployment — the Slack bot token lives on this tenant's row
 _TENANT = os.environ.get("DEFAULT_TENANT_ID", "00000000-0000-0000-0000-000000000000")
 
@@ -133,6 +135,17 @@ def dispatch(sb, event: dict, *, post, deliver=None, bot_user_id: str | None = N
     if not session:
         return {"skip": "no open session for this thread"}
 
+    # Phase 27h — `route: <team>` from the Reassign / Not-my-team buttons
+    m = _ROUTE_RE.match(text)
+    if m:
+        team = m.group(1).lower()
+        r = _reassign(sb, session, team)
+        post(channel, thread_ts,
+             f":arrows_counterclockwise: Re-routed to *{team}* — Omni will push it to that team."
+             if r.get("ok") else f":warning: Couldn't re-route ({r.get('error')}).")
+        return {"session_id": session["session_id"], "action": "reassign",
+                "routed_team": team, "ok": r.get("ok")}
+
     out = reasoning.handle_agent_message(sb, session, text, handoff=mentioned or None)
     post(channel, thread_ts, out["reply"])
     res = {"session_id": session["session_id"],
@@ -147,6 +160,75 @@ def dispatch(sb, event: dict, *, post, deliver=None, bot_user_id: str | None = N
              f"The draft is on the Case.")
         res["delivery"] = d
     return res
+
+
+_TEAM_QUEUE = {"support": "Team_Support", "tier2": "Support_Tier2", "csm": "Team_CSM",
+               "sales": "Team_Sales", "offboarding": "Team_Offboarding",
+               "billing": "Billing_Escalations"}
+
+
+def _reassign(sb, session: dict, team: str) -> dict:
+    """`route: <team>` — set Routed_Team__c + owner queue on the Case; Omni
+    then re-routes. Also records a routing-correction case_events row."""
+    sf_id = session.get("case_id")
+    if not sf_id:
+        return {"ok": False, "error": "no case id on the session"}
+    try:
+        from interpreter import case_events, salesforce
+
+        salesforce.update_case_fields(sf_id, {"Routed_Team__c": team, "Status": "Escalated"})
+        salesforce.assign_case(sf_id, queue=_TEAM_QUEUE.get(team, "Team_Support"))
+        case_events.record(sb, tenant_id=session.get("tenant_id"), case_sf_id=str(sf_id),
+                           case_number=session.get("case_number"),
+                           actor=f"agent:{session.get('agent_slack_id') or '?'}",
+                           action="reassign", to_status="Escalated", routed_team=team,
+                           reason="agent reassigned in Slack")
+        return {"ok": True}
+    except Exception as e:  # noqa: BLE001
+        log.warning("_reassign(%s -> %s): %s", sf_id, team, e)
+        return {"ok": False, "error": str(e)[:120]}
+
+
+def dispatch_action(sb, payload: dict, *, post, deliver=None) -> dict:
+    """Phase 27h — one Block Kit button click (Socket Mode `interactive`
+    envelope). Pure given `post` / `deliver`."""
+    if payload.get("type") != "block_actions":
+        return {"skip": f"payload type={payload.get('type')}"}
+    actions = payload.get("actions") or []
+    if not actions:
+        return {"skip": "no actions"}
+    action_id = actions[0].get("action_id")
+    channel = (payload.get("channel") or {}).get("id")
+    cont = payload.get("container") or {}
+    msg = payload.get("message") or {}
+    thread_ts = cont.get("thread_ts") or msg.get("thread_ts") or msg.get("ts")
+    if not (channel and thread_ts):
+        return {"skip": "no channel/thread on the interaction"}
+
+    session = _find_session(sb, thread_ts)
+    if not session:
+        return {"skip": "no open session for this thread"}
+
+    if action_id == "cx_send":
+        out = reasoning.handle_agent_message(sb, session, "send it", handoff=True)
+        if out.get("action") == "send":
+            d = (deliver or _deliver)(sb, out["session"])
+            post(channel, thread_ts,
+                 ":white_check_mark: Sent to the customer." if d.get("sent")
+                 else f":warning: couldn't send ({d.get('error') or d.get('via')}).")
+            return {"action": "send", "delivery": d}
+        post(channel, thread_ts, out.get("reply") or "…")
+        return {"action": "send", "state": out["session"]["state"]}
+    if action_id == "cx_edit":
+        post(channel, thread_ts,
+             ":pencil2: Reply in this thread with the edited reply text and I'll send *that*.")
+        return {"action": "edit"}
+    if action_id in ("cx_reassign", "cx_not_my_team"):
+        post(channel, thread_ts,
+             "Which team? Reply `route: <team>` — `support` / `tier2` / `csm` / "
+             "`sales` / `offboarding` / `billing`.")
+        return {"action": action_id}
+    return {"skip": f"unknown action {action_id}"}
 
 
 # ── transport ─────────────────────────────────────────────────────
@@ -223,6 +305,12 @@ async def _run_async() -> None:
                             log.info("dispatch: %s", dispatch(sb, ev, post=post, bot_user_id=bot_uid))
                         except Exception as e:  # noqa: BLE001
                             log.exception("dispatch failed: %s", e)
+                    if kind == "interactive":                 # Phase 27h — button clicks
+                        try:
+                            log.info("action: %s",
+                                     dispatch_action(sb, msg.get("payload") or {}, post=post))
+                        except Exception as e:  # noqa: BLE001
+                            log.exception("dispatch_action failed: %s", e)
         except Exception as e:  # noqa: BLE001
             log.warning("socket error (%s); reconnecting in 5s", e)
             await asyncio.sleep(5)

@@ -763,9 +763,15 @@ an agent can go "Available".
   Rule skipped (the `queue_sweep` covers it; add by hand for a worker-outage
   backstop).
 
-Still not built: the Slack channels / usergroups (needs Slack admin) and the
-interactive card buttons (**27h** — needs the Slack app interactivity
-endpoint).
+**27h interactive card — built (2026-09-01).** `alert._handoff_card` renders
+the reasoning-thread root as a Block Kit card (Send as-is / Edit in thread /
+Reassign… / Not my team); `slack_socket.dispatch_action` handles the clicks
+(Socket Mode `interactive` envelopes over the existing WSS); a `route: <team>`
+reply updates `Routed_Team__c` + re-assigns the queue + writes a
+routing-correction `case_events` row. One Slack-app toggle to activate:
+Interactivity ON (no request URL under Socket Mode). 319 offline pytest.
+
+Still not built: the Slack `#cx-*` channels / usergroups (needs Slack admin).
 
 **27a live-applied + 27a/c/d live-verified (2026-09-01).** Migrations `062`/
 `063` applied; `sf_support_setup.py --only queues --only cp_fields --only

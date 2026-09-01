@@ -132,9 +132,16 @@ Repo-side routing (`resolve_slack_route`, migration `063`) is done. In Slack:
 4. Invite the `slackbot` app to every channel (it needs `channels:history` +
    membership per the Socket-Mode setup).
 
-### Deferred — the interactive card buttons
-**Send as-is / Edit in thread / Reassign… / Not my team** need the Slack app's
-**Interactivity** request URL (or Socket Mode `interactive` envelopes) plus a
-Block Kit card. Not built. Until then the thread works as a reasoning dialogue
-(`@mention` / `take`), and reassignment is `Routed_Team__c` edited on the Case
-(Omni re-routes). Track as Phase 27h.
+### 27h — interactive card buttons  ✅ built (2026-09-01)
+The handoff-thread root is now a Block Kit card: **Send as-is** (delivers the
+draft) · **Edit in thread** (prompts for edited text) · **Reassign…** /
+**Not my team** (prompt → agent replies `route: <team>` → `Routed_Team__c`
+updated + queue re-assigned + Omni re-routes + a routing-correction
+`case_events` row). `alert._handoff_card` builds it; `slack_socket.
+dispatch_action` handles the clicks; the WSS loop routes `type: interactive`
+envelopes.
+
+**One Slack-app toggle:** api.slack.com/apps → your app → **Interactivity &
+Shortcuts** → turn **Interactivity ON**. With Socket Mode there's no request
+URL to fill — the `interactive` payloads then arrive over the same WebSocket.
+No re-install / new scopes needed.
