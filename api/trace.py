@@ -47,8 +47,10 @@ def build_timeline(
     runs: list[dict],
     jobs: list[dict],
     channel_errors: list[dict] | None = None,
+    case_events: list[dict] | None = None,
 ) -> dict[str, Any]:
-    """runs + jobs rows (already fetched, any order) -> a timeline + summary."""
+    """runs + jobs rows (already fetched, any order) -> a timeline + summary.
+    `case_events` (Phase 27) is the Status / routing / breach spine."""
     runs = sorted(runs, key=lambda r: str(r.get("created_at") or ""))
     jobs = sorted(jobs, key=lambda j: str(j.get("created_at") or ""))
     now = datetime.now(timezone.utc)
@@ -162,6 +164,25 @@ def build_timeline(
                 "summary": ce.get("last_error"), "error": ce.get("last_error"), "data": ce,
             })
 
+    # ---- case_events (Phase 27 — the Status / routing / breach spine) ---
+    for ev in sorted(case_events or [], key=lambda e: str(e.get("ts") or "")):
+        transition = ""
+        if ev.get("from_status") or ev.get("to_status"):
+            transition = f" · {ev.get('from_status') or '∅'} → {ev.get('to_status') or '∅'}"
+        bits = [b for b in (ev.get("routed_team") and f"team={ev['routed_team']}",
+                            ev.get("reason")) if b]
+        if str(ev.get("action")) == "breach":
+            errors.append(f"SLA breach: Case {ev.get('case_number') or ev.get('case_sf_id')}")
+        events.append({
+            "ts": _iso(_ts(ev.get("ts"))),
+            "kind": "case_event",
+            "label": f"case · {ev.get('action')}",
+            "status": ev.get("to_status"),
+            "summary": (f"{ev.get('actor')}{transition}"
+                        + (f" · {' · '.join(bits)}" if bits else "")),
+            "data": ev,
+        })
+
     events.sort(key=lambda e: (e["ts"] or "", e["kind"] != "job"))
 
     last_run = runs[-1] if runs else {}
@@ -170,7 +191,7 @@ def build_timeline(
         "sf_id": sf_id,
         "case_number": case_number,
         "counts": {"runs": len(runs), "jobs": len(jobs), "events": len(events),
-                   "errors": len(errors)},
+                   "case_events": len(case_events or []), "errors": len(errors)},
         "outcome": last_run.get("outcome"),
         "human_action": last_run.get("human_action"),
         "flow_version": last_run.get("flow_version"),

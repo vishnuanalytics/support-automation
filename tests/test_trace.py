@@ -90,3 +90,26 @@ def test_markdown_render_has_the_key_facts():
     assert "STUB mode" in md
     assert "labels written" in md and "labels skipped" in md
     assert "## timeline" in md
+
+
+def test_case_events_fold_into_the_timeline():
+    ev = [
+        {"ts": "2026-09-01T16:24:27Z", "actor": "ai", "action": "route",
+         "from_status": None, "to_status": "Triaged", "routed_team": "csm",
+         "case_sf_id": "500Z", "case_number": "00001190"},
+        {"ts": "2026-09-01T16:24:41Z", "actor": "ai", "action": "ask_human",
+         "from_status": "New", "to_status": "Escalated", "routed_team": "csm",
+         "reason": "confidence below tier threshold", "case_sf_id": "500Z"},
+        {"ts": "2026-09-01T16:40:00Z", "actor": "system:sweep", "action": "breach",
+         "from_status": "Escalated", "to_status": "Escalated", "routed_team": "csm",
+         "case_sf_id": "500Z", "case_number": "00001190"},
+    ]
+    t = build_timeline(key="500Z", runs=[], jobs=[], case_events=ev)
+    assert t["counts"]["case_events"] == 3
+    kinds = [e["kind"] for e in t["timeline"]]
+    assert kinds.count("case_event") == 3
+    esc = next(e for e in t["timeline"] if e["label"] == "case · ask_human")
+    assert "New → Escalated" in esc["summary"] and "team=csm" in esc["summary"]
+    assert any("SLA breach" in err for err in t["errors"])       # breach -> errors
+    md = render_markdown(t)
+    assert "case · route" in md and "case · breach" in md
