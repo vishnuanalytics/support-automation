@@ -747,6 +747,33 @@ assignment-rule cutover to `→ AI_Intake`, **27g** native Escalation Rule +
 usergroups, and the interactive card buttons (**27h** — needs the Slack app
 interactivity endpoint).
 
+**27a live-applied + 27a/c/d live-verified (2026-09-01).** Migrations `062`/
+`063` applied; `sf_support_setup.py --only queues --only cp_fields --only
+types --only fls` run against the org (3 queues, 9 Case fields, Status
+values — a Checkbox field needed `defaultValue` set explicitly, fixed).
+Then dry-ran the sweeps against the real org/Supabase (PR #23):
+- **Found + fixed a false-breach storm** — `queue_sweep` flagged all 92
+  pre-existing open Cases as SLA breaches, because "stuck" judged purely on
+  `Status` + `CreatedDate` age with no way to tell a Case the pipeline has
+  started managing (has `Next_Action_Due__c`/`Routed_Team__c`/
+  `Last_AI_Run_At__c` set) from the pre-cutover backlog. Now skips untouched
+  Cases entirely (`cdc_reconcile` is the backstop for those) and measures
+  "stuck" from `Last_AI_Run_At__c` when set, not `CreatedDate` (a re-triaged
+  Case has an old `CreatedDate` but should read as fresh).
+- Verified end-to-end on a real Case (`00001189`): `update_case_fields`
+  write + `case_events` insert both succeed through live FLS/RLS; the sweep
+  then correctly reads it as touched-but-not-overdue. Reverted after.
+- `reasoning_ttl` / `cdc_reconcile` verified against a real Supabase client
+  (0 stale sessions; correctly found the existing `runs` row via
+  `case_payload->>sf_id` OR `case_id`, no duplicate enqueue).
+- The CI pipeline itself needed two fixes unrelated to Phase 27 but only
+  now surfaced (this branch's PR was the first to run true CI with zero
+  `.env`): `test_fallback_chain_uses_the_roster` never set `GROQ_API_KEY`
+  so `_dedup_available` correctly dropped the Groq model in every CI run;
+  and `web/src/flows/graph.ts` + `FlowEditor.tsx` had two independent
+  `TERMINAL` node-type sets that drifted apart after Phase 24d removed
+  `auto_reply`'s send path — consolidated into one exported set.
+
 **Audit remediation pass done (2026-09-01) — WF / NEO / SB / Oracle items.**
 One batch closing the yellow/green items from the deployment audit. 291
 offline pytest + web build green.
