@@ -758,7 +758,7 @@ the single comprehensive workflow (`team_route` + 5-way gate) — **applied
 2026-08-31**, published **v4**). Migrations `047`–`053` land the resilience
 work and the `notify_human` / double-tag fixes — see the Phase 23* entries
 below; the email `sf_entry` flow is now at **v9**.
-288 offline pytest (24a-f + 25) tests + web tsc/vitest (6)/build +
+296 offline pytest (24a-f + 25 + 26) tests + web tsc/vitest (6)/build +
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
 
@@ -876,7 +876,7 @@ new comment into a customer email; (b) there was no one-click "send it".
   CDC's `bot_user_id` filter stops a loop).
 - **Operator step:** run the deploy script, then Setup → Object Manager →
   Case → Page Layouts → drag "Send Bot Draft to Customer" onto the action bar.
-- No DB migration (the fields live in Salesforce). 288 offline pytest (24a-f + 25) (11 new).
+- No DB migration (the fields live in Salesforce). 296 offline pytest (24a-f + 25 + 26) (11 new).
 
 **Phase 23g (2026-09-01): `notify_human` → a real Slack channel (live test prep).**
 Slack was already connected for tenant `00000000…` (`tenant_integrations`
@@ -911,7 +911,7 @@ place to answer since that is where the @mention lives.
   draft **verbatim, no LLM call**. `_check_resolution` passes `row["draft"]`.
 - Verified live: the queued `check_resolution` tick picked up the FeedComment
   and emailed the original draft to the customer (SMTP, mirrored to the Case
-  as an outbound EmailMessage); run → `guided_resume`. 288 offline pytest (24a-f + 25).
+  as an outbound EmailMessage); run → `guided_resume`. 296 offline pytest (24a-f + 25 + 26).
 
 **Phase 23e (2026-09-01): stop the double Chatter tag on an escalated Case.**
 Case 00001184 showed 3 bot feed posts and the rep @mentioned twice: `ask_human`
