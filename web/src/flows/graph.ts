@@ -5,9 +5,13 @@ import type { Flow, FlowEdge, FlowNode } from "../types";
 export type RFNode = Node<{ label: string; nodeType: string; terminal: boolean }>;
 export type RFEdge = Edge<{ condition: Record<string, unknown> }>;
 
-// `notify_human` is the real end of every path now (Phase 24 — no auto-send);
-// ask_human / handover / notify / clarify feed into it.
-const TERMINAL = new Set(["notify_human", "auto_reply"]);
+// Node types that can end a path — each produces a final `outcome` (or, for
+// `notify_human`, is the real end of every escalation now that Phase 24
+// removed auto-send). Single source of truth — FlowEditor's palette preview
+// used to keep its own copy of this list and the two drifted apart.
+export const TERMINAL = new Set([
+  "auto_reply", "ask_human", "handover", "clarify", "notify", "notify_human",
+]);
 
 export function toReactFlow(flow: Flow): { nodes: RFNode[]; edges: RFEdge[] } {
   const needsLayout = flow.nodes.some(
