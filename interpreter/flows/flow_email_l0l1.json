@@ -40,11 +40,11 @@
       "config": { "max_questions": 3, "max_rounds": 2, "auto_send": false, "channel": "email", "handover_queue": "Team_Support" } },
     { "node_id": "handover", "type": "handover", "label": "Full handover (enterprise / offboarding)",
       "config": { "reason": "enterprise_or_offboarding", "enterprise_queue": "Enterprise_Support", "queue_by_team": { "offboarding": "Team_Offboarding" } } },
-    { "node_id": "notify_human", "type": "notify_human", "label": "Tag a human (Slack + / or Chatter)",
+    { "node_id": "notify_human", "type": "notify_human", "label": "Reason with a human in Slack, then reply",
       "config": { "channel": "both",
         "slack_channel": "#support-escalations",
         "slack_channel_by_team": { "csm": "#csm-escalations", "sales": "#sales-escalations", "offboarding": "#retention", "default": "#support-escalations" },
-        "draft_comment": true,
+        "max_rounds": 3,
         "mention": { "mention_id": "005jV000000fm5WQAQ" } } }
   ],
   "edges": [

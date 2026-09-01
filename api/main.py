@@ -102,6 +102,18 @@ NODE_DEFAULTS: dict[str, dict[str, Any]] = {
     "auto_reply": {},
     "ask_human": {"channel": "salesforce_chatter"},
     "handover": {"reason": "policy"},
+    "team_route": {"default": "support"},
+    "case_lookup": {"k": 3, "pool": 10, "min_similarity": 0.35},
+    "notify": {"channel": "salesforce_chatter", "target_by_type": {}, "fallback_target": None},
+    "clarify": {"max_questions": 3, "max_rounds": 2, "auto_send": False, "channel": "email"},
+    # Phase 24 — every path ends here: tag the agent + open the Slack reasoning
+    # dialogue; the customer reply is drafted and sent only on the agent's OK.
+    "notify_human": {
+        "channel": "both",
+        "slack_channel": "#support-escalations",
+        "max_rounds": 3,
+        "mention": {},
+    },
 }
 
 

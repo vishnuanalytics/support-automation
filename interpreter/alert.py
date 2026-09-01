@@ -118,6 +118,9 @@ def _open_session(state: dict, config: dict, *, sf_uid, slack_uid,
             case_type=cls.get("case_type") or state.get("case_type"),
             case_number=(state.get("sf_case") or {}).get("case_number") or case.get("case_number"),
             agent_sf_id=sf_uid, agent_slack_id=slack_uid,
+            kb_hits=(state.get("case_lookup") or {}).get("hints")
+                    or (state.get("retrieval") or {}).get("docs"),
+            max_rounds=config.get("max_rounds"),
         )
         sb.table("reasoning_sessions").update({
             "slack_channel": slack_channel, "slack_thread_ts": slack_thread_ts,

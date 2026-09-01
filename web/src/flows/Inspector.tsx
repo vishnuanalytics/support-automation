@@ -104,6 +104,10 @@ export function NodeInspector({
         <NotifyForm config={config} onConfig={onConfig} />
       )}
 
+      {node.data.nodeType === "notify_human" && (
+        <NotifyHumanForm config={config} onConfig={onConfig} />
+      )}
+
       {node.data.nodeType === "identify" && (
         <IdentifyForm config={config} onConfig={onConfig} />
       )}
@@ -357,6 +361,80 @@ function NotifyForm({
           value={typeof config.fallback_target === "string" ? config.fallback_target : ""}
           placeholder="(optional)"
           onChange={(e) => set({ fallback_target: e.target.value.trim() || null })}
+        />
+      </div>
+    </div>
+  );
+}
+
+function NotifyHumanForm({
+  config,
+  onConfig,
+}: {
+  config: Record<string, unknown>;
+  onConfig: (v: Record<string, unknown>) => void;
+}) {
+  const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
+  const mention = (config.mention as Record<string, unknown>) || {};
+  const channel = typeof config.channel === "string" ? config.channel : "both";
+  const rounds = typeof config.max_rounds === "number" ? config.max_rounds : 3;
+
+  return (
+    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+      <div className="muted" style={{ fontSize: 11 }}>
+        Tags the responsible agent and <strong>opens the Slack reasoning
+        dialogue</strong>: the bot picks the questions that matter for this case,
+        asks them in one message with its own read, and drafts the customer
+        reply only after the agent works through the critical points and
+        approves. Nothing is sent automatically. Put this after every terminal
+        branch.
+      </div>
+
+      <label style={{ marginTop: 6, display: "block" }}>channel</label>
+      <select value={channel} onChange={(e) => set({ channel: e.target.value })}>
+        <option value="both">Slack + Salesforce Chatter</option>
+        <option value="slack">Slack only</option>
+        <option value="salesforce_chatter">Salesforce Chatter only</option>
+      </select>
+
+      <div className="row" style={{ marginTop: 6 }}>
+        <span className="muted" style={{ width: 130 }}>slack channel</span>
+        <input
+          value={typeof config.slack_channel === "string" ? config.slack_channel : ""}
+          placeholder="#support-escalations or Cxxxxxxxx"
+          onChange={(e) => set({ slack_channel: e.target.value.trim() })}
+        />
+      </div>
+
+      <div className="row" style={{ marginTop: 4 }}>
+        <span className="muted" style={{ width: 130 }}>max clarify rounds</span>
+        <input
+          type="number"
+          min={0}
+          max={6}
+          value={rounds}
+          onChange={(e) => set({ max_rounds: Math.max(0, Math.min(6, Number(e.target.value) || 0)) })}
+        />
+      </div>
+      <div className="muted" style={{ fontSize: 11 }}>
+        short follow-ups the bot may send when a <em>critical</em> point is still
+        open, before it drafts anyway (default 3).
+      </div>
+
+      <div className="row" style={{ marginTop: 6 }}>
+        <span className="muted" style={{ width: 130 }}>@mention (Slack id)</span>
+        <input
+          value={typeof mention.slack_user_id === "string" ? mention.slack_user_id : ""}
+          placeholder="Uxxxxxxxx (else resolved by agent email)"
+          onChange={(e) => set({ mention: { ...mention, slack_user_id: e.target.value.trim() } })}
+        />
+      </div>
+      <div className="row" style={{ marginTop: 4 }}>
+        <span className="muted" style={{ width: 130 }}>@mention (SF id)</span>
+        <input
+          value={typeof mention.mention_id === "string" ? mention.mention_id : ""}
+          placeholder="005xxxxxxxxxxxx (Chatter @mention)"
+          onChange={(e) => set({ mention: { ...mention, mention_id: e.target.value.trim() } })}
         />
       </div>
     </div>

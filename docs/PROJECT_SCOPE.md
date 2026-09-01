@@ -722,7 +722,7 @@ the single comprehensive workflow (`team_route` + 5-way gate) — **applied
 2026-08-31**, published **v4**). Migrations `047`–`053` land the resilience
 work and the `notify_human` / double-tag fixes — see the Phase 23* entries
 below; the email `sf_entry` flow is now at **v9**.
-266 offline pytest (24a-c) tests + web tsc/vitest (6)/build +
+271 offline pytest (24a-e) tests + web tsc/vitest (6)/build +
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
 
@@ -783,7 +783,22 @@ removed. Slack becomes bidirectional via **Socket Mode**.
   `message.groups`, `message.im`, `app_mention`), reinstall, put
   `SLACK_APP_TOKEN` in `.env`, and give the agent's Slack member id for
   `notify_human`'s `mention.slack_user_id` (or rely on the email lookup).
-- **24d:** remove the SF shortcuts + the `check_resolution` comment-send path.
+- **24e done (2026-09-01):** the dialogue no longer walks 4–6 pointers one at
+  a time. `reasoning.plan_questions` (LLM) prunes the seed bank to what THIS
+  case needs (a basic case → 1–2, each flagged `critical`), `_ask_all` asks
+  them **in one message** with the bot's read on each, `_ingest` (LLM) maps
+  the agent's free-form reply back to the questions, and it sends at most
+  `max_rounds` (default 3) short follow-ups only for still-open *critical*
+  points before drafting anyway. States: `awaiting_handoff → clarifying →
+  drafting → awaiting_approval → sent|abandoned` (`cursor` = round counter).
+  Migration `057` (`max_rounds` column) + `058` (node config + label → v12).
+  `alert_human` passes `max_rounds` + kb_hits. **Editor:** `NotifyHumanForm`
+  in `Inspector.tsx` (channel / slack_channel / max clarify rounds / @mention
+  ids), `graph.ts` TERMINAL = `notify_human`, `NODE_DEFAULTS` gains
+  team_route/case_lookup/notify/clarify/notify_human. 271 offline pytest +
+  web build green. `_norm()` tolerates pre-24e session rows.
+- **24d (still pending):** remove the SF shortcuts + the `check_resolution`
+  comment-send path.
 
 **Phase 23h (2026-09-01): "Send Bot Draft to Customer" quick action + stop
 accidental sends.** Two problems: (a) humans use Chatter for internal
@@ -807,7 +822,7 @@ new comment into a customer email; (b) there was no one-click "send it".
   CDC's `bot_user_id` filter stops a loop).
 - **Operator step:** run the deploy script, then Setup → Object Manager →
   Case → Page Layouts → drag "Send Bot Draft to Customer" onto the action bar.
-- No DB migration (the fields live in Salesforce). 266 offline pytest (24a-c) (11 new).
+- No DB migration (the fields live in Salesforce). 271 offline pytest (24a-e) (11 new).
 
 **Phase 23g (2026-09-01): `notify_human` → a real Slack channel (live test prep).**
 Slack was already connected for tenant `00000000…` (`tenant_integrations`
@@ -842,7 +857,7 @@ place to answer since that is where the @mention lives.
   draft **verbatim, no LLM call**. `_check_resolution` passes `row["draft"]`.
 - Verified live: the queued `check_resolution` tick picked up the FeedComment
   and emailed the original draft to the customer (SMTP, mirrored to the Case
-  as an outbound EmailMessage); run → `guided_resume`. 266 offline pytest (24a-c).
+  as an outbound EmailMessage); run → `guided_resume`. 271 offline pytest (24a-e).
 
 **Phase 23e (2026-09-01): stop the double Chatter tag on an escalated Case.**
 Case 00001184 showed 3 bot feed posts and the rep @mentioned twice: `ask_human`

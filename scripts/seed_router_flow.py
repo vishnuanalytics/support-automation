@@ -98,9 +98,9 @@ NODES = [
     (n_clarify, "clarify", "Ask the customer for missing detail",
      {"max_questions": 3, "max_rounds": 2, "auto_send": False, "channel": "email",
       "handover_queue": CLARIFY_HANDOVER_QUEUE}),
-    (n_human, "notify_human", "Tag a human (Slack + / or Chatter)",
+    (n_human, "notify_human", "Reason with a human in Slack, then reply",
      {"channel": "both", "slack_channel": "#support-escalations",
-      "draft_comment": True, "mention": {"mention_id": "005jV000000fm5WQAQ"}}),
+      "max_rounds": 3, "mention": {"mention_id": "005jV000000fm5WQAQ"}}),
 ]
 
 _LIVE = "tier != 'enterprise' and routed_team != 'offboarding'"

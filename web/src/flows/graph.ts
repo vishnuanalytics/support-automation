@@ -5,7 +5,9 @@ import type { Flow, FlowEdge, FlowNode } from "../types";
 export type RFNode = Node<{ label: string; nodeType: string; terminal: boolean }>;
 export type RFEdge = Edge<{ condition: Record<string, unknown> }>;
 
-const TERMINAL = new Set(["auto_reply", "ask_human", "handover", "clarify", "notify"]);
+// `notify_human` is the real end of every path now (Phase 24 — no auto-send);
+// ask_human / handover / notify / clarify feed into it.
+const TERMINAL = new Set(["notify_human", "auto_reply"]);
 
 export function toReactFlow(flow: Flow): { nodes: RFNode[]; edges: RFEdge[] } {
   const needsLayout = flow.nodes.some(

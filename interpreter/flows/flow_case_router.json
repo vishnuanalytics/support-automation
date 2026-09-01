@@ -182,11 +182,11 @@
     {
       "node_id": "f0000000-0000-4000-8000-000000000015",
       "type": "notify_human",
-      "label": "Tag a human (Slack + / or Chatter)",
+      "label": "Reason with a human in Slack, then reply",
       "config": {
         "channel": "both",
         "slack_channel": "#support-escalations",
-        "draft_comment": true,
+        "max_rounds": 3,
         "mention": {
           "mention_id": "005jV000000fm5WQAQ"
         }

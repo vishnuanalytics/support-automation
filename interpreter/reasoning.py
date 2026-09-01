@@ -1,20 +1,23 @@
 """
-Phase 24b — the Slack reasoning dialogue.
+Phase 24 — the Slack reasoning dialogue between the bot and the responsible agent.
 
-No case gets an AI answer from automation. After triage the bot tags the
-responsible agent; when the agent hands the case to the bot in Slack, the bot
-runs a *reasoning conversation*: it works through a bank of 4–6 "pointer
-questions" (seed bank per Case.Type + an LLM top-up), proposing its own read
-of each and letting the agent confirm / correct / add. It works through
-**every** pointer — it never short-circuits to a draft once it has "enough".
-Only when all pointers are covered does it compose the customer-facing reply,
-and it sends only after the agent explicitly approves.
+No case gets an AI answer from automation. After triage the bot tags the agent;
+when the agent hands the case to the bot in Slack (an @mention, or `take`), the
+bot:
 
-    awaiting_handoff ─(agent: "take")→ reasoning ─(all pointers answered)→
-        drafting → awaiting_approval ─(agent: "send")→ sent
-                                     └(agent: "no")───→ abandoned
+  1. picks the questions that actually matter for THIS case (LLM prunes a
+     per-Case.Type seed bank — a basic case may need 1–2, not 6),
+  2. asks them **all in one message**, each with the bot's own tentative read,
+  3. lets the agent answer free-form; if a *critical* point is still open it
+     asks a short follow-up — at most `max_rounds` (default 3) rounds total,
+  4. drafts the customer reply and sends it **only** on explicit approval.
 
-`advance()` is pure given an `llm_fn` — the DB lives in `handle_agent_message`.
+    awaiting_handoff ─(@mention / "take")→ clarifying ─(no critical gap
+        | max rounds)→ drafting → awaiting_approval ─("send")→ sent
+                                                    └("no")──→ abandoned
+
+`advance()` is pure given an `llm_fn`; the DB lives in `handle_agent_message`.
+`cursor` on the row is reused as the clarification-round counter.
 """
 
 from __future__ import annotations
@@ -30,11 +33,13 @@ from interpreter import llm
 
 log = logging.getLogger("interpreter.reasoning")
 
-STATES = ("awaiting_handoff", "reasoning", "drafting", "awaiting_approval",
+STATES = ("awaiting_handoff", "clarifying", "drafting", "awaiting_approval",
           "sent", "abandoned")
 
-# Any of these words (or @mentioning the bot in the thread) starts the
-# reasoning walkthrough. Add your own with HANDOFF_WORDS="foo,bar" in .env.
+DEFAULT_MAX_ROUNDS = int(os.environ.get("REASONING_MAX_ROUNDS", "3") or 3)
+_MAX_QUESTIONS = 5
+
+# @mentioning the bot in the thread also counts as a handoff.
 _HANDOFF = {
     "take", "take it", "take this", "take the case", "you take it", "over to you",
     "go", "go ahead", "start", "begin", "reason", "reason it", "let's reason",
@@ -47,28 +52,18 @@ _ABANDON = {"no", "not yet", "cancel", "hold", "stop", "abandon", "leave it",
             "i'll handle it", "ill handle it", "nvm", "never mind"}
 _APPROVE_EXACT = {"looks good", "send it", "sounds good", "go for it", "ship it",
                   "good to go", "that works", "perfect", "all good"}
-_APPROVE_WORDS = {"send", "approve", "approved", "lgtm", "ship", "approve.",
-                  "confirmed"}
+_APPROVE_WORDS = {"send", "approve", "approved", "lgtm", "ship", "confirmed"}
 _EDIT_PREFIX = ("edit", "change", "reword", "tweak", "revise", "shorten",
                 "no,", "not quite", "almost")
 
-
-def _is_approve(text: str) -> bool:
-    t = (text or "").strip().strip(".!👍✅🚀 ").lower()
-    if t in _APPROVE_EXACT or t in {"yes", "yep", "yeah", "ok", "okay", "sure",
-                                    "confirm", "confirmed", "👍", "✅"}:
-        return True
-    return bool(set(re.findall(r"[a-z']+", t)) & _APPROVE_WORDS)
-
-_MAX_POINTERS = 6
-_MIN_POINTERS = 4
+LLMFn = Callable[..., str]
 
 
 def _now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).isoformat()
 
 
-def _default_llm(system: str, user: str, *, max_tokens: int = 400,
+def _default_llm(system: str, user: str, *, max_tokens: int = 500,
                  model: str | None = None) -> str:
     try:
         return (llm.complete(system=system, user=user,
@@ -79,90 +74,6 @@ def _default_llm(system: str, user: str, *, max_tokens: int = 400,
         return ""
 
 
-LLMFn = Callable[..., str]
-
-
-# ── pointer bank ─────────────────────────────────────────────────────
-_FALLBACK_POINTERS = [
-    "What is the customer really asking for, in one sentence?",
-    "What do we know for certain vs. what are we assuming?",
-    "Does a good answer need the customer's own data, or is a general answer enough?",
-    "What is the risk if we answer wrong?",
-]
-
-
-def seed_pointers(sb, case_type: str | None) -> list[str]:
-    """The per-Case.Type seed bank (migration 056's `pointer_bank`)."""
-    ct = (case_type or "Other").strip()
-    try:
-        rows = sb.table("pointer_bank").select("pointers").eq("case_type", ct).execute().data
-        if not rows:
-            rows = sb.table("pointer_bank").select("pointers").eq("case_type", "Other").execute().data
-        if rows and rows[0].get("pointers"):
-            got = rows[0]["pointers"]
-            return list(got) if isinstance(got, list) else list(_FALLBACK_POINTERS)
-    except Exception as e:  # noqa: BLE001
-        log.warning("pointer_bank read failed (%s); using fallback", e)
-    return list(_FALLBACK_POINTERS)
-
-
-_TOPUP_SYS = (
-    "You add 1–2 SHORT, case-specific diagnostic questions a support agent and "
-    "an AI should reason through before answering this customer — things the "
-    "generic checklist below misses for THIS case. Return a JSON array of "
-    "strings, 0 to 2 items, no prose. Do not repeat the generic questions."
-)
-
-
-def build_pointers(sb, *, case_type: str | None, case: dict,
-                   kb_hits: list | None = None, llm_fn: LLMFn | None = None) -> list[dict]:
-    """Seed bank + an LLM top-up, capped at `_MAX_POINTERS`. Each pointer is
-    `{"q", "answered": False, "bot_take": None, "agent_note": None}`."""
-    llm_fn = llm_fn or _default_llm
-    seed = seed_pointers(sb, case_type)
-    extra: list[str] = []
-    if len(seed) < _MAX_POINTERS:
-        body = (f"Case type: {case_type or 'Other'}\n"
-                f"Subject: {case.get('subject', '')}\n"
-                f"Body: {(case.get('body') or '')[:1500]}\n\n"
-                f"Generic questions already covered:\n- " + "\n- ".join(seed))
-        raw = llm_fn(_TOPUP_SYS, body, max_tokens=250)
-        try:
-            got = json.loads(raw[raw.find("["): raw.rfind("]") + 1] or "[]")
-            extra = [str(x).strip() for x in got if str(x).strip()][:2]
-        except Exception:  # noqa: BLE001
-            extra = []
-    qs = (seed + extra)[:_MAX_POINTERS]
-    if len(qs) < _MIN_POINTERS:
-        qs += _FALLBACK_POINTERS[: _MIN_POINTERS - len(qs)]
-    return [{"q": q, "answered": False, "bot_take": None, "agent_note": None} for q in qs]
-
-
-# ── session construction ────────────────────────────────────────────
-def open_session(sb, *, case: dict, tenant_id: str, run_id: str | None = None,
-                 case_type: str | None = None, case_number: str | None = None,
-                 agent_sf_id: str | None = None, agent_slack_id: str | None = None,
-                 kb_hits: list | None = None, llm_fn: LLMFn | None = None) -> dict:
-    """Create (or return the existing open) reasoning session for a Case."""
-    case_id = case.get("sf_id") or case.get("id")
-    existing = (sb.table("reasoning_sessions").select("*")
-                .eq("case_id", case_id)
-                .not_.in_("state", ("sent", "abandoned")).execute().data)
-    if existing:
-        return existing[0]
-    pointers = build_pointers(sb, case_type=case_type, case=case,
-                              kb_hits=kb_hits, llm_fn=llm_fn)
-    row = {
-        "tenant_id": tenant_id, "case_id": case_id, "run_id": run_id,
-        "case_number": case_number or case.get("case_number"),
-        "state": "awaiting_handoff", "agent_sf_id": agent_sf_id,
-        "agent_slack_id": agent_slack_id, "pointers": pointers, "cursor": 0,
-        "transcript": [],
-    }
-    return sb.table("reasoning_sessions").insert(row).execute().data[0]
-
-
-# ── the dialogue engine (pure) ──────────────────────────────────────
 def is_handoff(text: str) -> bool:
     t = (text or "").strip().strip("!.?").lower().lstrip("@")
     if t in _HANDOFF:
@@ -170,80 +81,208 @@ def is_handoff(text: str) -> bool:
     return any(t.startswith(w + " ") or t == w for w in _HANDOFF) or "take this" in t
 
 
-_TAKE_SYS = (
-    "You are a senior support engineer reasoning WITH a colleague about a "
-    "customer case — not answering the customer. For the one question below, "
-    "give your best current read in 1–3 sentences, grounded ONLY in the case "
-    "text and the notes provided. If answering it properly would need the "
-    "customer's own data that we don't have, say so plainly. No hedging boilerplate."
-)
+def _is_approve(text: str) -> bool:
+    t = (text or "").strip().strip(".!👍✅🚀 ").lower()
+    if t in _APPROVE_EXACT or t in {"yes", "yep", "yeah", "ok", "okay", "sure",
+                                    "confirm", "confirmed", "👍", "✅"}:
+        return True
+    return bool(set(re.findall(r"[a-z']+", t)) & _APPROVE_WORDS)
 
-_DRAFT_SYS = (
-    "Write the customer-facing reply, using ONLY the case and the agreed "
-    "reasoning notes below. Concise, friendly, plain text, no preamble. If the "
-    "notes say the real answer needs the customer's specific data we don't "
-    "have, the reply must ask for that / set expectations — do NOT invent "
-    "specifics or present a generic scenario as if it were their situation."
-)
+
+def _json_slice(raw: str, open_ch: str = "[", close_ch: str = "]"):
+    try:
+        return json.loads(raw[raw.find(open_ch): raw.rfind(close_ch) + 1] or "null")
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _issue_summary(case: dict) -> str:
-    b = (case.get("body") or "").strip().replace("\n", " ")
-    return (b[:300] + "…") if len(b) > 300 else b
+    b = (case.get("body") or case.get("description") or "").strip().replace("\n", " ")
+    return (b[:400] + "…") if len(b) > 400 else b
 
 
-def _bot_take(pointer_q: str, case: dict, pointers: list[dict],
-              kb_hits: list | None, llm_fn: LLMFn) -> str:
-    prior = "\n".join(f"- {p['q']}\n  agreed: {p['agent_note']}"
-                      for p in pointers if p.get("answered") and p.get("agent_note"))
-    kb = "\n".join(f"- {h}" for h in (kb_hits or [])[:5])
+# ── question planning ───────────────────────────────────────────────
+_FALLBACK_Q = [
+    {"q": "What is the customer really asking for, in one sentence?", "critical": True},
+    {"q": "What do we know for certain vs. what are we assuming?", "critical": True},
+    {"q": "Does a good answer need the customer's own data, or is a general answer enough?",
+     "critical": False},
+]
+
+
+def seed_pointers(sb, case_type: str | None) -> list[str]:
+    ct = (case_type or "Other").strip()
+    try:
+        rows = sb.table("pointer_bank").select("pointers").eq("case_type", ct).execute().data
+        if not rows:
+            rows = sb.table("pointer_bank").select("pointers").eq("case_type", "Other").execute().data
+        if rows and isinstance(rows[0].get("pointers"), list):
+            return list(rows[0]["pointers"])
+    except Exception as e:  # noqa: BLE001
+        log.warning("pointer_bank read failed (%s)", e)
+    return [p["q"] for p in _FALLBACK_Q]
+
+
+_PLAN_SYS = (
+    "You are triaging a customer support case with a colleague before drafting a "
+    "reply. From the candidate questions below, keep ONLY the ones that genuinely "
+    "need an answer for THIS case — a simple/known case may need just 1 or 2. You "
+    "may reword for concision and add at most ONE case-specific question the list "
+    "misses. Mark `critical` true only if we cannot safely reply without it. "
+    "Return a JSON array (max 5) of {\"q\": string, \"critical\": boolean}. JSON only."
+)
+
+
+def plan_questions(sb, *, case_type: str | None, case: dict,
+                   kb_hits: list | None = None, llm_fn: LLMFn | None = None) -> list[dict]:
+    """LLM-pruned subset of the seed bank for this case. 1–5 questions."""
+    llm_fn = llm_fn or _default_llm
+    seed = seed_pointers(sb, case_type)
+    user = (f"Case type: {case_type or 'Other'}\n"
+            f"Subject: {case.get('subject', '')}\n"
+            f"Body: {_issue_summary(case)}\n"
+            f"{('KB hits: ' + '; '.join(str(h) for h in kb_hits[:4])) if kb_hits else ''}\n\n"
+            f"Candidate questions:\n- " + "\n- ".join(seed))
+    got = _json_slice(llm_fn(_PLAN_SYS, user, max_tokens=400))
+    picked: list[dict] = []
+    if isinstance(got, list):
+        for item in got[:_MAX_QUESTIONS]:
+            q = str((item or {}).get("q") or "").strip() if isinstance(item, dict) else str(item).strip()
+            if q:
+                picked.append({"q": q, "critical": bool(isinstance(item, dict) and item.get("critical"))})
+    if not picked:
+        picked = [dict(p) for p in _FALLBACK_Q]
+    for p in picked:
+        p.update(answered=False, agent_note=None)
+    return picked
+
+
+# back-compat alias (older callers / tests)
+build_pointers = plan_questions
+
+
+# ── message builders (LLM) ─────────────────────────────────────────
+_ASK_SYS = (
+    "You are a senior support engineer briefing a colleague on a customer case "
+    "before you draft the reply together. For EACH numbered question, give your "
+    "current best read in ONE sentence, grounded ONLY in the case + KB. If a "
+    "question needs the customer's own data we don't have, say so. Output ONLY a "
+    "numbered list, one item per question, format:\n"
+    "`N. <question>`\n`   _my read:_ <one sentence>`"
+)
+
+_INGEST_SYS = (
+    "A colleague replied (free-form) to a set of questions about a support case. "
+    "For EACH question in order, decide if the reply now answers it, and capture "
+    "their answer in one short line. Return a JSON array, same length and order as "
+    "the questions, of {\"answered\": boolean, \"note\": string}. JSON only."
+)
+
+_DRAFT_SYS = (
+    "Write the customer-facing reply, using ONLY the case and the agreed reasoning "
+    "notes below. Concise, friendly, plain text, no preamble. Where a note says we "
+    "need the customer's specific data we don't have, the reply must ask for it / "
+    "set expectations — do NOT invent specifics or present a generic scenario as "
+    "if it were their situation."
+)
+
+
+def _kb_block(kb_hits: list | None, n: int = 5) -> str:
+    return "\n".join(f"- {h}" for h in (kb_hits or [])[:n])
+
+
+def _ask_all(pointers: list[dict], case: dict, kb_hits: list | None, llm_fn: LLMFn) -> str:
+    qs = "\n".join(f"{i + 1}. {p['q']}" for i, p in enumerate(pointers))
     user = (f"Case: {case.get('subject', '')}\n{_issue_summary(case)}\n\n"
-            f"{'Notes so far:\n' + prior + '\n\n' if prior else ''}"
-            f"{'KB:\n' + kb + '\n\n' if kb else ''}"
-            f"Question: {pointer_q}")
-    return llm_fn(_TAKE_SYS, user, max_tokens=220) or "(no read — over to you)"
+            f"{('KB:\n' + _kb_block(kb_hits) + '\n\n') if kb_hits else ''}"
+            f"Questions:\n{qs}")
+    body = llm_fn(_ASK_SYS, user, max_tokens=600)
+    if not body:
+        body = "\n".join(f"{i + 1}. {p['q']}\n   _my read:_ (over to you)"
+                         for i, p in enumerate(pointers))
+    return body
+
+
+def _ingest(pointers: list[dict], agent_text: str, llm_fn: LLMFn) -> None:
+    qs = "\n".join(f"{i + 1}. {p['q']}" for i, p in enumerate(pointers))
+    got = _json_slice(llm_fn(_INGEST_SYS, f"Questions:\n{qs}\n\nColleague's reply:\n{agent_text}",
+                             max_tokens=500))
+    if isinstance(got, list):
+        for p, item in zip(pointers, got):
+            if isinstance(item, dict) and item.get("answered"):
+                p["answered"] = True
+                p["agent_note"] = str(item.get("note") or "").strip() or p.get("agent_note")
+    # fallback: a substantive reply marks the non-critical ones covered
+    if not any(p["answered"] for p in pointers) and len(agent_text.split()) >= 4:
+        for p in pointers:
+            if not p["critical"]:
+                p["answered"] = True
+                p["agent_note"] = agent_text.strip()[:300]
+
+
+def _norm(pointers: list[dict]) -> list[dict]:
+    """Tolerate pre-24e rows (no `critical` key)."""
+    for p in pointers or []:
+        p.setdefault("critical", False)
+        p.setdefault("answered", False)
+        p.setdefault("agent_note", None)
+    return pointers or []
+
+
+def _open_gaps(pointers: list[dict], critical_only: bool = True) -> list[dict]:
+    return [p for p in pointers
+            if not p.get("answered") and (p.get("critical") or not critical_only)]
 
 
 def _compose_draft(case: dict, pointers: list[dict], kb_hits: list | None,
                    llm_fn: LLMFn, extra_instruction: str = "") -> str:
-    notes = "\n".join(f"- {p['q']}\n  → {p.get('agent_note') or p.get('bot_take') or ''}"
-                      for p in pointers)
-    kb = "\n".join(f"- {h}" for h in (kb_hits or [])[:6])
+    notes = "\n".join(
+        f"- {p['q']}\n  → {p.get('agent_note') or '(agent did not confirm — use judgement / ask the customer)'}"
+        for p in pointers)
     user = (f"Customer case\nSubject: {case.get('subject', '')}\n{_issue_summary(case)}\n\n"
             f"Agreed reasoning notes\n{notes}\n"
-            f"{('\nKB\n' + kb) if kb else ''}"
+            f"{('\nKB\n' + _kb_block(kb_hits, 6)) if kb_hits else ''}"
             f"{('\n\nAlso apply: ' + extra_instruction) if extra_instruction else ''}")
     return llm_fn(_DRAFT_SYS, user, max_tokens=650) or ""
 
 
-def _n_answered(pointers: list[dict]) -> int:
-    return sum(1 for p in pointers if p.get("answered"))
+# ── session construction ────────────────────────────────────────────
+def open_session(sb, *, case: dict, tenant_id: str, run_id: str | None = None,
+                 case_type: str | None = None, case_number: str | None = None,
+                 agent_sf_id: str | None = None, agent_slack_id: str | None = None,
+                 kb_hits: list | None = None, max_rounds: int | None = None,
+                 llm_fn: LLMFn | None = None) -> dict:
+    """Create (or return the existing open) reasoning session for a Case."""
+    case_id = case.get("sf_id") or case.get("id")
+    existing = (sb.table("reasoning_sessions").select("*")
+                .eq("case_id", case_id)
+                .not_.in_("state", ("sent", "abandoned")).execute().data)
+    if existing:
+        return existing[0]
+    pointers = plan_questions(sb, case_type=case_type, case=case,
+                              kb_hits=kb_hits, llm_fn=llm_fn)
+    row = {
+        "tenant_id": tenant_id, "case_id": case_id, "run_id": run_id,
+        "case_number": case_number or case.get("case_number"),
+        "state": "awaiting_handoff", "agent_sf_id": agent_sf_id,
+        "agent_slack_id": agent_slack_id, "pointers": pointers, "cursor": 0,
+        "max_rounds": int(max_rounds or DEFAULT_MAX_ROUNDS), "transcript": [],
+    }
+    return sb.table("reasoning_sessions").insert(row).execute().data[0]
 
 
-def _first_unanswered(pointers: list[dict]) -> int:
-    for i, p in enumerate(pointers):
-        if not p.get("answered"):
-            return i
-    return len(pointers)
-
-
-def _pointer_block(i: int, n: int, p: dict) -> str:
-    return f"*{i + 1}/{n}. {p['q']}*\nMy read: {p['bot_take']}"
-
-
+# ── the dialogue engine (pure) ─────────────────────────────────────
 def advance(session: dict, text: str, *, case: dict, kb_hits: list | None = None,
             llm_fn: LLMFn | None = None, handoff: bool | None = None) -> dict[str, Any]:
     """Advance the dialogue by one agent message. Returns
-    `{"reply": str, "session": dict, "action": None | "send" | "abandoned"}`.
-    Pure — no DB, no Slack. `session` is returned mutated. `handoff` (when the
-    caller knows the agent @mentioned the bot) overrides the keyword check in
-    the `awaiting_handoff` state."""
+    `{"reply", "session", "action": None | "send" | "abandoned"}`. Pure — no DB,
+    no Slack. `session` is returned mutated. `handoff` (the agent @mentioned the
+    bot) overrides the keyword check in `awaiting_handoff`."""
     llm_fn = llm_fn or _default_llm
     state = session.get("state", "awaiting_handoff")
-    pointers: list[dict] = session.get("pointers") or []
-    n = len(pointers)
-    session.setdefault("transcript", []).append(
-        {"role": "agent", "text": text, "at": _now()})
+    pointers: list[dict] = _norm(session.get("pointers") or [])
+    max_rounds = int(session.get("max_rounds") or DEFAULT_MAX_ROUNDS)
+    session.setdefault("transcript", []).append({"role": "agent", "text": text, "at": _now()})
 
     def done(reply: str, action: str | None = None) -> dict[str, Any]:
         session["transcript"].append({"role": "bot", "text": reply, "at": _now()})
@@ -251,44 +290,40 @@ def advance(session: dict, text: str, *, case: dict, kb_hits: list | None = None
         return {"reply": reply, "session": session, "action": action}
 
     if state in ("sent", "abandoned"):
-        return done(f"This case's dialogue is already _{state}_. Start a new "
-                    f"one from Salesforce if you need to.")
+        return done(f"This case's dialogue is already _{state}_.")
 
     if state == "awaiting_handoff":
         if not (handoff or is_handoff(text)):
             return done("Reply *@support automation* in this thread — or type "
                         "`take` — when you want to reason through this one together.")
-        i = 0
-        pointers[i]["bot_take"] = _bot_take(pointers[i]["q"], case, pointers, kb_hits, llm_fn)
-        session["state"] = "reasoning"
-        session["cursor"] = i
-        opener = (
-            f"*Case {session.get('case_number') or session.get('case_id')}* — "
-            f"{case.get('subject', '(no subject)')}\n{_issue_summary(case)}\n\n"
-            f"Let's reason through this — {n} points, and I'll want your read on "
-            f"every one before I draft anything.\n\n{_pointer_block(i, n, pointers[i])}\n\n"
-            f"Confirm, correct me, or add detail.")
-        return done(opener)
+        session["state"] = "clarifying"
+        session["cursor"] = 1                       # round 1
+        hdr = (f"*Case {session.get('case_number') or session.get('case_id')}* — "
+               f"{case.get('subject', '(no subject)')}\n{_issue_summary(case)}\n\n"
+               f"Here's my read on the {'point' if len(pointers) == 1 else 'points'} "
+               f"that matter — correct anything wrong and fill any gaps (one reply "
+               f"is fine):\n\n")
+        return done(hdr + _ask_all(pointers, case, kb_hits, llm_fn))
 
-    if state == "reasoning":
-        cur = session.get("cursor", _first_unanswered(pointers))
-        if 0 <= cur < n:
-            pointers[cur]["agent_note"] = text.strip()
-            pointers[cur]["answered"] = True
-        nxt = _first_unanswered(pointers)
-        if nxt < n:
-            pointers[nxt]["bot_take"] = _bot_take(pointers[nxt]["q"], case, pointers, kb_hits, llm_fn)
-            session["cursor"] = nxt
-            return done(f"Noted.\n\n{_pointer_block(nxt, n, pointers[nxt])}")
-        # every pointer covered -> draft
-        session["state"] = "drafting"
+    if state == "clarifying":
+        rnd = int(session.get("cursor") or 1)
+        _ingest(pointers, text.strip(), llm_fn)
+        gaps = _open_gaps(pointers, critical_only=True)
+        if gaps and rnd < max_rounds:
+            session["cursor"] = rnd + 1
+            bullets = "\n".join(f"• {p['q']}" for p in gaps)
+            return done(f"Thanks. Still need your read on "
+                        f"{'this' if len(gaps) == 1 else 'these'} before I draft "
+                        f"(round {rnd + 1}/{max_rounds}):\n\n{bullets}")
+        # enough — or we've used our rounds
         draft = _compose_draft(case, pointers, kb_hits, llm_fn)
         session["draft"] = draft
         session["state"] = "awaiting_approval"
-        return done(
-            f"That's all {n} points. Here's my draft to the customer:\n\n"
-            f"————\n{draft}\n————\n\n"
-            f"Reply `send` to send it, `edit: <what to change>`, or `no` to hold.")
+        tail = ("" if not gaps else
+                f"\n\n_(still unconfirmed: {', '.join(p['q'] for p in gaps)} — "
+                f"I've drafted conservatively.)_")
+        return done(f"Here's my draft to the customer:\n\n————\n{draft}\n————{tail}\n\n"
+                    f"Reply `send`, `edit: <what to change>`, or `no` to hold.")
 
     if state == "awaiting_approval":
         low = text.strip().lower()
@@ -297,9 +332,9 @@ def advance(session: dict, text: str, *, case: dict, kb_hits: list | None = None
             return done("Holding — the Case stays with you.", action="abandoned")
         if low.startswith(_EDIT_PREFIX) or "edit:" in low:
             instr = text.split(":", 1)[1].strip() if ":" in text else text
-            draft = _compose_draft(case, pointers, kb_hits, llm_fn, extra_instruction=instr)
-            session["draft"] = draft
-            return done(f"Updated draft:\n\n————\n{draft}\n————\n\n"
+            session["draft"] = _compose_draft(case, pointers, kb_hits, llm_fn,
+                                              extra_instruction=instr)
+            return done(f"Updated draft:\n\n————\n{session['draft']}\n————\n\n"
                         f"`send`, `edit: <more>`, or `no`.")
         if _is_approve(text):
             session["state"] = "sent"
@@ -329,10 +364,7 @@ def _case_for_session(sb, session: dict) -> dict:
 def handle_agent_message(sb, session_row: dict, text: str, *,
                          llm_fn: LLMFn | None = None,
                          handoff: bool | None = None) -> dict[str, Any]:
-    """Load the case, advance the dialogue, persist the session. Returns the
-    same shape as `advance()`. The caller (slackbot) posts `reply` and, on
-    `action == 'send'`, delivers `session['draft']`. `handoff` = the agent
-    @mentioned the bot (counts as a handoff in `awaiting_handoff`)."""
+    """Load the case, advance the dialogue, persist the session."""
     case = _case_for_session(sb, session_row)
     out = advance(session_row, text, case=case, llm_fn=llm_fn, handoff=handoff)
     s = out["session"]
@@ -343,6 +375,5 @@ def handle_agent_message(sb, session_row: dict, text: str, *,
             "updated_at": "now()",
         }).eq("session_id", s["session_id"]).execute()
     except Exception as e:  # noqa: BLE001
-        log.warning("reasoning_sessions persist failed for %s: %s",
-                    s.get("session_id"), e)
+        log.warning("reasoning_sessions persist failed for %s: %s", s.get("session_id"), e)
     return out

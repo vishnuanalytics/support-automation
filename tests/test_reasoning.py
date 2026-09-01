@@ -1,20 +1,33 @@
-"""Phase 24b — the Slack reasoning dialogue engine (offline, no LLM, no DB)."""
+"""Phase 24e — the reasoning dialogue engine (offline; no real LLM, no DB).
+
+New model: LLM prunes the seed bank to what THIS case needs, asks it all in one
+message, then ≤ max_rounds short follow-ups if a *critical* point is still open,
+then draft + approve.
+"""
 
 from __future__ import annotations
+
+import json
 
 import pytest
 
 from interpreter import reasoning
 
 
-def _stub_llm(system: str, user: str, **_kw) -> str:
-    if "JSON array" in system:
-        return "[]"                       # no LLM top-up
-    if "colleague" in system:
-        return "my read on that point"
-    if "customer-facing reply" in system:
-        return "Hi there — here is our answer. Thanks!"
-    return ""
+def make_stub(*, plan=None, ingest=None, ask="1. Q\n   _my read:_ x", draft="Hi — here is our answer."):
+    def stub(system: str, user: str, **_kw) -> str:
+        if "triaging a customer support case" in system:          # _PLAN_SYS
+            return json.dumps(plan if plan is not None
+                              else [{"q": "Q1", "critical": True}, {"q": "Q2", "critical": True}])
+        if "briefing a colleague" in system:                      # _ASK_SYS
+            return ask
+        if "replied (free-form)" in system:                       # _INGEST_SYS
+            return json.dumps(ingest if ingest is not None
+                              else [{"answered": True, "note": "a"}, {"answered": True, "note": "b"}])
+        if "customer-facing reply" in system:                     # _DRAFT_SYS
+            return draft
+        return ""
+    return stub
 
 
 CASE = {"sf_id": "500X", "subject": "Refund for a double charge",
@@ -22,112 +35,41 @@ CASE = {"sf_id": "500X", "subject": "Refund for a double charge",
         "case_number": "00001234"}
 
 
-def _session(pointer_qs, **over):
+def _session(qs, **over):
     s = {
         "session_id": "s1", "case_id": "500X", "case_number": "00001234",
-        "state": "awaiting_handoff", "cursor": 0, "transcript": [],
-        "pointers": [{"q": q, "answered": False, "bot_take": None, "agent_note": None}
-                     for q in pointer_qs],
+        "state": "awaiting_handoff", "cursor": 0, "transcript": [], "max_rounds": 3,
+        "pointers": [{"q": q, "critical": crit, "answered": False, "agent_note": None}
+                     for q, crit in qs],
     }
     s.update(over)
     return s
 
 
-P4 = ["What is disputed?", "What does billing show?", "One-off or recurring?",
-      "Do we need their data?"]
+P2 = [("What is disputed?", True), ("Do we need their billing data?", True)]
 
 
-# ── handoff detection ───────────────────────────────────────────────
+# ── handoff detection ──────────────────────────────────────────────
 def test_is_handoff():
-    for yes in ("take", "take it", "Take this one", "@bot take this", "go ahead",
-                "your turn", "over to you"):
+    for yes in ("take", "take it", "Take this one", "assist", "discuss",
+                "walk me through it", "your turn"):
         assert reasoning.is_handoff(yes), yes
     for no in ("the customer says it's urgent", "I think this is billing",
-              "can you check the logs", "what's the refund policy"):
+              "what's the refund policy"):
         assert not reasoning.is_handoff(no), no
 
 
-# ── the dialogue ───────────────────────────────────────────────────
-def test_nudge_until_handoff():
-    s = _session(P4)
-    out = reasoning.advance(s, "this looks like a dupe charge", case=CASE, llm_fn=_stub_llm)
-    assert out["action"] is None
-    assert out["session"]["state"] == "awaiting_handoff"
-    assert "take" in out["reply"].lower()
+def test_at_mention_counts_as_handoff():
+    s = _session(P2)
+    out = reasoning.advance(s, "sort this please", case=CASE, llm_fn=make_stub(), handoff=True)
+    assert out["session"]["state"] == "clarifying"
 
 
-def test_at_mention_counts_as_handoff_even_without_a_keyword():
-    s = _session(P4)
-    out = reasoning.advance(s, "please sort this out", case=CASE,
-                            llm_fn=_stub_llm, handoff=True)
-    assert out["session"]["state"] == "reasoning" and "1/4" in out["reply"]
-
-
-def test_handoff_opens_with_pointer_one():
-    s = _session(P4)
-    out = reasoning.advance(s, "take it", case=CASE, llm_fn=_stub_llm)
-    assert out["session"]["state"] == "reasoning"
-    assert out["session"]["cursor"] == 0
-    assert out["session"]["pointers"][0]["bot_take"] == "my read on that point"
-    assert "1/4" in out["reply"] and P4[0] in out["reply"]
-
-
-def test_it_works_through_every_pointer_and_never_drafts_early():
-    s = _session(P4, state="reasoning",
-                 pointers=[{"q": q, "answered": False, "bot_take": "x",
-                            "agent_note": None} for q in P4])
-    # answer the first THREE — it must still be reasoning, not drafting
-    for i, ans in enumerate(["an amount", "two charges on the 3rd", "one-off"]):
-        out = reasoning.advance(s, ans, case=CASE, llm_fn=_stub_llm)
-        s = out["session"]
-        assert s["state"] == "reasoning", f"drafted early after {i + 1} answers"
-        assert s["pointers"][i]["answered"] and s["pointers"][i]["agent_note"] == ans
-    assert reasoning._n_answered(s["pointers"]) == 3
-    assert f"4/4" in out["reply"]                       # asking the last one
-
-    # answer the last -> now it drafts and asks for approval
-    out = reasoning.advance(s, "yes we need their invoice", case=CASE, llm_fn=_stub_llm)
-    s = out["session"]
-    assert s["state"] == "awaiting_approval"
-    assert s["draft"] == "Hi there — here is our answer. Thanks!"
-    assert "————" in out["reply"] and "`send`" in out["reply"]
-
-
-def test_approval_sends():
-    s = _session(P4, state="awaiting_approval", draft="the draft text")
-    out = reasoning.advance(s, "looks good, send it", case=CASE, llm_fn=_stub_llm)
-    assert out["action"] == "send"
-    assert out["session"]["state"] == "sent"
-
-
-def test_edit_redrafts_and_stays_pending():
-    s = _session(P4, state="awaiting_approval", draft="v1")
-    out = reasoning.advance(s, "edit: make it shorter and warmer", case=CASE, llm_fn=_stub_llm)
-    assert out["action"] is None
-    assert out["session"]["state"] == "awaiting_approval"
-    assert out["session"]["draft"] == "Hi there — here is our answer. Thanks!"
-    assert "Updated draft" in out["reply"]
-
-
-def test_no_abandons():
-    s = _session(P4, state="awaiting_approval", draft="v1")
-    out = reasoning.advance(s, "no", case=CASE, llm_fn=_stub_llm)
-    assert out["action"] == "abandoned"
-    assert out["session"]["state"] == "abandoned"
-
-
-def test_terminal_states_are_inert():
-    for st in ("sent", "abandoned"):
-        out = reasoning.advance(_session(P4, state=st), "send", case=CASE, llm_fn=_stub_llm)
-        assert out["action"] is None and st in out["reply"]
-
-
-# ── pointer bank ───────────────────────────────────────────────────
+# ── question planning ─────────────────────────────────────────────
 class _FakeSB:
     def __init__(self, bank):
         self.bank = bank
-        self.updates = []
-        self.inserted = []
+        self.rows = []
 
     def table(self, name):
         return _FakeQ(self, name)
@@ -139,17 +81,16 @@ class _FakeQ:
 
     def select(self, *_a, **_k): return self
     def eq(self, k, v): self.f[k] = v; return self
+    @property
     def not_(self): return self
     def in_(self, *_a, **_k): return self
-    def order(self, *_a, **_k): return self
     def limit(self, *_a, **_k): return self
+    def order(self, *_a, **_k): return self
 
     def insert(self, row):
-        row = {**row, "session_id": "s-new"}
-        self.sb.inserted.append(row); self._ins = row; return self
+        row = {**row, "session_id": "s-new"}; self.sb.rows.append(row); self._ins = row; return self
 
-    def update(self, patch):
-        self.sb.updates.append(patch); self._upd = True; return self
+    def update(self, patch): self.sb.rows.append(("update", patch)); self._upd = True; return self
 
     def execute(self):
         if getattr(self, "_ins", None):
@@ -158,31 +99,114 @@ class _FakeQ:
             return type("R", (), {"data": []})
         if self.name == "pointer_bank":
             ct = self.f.get("case_type")
-            rows = [{"pointers": self.sb.bank[ct]}] if ct in self.sb.bank else []
-            return type("R", (), {"data": rows})
+            return type("R", (), {"data": [{"pointers": self.sb.bank[ct]}] if ct in self.sb.bank else []})
         return type("R", (), {"data": []})
 
 
-def test_build_pointers_uses_seed_bank_and_caps_at_six():
-    sb = _FakeSB({"Billing": ["q1", "q2", "q3", "q4", "q5"], "Other": ["o1", "o2", "o3", "o4"]})
-    ps = reasoning.build_pointers(sb, case_type="Billing", case=CASE, llm_fn=_stub_llm)
-    assert [p["q"] for p in ps] == ["q1", "q2", "q3", "q4", "q5"]
-    assert all(p["answered"] is False and p["bot_take"] is None for p in ps)
+def test_plan_questions_prunes_to_the_llm_subset():
+    sb = _FakeSB({"Billing": ["a", "b", "c", "d", "e"], "Other": ["o1", "o2", "o3"]})
+    ps = reasoning.plan_questions(
+        sb, case_type="Billing", case=CASE,
+        llm_fn=make_stub(plan=[{"q": "Just this one", "critical": True}]))
+    assert [p["q"] for p in ps] == ["Just this one"]
+    assert ps[0]["critical"] is True and ps[0]["answered"] is False
 
 
-def test_build_pointers_falls_back_to_other_then_hardcoded():
-    sb = _FakeSB({"Other": ["o1", "o2", "o3", "o4"]})
-    ps = reasoning.build_pointers(sb, case_type="Nonsense", case=CASE, llm_fn=_stub_llm)
-    assert [p["q"] for p in ps] == ["o1", "o2", "o3", "o4"]
-    sb2 = _FakeSB({})
-    ps2 = reasoning.build_pointers(sb2, case_type=None, case=CASE, llm_fn=_stub_llm)
-    assert len(ps2) >= reasoning._MIN_POINTERS
+def test_plan_questions_falls_back_when_llm_gives_nothing():
+    sb = _FakeSB({"Other": ["o1", "o2", "o3"]})
+    ps = reasoning.plan_questions(sb, case_type="Zzz", case=CASE,
+                                  llm_fn=make_stub(plan=[]))
+    assert 1 <= len(ps) <= reasoning._MAX_QUESTIONS
+
+
+# ── the dialogue ──────────────────────────────────────────────────
+def test_nudge_until_handoff():
+    out = reasoning.advance(_session(P2), "looks like a dupe", case=CASE, llm_fn=make_stub())
+    assert out["action"] is None and out["session"]["state"] == "awaiting_handoff"
+    assert "take" in out["reply"].lower()
+
+
+def test_handoff_asks_every_question_in_one_message():
+    s = _session(P2)
+    out = reasoning.advance(s, "take it", case=CASE, llm_fn=make_stub(ask="1. What is disputed?\n2. Do we need data?"))
+    s = out["session"]
+    assert s["state"] == "clarifying" and s["cursor"] == 1
+    # one message contains both questions — not a per-question walk
+    assert "1." in out["reply"] and "2." in out["reply"]
+
+
+def test_answering_everything_goes_straight_to_draft():
+    s = _session(P2, state="clarifying", cursor=1)
+    out = reasoning.advance(
+        s, "It's the amount; yes we need their invoice.", case=CASE,
+        llm_fn=make_stub(ingest=[{"answered": True, "note": "amount"},
+                                 {"answered": True, "note": "yes, invoice"}]))
+    s = out["session"]
+    assert s["state"] == "awaiting_approval"
+    assert s["draft"] == "Hi — here is our answer."
+    assert "————" in out["reply"] and "`send`" in out["reply"]
+
+
+def test_open_critical_point_triggers_one_short_followup():
+    s = _session(P2, state="clarifying", cursor=1)
+    out = reasoning.advance(
+        s, "It's about the amount.", case=CASE,
+        llm_fn=make_stub(ingest=[{"answered": True, "note": "amount"},
+                                 {"answered": False, "note": ""}]))
+    s = out["session"]
+    assert s["state"] == "clarifying" and s["cursor"] == 2
+    assert "Do we need their billing data?" in out["reply"] and "round 2/3" in out["reply"]
+
+
+def test_it_drafts_anyway_after_max_rounds():
+    s = _session(P2, state="clarifying", cursor=3, max_rounds=3)   # already on the last round
+    out = reasoning.advance(
+        s, "not sure honestly", case=CASE,
+        llm_fn=make_stub(ingest=[{"answered": False, "note": ""},
+                                 {"answered": False, "note": ""}]))
+    s = out["session"]
+    assert s["state"] == "awaiting_approval"          # used our rounds -> draft anyway
+    assert "still unconfirmed" in out["reply"]
+
+
+def test_approval_sends():
+    s = _session(P2, state="awaiting_approval", draft="the draft")
+    out = reasoning.advance(s, "looks good, send it", case=CASE, llm_fn=make_stub())
+    assert out["action"] == "send" and out["session"]["state"] == "sent"
+
+
+def test_edit_redrafts_and_stays_pending():
+    s = _session(P2, state="awaiting_approval", draft="v1")
+    out = reasoning.advance(s, "edit: shorter", case=CASE,
+                            llm_fn=make_stub(draft="v2 shorter"))
+    assert out["action"] is None and out["session"]["state"] == "awaiting_approval"
+    assert out["session"]["draft"] == "v2 shorter"
+
+
+def test_no_abandons():
+    out = reasoning.advance(_session(P2, state="awaiting_approval", draft="v1"),
+                            "no", case=CASE, llm_fn=make_stub())
+    assert out["action"] == "abandoned" and out["session"]["state"] == "abandoned"
+
+
+def test_terminal_states_are_inert():
+    for st in ("sent", "abandoned"):
+        out = reasoning.advance(_session(P2, state=st), "send", case=CASE, llm_fn=make_stub())
+        assert out["action"] is None and st in out["reply"]
+
+
+def test_open_session_records_max_rounds(monkeypatch):
+    sb = _FakeSB({"Billing": ["a", "b", "c"]})
+    s = reasoning.open_session(sb, case=CASE, tenant_id="t", case_type="Billing",
+                               max_rounds=2, llm_fn=make_stub(plan=[{"q": "x", "critical": True}]))
+    assert s["max_rounds"] == 2 and s["state"] == "awaiting_handoff"
 
 
 def test_handle_agent_message_persists(monkeypatch):
-    sb = _FakeSB({"Other": ["o1", "o2", "o3", "o4"]})
+    sb = _FakeSB({"Other": ["o1", "o2"]})
     monkeypatch.setattr(reasoning, "_case_for_session", lambda _sb, _s: CASE)
-    row = _session(P4, session_id="s9")
-    out = reasoning.handle_agent_message(sb, row, "take it", llm_fn=_stub_llm)
-    assert out["session"]["state"] == "reasoning"
-    assert sb.updates and sb.updates[-1]["state"] == "reasoning"
+    out = reasoning.handle_agent_message(sb, _session(P2, session_id="s9"),
+                                         "take it", llm_fn=make_stub())
+    assert out["session"]["state"] == "clarifying"
+    assert any(isinstance(r, tuple) and r[0] == "update" and r[1]["state"] == "clarifying"
+               for r in sb.rows)
