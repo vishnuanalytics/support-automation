@@ -135,20 +135,25 @@ def update_message(tenant_id: str, channel: str, ts: str, text: str, sb) -> dict
 
 
 def post_message(text: str, *, tenant_id: str | None = None, channel: str | None = None,
-                 sb=None, webhook: str | None = None, thread_ts: str | None = None) -> dict:
-    """Send a plain message to Slack (Phase 23d — the `notify_human` node).
+                 sb=None, webhook: str | None = None, thread_ts: str | None = None,
+                 blocks: "list | None" = None) -> dict:
+    """Send a message to Slack (Phase 23d — the `notify_human` node).
 
     Prefers the tenant's bot token (`chat.postMessage` to `channel`, so it can
     thread / react later); falls back to an incoming webhook
     (`webhook` arg or `SLACK_ALERT_WEBHOOK`). `thread_ts` posts as a reply in
-    that thread (bot path only). Returns {sent, via, ...}; never raises."""
+    that thread (bot path only). `blocks` (Phase 27h — Block Kit, e.g. the
+    handoff card with buttons) overrides the default single-section render;
+    `text` is still sent as the notification fallback. Returns {sent, via, …};
+    never raises."""
     webhook = webhook or os.environ.get("SLACK_ALERT_WEBHOOK")
     # bot token path
     if tenant_id and channel:
         try:
             sb = sb or _sb()
             payload = {"channel": channel, "text": text,
-                       "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]}
+                       "blocks": blocks or
+                       [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]}
             if thread_ts:
                 payload["thread_ts"] = thread_ts
             r = _call("chat.postMessage", _bot_token(tenant_id, sb), payload)

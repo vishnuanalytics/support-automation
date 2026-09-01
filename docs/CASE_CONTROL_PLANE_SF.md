@@ -31,131 +31,90 @@ Then apply migration `062` (Supabase MCP `apply_migration` or SQL editor) and
 
 ---
 
-## 27b — Omni-Channel
+## 27b — Omni-Channel  ✅ scripted + live-applied (2026-09-01)
 
-All in **Setup**. Omni-Channel is already enabled in the org.
+**No Flow, no Apex, no pipeline code.** `scripts/sf_omni_setup.py` does it
+all through the API, and once a queue has a routing config Salesforce
+**auto-creates** the `PendingServiceRouting` the moment the pipeline's
+`assign_case(queue=…)` sets the Case owner to that queue. Verified live —
+a re-assign to `Team_CSM` produced a ready PSR with zero extra code.
 
-### 1. Service Channel
-Setup → **Omni-Channel Settings** → Enable (confirm). Setup → **Service
-Channels** → New:
-
-| Field | Value |
-|---|---|
-| Service Channel Name | `Support Case` |
-| Developer Name | `Support_Case` |
-| Salesforce Object | `Case` |
-
-### 2. Routing Configurations
-Setup → **Routing Configurations** → New (×2):
-
-| | `RC_Standard` | `RC_Priority` |
-|---|---|---|
-| Routing Priority | 2 | 1 |
-| Routing Model | **Least Active** | Least Active |
-| Units of Capacity | 1 | 1 |
-| Push Time-Out (sec) | 90 | 90 |
-
-### 3. Attach a routing config to each destination queue
-Setup → **Queues** → for each of `Team_Support`, `Support_Tier2`, `Team_CSM`,
-`Team_Sales`, `Team_Offboarding` → set **Routing Configuration = `RC_Standard`**.
-For `Enterprise_Support` and `Billing_Escalations` → **`RC_Priority`**.
-Add the test agents as **members** of the queues they should receive from.
-
-### 4. Presence Configuration + Statuses
-Setup → **Presence Statuses** → New: `Available — Cases` (channel: `Support
-Case`), `Busy`, `Away`.
-Setup → **Presence Configurations** → New `PC_Support_Agent`: Capacity **3**,
-add the presence statuses, **Auto-accept requests = off**.
-
-### 5. Omni-Channel Flow — the routing brain
-Setup → **Flows** → New → **Omni-Channel Flow**, name `Route_Support_Case`.
-Input: the record (`Case`). Logic:
-
-```
-Decision on {!Record.Routed_Team__c}
-  = "support"     -> Route Work: Queue Team_Support        (RC_Standard)
-  = "tier2"       -> Route Work: Queue Support_Tier2       (RC_Standard)
-  = "csm"         -> Route Work: Queue Team_CSM            (RC_Standard)
-  = "sales"       -> Route Work: Queue Team_Sales          (RC_Standard)
-  = "offboarding" -> Route Work: Queue Team_Offboarding    (RC_Standard)
-  = "billing"     -> Route Work: Queue Billing_Escalations (RC_Priority)
-  (default)        -> Route Work: Queue AI_Intake  (no-op — sweep will page)
+```bash
+python scripts/sf_omni_setup.py --dry-run
+python scripts/sf_omni_setup.py
 ```
 
-### 6. Record-triggered Flow — fire the routing on handoff
-Setup → **Flows** → New → **Record-Triggered Flow** on `Case`:
+Creates + wires: `ServiceChannel Support_Case` (Case, TabBased) · presence
+statuses `Available_Cases` / `Busy` / `Away` + the channel-status link ·
+`QueueRoutingConfig` `RC_Standard` (LeastActive, pri 2, 90s) on
+`Team_Support` / `Support_Tier2` / `Team_CSM` / `Team_Sales` /
+`Team_Offboarding` and `RC_Priority` (pri 1) on `Enterprise_Support` /
+`Billing_Escalations` · `PresenceUserConfig PC_Support_Agent` (capacity 3) ·
+running user assigned to it.
 
-| | |
-|---|---|
-| Trigger | A record is updated |
-| Entry conditions | `Status` **Equals** `Escalated` **AND** `Routed_Team__c` **Is Changed** = `true` |
-| Optimize for | Actions and Related Records |
-| Action | Subflow → `Route_Support_Case`, pass `{!$Record}` |
+### The two things the script can't do (once, in Setup)
+1. **Presence-status access** — Setup → Permission Sets → *(your agent
+   permset)* → **Service Presence Statuses** → enable `Available — Cases`
+   etc., and assign the **Presence Configuration** `PC_Support_Agent`.
+   (System Administrators already have status access.)
+2. **The Omni widget** — Setup → App Manager → Service Console → **Utility
+   Items** → add **Omni-Channel** (and optionally **Omni Supervisor** as a
+   tab for leads). An agent opens the console and sets presence to
+   **Available — Cases** — until someone does, PSRs sit *ready and pending*.
 
-### 7. Permission set + console
-Setup → **Permission Sets** → New `Omni_Support_Agent`: enable the **Service
-Presence Statuses** (`Available — Cases`, `Busy`, `Away`), assign the
-**Presence Configuration** `PC_Support_Agent` and the **Routing
-Configuration(s)**. Assign to the test agents.
-
-Setup → **App Manager** → your Service Console app → **Utility Items** → add
-**Omni-Channel**. (Optionally add **Omni Supervisor** as a tab for leads.)
-
-### 8. Smoke test
-1. A test agent opens the console, sets presence to **Available — Cases**.
-2. On any open Case, set `Routed_Team__c = tier2` and `Status = Escalated`.
-3. Within ~seconds the Case pops in that agent's Omni widget → **Accept** →
-   `OwnerId` becomes the agent, capacity drops by 1.
-4. **Decline** instead → it re-routes to the next available agent.
+### Smoke test
+1. An agent goes **Available — Cases** in the console.
+2. Run the pipeline on a case that escalates (or set `Status = Escalated` +
+   `OwnerId` = a routing-configured queue by hand).
+3. The Case pops in that agent's Omni widget → **Accept** → `OwnerId`
+   becomes the agent, capacity −1. **Decline** → re-routes.
 
 ---
 
 ## 27f — Cutover (one entry queue)
 
-The one hard-to-reverse step. Do it in a low-volume window.
+Two parts. Part A (code) shipped; part B is the one hard-to-reverse step —
+run it in a low-volume window.
 
-1. Setup → **Case Assignment Rules** → export / screenshot the current active
-   rule's entries (so you can restore).
-2. Edit the active rule: delete every entry, add **one**:
-   - Criteria: (no criteria — matches all), Assign to **Queue `AI_Intake`**,
-     do not notify.
-3. Confirm Email-to-Case / Web-to-Case still point at the standard intake (they
-   feed the assignment rule, which now always lands in `AI_Intake`).
-4. Create a Case from each channel → it lands in `AI_Intake`, owner = the
-   integration user once the pipeline's first pass runs; escalations route via
-   Omni (27b), not the assignment rule.
+**A. Pipeline-created Cases** — done. `salesforce.ensure_case` now sets
+`OwnerId = AI_Intake` on every Case it creates (a REST create doesn't run
+assignment rules), so CDC / email-poller Cases already start in the one queue.
 
-Rollback: re-add the old rule entries.
+**B. Email-to-Case / Web-to-Case / manual Cases** — `scripts/sf_assignment_cutover.py`:
+
+```bash
+python scripts/sf_assignment_cutover.py --dry-run   # backs up the current rule, shows the diff
+python scripts/sf_assignment_cutover.py             # replace 'Standard' with one entry -> AI_Intake
+python scripts/sf_assignment_cutover.py --restore   # redeploy the backup
+```
+
+The backup is written to `scripts/_assignment_backup/Case.assignmentRules.json`.
+After the cutover, create a Case from each channel → it lands in `AI_Intake`;
+the pipeline drives from there and escalations route via Omni (27b).
 
 ---
 
 ## 27g — Backstops
 
-### Native Case Escalation Rule (belt-and-braces to the app sweep)
-Setup → **Escalation Rules** → new rule, one entry:
-- Criteria: `Status` equals `Escalated` **AND** `Owner` = a Queue.
-- Escalation time: **60 minutes** after `Case: Last Modified`.
-- Action: re-assign to `SLA_Breach`, notify the support manager.
+**`scripts/sf_backstops.py`** deploys the two low-risk ones via metadata:
 
-(The app's `queue_sweep` acts at 30 min; this fires only if the worker is down.)
-
-### Validation rule — no undocumented close
-Setup → **Object Manager → Case → Validation Rules** → New:
+```bash
+python scripts/sf_backstops.py --dry-run
+python scripts/sf_backstops.py            # validation rule + 2 list views
+python scripts/sf_backstops.py --remove
 ```
-AND(
-  ISPICKVAL(Status, "Closed"),
-  OR(ISBLANK(TEXT(Type)), ISBLANK(Description))
-)
-```
-Error: "Set a Case Type and a resolution summary before closing."
 
-### List views
-Object Manager → Case → **List View Controls** (or the Cases tab):
-- **Live Queue** — filter `Closed = false`; group/sort by `Status`, then
-  `Next_Action_Due__c` ascending; columns: Case #, Subject, `Status`,
-  `Routed_Team__c`, `Next_Action__c`, `Next_Action_Due__c`, `AI_Confidence__c`,
-  Owner.
-- **SLA Breach** — filter `SLA_Breach__c = true` AND `Closed = false`.
+- **`Close_Needs_Type`** validation rule — a Case can't be `Closed` without a
+  `Type` and a non-blank `Description`.
+- **Live Queue** list view — open Cases; columns Case # / Subject / Status /
+  `Routed_Team__c` / `Next_Action__c` / `Next_Action_Due__c` / `AI_Confidence__c` / Owner.
+- **SLA Breach** list view — `SLA_Breach__c = true` AND not closed.
+
+### Native Case Escalation Rule — skipped (do by hand if wanted)
+The app `queue_sweep` acts at 30 min and is the primary path. If you want a
+worker-outage backstop: Setup → **Escalation Rules** → new rule, `Status`
+equals `Escalated` AND `Owner` = a Queue, escalate 60 min after Last
+Modified → re-assign to `SLA_Breach`.
 
 ---
 
@@ -173,9 +132,16 @@ Repo-side routing (`resolve_slack_route`, migration `063`) is done. In Slack:
 4. Invite the `slackbot` app to every channel (it needs `channels:history` +
    membership per the Socket-Mode setup).
 
-### Deferred — the interactive card buttons
-**Send as-is / Edit in thread / Reassign… / Not my team** need the Slack app's
-**Interactivity** request URL (or Socket Mode `interactive` envelopes) plus a
-Block Kit card. Not built. Until then the thread works as a reasoning dialogue
-(`@mention` / `take`), and reassignment is `Routed_Team__c` edited on the Case
-(Omni re-routes). Track as Phase 27h.
+### 27h — interactive card buttons  ✅ built (2026-09-01)
+The handoff-thread root is now a Block Kit card: **Send as-is** (delivers the
+draft) · **Edit in thread** (prompts for edited text) · **Reassign…** /
+**Not my team** (prompt → agent replies `route: <team>` → `Routed_Team__c`
+updated + queue re-assigned + Omni re-routes + a routing-correction
+`case_events` row). `alert._handoff_card` builds it; `slack_socket.
+dispatch_action` handles the clicks; the WSS loop routes `type: interactive`
+envelopes.
+
+**One Slack-app toggle:** api.slack.com/apps → your app → **Interactivity &
+Shortcuts** → turn **Interactivity ON**. With Socket Mode there's no request
+URL to fill — the `interactive` payloads then arrive over the same WebSocket.
+No re-install / new scopes needed.

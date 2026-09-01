@@ -128,3 +128,50 @@ def test_delivery_failure_is_reported_in_thread(monkeypatch):
                           post=lambda c, t, x: posts.append(x),
                           deliver=lambda *a: {"sent": False, "error": "smtp auth"})
     assert "couldn't send it" in posts[1] and "smtp auth" in posts[1]
+
+
+# ── Phase 27h — Block Kit button clicks ───────────────────────────
+def _payload(action_id, **over):
+    p = {"type": "block_actions", "actions": [{"action_id": action_id}],
+         "channel": {"id": "C1"}, "container": {"thread_ts": "111.1"},
+         "message": {"ts": "111.1"}, "user": {"id": "UAGENT"}}
+    p.update(over)
+    return p
+
+
+def test_action_send_delivers(monkeypatch):
+    monkeypatch.setattr(slack_socket.reasoning, "handle_agent_message",
+                        lambda *a, **k: {"reply": "ok", "session": dict(SESSION),
+                                         "action": "send"})
+    posts = []
+    out = slack_socket.dispatch_action(
+        _SB([dict(SESSION)]), _payload("cx_send"),
+        post=lambda c, t, x: posts.append(x),
+        deliver=lambda *a: {"sent": True, "via": "smtp"})
+    assert out["action"] == "send" and out["delivery"]["sent"] is True
+    assert "Sent to the customer" in posts[0]
+
+
+def test_action_edit_and_reassign_prompt(monkeypatch):
+    posts = []
+    p = lambda c, t, x: posts.append(x)  # noqa: E731
+    o1 = slack_socket.dispatch_action(_SB([dict(SESSION)]), _payload("cx_edit"), post=p)
+    o2 = slack_socket.dispatch_action(_SB([dict(SESSION)]), _payload("cx_not_my_team"), post=p)
+    assert o1["action"] == "edit" and "edited reply text" in posts[0]
+    assert o2["action"] == "cx_not_my_team" and "route: <team>" in posts[1]
+
+
+def test_action_no_session_is_a_skip():
+    out = slack_socket.dispatch_action(_SB([]), _payload("cx_send"), post=lambda *a: None)
+    assert out["skip"] == "no open session for this thread"
+
+
+def test_route_command_reassigns(monkeypatch):
+    called = {}
+    monkeypatch.setattr(slack_socket, "_reassign",
+                        lambda sb, sess, team: called.update(team=team) or {"ok": True})
+    posts = []
+    out = slack_socket.dispatch(_SB([dict(SESSION)]), _event(text="route: tier2"),
+                                post=lambda c, t, x: posts.append(x))
+    assert called["team"] == "tier2" and out["routed_team"] == "tier2"
+    assert "Re-routed to *tier2*" in posts[0]

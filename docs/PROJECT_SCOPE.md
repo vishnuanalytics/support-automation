@@ -739,13 +739,39 @@ Repo side done (branch `phase-27-case-control-plane`, 312 offline pytest):
   root @mentions the usergroup + carries tier/type/team/confidence/nearest
   resolutions.
 
-Not built (needs the org / Slack app — see the SF runbook): **27b**
-Omni-Channel config (Service Channel, Routing/Presence Configs, the
-`Route_Support_Case` Omni-Channel Flow + record-triggered Flow), **27f**
-assignment-rule cutover to `→ AI_Intake`, **27g** native Escalation Rule +
-`Closed`-needs-`Type` validation rule + list views, the Slack channels /
-usergroups, and the interactive card buttons (**27h** — needs the Slack app
-interactivity endpoint).
+**27b Omni-Channel — scripted + live (2026-09-01).** No Flow, no Apex, no
+pipeline code. `scripts/sf_omni_setup.py` creates the `Support_Case`
+ServiceChannel, 3 presence statuses + the channel link, `RC_Standard` /
+`RC_Priority` QueueRoutingConfigs attached to the 7 `Team_*` / reason
+queues, and `PC_Support_Agent` (capacity 3). **Key finding:** once a queue
+has a routing config, Salesforce *auto-creates* the PendingServiceRouting
+when a Case's OwnerId is set to it — which `ask_human` / `handover` already
+do via `assign_case(queue=…)`. Verified live (a re-assign to `Team_CSM`
+produced a ready PSR). Two Setup-only bits remain: grant the agent permset
+access to the presence statuses, and add the Omni widget to the console so
+an agent can go "Available".
+
+**27f / 27g — scripted, one command each to apply (2026-09-01).**
+- **27f** part A shipped: `salesforce.ensure_case` sets `OwnerId = AI_Intake`
+  on every pipeline-created Case (REST create skips assignment rules). Part B:
+  `scripts/sf_assignment_cutover.py` backs up the live `Standard` rule
+  (`scripts/_assignment_backup/`) and swaps it for one catch-all entry →
+  `AI_Intake`; `--restore` reverts. Dry-run verified (6 stock entries backed
+  up); the live swap is the deliberate low-volume-window step, left to run.
+- **27g**: `scripts/sf_backstops.py` deploys the `Close_Needs_Type`
+  validation rule + the Live Queue / SLA Breach list views. Native Escalation
+  Rule skipped (the `queue_sweep` covers it; add by hand for a worker-outage
+  backstop).
+
+**27h interactive card — built (2026-09-01).** `alert._handoff_card` renders
+the reasoning-thread root as a Block Kit card (Send as-is / Edit in thread /
+Reassign… / Not my team); `slack_socket.dispatch_action` handles the clicks
+(Socket Mode `interactive` envelopes over the existing WSS); a `route: <team>`
+reply updates `Routed_Team__c` + re-assigns the queue + writes a
+routing-correction `case_events` row. One Slack-app toggle to activate:
+Interactivity ON (no request URL under Socket Mode). 319 offline pytest.
+
+Still not built: the Slack `#cx-*` channels / usergroups (needs Slack admin).
 
 **27a live-applied + 27a/c/d live-verified (2026-09-01).** Migrations `062`/
 `063` applied; `sf_support_setup.py --only queues --only cp_fields --only

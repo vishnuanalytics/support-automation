@@ -113,6 +113,7 @@ def alert_human(state: dict, config: dict) -> dict[str, Any]:
         out["slack"] = slack.post_message(
             root, tenant_id=tenant_id, channel=slack_ch,
             webhook=config.get("slack_webhook"),
+            blocks=_handoff_card(root, has_draft=bool((state.get("draft") or "").strip())),
         )
         sl = out["slack"]
         if sl.get("sent") and sl.get("channel") and sl.get("ts"):
@@ -168,6 +169,27 @@ def _open_session(state: dict, config: dict, *, sf_uid, slack_uid,
     except Exception as e:  # noqa: BLE001
         log.warning("could not open reasoning session: %s", e)
         return None
+
+
+def _handoff_card(body: str, *, has_draft: bool) -> list[dict]:
+    """Phase 27h — the reasoning-thread root as a Block Kit card with buttons.
+    Socket Mode delivers the clicks as `interactive` envelopes; slack_socket
+    routes them via `dispatch_action`."""
+    els = [
+        {"type": "button", "action_id": "cx_edit",
+         "text": {"type": "plain_text", "text": "Edit in thread"}},
+        {"type": "button", "action_id": "cx_reassign",
+         "text": {"type": "plain_text", "text": "Reassign…"}},
+        {"type": "button", "action_id": "cx_not_my_team",
+         "text": {"type": "plain_text", "text": "Not my team"}},
+    ]
+    if has_draft:
+        els.insert(0, {"type": "button", "action_id": "cx_send", "style": "primary",
+                       "text": {"type": "plain_text", "text": "Send as-is"}})
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": body}},
+        {"type": "actions", "block_id": "cx_handoff", "elements": els},
+    ]
 
 
 def _looks_id(v: Any) -> bool:
