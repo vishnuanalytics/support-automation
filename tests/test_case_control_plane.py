@@ -119,6 +119,35 @@ def test_handover_escalates(capture, monkeypatch):
 
 
 # ── clarify ──────────────────────────────────────────────────────────────
+# ── slack route resolution (27e) ─────────────────────────────────────────
+_ROUTE_ROWS = [
+    {"match_kind": "routed_team", "match_value": "tier2", "slack_channel": "#cx-tier2",
+     "slack_usergroup": "@cx-tier2-oncall", "urgency": "high", "label": "Support Tier 2"},
+    {"match_kind": "routed_team", "match_value": "billing", "slack_channel": "#cx-billing",
+     "slack_usergroup": "@billing-oncall", "urgency": "high", "label": "Billing"},
+    {"match_kind": "case_type", "match_value": "How-to", "slack_channel": "#cx-l1",
+     "slack_usergroup": "@cx-l1-oncall", "urgency": "normal", "label": "Support L1"},
+]
+
+
+def test_resolve_slack_route_prefers_routed_team(monkeypatch):
+    from interpreter import routing
+    monkeypatch.setattr(routing, "_fetch_rows", lambda t, sb: _ROUTE_ROWS)
+    monkeypatch.setattr(routing, "_cache_get", lambda k: None)
+    r = routing.resolve_slack_route("t", routed_team="tier2", case_type="How-to")
+    assert r["channel"] == "#cx-tier2" and r["usergroup"] == "@cx-tier2-oncall"
+
+
+def test_resolve_slack_route_falls_back_to_case_type_then_unrouted(monkeypatch):
+    from interpreter import routing
+    monkeypatch.setattr(routing, "_fetch_rows", lambda t, sb: _ROUTE_ROWS)
+    monkeypatch.setattr(routing, "_cache_get", lambda k: None)
+    assert routing.resolve_slack_route("t", routed_team="support",
+                                       case_type="How-to")["channel"] == "#cx-l1"
+    miss = routing.resolve_slack_route("t", routed_team="support", case_type="Other")
+    assert miss["channel"] == "#cx-unrouted" and miss["usergroup"] is None
+
+
 def test_clarify_sets_waiting_on_customer(capture, monkeypatch):
     monkeypatch.setattr(salesforce, "post_chatter", lambda *a, **k: {"posted": True, "dry_run": True})
     monkeypatch.setattr("interpreter.registry.llm.complete",

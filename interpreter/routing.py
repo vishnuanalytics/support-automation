@@ -48,11 +48,14 @@ def _default_sb():
 
 
 def _fetch_rows(tenant_id: str | None, sb) -> list[dict[str, Any]]:
+    if sb is None and "PYTEST_CURRENT_TEST" in os.environ:
+        return []                     # offline tests monkeypatch this or pass sb
     try:
         sb = sb or _default_sb()
         q = (sb.table("notify_targets")
              .select("match_kind,match_value,resolver,sf_target_id,sf_target_type,"
-                     "sf_team,sf_role,sf_queue,label,active")
+                     "sf_team,sf_role,sf_queue,label,active,"
+                     "slack_channel,slack_usergroup,urgency")
              .eq("active", True))
         if tenant_id:
             q = q.eq("tenant_id", str(tenant_id))
@@ -191,5 +194,47 @@ def resolve_notify_target(
             role = row.get("sf_role") or "Manager"
             out["label"] = f"{name} ({row['sf_team']} {role})"
 
+    _cache_put(ck, out)
+    return out
+
+
+def resolve_slack_route(
+    tenant_id: str | None,
+    *,
+    routed_team: str | None = None,
+    case_type: str | None = None,
+    module: str | None = None,
+    sb=None,
+) -> dict[str, Any]:
+    """Where a handoff card goes in Slack (Phase 27e). Most-specific match
+    wins: routed_team -> module -> case_type. No match -> #cx-unrouted.
+
+    Returns `{"channel", "usergroup", "urgency", "label"}` — channel is always
+    set (the fallback), usergroup may be None.
+    """
+    fallback = {"channel": os.environ.get("SLACK_UNROUTED_CHANNEL", "#cx-unrouted"),
+               "usergroup": None, "urgency": "high", "label": "unrouted"}
+    ck = f"slackroute:{tenant_id}:{routed_team}:{case_type}:{module}"
+    cached = _cache_get(ck)
+    if cached is not None:
+        return cached
+    rows = _fetch_rows(tenant_id, sb)
+    if not rows:
+        return fallback
+    idx = {(r.get("match_kind"), r.get("match_value")): r for r in rows if r.get("slack_channel")}
+    row = (
+        (routed_team and idx.get(("routed_team", routed_team)))
+        or (module and idx.get(("module", module)))
+        or (case_type and idx.get(("case_type", case_type)))
+    )
+    if not row:
+        _cache_put(ck, fallback)
+        return fallback
+    out = {
+        "channel": row.get("slack_channel") or fallback["channel"],
+        "usergroup": row.get("slack_usergroup"),
+        "urgency": row.get("urgency") or "normal",
+        "label": row.get("label") or routed_team or case_type or "support",
+    }
     _cache_put(ck, out)
     return out

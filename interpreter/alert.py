@@ -65,17 +65,46 @@ def alert_human(state: dict, config: dict) -> dict[str, Any]:
             salesforce.user_email(sf_uid, tenant_id=tenant_id) or "", tenant_id=tenant_id)
 
     want = config.get("channel") or "both"
-    slack_ch = _pick(config.get("slack_channel_by_team"), team, "default") or config.get("slack_channel")
-    out: dict[str, Any] = {"mention": {"slack": slack_uid, "sf": sf_uid}, "channel": want}
+    # Phase 27e — category -> #cx-* channel + @cx-*-oncall usergroup from
+    # notify_targets. Flow config still wins if it names a channel explicitly.
+    cls = state.get("classification") or {}
+    route = {}
+    try:
+        from interpreter import routing
+        route = routing.resolve_slack_route(
+            tenant_id, routed_team=team or None,
+            case_type=cls.get("case_type"), module=(state.get("sf_writeback") or {}).get("written", {}).get("Module__c"),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("slack route lookup failed: %s", e)
+    slack_ch = (_pick(config.get("slack_channel_by_team"), team, "default")
+                or config.get("slack_channel") or route.get("channel"))
+    usergroup = route.get("usergroup")
+    out: dict[str, Any] = {"mention": {"slack": slack_uid, "sf": sf_uid},
+                           "channel": want, "route": route}
 
     # Phase 24 — the bot has NOT answered the customer. The Slack post is the
     # root of the reasoning thread; the agent replies `take` in it to start.
-    who = f"<@{slack_uid}>" if slack_uid else "the responsible agent"
+    # Phase 27e — @mention the on-call usergroup and carry the context an
+    # agent needs before they claim the case in Omni.
+    who = (f"<@{slack_uid}>" if slack_uid
+           else f"{usergroup} " if usergroup else "the responsible agent")
+    tier = state.get("tier") or "basic"
+    ctype = cls.get("case_type") or "?"
+    ctx_bits = [f"tier `{tier}`", f"type `{ctype}`", f"team `{team or 'support'}`"]
+    if conf is not None:
+        ctx_bits.append(f"confidence `{conf}`")
+    prior = state.get("prior_resolutions") or []
+    prior_line = ""
+    if prior:
+        prior_line = "\n_Nearest past resolutions:_ " + "; ".join(
+            f"{(p.get('case_number') or p.get('case_sf_id') or '?')}" for p in prior[:3])
     root = (
         f":thread: {who} — Case *{cn}*  ·  _{subject}_\n"
+        f"{' · '.join(ctx_bits)}\n"
         f"Triaged (type/priority written to the Case). *I have not replied to the "
-        f"customer.* When you're ready to reason through the response with me, "
-        f"reply in this thread — **@mention me** or type `take`.\n"
+        f"customer.* Claim it in Omni, then reply here — **@mention me** or type "
+        f"`take` — to reason through the response.{prior_line}\n"
         f"{_sf_link(sf_id) if sf_id else ''}"
     )
 
