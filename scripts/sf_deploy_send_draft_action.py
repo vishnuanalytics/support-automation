@@ -11,19 +11,21 @@ Deploys (Metadata API, no Apex, no test coverage needed):
 
   * Case field  `Bot_Send_Draft__c`  (Checkbox, default false)  — the arm flag
   * Case field  `Bot_Send_Note__c`   (LongTextArea 4096)        — optional edits
-  * Screen Flow `Send_Bot_Draft_to_Customer` — confirm -> (optional edits) ->
-                set Bot_Send_Draft__c = true -> "queued" screen.
-                Runs in system context, so the field needs no profile FLS.
-  * Quick Action `Case.Send_Bot_Draft` (type = Flow)
+  * Quick Action `Case.Send_Bot_Draft` — type **Update**: shows the arm
+    checkbox + the note; Save fires the CDC event. (A Flow-type action can't
+    be added to a page-layout action list, so Update it is.)
+  * FLS for both fields on the **Admin** profile — a Metadata-API field is
+    invisible to every profile, System Administrator included, until granted.
 
     python scripts/sf_deploy_send_draft_action.py            # deploy
     python scripts/sf_deploy_send_draft_action.py --remove   # delete all of it
 
-Needs SF creds + "Author Apex" / "Modify Metadata" / "Manage Flow".
+Needs SF creds + "Modify Metadata" / "Customize Application".
 
-AFTER deploying: add the action to the Case page — Setup -> Object Manager ->
-Case -> Page Layouts (or the Lightning record page in App Builder) -> drag
-"Send Bot Draft to Customer" into the Salesforce Mobile & Lightning Actions.
+AFTER deploying, add the action to the Case layouts' action lists — done for
+this org by appending `Case.Send_Bot_Draft` to each `Layout.quickActionList`
+via `sf.mdapi` (see the session notes); in the UI it's Setup -> Object
+Manager -> Case -> Page Layouts -> Mobile & Lightning Actions.
 """
 
 from __future__ import annotations
@@ -72,99 +74,36 @@ CASE_OBJECT = """\
 </CustomObject>
 """
 
-FLOW = """\
-<?xml version="1.0" encoding="UTF-8"?>
-<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
-    <apiVersion>60.0</apiVersion>
-    <environments>Default</environments>
-    <interviewLabel>Send Bot Draft to Customer {!$Flow.CurrentDateTime}</interviewLabel>
-    <label>Send Bot Draft to Customer</label>
-    <processType>Flow</processType>
-    <runInMode>SystemModeWithSharing</runInMode>
-    <status>Active</status>
-    <screens>
-        <name>Confirm</name>
-        <label>Confirm send</label>
-        <locationX>176</locationX>
-        <locationY>134</locationY>
-        <allowBack>true</allowBack>
-        <allowFinish>false</allowFinish>
-        <allowPause>false</allowPause>
-        <connector>
-            <targetReference>Arm_send_flag</targetReference>
-        </connector>
-        <fields>
-            <name>Confirm_info</name>
-            <fieldText>&lt;p&gt;This queues the support bot&amp;#39;s suggested reply to be emailed to the customer. Click &lt;b&gt;Next&lt;/b&gt; to send it as drafted, or Cancel to stop.&lt;/p&gt;</fieldText>
-            <fieldType>DisplayText</fieldType>
-        </fields>
-        <showFooter>true</showFooter>
-        <showHeader>true</showHeader>
-    </screens>
-    <screens>
-        <name>Queued</name>
-        <label>Queued</label>
-        <locationX>176</locationX>
-        <locationY>374</locationY>
-        <allowBack>false</allowBack>
-        <allowFinish>true</allowFinish>
-        <allowPause>false</allowPause>
-        <fields>
-            <name>Queued_info</name>
-            <fieldText>&lt;p&gt;Queued. The customer will receive the reply within about a minute, and it will appear in this Case&amp;#39;s activity.&lt;/p&gt;</fieldText>
-            <fieldType>DisplayText</fieldType>
-        </fields>
-        <showFooter>true</showFooter>
-        <showHeader>true</showHeader>
-    </screens>
-    <recordUpdates>
-        <name>Arm_send_flag</name>
-        <label>Arm send flag</label>
-        <locationX>176</locationX>
-        <locationY>254</locationY>
-        <connector>
-            <targetReference>Queued</targetReference>
-        </connector>
-        <filterLogic>and</filterLogic>
-        <filters>
-            <field>Id</field>
-            <operator>EqualTo</operator>
-            <value>
-                <elementReference>recordId</elementReference>
-            </value>
-        </filters>
-        <inputAssignments>
-            <field>Bot_Send_Draft__c</field>
-            <value>
-                <booleanValue>true</booleanValue>
-            </value>
-        </inputAssignments>
-        <object>Case</object>
-    </recordUpdates>
-    <start>
-        <locationX>50</locationX>
-        <locationY>0</locationY>
-        <connector>
-            <targetReference>Confirm</targetReference>
-        </connector>
-    </start>
-    <variables>
-        <name>recordId</name>
-        <dataType>String</dataType>
-        <isCollection>false</isCollection>
-        <isInput>true</isInput>
-        <isOutput>false</isOutput>
-    </variables>
-</Flow>
-"""
-
+# An **Update** action (not Flow): a Flow quick action can't be added to a
+# page layout's action list, an Update one can. It shows the arm checkbox +
+# an optional note; Save fires the CDC event the worker listens for.
 QUICK_ACTION = """\
 <?xml version="1.0" encoding="UTF-8"?>
 <QuickAction xmlns="http://soap.sforce.com/2006/04/metadata">
     <label>Send Bot Draft to Customer</label>
-    <flowDefinition>Send_Bot_Draft_to_Customer</flowDefinition>
     <optionsCreateFeedItem>false</optionsCreateFeedItem>
-    <type>Flow</type>
+    <quickActionLayout>
+        <layoutSectionStyle>TwoColumnsLeftToRight</layoutSectionStyle>
+        <quickActionLayoutColumns>
+            <quickActionLayoutItems>
+                <emptySpace>false</emptySpace>
+                <field>Bot_Send_Draft__c</field>
+                <uiBehavior>Edit</uiBehavior>
+            </quickActionLayoutItems>
+            <quickActionLayoutItems>
+                <emptySpace>false</emptySpace>
+                <field>Bot_Send_Note__c</field>
+                <uiBehavior>Edit</uiBehavior>
+            </quickActionLayoutItems>
+        </quickActionLayoutColumns>
+        <quickActionLayoutColumns>
+            <quickActionLayoutItems>
+                <emptySpace>true</emptySpace>
+            </quickActionLayoutItems>
+        </quickActionLayoutColumns>
+    </quickActionLayout>
+    <targetObject>Case</targetObject>
+    <type>Update</type>
 </QuickAction>
 """
 
@@ -196,7 +135,6 @@ PACKAGE = """\
         <members>Case.Bot_Send_Note__c</members>
         <name>CustomField</name>
     </types>
-    <types><members>Send_Bot_Draft_to_Customer</members><name>Flow</name></types>
     <types><members>Case.Send_Bot_Draft</members><name>QuickAction</name></types>
     <types><members>Admin</members><name>Profile</name></types>
     <version>%(api)s</version>
@@ -206,11 +144,10 @@ PACKAGE = """\
 _EMPTY_PACKAGE = ('<?xml version="1.0" encoding="UTF-8"?>\n'
                   '<Package xmlns="http://soap.sforce.com/2006/04/metadata">'
                   f'<version>{API}</version></Package>\n')
-# quick action first (it references the flow); flow next; fields last.
+# quick action before the fields it references.
 _DESTRUCTIVE = ('<?xml version="1.0" encoding="UTF-8"?>\n'
                 '<Package xmlns="http://soap.sforce.com/2006/04/metadata">\n'
                 '  <types><members>Case.Send_Bot_Draft</members><name>QuickAction</name></types>\n'
-                '  <types><members>Send_Bot_Draft_to_Customer</members><name>Flow</name></types>\n'
                 '  <types><members>Case.Bot_Send_Draft__c</members>'
                 '<members>Case.Bot_Send_Note__c</members><name>CustomField</name></types>\n'
                 f'  <version>{API}</version>\n</Package>\n')
@@ -221,7 +158,6 @@ def _zip() -> bytes:
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("package.xml", PACKAGE)
         z.writestr("objects/Case.object", CASE_OBJECT)
-        z.writestr("flows/Send_Bot_Draft_to_Customer.flow", FLOW)
         z.writestr("quickActions/Case.Send_Bot_Draft.quickAction", QUICK_ACTION)
         z.writestr("profiles/Admin.profile", ADMIN_PROFILE)
     return buf.getvalue()
@@ -254,10 +190,38 @@ def _deploy(sf, data: bytes, what: str) -> int:
     return 0 if res.get("state") in ("Succeeded", "Completed") else 1
 
 
+def _add_to_layouts(sf) -> None:
+    """Append `Case.Send_Bot_Draft` to every Case layout's action list so the
+    button shows in Lightning. Idempotent."""
+    action = "Case.Send_Bot_Draft"
+    for full in ("Case-Case Layout", "Case-Case (Marketing) Layout",
+                 "Case-Case (Sales) Layout", "Case-Case (Support) Layout"):
+        try:
+            lay = sf.mdapi.Layout.read(full)
+        except Exception as e:  # noqa: BLE001
+            print(f"  [skip] {full}: {repr(e)[:100]}")
+            continue
+        qal = lay.quickActionList
+        if qal is None:
+            lay.quickActionList = {"quickActionListItems": [{"quickActionName": action}]}
+        elif action in [i["quickActionName"] for i in qal["quickActionListItems"]]:
+            print(f"  [ok]   {full}: already has it")
+            continue
+        else:
+            qal["quickActionListItems"].append({"quickActionName": action})
+        try:
+            sf.mdapi.Layout.update(lay)
+            print(f"  [done] {full}")
+        except Exception as e:  # noqa: BLE001
+            print(f"  [FAIL] {full}: {repr(e)[:150]}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--remove", action="store_true",
-                    help="delete the action + flow + fields")
+                    help="delete the action + Case fields")
+    ap.add_argument("--skip-layouts", action="store_true",
+                    help="don't touch the Case page layouts")
     args = ap.parse_args()
     if not available():
         sys.exit("no SF creds in .env")
@@ -265,25 +229,22 @@ def main() -> int:
 
     if args.remove:
         rc = _deploy(sf, _remove_zip(),
-                     "removing Send_Bot_Draft action + flow + Case fields")
-        print("\ndone." if rc == 0 else
-              "\nremoval incomplete — an active Flow can't be deleted via API; "
-              "deactivate 'Send Bot Draft to Customer' in Setup -> Flows, then re-run.")
+                     "removing Send_Bot_Draft action + Case fields")
+        print("\ndone (remove the action from the Case layouts by hand if needed)."
+              if rc == 0 else "\nremoval incomplete — see the failures above.")
         return rc
 
-    rc = _deploy(sf, _zip(), "deploying Send_Bot_Draft action + flow + Case fields")
-    if rc == 0:
-        print("\ndone. Now add the button to the Case page:")
-        print("  Setup -> Object Manager -> Case -> Page Layouts -> (your layout)")
-        print("  -> Mobile & Lightning Actions -> drag 'Send Bot Draft to Customer'")
-        print("  into the Salesforce Mobile and Lightning Experience Actions row.")
-        print("\nThen: open an escalated Case, click the button, confirm. The worker")
-        print("emails the bot's draft and clears Bot_Send_Draft__c within ~1 min.")
-    else:
-        print("\ndeploy failed — see the component failures above. If the Flow")
-        print("failed to activate, change <status>Active</status> to Draft in this")
-        print("script, re-deploy, then activate it manually in Setup -> Flows.")
-    return rc
+    rc = _deploy(sf, _zip(), "deploying Send_Bot_Draft action + Case fields + FLS")
+    if rc != 0:
+        print("\ndeploy failed — see the component failures above.")
+        return rc
+    if not args.skip_layouts:
+        print("\nadding the action to the Case layouts:")
+        _add_to_layouts(sf)
+    print("\ndone. Open an escalated Case -> 'Send Bot Draft to Customer' -> tick")
+    print("the box -> Save. The worker emails the bot's draft and clears the")
+    print("box within ~1 min.")
+    return 0
 
 
 if __name__ == "__main__":
