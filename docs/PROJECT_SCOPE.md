@@ -751,17 +751,16 @@ produced a ready PSR). Two Setup-only bits remain: grant the agent permset
 access to the presence statuses, and add the Omni widget to the console so
 an agent can go "Available".
 
-**27f / 27g — scripted, one command each to apply (2026-09-01).**
-- **27f** part A shipped: `salesforce.ensure_case` sets `OwnerId = AI_Intake`
-  on every pipeline-created Case (REST create skips assignment rules). Part B:
-  `scripts/sf_assignment_cutover.py` backs up the live `Standard` rule
-  (`scripts/_assignment_backup/`) and swaps it for one catch-all entry →
-  `AI_Intake`; `--restore` reverts. Dry-run verified (6 stock entries backed
-  up); the live swap is the deliberate low-volume-window step, left to run.
-- **27g**: `scripts/sf_backstops.py` deploys the `Close_Needs_Type`
-  validation rule + the Live Queue / SLA Breach list views. Native Escalation
-  Rule skipped (the `queue_sweep` covers it; add by hand for a worker-outage
-  backstop).
+**27f / 27g — applied live (2026-09-01).**
+- **27f** part A: `salesforce.ensure_case` sets `OwnerId = AI_Intake` on every
+  pipeline-created Case. Part B **run**: `scripts/sf_assignment_cutover.py`
+  backed up the live `Standard` rule (`scripts/_assignment_backup/`, 6 stock
+  entries) and swapped it for one catch-all → `AI_Intake`; `--restore` reverts.
+  Verified: rule now has 1 entry, `formula=true → Queue AI_Intake`.
+- **27g**: `scripts/sf_backstops.py` **run** — `Close_Needs_Type` validation
+  rule live + active (no Close without `Type` + `Description`). The two list
+  views are a 60-second Setup task (column tokens fight the metadata API);
+  native Escalation Rule skipped (the `queue_sweep` covers it).
 
 **27h interactive card — built (2026-09-01).** `alert._handoff_card` renders
 the reasoning-thread root as a Block Kit card (Send as-is / Edit in thread /

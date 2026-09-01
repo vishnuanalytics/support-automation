@@ -49,7 +49,6 @@ CUTOVER_XML = """\
             <assignedTo>AI_Intake</assignedTo>
             <assignedToType>Queue</assignedToType>
             <formula>true</formula>
-            <doNotReassignOwner>false</doNotReassignOwner>
         </ruleEntry>
     </assignmentRule>
 </AssignmentRules>
