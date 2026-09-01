@@ -241,3 +241,36 @@ def test_reasoning_ttl_nudges_then_escalates(monkeypatch):
     out = sweeps.reasoning_ttl(sb, dry_run=False)
     assert out["nudged"] == ["0007"] and out["escalated"] == ["0008"]
     assert {"state": "abandoned"} in sb.updated
+
+
+def test_queue_sweep_auto_resolves_stale_waiting_on_customer(monkeypatch):
+    now = datetime.now(timezone.utc)
+    sf = _SF([{
+        "Id": "500W", "CaseNumber": "0010", "Status": "Waiting on Customer",
+        "OwnerId": "00Gx", "Routed_Team__c": "support",
+        "Next_Action_Due__c": _iso(now - timedelta(hours=1)),
+        "SLA_Breach__c": False, "CreatedDate": _iso(now - timedelta(days=5)),
+        "LastModifiedDate": _iso(now - timedelta(days=3)),
+        "Last_AI_Run_At__c": _iso(now - timedelta(days=3)),
+    }])
+    _sf_patch(monkeypatch, sf)
+    monkeypatch.setattr(salesforce, "post_chatter", lambda *a, **k: {"posted": True})
+    out = sweeps.queue_sweep(sf, dry_run=False)
+    assert out["resolved"] == ["0010"] and out["breached"] == []
+    assert any(f.get("Status") == "Resolved" for _c, f in sf.updates)
+
+
+def test_queue_sweep_dead_letters_escalated_but_unrouted(monkeypatch):
+    now = datetime.now(timezone.utc)
+    sf = _SF([{
+        "Id": "500U", "CaseNumber": "0011", "Status": "Escalated",
+        "OwnerId": "00GAI_Intake000",          # still queue-owned by intake
+        "Routed_Team__c": None,
+        "Next_Action_Due__c": None, "Last_AI_Run_At__c": _iso(now - timedelta(hours=2)),
+        "SLA_Breach__c": False, "CreatedDate": _iso(now - timedelta(hours=3)),
+        "LastModifiedDate": _iso(now - timedelta(hours=2)),
+    }])
+    _sf_patch(monkeypatch, sf)
+    out = sweeps.queue_sweep(sf, dry_run=False)
+    assert out["breached"] == ["0011"]
+    assert any(k["queue"] == "Unrouted_Review" for _c, k in sf.assigns)

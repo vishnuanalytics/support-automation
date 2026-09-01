@@ -175,3 +175,14 @@ def test_route_command_reassigns(monkeypatch):
                                 post=lambda c, t, x: posts.append(x))
     assert called["team"] == "tier2" and out["routed_team"] == "tier2"
     assert "Re-routed to *tier2*" in posts[0]
+
+
+def test_redrive_nudges_open_sessions():
+    posts = []
+    rows = [
+        {"session_id": "a", "slack_channel": "#x", "slack_thread_ts": "1.1", "state": "clarifying"},
+        {"session_id": "b", "slack_channel": "#x", "slack_thread_ts": "2.2", "state": "drafting"},
+        {"session_id": "c", "slack_channel": None, "slack_thread_ts": None, "state": "clarifying"},
+    ]
+    slack_socket._redrive_open_sessions(_SB(rows), lambda c, t, x: posts.append((c, t)))
+    assert posts == [("#x", "1.1"), ("#x", "2.2")]      # the channelless one is skipped

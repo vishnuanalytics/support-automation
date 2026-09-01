@@ -103,6 +103,7 @@ def queue_sweep(sb, *, dry_run: bool | None = None) -> dict:
 
     nudged: list[str] = []
     breached: list[str] = []
+    resolved: list[str] = []
     for r in rows:
         if r.get("SLA_Breach__c"):
             continue
@@ -120,6 +121,47 @@ def queue_sweep(sb, *, dry_run: bool | None = None) -> dict:
         # backstop for "CDC never picked this up at all".
         touched = bool(due or r.get("Routed_Team__c") or r.get("Last_AI_Run_At__c"))
         if not touched:
+            continue
+
+        # Phase 27 — the customer went quiet: auto-resolve a stale
+        # `Waiting on Customer` Case (design state machine: WOC -> Resolved
+        # on the timer). Not a breach — a graceful close.
+        if status == "Waiting on Customer" and due and due < now:
+            resolved.append(cn)
+            if not dry:
+                try:
+                    salesforce.update_case_fields(r["Id"], {
+                        "Status": "Resolved",
+                        "Next_Action__c": "auto-resolved — no customer reply",
+                    })
+                    salesforce.post_chatter(
+                        r["Id"], "Closing this out as we didn't hear back. Reply any "
+                        "time and it'll reopen.")
+                except Exception as e:  # noqa: BLE001
+                    log.warning("queue_sweep auto-resolve %s: %s", cn, e)
+                _event(sb, tenant_id=None, case_sf_id=r["Id"], case_number=cn,
+                       actor="system:sweep", action="send", from_status=status,
+                       to_status="Resolved", reason="no customer reply — auto-resolved")
+            continue
+
+        # Phase 27 — escalated but Omni never took it (Routed_Team__c missing,
+        # or still queue-owned by AI_Intake): dead-letter to Unrouted_Review.
+        if (status == "Escalated" and is_queue
+                and (not r.get("Routed_Team__c") or "AI_Intake" in owner)
+                and _age_min(r.get("LastModifiedDate"), now) > ACK_MIN):
+            breached.append(cn)
+            if not dry:
+                try:
+                    salesforce.assign_case(r["Id"], queue="Unrouted_Review")
+                    salesforce.update_case_fields(r["Id"], {"SLA_Breach__c": True})
+                except Exception as e:  # noqa: BLE001
+                    log.warning("queue_sweep unrouted %s: %s", cn, e)
+                _page(f":warning: Case *{cn}* escalated but never routed "
+                      f"(team=`{r.get('Routed_Team__c') or '∅'}`) — parked in `Unrouted_Review`.",
+                      sb=sb)
+                _event(sb, tenant_id=None, case_sf_id=r["Id"], case_number=cn,
+                       actor="system:sweep", action="breach", from_status=status,
+                       to_status=status, reason="escalated but unrouted")
             continue
 
         reason = hard = None
@@ -172,7 +214,8 @@ def queue_sweep(sb, *, dry_run: bool | None = None) -> dict:
                        actor="system:sweep", action="reconcile", from_status=status,
                        to_status=status, reason=reason, routed_team=team)
 
-    return {"scanned": len(rows), "nudged": nudged, "breached": breached, "dry_run": dry}
+    return {"scanned": len(rows), "nudged": nudged, "breached": breached,
+            "resolved": resolved, "dry_run": dry}
 
 
 # ── cdc_reconcile ───────────────────────────────────────────────────────
