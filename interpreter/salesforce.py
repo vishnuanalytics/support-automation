@@ -510,7 +510,7 @@ def post_chatter(case_id: str, body: str, *, mention_id: str | None = None, tena
     }
     try:
         res = sf.restful(
-            "connect/records/feed-elements", method="POST", data=json.dumps(payload)
+            "chatter/feed-elements", method="POST", data=json.dumps(payload)
         )
         return {"posted": True, "dry_run": False, "mention_id": mention_id,
                 "feed_element_id": (res or {}).get("id")}

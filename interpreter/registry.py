@@ -1038,6 +1038,9 @@ def h_notify(state: CaseState, config: dict) -> dict:
         "draft below, please review before it goes to the customer.\n\n{draft}"
     )
     body = tmpl.format(label=label, confidence=confidence, draft=draft or "(no draft yet)")
+    # `draft_inline: true` -> one feed row (draft in the Chatter note); default
+    # keeps the draft as a separate private CaseComment the agent can copy.
+    inline = bool(config.get("draft_inline"))
 
     if sf_id and outcome["channel"] == "salesforce_chatter":
         # @mention a real person. A User/Group id is mentionable directly; a
@@ -1055,7 +1058,7 @@ def h_notify(state: CaseState, config: dict) -> dict:
         outcome["chatter"] = chatter
         mode = "dry-run" if chatter.get("dry_run") else "posted"
         summary = f"Chatter {mode} → {label} [{resolved_via}] (no reassign)"
-        if draft.strip():
+        if draft.strip() and not inline:
             note = salesforce.add_case_comment(
                 sf_id, f"[bot draft — {label}; review before sending]\n\n{draft}",
                 published=False, tenant_id=state.get("tenant_id"),
@@ -1064,10 +1067,9 @@ def h_notify(state: CaseState, config: dict) -> dict:
             if note.get("created"):
                 summary += " + draft comment"
 
-        # OD-4 workaround: Connect API @mention 404s on this DE org, so a
-        # Chatter mention doesn't actually notify anyone. Set flag fields on
-        # the Case instead — a record-triggered SF Flow keyed on them can fire
-        # an Email Alert to the routed team. Unknown fields are skipped.
+        # Optional: also set flag fields on the Case (e.g. Bot_Attention__c)
+        # so a record-triggered SF Flow can fire an Email Alert / Slack in
+        # addition to the @mention. Unknown fields are skipped.
         af = config.get("attention_fields")
         if af:
             rendered = {k: (v.format(label=label, case_type=case_type or "",
