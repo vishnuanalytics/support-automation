@@ -73,3 +73,13 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python -m scripts.purge_old
+
+      # Phase 26 — re-rank the free OpenRouter models (they churn weekly) so
+      # llm.py's fallback chains stay current.
+      - name: Refresh the free-model roster
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: python -m scripts.refresh_llm_roster

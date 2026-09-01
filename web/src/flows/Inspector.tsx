@@ -531,6 +531,13 @@ function AttachmentsForm({
       </label>
       <label className="row" style={{ gap: 6, marginTop: 4 }}>
         <input type="checkbox" style={{ width: "auto" }}
+               checked={config.skip_signatures !== false}
+               onChange={(e) => set({ skip_signatures: e.target.checked })} />
+        skip signature / logo images (tiny, banner-shaped, <code>image00x.png</code>,
+        or seen before from that sender)
+      </label>
+      <label className="row" style={{ gap: 6, marginTop: 4 }}>
+        <input type="checkbox" style={{ width: "auto" }}
                checked={config.video === true} onChange={(e) => set({ video: e.target.checked })} />
         process video (transcribe audio + OCR keyframes)
       </label>

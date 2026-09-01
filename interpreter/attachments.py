@@ -26,13 +26,26 @@ or no SF creds never raises.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+import re
 import subprocess
 import tempfile
 from typing import Any
 
 log = logging.getLogger("interpreter.attachments")
+
+# an image is treated as a signature / logo (skipped before OCR / vision) when
+# it's tiny, an extreme banner/icon shape, or named like an inline sig image.
+SIG_MIN_PX = int(os.environ.get("ATTACH_MIN_IMAGE_PX", "350"))
+SIG_MIN_BYTES = int(os.environ.get("ATTACH_MIN_IMAGE_BYTES", "18000"))
+SIG_SEEN_THRESHOLD = int(os.environ.get("ATTACH_SIG_SEEN", "2"))
+_SIG_NAME = re.compile(
+    r"(image0\d{2}|logo|signature|\bsig[-_.]|banner|footer|header|badge|icon|"
+    r"facebook|linkedin|twitter|instagram|youtube|x-icon|social|award|cert)",
+    re.I,
+)
 
 _IMAGE_EXT = {"png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff"}
 _VIDEO_EXT = {"mp4", "mov", "webm", "mkv", "m4v", "avi", "ogv"}
@@ -255,10 +268,61 @@ def _sf_blob(sf, content_version_id: str, max_bytes: int) -> bytes | None:
         return None
 
 
+# ── signature / logo filter ──────────────────────────────────────
+def _dims(data: bytes) -> tuple[int, int]:
+    try:
+        import io
+
+        from PIL import Image
+        with Image.open(io.BytesIO(data)) as im:
+            return im.size                     # (w, h)
+    except Exception:  # noqa: BLE001
+        return (0, 0)
+
+
+def looks_like_signature(name: str, data: bytes, *, min_px: int = SIG_MIN_PX,
+                         min_bytes: int = SIG_MIN_BYTES) -> bool:
+    if _SIG_NAME.search(name or ""):
+        return True
+    if len(data) < min_bytes:
+        return True
+    w, h = _dims(data)
+    if w and h:
+        if min(w, h) < min_px:
+            return True
+        ar = max(w, h) / max(1, min(w, h))
+        if ar >= 6:                            # letterbox banner / thin strip
+            return True
+    return False
+
+
+def _seen_signature(sb, tenant_id: str | None, domain: str, data: bytes,
+                    threshold: int) -> bool:
+    """True (skip) when we've already seen this exact image from this domain
+    `threshold`+ times. Records the sighting either way. Best-effort."""
+    if not sb or not tenant_id or not domain:
+        return False
+    h = hashlib.md5(data).hexdigest()
+    try:
+        rows = (sb.table("signature_hashes").select("seen")
+                .eq("tenant_id", tenant_id).eq("domain", domain)
+                .eq("img_hash", h).execute().data or [])
+        seen = (rows[0]["seen"] if rows else 0)
+        sb.table("signature_hashes").upsert({
+            "tenant_id": tenant_id, "domain": domain, "img_hash": h,
+            "seen": seen + 1, "last_seen": "now()",
+        }, on_conflict="tenant_id,domain,img_hash").execute()
+        return seen + 1 > threshold
+    except Exception as e:  # noqa: BLE001
+        log.debug("signature_hashes check failed: %s", e)
+        return False
+
+
 # ── public ───────────────────────────────────────────────────────
 def extract(case: dict, *, tenant_id: str | None = None, limit: int | None = None,
             do_ocr: bool = True, do_video: bool = False,
             video_frames_n: int | None = None, video_max_seconds: int | None = None,
+            skip_signatures: bool = True, sb=None,
             source: str = "salesforce") -> dict[str, Any]:
     """Media attachments for `case` + extracted text. See module docstring."""
     limit = limit or MAX_IMAGES
@@ -282,10 +346,19 @@ def extract(case: dict, *, tenant_id: str | None = None, limit: int | None = Non
                         "size": len(a["data"]), "sf_content_id": None,
                         "kind": "video", "data": a["data"]})
 
+    domain = ((case.get("from") or "").rsplit("@", 1)[-1] or "").lower().strip(">")
+
     attachments, blobs, texts = [], {}, []
     for a in raw:
         rec = {k: a[k] for k in ("filename", "mime", "size", "sf_content_id", "kind")}
         if a["kind"] == "image":
+            sig = skip_signatures and (
+                looks_like_signature(a["filename"], a["data"])
+                or _seen_signature(sb, tenant_id, domain, a["data"], SIG_SEEN_THRESHOLD))
+            if sig:
+                rec["skipped"] = "signature/logo"
+                attachments.append(rec)
+                continue
             txt = ocr_bytes(a["data"]) if do_ocr else ""
             rec["ocr_text"] = txt
             key = a["sf_content_id"] or f"inline:{len(blobs)}"

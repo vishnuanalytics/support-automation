@@ -1547,6 +1547,13 @@ def h_attachments(state: CaseState, config: dict) -> dict:
     from interpreter import attachments as att
 
     nid = config["_node_id"]
+    _sb = None
+    if config.get("skip_signatures", True) is not False:
+        try:
+            from ingestion.scraper import get_supabase
+            _sb = get_supabase()
+        except Exception:  # noqa: BLE001
+            _sb = None
     try:
         out = att.extract(state.get("case", {}), tenant_id=state.get("tenant_id"),
                           limit=int(config.get("max_images", att.MAX_IMAGES)),
@@ -1555,23 +1562,28 @@ def h_attachments(state: CaseState, config: dict) -> dict:
                           video_frames_n=int(config.get("video_frames", att.VIDEO_FRAMES)),
                           video_max_seconds=int(config.get("video_max_seconds",
                                                            att.VIDEO_MAX_SECONDS)),
+                          skip_signatures=config.get("skip_signatures", True) is not False,
+                          sb=_sb,
                           source=config.get("source", "salesforce"))
     except Exception as e:  # noqa: BLE001
         log.warning("attachments node failed: %s", e)
         out = {"attachments": [], "attachment_text": "", "_blobs": {}}
 
-    kinds = [a.get("kind", "image") for a in out["attachments"]]
-    n_img, n_vid = kinds.count("image"), kinds.count("video")
+    atts = out["attachments"]
+    n_vid = sum(1 for a in atts if a.get("kind") == "video")
+    n_sig = sum(1 for a in atts if a.get("skipped"))
+    n_img = sum(1 for a in atts if a.get("kind", "image") == "image" and not a.get("skipped"))
     chars = len(out["attachment_text"])
     return {
-        "attachments": out["attachments"],
+        "attachments": atts,
         "attachment_text": out["attachment_text"],
         "_attachment_blobs": out["_blobs"],
         **_trace(nid, "attachments",
                  f"{n_img} image(s)" + (f" + {n_vid} video(s)" if n_vid else "")
+                 + (f", {n_sig} signature(s) skipped" if n_sig else "")
                  + f", {chars} chars extracted",
-                 {"images": n_img, "videos": n_vid, "chars": chars,
-                  "files": [a["filename"] for a in out["attachments"]]}),
+                 {"images": n_img, "videos": n_vid, "signatures_skipped": n_sig,
+                  "chars": chars, "files": [a["filename"] for a in atts]}),
     }
 
 

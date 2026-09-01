@@ -153,9 +153,11 @@ The scheduled jobs that don't run inside the compose stack:
 # health: alert to SLACK_ALERT_WEBHOOK if a component is stale / failing
 */5 * * * *  cd /opt/support-automation && venv/bin/python -m scripts.health_check --slack "$SLACK_ALERT_WEBHOOK" >> /var/log/sa-health.log 2>&1
 
-# nightly: refresh the Case-resolution memory + trim old jobs/runs
+# nightly: refresh the Case-resolution memory + trim old jobs/runs + re-rank
+# the free OpenRouter models
 30 3 * * *   cd /opt/support-automation && venv/bin/python -m ingestion.case_memory_sync --once >> /var/log/sa-sync.log 2>&1
 45 3 * * *   cd /opt/support-automation && venv/bin/python -m scripts.purge_old >> /var/log/sa-sync.log 2>&1
+50 3 * * *   cd /opt/support-automation && venv/bin/python -m scripts.refresh_llm_roster >> /var/log/sa-sync.log 2>&1
 ```
 
 (`daily-sync.yml` on GitHub Actions already runs the docs scrape + Neo4j

@@ -56,7 +56,7 @@ def test_extract_pulls_images_and_ocr(monkeypatch):
     monkeypatch.setattr(salesforce, "client_for", lambda *a, **k: _SF())
     monkeypatch.setattr(attachments, "ocr_bytes", lambda data: "ORA-01017: invalid password")
 
-    out = attachments.extract({"sf_id": "500X"}, tenant_id="t")
+    out = attachments.extract({"sf_id": "500X"}, tenant_id="t", skip_signatures=False)
     assert len(out["attachments"]) == 1
     a = out["attachments"][0]
     assert a["filename"] == "error.png" and a["mime"] == "image/png"

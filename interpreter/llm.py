@@ -87,33 +87,59 @@ def provider(model: str) -> str:
     return "openrouter" if (":" in model or model.count("/") == 1) else "groq"
 
 
+def _roster(capability: str) -> tuple[list[str], list[str]]:
+    """(free, premium) model ids from the daily-refreshed `llm_roster` table
+    (Phase 26). Every id is OpenRouter-hosted. Empty on any failure."""
+    try:
+        from interpreter.roster import chain as _rc
+        free, premium = _rc(capability)
+    except Exception:  # noqa: BLE001
+        return [], []
+    for m in free + premium:
+        MODELS.setdefault(m, "openrouter")
+    return free, premium
+
+
+def _dedup_available(*groups) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for g in groups:
+        for m in g:
+            if m and m not in seen and available(m):
+                seen.add(m)
+                out.append(m)
+    return out
+
+
 def _fallback_chain(model: str) -> list[str]:
-    """The models `complete()` will try, in order, before giving up to the
-    stub. Only providers with a key are included."""
-    chain: list[str] = []
-    if available(model):
-        chain.append(model)
-    for cand in (FALLBACK_MODEL, DEFAULT_MODEL, FAST_MODEL):
-        if cand not in chain and available(cand):
-            chain.append(cand)
-    return chain
+    """Models `complete()` tries, in order, before the stub: the chosen model,
+    then today's free roster (Phase 26), then the env fallbacks, then the
+    roster's paid tail. Only providers with a key survive."""
+    free, premium = _roster("text")
+    return _dedup_available(
+        [model], free, [FALLBACK_MODEL, DEFAULT_MODEL, FAST_MODEL], premium)
 
 
 def _vision_chain(model: str | None = None) -> list[str]:
-    """Models to try for a call that includes images — the chosen model (if it
-    is vision-capable), then the free OpenRouter vision list, then the paid
-    tail. Only providers with a key survive."""
-    chain: list[str] = []
-    if model and model not in VISION_MODELS and model != VISION_PAID and available(model) \
+    """Models for a call with images — the chosen model (if vision-capable),
+    today's free vision roster, the env `LLM_VISION_MODELS`, then the paid
+    tail (roster premium, then `LLM_VISION_PAID`)."""
+    free, premium = _roster("vision")
+    head: list[str] = []
+    if model and model != VISION_PAID and available(model) \
             and provider(model) in ("anthropic", "openrouter"):
-        chain.append(model)
+        head = [model]
     for m in VISION_MODELS:
         MODELS.setdefault(m, "openrouter")
-        if m not in chain and available(m):
-            chain.append(m)
-    if VISION_PAID and VISION_PAID not in chain and available(VISION_PAID):
-        chain.append(VISION_PAID)
-    return chain
+    return _dedup_available(head, free, VISION_MODELS, premium, [VISION_PAID])
+
+
+def _video_chain(model: str | None = None) -> list[str]:
+    """Models for a call that includes video (Phase 26). Usually thin — the
+    caller falls back to local whisper+ffmpeg when this is empty."""
+    free, premium = _roster("video")
+    head = [model] if (model and available(model)) else []
+    return _dedup_available(head, free, premium, [VISION_PAID])
 
 
 _RECOVERABLE = ("rate_limit", "ratelimit", "429", "timeout", "timed out",
