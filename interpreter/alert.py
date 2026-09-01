@@ -74,8 +74,9 @@ def alert_human(state: dict, config: dict) -> dict[str, Any]:
     root = (
         f":thread: {who} — Case *{cn}*  ·  _{subject}_\n"
         f"Triaged (type/priority written to the Case). *I have not replied to the "
-        f"customer.* Reply `take` in this thread when you want to reason through "
-        f"it with me before we answer.\n{_sf_link(sf_id) if sf_id else ''}"
+        f"customer.* When you're ready to reason through the response with me, "
+        f"reply in this thread — **@mention me** or type `take`.\n"
+        f"{_sf_link(sf_id) if sf_id else ''}"
     )
 
     if want in ("both", "slack") and (slack_ch or config.get("slack_webhook")

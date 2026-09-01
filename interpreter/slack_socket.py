@@ -105,24 +105,28 @@ def _deliver(sb, session: dict) -> dict:
 def dispatch(sb, event: dict, *, post, deliver=None, bot_user_id: str | None = None) -> dict:
     """Handle one Slack message event. `post(channel, thread_ts, text)` sends a
     reply; `deliver(sb, session)` ships the approved draft. Returns a summary."""
-    if event.get("type") not in ("message", "app_mention"):
+    # only plain channel/DM messages — an `app_mention` event is a duplicate of
+    # the `message.*` event that already carries the same text.
+    if event.get("type") != "message":
         return {"skip": f"type={event.get('type')}"}
     if event.get("bot_id") or event.get("subtype"):
         return {"skip": "bot or subtype"}
     if bot_user_id and event.get("user") == bot_user_id:
         return {"skip": "self"}
 
-    text = _MENTION_RE.sub("", (event.get("text") or "").strip())
+    raw = (event.get("text") or "").strip()
+    mentioned = bool(bot_user_id and f"<@{bot_user_id}>" in raw)
+    text = _MENTION_RE.sub("", raw).strip()
     channel = event.get("channel")
     thread_ts = event.get("thread_ts") or event.get("ts")
-    if not (text and channel and thread_ts):
+    if not (channel and thread_ts) or not (text or mentioned):
         return {"skip": "incomplete event"}
 
     session = _find_session(sb, thread_ts)
     if not session:
         return {"skip": "no open session for this thread"}
 
-    out = reasoning.handle_agent_message(sb, session, text)
+    out = reasoning.handle_agent_message(sb, session, text, handoff=mentioned or None)
     post(channel, thread_ts, out["reply"])
     res = {"session_id": session["session_id"],
            "state": out["session"]["state"], "action": out.get("action")}

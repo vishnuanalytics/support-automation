@@ -22,6 +22,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import logging
+import os
 import re
 from typing import Any, Callable
 
@@ -32,12 +33,16 @@ log = logging.getLogger("interpreter.reasoning")
 STATES = ("awaiting_handoff", "reasoning", "drafting", "awaiting_approval",
           "sent", "abandoned")
 
+# Any of these words (or @mentioning the bot in the thread) starts the
+# reasoning walkthrough. Add your own with HANDOFF_WORDS="foo,bar" in .env.
 _HANDOFF = {
     "take", "take it", "take this", "take the case", "you take it", "over to you",
     "go", "go ahead", "start", "begin", "reason", "reason it", "let's reason",
     "lets reason", "work it", "work through it", "handoff", "hand off", "yours",
     "bot take this", "help", "help me", "your turn",
-}
+    "assist", "engage", "pick up", "pickup", "let's go", "lets go", "ready",
+    "walk me through", "walk through", "discuss", "let's discuss", "lets discuss",
+} | {w.strip().lower() for w in os.environ.get("HANDOFF_WORDS", "").split(",") if w.strip()}
 _ABANDON = {"no", "not yet", "cancel", "hold", "stop", "abandon", "leave it",
             "i'll handle it", "ill handle it", "nvm", "never mind"}
 _APPROVE_EXACT = {"looks good", "send it", "sounds good", "go for it", "ship it",
@@ -227,10 +232,12 @@ def _pointer_block(i: int, n: int, p: dict) -> str:
 
 
 def advance(session: dict, text: str, *, case: dict, kb_hits: list | None = None,
-            llm_fn: LLMFn | None = None) -> dict[str, Any]:
+            llm_fn: LLMFn | None = None, handoff: bool | None = None) -> dict[str, Any]:
     """Advance the dialogue by one agent message. Returns
     `{"reply": str, "session": dict, "action": None | "send" | "abandoned"}`.
-    Pure — no DB, no Slack. `session` is returned mutated."""
+    Pure — no DB, no Slack. `session` is returned mutated. `handoff` (when the
+    caller knows the agent @mentioned the bot) overrides the keyword check in
+    the `awaiting_handoff` state."""
     llm_fn = llm_fn or _default_llm
     state = session.get("state", "awaiting_handoff")
     pointers: list[dict] = session.get("pointers") or []
@@ -248,9 +255,9 @@ def advance(session: dict, text: str, *, case: dict, kb_hits: list | None = None
                     f"one from Salesforce if you need to.")
 
     if state == "awaiting_handoff":
-        if not is_handoff(text):
-            return done("When you want to reason this one through together, "
-                        "reply `take` (or @mention me).")
+        if not (handoff or is_handoff(text)):
+            return done("Reply *@support automation* in this thread — or type "
+                        "`take` — when you want to reason through this one together.")
         i = 0
         pointers[i]["bot_take"] = _bot_take(pointers[i]["q"], case, pointers, kb_hits, llm_fn)
         session["state"] = "reasoning"
@@ -320,12 +327,14 @@ def _case_for_session(sb, session: dict) -> dict:
 
 
 def handle_agent_message(sb, session_row: dict, text: str, *,
-                         llm_fn: LLMFn | None = None) -> dict[str, Any]:
+                         llm_fn: LLMFn | None = None,
+                         handoff: bool | None = None) -> dict[str, Any]:
     """Load the case, advance the dialogue, persist the session. Returns the
     same shape as `advance()`. The caller (slackbot) posts `reply` and, on
-    `action == 'send'`, delivers `session['draft']`."""
+    `action == 'send'`, delivers `session['draft']`. `handoff` = the agent
+    @mentioned the bot (counts as a handoff in `awaiting_handoff`)."""
     case = _case_for_session(sb, session_row)
-    out = advance(session_row, text, case=case, llm_fn=llm_fn)
+    out = advance(session_row, text, case=case, llm_fn=llm_fn, handoff=handoff)
     s = out["session"]
     try:
         sb.table("reasoning_sessions").update({

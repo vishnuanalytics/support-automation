@@ -78,14 +78,25 @@ def test_a_turn_posts_the_engine_reply(monkeypatch):
     assert out["state"] == "reasoning" and out["action"] is None
 
 
-def test_leading_bot_mention_is_stripped(monkeypatch):
+def test_leading_bot_mention_is_stripped_and_flags_handoff(monkeypatch):
     got = {}
     monkeypatch.setattr(slack_socket.reasoning, "handle_agent_message",
-                        lambda _sb, _s, text, **_k: got.update(text=text) or
+                        lambda _sb, _s, text, **kw: got.update(text=text, kw=kw) or
                         {"reply": "ok", "session": SESSION, "action": None})
     slack_socket.dispatch(_SB([dict(SESSION)]), _event(text="<@U0BT4RG2UP9> take it"),
-                          post=lambda *a: None)
+                          post=lambda *a: None, bot_user_id="U0BT4RG2UP9")
     assert got["text"] == "take it"
+    assert got["kw"]["handoff"] is True
+
+
+def test_bare_at_mention_still_dispatches(monkeypatch):
+    got = {}
+    monkeypatch.setattr(slack_socket.reasoning, "handle_agent_message",
+                        lambda _sb, _s, text, **kw: got.update(text=text, kw=kw) or
+                        {"reply": "ok", "session": SESSION, "action": None})
+    out = slack_socket.dispatch(_SB([dict(SESSION)]), _event(text="<@UBOT>"),
+                                post=lambda *a: None, bot_user_id="UBOT")
+    assert "skip" not in out and got["text"] == "" and got["kw"]["handoff"] is True
 
 
 def test_approval_triggers_delivery_and_confirms(monkeypatch):

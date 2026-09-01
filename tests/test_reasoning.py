@@ -56,6 +56,13 @@ def test_nudge_until_handoff():
     assert "take" in out["reply"].lower()
 
 
+def test_at_mention_counts_as_handoff_even_without_a_keyword():
+    s = _session(P4)
+    out = reasoning.advance(s, "please sort this out", case=CASE,
+                            llm_fn=_stub_llm, handoff=True)
+    assert out["session"]["state"] == "reasoning" and "1/4" in out["reply"]
+
+
 def test_handoff_opens_with_pointer_one():
     s = _session(P4)
     out = reasoning.advance(s, "take it", case=CASE, llm_fn=_stub_llm)
