@@ -703,6 +703,23 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**Phase 26 done (2026-09-01) — live free-model roster + signature/logo filter.**
+OpenRouter's free tier churns weekly (all classic `:free` slugs already gone),
+so nothing is hardcoded. Migration `060` = `llm_roster` + `signature_hashes`.
+`scripts/refresh_llm_roster.py` (daily via `daily-sync.yml` + VM cron): scores
+whatever costs $0 on OpenRouter *today* by vendor reputation / context window /
+param hint / modality, writes 6-deep free chains + a cheapest-capable-paid tail
+for `text` / `vision` / `video`. `interpreter/roster.py` caches it (no-op under
+pytest); `llm._fallback_chain` / `_vision_chain` / `_video_chain` build from it
+— free-first, premium only on total failure; env vars still override.
+`attachments.looks_like_signature()` + `signature_hashes` skip an image before
+any OCR / vision call when it's tiny / banner-shaped / named like an inline sig
+(`image00x.png`, `logo`, `linkedin`…) or the same md5 has been seen 2+ times
+from that sender domain — node `skip_signatures` (default on) + `min_image_px`,
+editor checkbox. 296 offline pytest (8 new). Also: runtime image 962→719 MB
+(scraper / Google / pytest deps split into `requirements-{ingest,connectors,dev}.txt`;
+`MEDIA=1` build arg for the OCR/video stack).
+
 **Phase 25 done (2026-09-01) — multimodal + Salesforce context, intelligence
 in nodes.** Routing decisions stay deterministic edge expressions; an
 `ai_prompt` node writes structured output and edges branch on it.
