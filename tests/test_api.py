@@ -130,6 +130,10 @@ def test_mermaid_import_endpoint_needs_a_token():
     assert r.status_code == 401
 
 
+def test_trace_needs_a_token():
+    assert client.get("/api/trace/500ABC").status_code == 401
+
+
 def test_assist_endpoints_need_a_token():
     assert client.post("/api/flows/assist", json={"prompt": "x"}).status_code == 401
     assert client.post(

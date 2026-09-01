@@ -886,21 +886,35 @@ def _q(fn):
 def get_trace(key: str, format: str = "json", c: Caller = Depends(caller)):
     """Everything that happened for a Case, in order. `key` = a Salesforce
     Case id, a Case number, a run_id, or a job_id. `?format=md` -> plain text.
-    Read-only, auth-gated; uses the service client so it can join `jobs`."""
+    Read-only, auth-gated, and **scoped to the caller's tenants** — the service
+    client is only used so it can join `jobs` (which have no RLS)."""
     from api.trace import build_timeline, render_markdown
 
     key = key.strip()
     S = _service
+    my_tenants = {
+        str(r["tenant_id"]) for r in
+        (c.sb.table("tenant_members").select("tenant_id").eq("user_id", c.user_id)
+         .execute().data or [])
+    }
+    if not my_tenants:
+        raise HTTPException(403, "not a member of any tenant")
+
+    def _mine(rows: list[dict]) -> list[dict]:
+        return [r for r in rows if str(r.get("tenant_id")) in my_tenants]
 
     runs: dict[str, dict] = {}
-    for r in (_q(lambda: S.table("runs").select("*").eq("run_id", key).execute().data)
-              + _q(lambda: S.table("runs").select("*").eq("case_id", key).execute().data)
-              + _q(lambda: S.table("runs").select("*").eq("case_payload->>sf_id", key).execute().data)
-              + _q(lambda: S.table("runs").select("*").eq("case_payload->>case_number", key).execute().data)):
+    for r in _mine(
+            _q(lambda: S.table("runs").select("*").eq("run_id", key).execute().data)
+            + _q(lambda: S.table("runs").select("*").eq("case_id", key).execute().data)
+            + _q(lambda: S.table("runs").select("*").eq("case_payload->>sf_id", key).execute().data)
+            + _q(lambda: S.table("runs").select("*").eq("case_payload->>case_number", key).execute().data)):
         runs[r["run_id"]] = r
 
     # widen: every case id / number / idempotency key those runs touched
-    ids: set[str] = {key}
+    # ids/ikeys are derived ONLY from the caller's own runs — the widen + jobs
+    # lookups below must not reach into another tenant's rows.
+    ids: set[str] = set()
     ikeys: set[str] = set()
     for r in runs.values():
         cp = r.get("case_payload") or {}
@@ -909,6 +923,8 @@ def get_trace(key: str, format: str = "json", c: Caller = Depends(caller)):
                 ids.add(str(v))
         if r.get("idempotency_key"):
             ikeys.add(r["idempotency_key"])
+    if runs:
+        ids.add(key)          # the raw key is safe once we know it's ours
 
     # a bare Case number typed straight from Salesforce -> resolve to its Id
     if key.isdigit() and len(key) >= 5:
@@ -924,13 +940,12 @@ def get_trace(key: str, format: str = "json", c: Caller = Depends(caller)):
             log.warning("trace: CaseNumber->Id lookup failed: %s", e)
 
     for i in list(ids):
-        for r in _q(lambda i=i: S.table("runs").select("*").eq("case_id", i).execute().data):
-            runs.setdefault(r["run_id"], r)
-        for r in _q(lambda i=i: S.table("runs").select("*").eq("case_payload->>sf_id", i).execute().data):
+        for r in _mine(_q(lambda i=i: S.table("runs").select("*").eq("case_id", i).execute().data)
+                       + _q(lambda i=i: S.table("runs").select("*").eq("case_payload->>sf_id", i).execute().data)):
             runs.setdefault(r["run_id"], r)
 
     jobs: dict[str, dict] = {}
-    for jid in list(ids) + [key]:
+    for jid in list(ids) + ([key] if runs else []):
         for j in (_q(lambda jid=jid: S.table("jobs").select("*").eq("job_id", jid).execute().data)
                   + _q(lambda jid=jid: S.table("jobs").select("*").ilike("dedupe_key", f"%{jid}%").execute().data)
                   + _q(lambda jid=jid: S.table("jobs").select("*").eq("payload->case->>sf_id", jid).execute().data)):
@@ -938,12 +953,23 @@ def get_trace(key: str, format: str = "json", c: Caller = Depends(caller)):
     for ik in ikeys:
         for j in _q(lambda ik=ik: S.table("jobs").select("*").eq("payload->>idempotency_key", ik).execute().data):
             jobs[j["job_id"]] = j
+    # a job belongs to this trace only if it references one of the caller's runs
+    # / ids / idempotency keys — never surface a bare cross-tenant job_id match.
+    _run_ids = set(runs)
+    jobs = {
+        jid: j for jid, j in jobs.items()
+        if (j.get("payload") or {}).get("run_id") in _run_ids
+        or (j.get("payload") or {}).get("idempotency_key") in ikeys
+        or any(i and i in str(j.get("dedupe_key") or "") for i in (ids | _run_ids))
+        or str(((j.get("payload") or {}).get("case") or {}).get("sf_id") or "") in ids
+    }
 
     if not runs and not jobs:
         raise HTTPException(404, f"nothing found for {key!r} (Case id / number / run_id / job_id)")
 
     channel_rows = _q(lambda: S.table("tenant_integrations")
-                      .select("kind,status,last_error,last_poll_at").execute().data)
+                      .select("kind,status,last_error,last_poll_at,tenant_id")
+                      .in_("tenant_id", list(my_tenants)).execute().data)
 
     t = build_timeline(key=key, runs=list(runs.values()), jobs=list(jobs.values()),
                        channel_errors=[r for r in channel_rows if r.get("last_error")])

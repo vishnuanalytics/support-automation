@@ -24,6 +24,11 @@ x-svc: &svc
     - ./sf_jwt:/app/sf_jwt:ro          # Salesforce JWT bearer key (gitignored)
     - model-cache:/root/.cache         # fastembed / HF model — survives rebuilds
   stop_grace_period: 20s
+  logging:                             # cap `docker logs` growth on a long-lived VM
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
 
 services:
   # inbound Gmail -> `jobs`. --interval is the poll cadence in seconds; drop it

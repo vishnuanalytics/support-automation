@@ -123,7 +123,30 @@ Then create or reassign a Case in Salesforce → `cdc` logs
 
 Already handled: every service is `restart: unless-stopped` and Docker is
 `systemctl enable`d, so after a crash or an Oracle maintenance reboot the
-stack comes back and `cdc` resumes from `sf_cdc_state`. Nothing to do.
+stack comes back and `cdc` resumes from `sf_cdc_state`. Docker log growth is
+capped in `docker-compose.yml` (`json-file`, 10 MB × 3 per service).
+
+No Postgres connection pooling needed — every service talks to Supabase over
+the PostgREST HTTP API (`supabase-py`), not a direct `postgresql://` socket,
+so the free-tier direct-connection cap doesn't apply.
+
+## VM cron
+
+The scheduled jobs that don't run inside the compose stack:
+
+```cron
+# health: alert to SLACK_ALERT_WEBHOOK if a component is stale / failing
+*/5 * * * *  cd /opt/support-automation && venv/bin/python -m scripts.health_check --slack "$SLACK_ALERT_WEBHOOK" >> /var/log/sa-health.log 2>&1
+
+# nightly: refresh the Case-resolution memory + trim old jobs/runs
+30 3 * * *   cd /opt/support-automation && venv/bin/python -m ingestion.case_memory_sync --once >> /var/log/sa-sync.log 2>&1
+45 3 * * *   cd /opt/support-automation && venv/bin/python -m scripts.purge_old >> /var/log/sa-sync.log 2>&1
+```
+
+(`daily-sync.yml` on GitHub Actions already runs the docs scrape + Neo4j
+sync + `case_memory_sync` + `purge_old`; the cron above is the belt-and-braces
+copy if you'd rather not depend on Actions, plus `health_check` which only
+makes sense next to the running stack.)
 
 ## Optional — also serve the API from the VM
 

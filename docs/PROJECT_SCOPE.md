@@ -722,7 +722,7 @@ the single comprehensive workflow (`team_route` + 5-way gate) — **applied
 2026-08-31**, published **v4**). Migrations `047`–`053` land the resilience
 work and the `notify_human` / double-tag fixes — see the Phase 23* entries
 below; the email `sf_entry` flow is now at **v9**.
-271 offline pytest (24a-e) tests + web tsc/vitest (6)/build +
+272 offline pytest (24a-f) tests + web tsc/vitest (6)/build +
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
 
@@ -797,6 +797,24 @@ removed. Slack becomes bidirectional via **Socket Mode**.
   ids), `graph.ts` TERMINAL = `notify_human`, `NODE_DEFAULTS` gains
   team_route/case_lookup/notify/clarify/notify_human. 271 offline pytest +
   web build green. `_norm()` tolerates pre-24e session rows.
+- **24f done (2026-09-01) — ops hardening from the audit:**
+  - **C1**: `/api/trace/{key}` is now tenant-scoped — resolves the caller's
+    `tenant_members` set and filters every `runs` / `jobs` / `tenant_integrations`
+    read to it (was service-client, any tenant).
+  - **C3/C4**: migration `059` — expression indexes on
+    `runs.case_payload->>'sf_id'|'case_number'`, `runs.case_id/created_at`,
+    `jobs.payload->>'run_id'`, `jobs.payload#>>'{case,sf_id}'`,
+    `jobs(status,created_at)`; a `purge_old(jobs_days, runs_days)` SQL fn +
+    `scripts/purge_old.py`.
+  - **D1**: `daily-sync.yml` now also runs `ingestion.case_memory_sync --once`
+    and `scripts.purge_old` (case_memory was never refreshed on a schedule).
+  - **E4**: `docker-compose.yml` `x-svc` gets `logging: json-file 10m×3`.
+  - **E5**: `docs/DEPLOY_ORACLE.md` — VM cron block (health_check /
+    case_memory_sync / purge_old).
+  - **C2**: no fix needed — every service uses the PostgREST HTTP client, not
+    a direct `postgresql://` socket, so the direct-connection cap is N/A
+    (documented in DEPLOY_ORACLE.md).
+  272 offline pytest.
 - **24d (still pending):** remove the SF shortcuts + the `check_resolution`
   comment-send path.
 
@@ -822,7 +840,7 @@ new comment into a customer email; (b) there was no one-click "send it".
   CDC's `bot_user_id` filter stops a loop).
 - **Operator step:** run the deploy script, then Setup → Object Manager →
   Case → Page Layouts → drag "Send Bot Draft to Customer" onto the action bar.
-- No DB migration (the fields live in Salesforce). 271 offline pytest (24a-e) (11 new).
+- No DB migration (the fields live in Salesforce). 272 offline pytest (24a-f) (11 new).
 
 **Phase 23g (2026-09-01): `notify_human` → a real Slack channel (live test prep).**
 Slack was already connected for tenant `00000000…` (`tenant_integrations`
@@ -857,7 +875,7 @@ place to answer since that is where the @mention lives.
   draft **verbatim, no LLM call**. `_check_resolution` passes `row["draft"]`.
 - Verified live: the queued `check_resolution` tick picked up the FeedComment
   and emailed the original draft to the customer (SMTP, mirrored to the Case
-  as an outbound EmailMessage); run → `guided_resume`. 271 offline pytest (24a-e).
+  as an outbound EmailMessage); run → `guided_resume`. 272 offline pytest (24a-f).
 
 **Phase 23e (2026-09-01): stop the double Chatter tag on an escalated Case.**
 Case 00001184 showed 3 bot feed posts and the rep @mentioned twice: `ask_human`

@@ -190,17 +190,23 @@ async def _run_async() -> None:
     bot_uid = _bot_user_id(sb)
     log.info("slackbot starting (bot user %s)", bot_uid)
 
+    async def _heartbeat() -> None:
+        from interpreter.health import beat
+        while True:
+            try:
+                beat("slackbot", {"status": "connected"}, sb=sb, force=True)
+            except Exception:  # noqa: BLE001
+                pass
+            await asyncio.sleep(60)
+
     while True:
+        hb = None
         try:
             url = _connection_url(app_token)
             async with websockets.connect(url, ping_interval=20, ping_timeout=20,
                                           open_timeout=20) as ws:
                 log.info("socket connected")
-                try:
-                    from interpreter.health import beat
-                    beat("slackbot", {"status": "connected"}, sb=sb, force=True)
-                except Exception:  # noqa: BLE001
-                    pass
+                hb = asyncio.create_task(_heartbeat())
                 async for raw in ws:
                     msg = json.loads(raw)
                     kind = msg.get("type")
@@ -217,14 +223,12 @@ async def _run_async() -> None:
                             log.info("dispatch: %s", dispatch(sb, ev, post=post, bot_user_id=bot_uid))
                         except Exception as e:  # noqa: BLE001
                             log.exception("dispatch failed: %s", e)
-                    try:
-                        from interpreter.health import beat
-                        beat("slackbot", None, sb=sb)
-                    except Exception:  # noqa: BLE001
-                        pass
         except Exception as e:  # noqa: BLE001
             log.warning("socket error (%s); reconnecting in 5s", e)
             await asyncio.sleep(5)
+        finally:
+            if hb is not None:
+                hb.cancel()
 
 
 def run() -> None:
