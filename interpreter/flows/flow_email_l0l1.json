@@ -32,7 +32,6 @@
         "escalate_modules": ["Billing & Plans", "Account & Login"],
         "escalate_types": ["Billing", "Account / Login"]
       } },
-    { "node_id": "auto_reply", "type": "auto_reply", "label": "Send the drafted reply", "config": { "channel": "email" } },
     { "node_id": "ask_human", "type": "ask_human", "label": "Escalate to the owning team (csm / sales) — reassigns the Case",
       "config": { "channel": "salesforce_chatter", "post_note": false, "queue_by_team": { "csm": "Team_CSM", "sales": "Team_Sales" }, "escalate_queue": "Billing_Escalations" } },
     { "node_id": "notify", "type": "notify", "label": "Ping the Type's internal rep (Case stays in the queue)",
@@ -62,7 +61,7 @@
       "condition": { "if": "tier == 'enterprise' or routed_team == 'offboarding'" } },
     { "source_node_id": "confidence_gate", "target_node_id": "ask_human",
       "condition": { "if": "routed_team in ('csm', 'sales') and tier != 'enterprise'" } },
-    { "source_node_id": "confidence_gate", "target_node_id": "auto_reply",
+    { "source_node_id": "confidence_gate", "target_node_id": "notify_human",
       "condition": { "if": "confidence_gate.pass and tier != 'enterprise' and routed_team == 'support'" } },
     { "source_node_id": "confidence_gate", "target_node_id": "notify",
       "condition": { "if": "not confidence_gate.pass and tier != 'enterprise' and routed_team == 'support' and confidence_gate.forced_escalation" } },

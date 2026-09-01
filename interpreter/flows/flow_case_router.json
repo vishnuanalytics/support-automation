@@ -3,9 +3,9 @@
   "tenant_id": "00000000-0000-0000-0000-000000000000",
   "team": "router",
   "name": "Case router \u2014 team routing + tag manager",
-  "version": 4,
+  "version": 1,
   "status": "draft",
-  "_doc": "The design doc's single end-to-end workflow: identify -> sf_case -> retrieve -> classify -> team_route -> sf_writeback -> draft -> confidence_gate -> {auto_reply | ask_human | handover}. team_route sets routed_team from keyword rules; ask_human/handover resolve the Salesforce queue from it.",
+  "_doc": "The design doc's single end-to-end workflow: identify -> sf_case -> retrieve -> classify -> team_route -> sf_writeback -> draft -> confidence_gate -> {notify_human | ask_human | handover}. team_route sets routed_team from keyword rules; ask_human/handover resolve the Salesforce queue from it.",
   "nodes": [
     {
       "node_id": "f0000000-0000-4000-8000-000000000001",
@@ -131,14 +131,6 @@
       }
     },
     {
-      "node_id": "f0000000-0000-4000-8000-000000000009",
-      "type": "auto_reply",
-      "label": "Auto-reply to the customer",
-      "config": {
-        "channel": "email"
-      }
-    },
-    {
       "node_id": "f0000000-0000-4000-8000-000000000010",
       "type": "ask_human",
       "label": "Escalate to the owning team (csm / sales) \u2014 reassigns the Case",
@@ -251,7 +243,7 @@
     },
     {
       "source_node_id": "f0000000-0000-4000-8000-000000000008",
-      "target_node_id": "f0000000-0000-4000-8000-000000000009",
+      "target_node_id": "f0000000-0000-4000-8000-000000000015",
       "condition": {
         "if": "confidence_gate.pass and tier != 'enterprise' and routed_team != 'offboarding'"
       }

@@ -123,8 +123,10 @@ def test_email_l0l1_portable_flow_compiles_and_routes():
     types = [n["type"] for n in flow["nodes"]]
     assert types[0] == "identify" and types[1] == "sf_case"
     # Phase 20p: the single comprehensive sf_entry flow — team_route + a 5-way gate.
-    assert {"team_route", "sf_writeback", "auto_reply", "ask_human",
+    # Phase 24a: `auto_reply` removed — no path auto-sends; gate.pass -> notify_human.
+    assert {"team_route", "sf_writeback", "notify_human", "ask_human",
             "notify", "clarify", "handover"} <= set(types)
+    assert "auto_reply" not in types
     # classify -> team_route -> sf_writeback
     assert any(e["source_node_id"] == "classify" and e["target_node_id"] == "team_route"
                for e in flow["edges"])

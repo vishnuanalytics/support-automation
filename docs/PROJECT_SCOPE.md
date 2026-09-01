@@ -722,7 +722,7 @@ the single comprehensive workflow (`team_route` + 5-way gate) — **applied
 2026-08-31**, published **v4**). Migrations `047`–`053` land the resilience
 work and the `notify_human` / double-tag fixes — see the Phase 23* entries
 below; the email `sf_entry` flow is now at **v9**.
-250 offline pytest tests + web tsc/vitest (6)/build +
+250 offline pytest (24a) tests + web tsc/vitest (6)/build +
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
 
@@ -739,6 +739,24 @@ customer" sends the bot's stored draft as-is; a substantive note is applied
 to that draft first. Requires the email channel's `auto_send_enabled=true`
 (it is, for tenant `00000000…`), else the polished reply is only left as a
 draft CaseComment.
+
+**Phase 24 (2026-09-01, in progress): human-in-the-loop reasoning before any
+response.** New model: no case gets an AI answer from automation — every
+response goes through a Slack reasoning dialogue with the responsible agent
+(a bank of 4–6 per-type "pointer questions" the bot works through *in full*,
+bot proposing / agent confirming), then an explicit send confirmation. The
+SF approve shortcuts (Chatter `send`, the "Send Bot Draft" button) are being
+removed. Slack becomes bidirectional via **Socket Mode**.
+- **24a done:** migration `055` removes `auto_reply` from the email flow
+  (→ **v11**); `confidence_gate.pass` now routes to `notify_human` like every
+  other branch. Portable JSONs + `seed_router_flow.py` regenerated. The only
+  path that emailed a customer automatically is gone; `notify` / `clarify`
+  remain as interim draft-for-review nodes (folded into `notify_human` in 24c).
+- **24b (next):** `reasoning_sessions` table + `interpreter/reasoning.py`
+  engine + per-type pointer bank.
+- **24c:** `slackbot` Socket Mode service wired to the engine; agent DM on
+  handoff.
+- **24d:** remove the SF shortcuts + the `check_resolution` comment-send path.
 
 **Phase 23h (2026-09-01): "Send Bot Draft to Customer" quick action + stop
 accidental sends.** Two problems: (a) humans use Chatter for internal
@@ -762,7 +780,7 @@ new comment into a customer email; (b) there was no one-click "send it".
   CDC's `bot_user_id` filter stops a loop).
 - **Operator step:** run the deploy script, then Setup → Object Manager →
   Case → Page Layouts → drag "Send Bot Draft to Customer" onto the action bar.
-- No DB migration (the fields live in Salesforce). 250 offline pytest (11 new).
+- No DB migration (the fields live in Salesforce). 250 offline pytest (24a) (11 new).
 
 **Phase 23g (2026-09-01): `notify_human` → a real Slack channel (live test prep).**
 Slack was already connected for tenant `00000000…` (`tenant_integrations`
@@ -797,7 +815,7 @@ place to answer since that is where the @mention lives.
   draft **verbatim, no LLM call**. `_check_resolution` passes `row["draft"]`.
 - Verified live: the queued `check_resolution` tick picked up the FeedComment
   and emailed the original draft to the customer (SMTP, mirrored to the Case
-  as an outbound EmailMessage); run → `guided_resume`. 250 offline pytest.
+  as an outbound EmailMessage); run → `guided_resume`. 250 offline pytest (24a).
 
 **Phase 23e (2026-09-01): stop the double Chatter tag on an escalated Case.**
 Case 00001184 showed 3 bot feed posts and the rep @mentioned twice: `ask_human`

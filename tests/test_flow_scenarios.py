@@ -74,7 +74,7 @@ def test_flow_compiles_and_gate_is_exhaustive():
 @pytest.mark.parametrize(
     "label, topic, tier, rscore, expect",
     [
-        ("how-to KB-covered / basic",      "zap-activation",             "basic",      0.92, "auto_reply"),
+        ("how-to KB-covered / basic",      "zap-activation",             "basic",      0.92, "notify_human"),
         ("vague no detail / basic",        "unclear",                    "basic",      0.10, "clarify"),
         ("billing double charge / basic",  "billing-refund",             "basic",      0.20, "notify"),
         ("account-login SSO / basic",      "sso-login",         "basic",      0.20, "notify"),
@@ -83,7 +83,7 @@ def test_flow_compiles_and_gate_is_exhaustive():
         ("pre-sales pricing / basic",      "pricing-quote",              "basic",      0.30, "ask_human"),
         ("cancellation + GDPR / premium",  "cancellation-data-export",   "premium",    0.30, "handover"),
         ("enterprise tier / any",          "trigger-timezone",           "enterprise", 0.90, "handover"),
-        ("how-to KB-covered / premium",    "zap-filter-step",            "premium",    0.93, "auto_reply"),
+        ("how-to KB-covered / premium",    "zap-filter-step",            "premium",    0.93, "notify_human"),
     ],
 )
 def test_scenario_routes_as_expected(label, topic, tier, rscore, expect):

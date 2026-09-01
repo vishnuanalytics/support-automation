@@ -4,7 +4,7 @@ flow from the support design doc:
 
   identify -> sf_case -> retrieve -> classify -> team_route -> sf_writeback
     -> draft -> confidence_gate
-        -> auto_reply                     (gate passes, not enterprise, not offboarding)
+        -> notify_human                   (gate passes, not enterprise, not offboarding — Phase 24a: no auto-send)
         -> ask_human   (queue_by_team)    (gate fails + routed to csm/sales — that team owns it, Case reassigned)
         -> notify      (target_by_type)   (gate fails + support + forced escalation — ping the Type's rep, Case stays put)
         -> clarify     (handover_queue)   (gate fails + support + not forced — ask the customer, then hand to Team_Support)
@@ -82,7 +82,8 @@ NODES = [
                           "2fa", "mfa", "password reset"],
       "escalate_modules": ["Billing & Plans", "Account & Login"],
       "escalate_types": ["Billing", "Account / Login"]}),
-    (n_auto, "auto_reply", "Auto-reply to the customer", {"channel": "email"}),
+    # Phase 24a — no auto-send. `confidence_gate.pass` now also routes to
+    # `notify_human` (every response goes through a human).
     (n_ask, "ask_human",
      "Escalate to the owning team (csm / sales) — reassigns the Case",
      {"channel": "salesforce_chatter", "post_note": False,
@@ -114,7 +115,7 @@ EDGES = [
     (n_case_lookup, n_draft, {}),
     (n_draft, n_gate, {}),
     (n_gate, n_handover, {"if": "tier == 'enterprise' or routed_team == 'offboarding'"}),
-    (n_gate, n_auto, {"if": f"confidence_gate.pass and {_LIVE}"}),
+    (n_gate, n_human, {"if": f"confidence_gate.pass and {_LIVE}"}),
     (n_gate, n_ask, {"if": f"not confidence_gate.pass and {_LIVE} and routed_team in ('csm', 'sales')"}),
     (n_gate, n_notify, {"if": f"{_SUPPORT_FAIL} and confidence_gate.forced_escalation"}),
     (n_gate, n_clarify, {"if": f"{_SUPPORT_FAIL} and not confidence_gate.forced_escalation"}),
@@ -129,7 +130,7 @@ def flow_json() -> dict:
         "version": 1, "status": "draft",
         "_doc": ("The design doc's single end-to-end workflow: identify -> "
                  "sf_case -> retrieve -> classify -> team_route -> sf_writeback "
-                 "-> draft -> confidence_gate -> {auto_reply | ask_human | "
+                 "-> draft -> confidence_gate -> {notify_human | ask_human | "
                  "handover}. team_route sets routed_team from keyword rules; "
                  "ask_human/handover resolve the Salesforce queue from it."),
         "nodes": [{"node_id": nid, "type": t, "label": lbl, "config": cfg}
