@@ -13,7 +13,9 @@ Unhealthy =
   * >HEALTH_STUB_RATE (default 0.3) of runs in the last hour fell back to the
     deterministic LLM stub (every provider down -> generic drafts -> the
     human queues flood), or
-  * a `neo4j` heartbeat exists but is stale (graph enrichment silently off).
+  * a `neo4j` heartbeat exists but is stale (graph enrichment silently off), or
+  * >HEALTH_SLA_BREACH_MAX (default 3) Case SLA breaches in the last hour
+    (the sweep is escalating but nobody is picking cases up).
 
 Exit 0 = healthy, 1 = unhealthy, 2 = could not check.
 """
@@ -33,6 +35,7 @@ STALE_MIN = float(os.environ.get("HEALTH_STALE_MIN", "15"))
 FAIL_RATE = float(os.environ.get("HEALTH_FAIL_RATE", "0.5"))
 STUB_RATE = float(os.environ.get("HEALTH_STUB_RATE", "0.3"))
 NEO4J_STALE_MIN = float(os.environ.get("HEALTH_NEO4J_STALE_MIN", "1560"))  # ~26h
+SLA_BREACH_MAX = int(os.environ.get("HEALTH_SLA_BREACH_MAX", "3"))         # per hour
 EXPECT = os.environ.get("HEALTH_COMPONENTS", "worker").split(",")
 
 
@@ -95,6 +98,17 @@ def _check() -> tuple[bool, list[str]]:
         if srate > STUB_RATE:
             problems.append(f"llm: {stub}/{len(runs)} runs hit the offline stub in the last "
                             f"hour ({srate:.0%}) — every provider is down / rate-limited")
+
+    # Phase 27d — a spike of SLA breaches means the sweep is doing its job but
+    # cases aren't getting picked up (Omni offline / no agents / routing broken).
+    try:
+        br = (sb.table("case_events").select("case_number")
+              .eq("action", "breach").gte("ts", since).limit(200).execute().data or [])
+        if len(br) > SLA_BREACH_MAX:
+            problems.append(f"sla: {len(br)} Case SLA breaches in the last hour "
+                            f"(> {SLA_BREACH_MAX}) — cases are not being picked up")
+    except Exception:  # noqa: BLE001 — case_events may not exist on an old DB
+        pass
 
     return (not problems), problems
 

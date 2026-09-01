@@ -293,8 +293,38 @@ def _create_github_issue(payload: dict, sb) -> dict:
     return {"action_request_id": ar_id, **issue}
 
 
+# ── Phase 27d — the case-control-plane safety-net sweeps ──────────────────
+_SWEEP_EVERY_MIN = {"queue_sweep": 5, "cdc_reconcile": 60, "reasoning_ttl": 5}
+
+
+def _reschedule(kind: str, sb) -> None:
+    """Re-enqueue a periodic sweep for its next slot. Bucketed dedupe key so a
+    worker restart can't pile them up."""
+    import datetime as _dt
+
+    mins = _SWEEP_EVERY_MIN[kind]
+    nxt = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(minutes=mins)
+    bucket = int(nxt.timestamp() // (mins * 60))
+    jobs.enqueue(kind, {}, dedupe_key=f"{kind}:{bucket}",
+                 run_after=nxt.isoformat(), sb=sb)
+
+
+def _sweep_handler(fn):
+    def _run(payload: dict, sb) -> dict:
+        from interpreter import sweeps
+
+        try:
+            return getattr(sweeps, fn)(sb)
+        finally:
+            _reschedule(fn, sb)
+    return _run
+
+
 HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
-            "embed_kb_entry": _embed_kb_entry, "create_github_issue": _create_github_issue}
+            "embed_kb_entry": _embed_kb_entry, "create_github_issue": _create_github_issue,
+            "queue_sweep": _sweep_handler("queue_sweep"),
+            "cdc_reconcile": _sweep_handler("cdc_reconcile"),
+            "reasoning_ttl": _sweep_handler("reasoning_ttl")}
 
 JOB_TIMEOUT = int(os.environ.get("WORKER_JOB_TIMEOUT", "120"))
 
@@ -356,6 +386,12 @@ def main(argv: list[str] | None = None) -> int:
 
     log.info("worker started; polling every %.1fs", args.idle_sleep)
     beat("worker", {"pid": os.getpid()}, sb=sb, force=True)
+    if os.environ.get("SWEEPS_DISABLED") != "1":
+        for _k in _SWEEP_EVERY_MIN:          # Phase 27d — seed the periodic sweeps
+            try:
+                jobs.enqueue(_k, {}, dedupe_key=f"{_k}:boot", sb=sb)
+            except Exception as e:  # noqa: BLE001
+                log.warning("could not seed sweep %s: %s", _k, e)
     while True:
         did = process_one(sb)
         beat("worker", {"idle": not did}, sb=sb)
