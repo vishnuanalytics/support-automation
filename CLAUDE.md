@@ -56,6 +56,11 @@ GitHub actions). No open phase.
 - **Migrations are sequential and single-concern.** New migration =
   next number (`005_...sql`, etc.), scoped to one thing, matching the
   pattern of `db/migrations/001_flow_schema.sql` through `004_docs_ingestion_schema.sql`.
+- **Migrations are applied by hand only** — via the Supabase MCP
+  `apply_migration` (or the SQL editor), never the Supabase CLI. The
+  `supabase_migrations` history table is **not** kept in sync with
+  `db/migrations/*.sql`; the `.sql` files are the source of truth. Don't run
+  `supabase db push` / `supabase migration` against this project.
 - **Multi-tenancy is not optional.** Any new table holding tenant-scoped
   data needs RLS via `tenant_members`, following
   `db/migrations/002_rls_and_constraints.sql`'s pattern. Don't defer this "for later."

@@ -178,13 +178,13 @@ def client_for(tenant_id: str | None, sb=None):
 # Prefer a custom Account.Tier__c (basic|premium|enterprise) if the org has
 # one; fall back to the standard restricted Account.Type picklist otherwise.
 _CASE_SOQL_TIER = (
-    "SELECT Id, CaseNumber, Subject, Description, Status, Priority, "
+    "SELECT Id, CaseNumber, Subject, Description, Status, Priority, OwnerId, "
     "Account.Name, Account.Tier__c, Account.Type, Account.BillingCountry, "
     "Contact.Name, Contact.Email "
     "FROM Case WHERE Id = '{cid}'"
 )
 _CASE_SOQL_BASE = (
-    "SELECT Id, CaseNumber, Subject, Description, Status, Priority, "
+    "SELECT Id, CaseNumber, Subject, Description, Status, Priority, OwnerId, "
     "Account.Name, Account.Type, Account.BillingCountry, "
     "Contact.Name, Contact.Email "
     "FROM Case WHERE Id = '{cid}'"
@@ -214,6 +214,9 @@ def get_case(case_id: str) -> dict[str, Any]:
     return {
         "sf_id": r["Id"],
         "case_id": r.get("CaseNumber") or r["Id"],
+        "case_number": r.get("CaseNumber"),
+        "status": r.get("Status"),
+        "owner_id": r.get("OwnerId"),
         "subject": r.get("Subject") or "",
         "body": r.get("Description") or "",
         "account": {
@@ -233,7 +236,7 @@ def latest_inbound_email(case_id: str, *, tenant_id: str | None = None) -> dict[
         return None
     try:
         rows = client_for(tenant_id).query(
-            "SELECT Subject, TextBody, FromAddress, MessageIdentifier, MessageDate "
+            "SELECT Id, Subject, TextBody, FromAddress, MessageIdentifier, MessageDate "
             f"FROM EmailMessage WHERE ParentId = '{_soql_lit(case_id)}' AND Incoming = true "
             "ORDER BY MessageDate DESC LIMIT 1"
         ).get("records", [])
@@ -244,6 +247,7 @@ def latest_inbound_email(case_id: str, *, tenant_id: str | None = None) -> dict[
         return None
     m = rows[0]
     return {
+        "id": m.get("Id"),
         "text": m.get("TextBody") or "",
         "subject": m.get("Subject") or "",
         "from_addr": m.get("FromAddress") or "",
@@ -252,33 +256,55 @@ def latest_inbound_email(case_id: str, *, tenant_id: str | None = None) -> dict[
     }
 
 
+# the bot's own Case writes — never mistake one of these for a human's answer
+_BOT_COMMENT_PREFIXES = ("[bot draft", "[triage]", "support bot needs a human",
+                         "support bot could not")
+
+
+def _looks_bot_written(body: str) -> bool:
+    b = (body or "").lstrip().lower()
+    return any(b.startswith(p) for p in _BOT_COMMENT_PREFIXES)
+
+
 def agent_response_since(case_id: str, since_iso: str | None = None,
                          *, tenant_id: str | None = None) -> dict[str, Any]:
     """What a human has done on a Case since `since_iso` (the bot's run time):
 
-      {"guidance": <newest CaseComment body> | None,
+      {"guidance": <newest human CaseComment / Chatter FeedComment> | None,
        "guidance_at": iso | None,
        "outbound_email": <newest agent reply-to-customer body> | None}
 
-    A CaseComment is treated as *internal guidance the bot should turn into a
-    customer reply*; an outbound EmailMessage means the agent already
-    answered the customer directly. Never raises."""
-    out: dict[str, Any] = {"guidance": None, "guidance_at": None, "outbound_email": None}
+    Used only for telemetry now — `check_resolution` records the note and
+    scores an agent's direct reply; it never sends (the Slack reasoning
+    dialogue is the only send path — Phase 24). The bot's own notes
+    ([bot draft…], [triage]…, the escalation @mention text) are skipped.
+    Never raises."""
+    out: dict[str, Any] = {"guidance": None, "guidance_at": None,
+                           "outbound_email": None}
     if not available():
         return out
     sf = client_for(tenant_id)
     cid = _soql_lit(case_id)
     since = f" AND CreatedDate > {since_iso}" if since_iso else ""
-    try:
-        rows = sf.query(
-            f"SELECT CommentBody, CreatedDate FROM CaseComment WHERE ParentId = '{cid}'{since} "
-            "ORDER BY CreatedDate DESC LIMIT 1"
-        ).get("records", [])
-        if rows and rows[0].get("CommentBody"):
-            out["guidance"] = rows[0]["CommentBody"]
-            out["guidance_at"] = rows[0].get("CreatedDate")
-    except Exception as e:  # noqa: BLE001
-        log.warning("agent_response_since/comment(%s): %s", case_id, e)
+    from interpreter.mailbox import _strip_html
+
+    cands: list[tuple[str, str]] = []  # (created_date, text)
+    for obj, col in (("CaseComment", "CommentBody"), ("FeedComment", "CommentBody")):
+        try:
+            rows = sf.query(
+                f"SELECT {col}, CreatedDate FROM {obj} WHERE ParentId = '{cid}'{since} "
+                "ORDER BY CreatedDate DESC LIMIT 5"
+            ).get("records", [])
+        except Exception as e:  # noqa: BLE001
+            log.warning("agent_response_since/%s(%s): %s", obj, case_id, e)
+            continue
+        for r in rows:
+            txt = _strip_html(r.get(col) or "").strip()
+            if txt and not _looks_bot_written(txt):
+                cands.append((r.get("CreatedDate") or "", txt))
+    if cands:
+        cands.sort(key=lambda t: t[0], reverse=True)
+        out["guidance"], out["guidance_at"] = cands[0][1], cands[0][0]
     try:
         rows = sf.query(
             f"SELECT TextBody, CreatedDate FROM EmailMessage WHERE ParentId = '{cid}' "
@@ -446,6 +472,9 @@ def update_case_fields(
         current = sf.Case.get(case_id)
         for fld, text in append.items():
             base = (current.get(fld) or "").strip()
+            # idempotent: a re-run must not stack the same [triage] block again
+            if text and text.strip() and text.strip() in base:
+                continue
             fields[fld] = f"{base}\n\n{text}".strip() if base else text
 
     if not fields:
@@ -479,6 +508,21 @@ def _current_user_id(sf) -> str | None:
         return None
 
 
+def user_email(user_id: str, *, tenant_id: str | None = None) -> str | None:
+    """Email for a Salesforce User id — used to map an agent to their Slack
+    account (`slack.lookup_user_by_email`). None on any failure."""
+    if not user_id or not available():
+        return None
+    try:
+        rows = client_for(tenant_id).query(
+            f"SELECT Email FROM User WHERE Id = '{_soql_lit(user_id)}' LIMIT 1"
+        ).get("records", [])
+        return rows[0].get("Email") if rows else None
+    except Exception as e:  # noqa: BLE001
+        log.warning("user_email(%s): %s", user_id, e)
+        return None
+
+
 def post_chatter(case_id: str, body: str, *, mention_id: str | None = None, tenant_id: str | None = None) -> dict[str, Any]:
     """
     Post a Chatter FeedItem on the Case, @mentioning `mention_id` (or the
@@ -490,6 +534,8 @@ def post_chatter(case_id: str, body: str, *, mention_id: str | None = None, tena
         return {"posted": False, "dry_run": True, "mention_id": mention_id}
 
     sf = client_for(tenant_id)
+    if _recent_duplicate(sf, "FeedItem", case_id, "Body", body):
+        return {"posted": False, "dry_run": False, "mention_id": mention_id, "deduped": True}
     mention_id = mention_id or _current_user_id(sf)
 
     segments: list[dict[str, Any]] = []
@@ -504,27 +550,58 @@ def post_chatter(case_id: str, body: str, *, mention_id: str | None = None, tena
     }
     try:
         res = sf.restful(
-            "connect/records/feed-elements", method="POST", data=json.dumps(payload)
+            "chatter/feed-elements", method="POST", data=json.dumps(payload)
         )
         return {"posted": True, "dry_run": False, "mention_id": mention_id,
                 "feed_element_id": (res or {}).get("id")}
     except Exception as e:  # noqa: BLE001
-        log.warning("Connect API mention failed (%s); falling back to plain FeedItem", e)
+        log.warning("Connect API feed-element post failed (%s); trying a plain FeedItem", e)
+    try:
         res = sf.FeedItem.create({"ParentId": case_id, "Body": body})
         return {"posted": True, "dry_run": False, "mention_id": None,
                 "feed_element_id": res.get("id"), "mention_failed": True}
+    except Exception as e:  # noqa: BLE001 — best-effort, never raise into the flow
+        log.warning("post_chatter(%s) failed: %s", case_id, e)
+        return {"posted": False, "dry_run": False, "mention_id": None, "error": str(e)}
+
+
+def _recent_duplicate(sf, sobject: str, case_id: str, body_field: str, body: str,
+                      minutes: int = 180) -> bool:
+    """True if an identical (same leading text) row already exists on the Case
+    in the last `minutes` — so a re-run of the same flow doesn't stack a
+    second identical Chatter note / draft CaseComment (Phase 23). Set
+    SF_DEDUP_WRITES=0 to skip the check (saves one SOQL per escalation)."""
+    if os.environ.get("SF_DEDUP_WRITES", "").strip() == "0":
+        return False
+    try:
+        from datetime import datetime, timedelta, timezone
+
+        head = _soql_lit((body or "")[:255])
+        since = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+        rows = sf.query(
+            f"SELECT Id FROM {sobject} WHERE ParentId = '{_soql_lit(case_id)}' "
+            f"AND {body_field} LIKE '{head}%' AND CreatedDate >= {since} LIMIT 1"
+        ).get("records", [])
+        return bool(rows)
+    except Exception:  # noqa: BLE001 — dedup is best-effort, never blocks the write
+        return False
 
 
 def add_case_comment(case_id: str, body: str, *, published: bool = False,
                      tenant_id: str | None = None) -> dict[str, Any]:
     """Add a `CaseComment` (internal by default). Used for the bot's
     suggested-reply draft — Salesforce won't take an API-created outbound
-    draft `EmailMessage`. Dry-run with no creds; never raises."""
+    draft `EmailMessage`. Skips an identical comment posted in the last 3h.
+    Dry-run with no creds; never raises."""
     if not available():
         log.info("[sf dry-run] CaseComment on %s (published=%s): %r", case_id, published, body[:80])
         return {"created": False, "dry_run": True, "id": None}
+    sf = client_for(tenant_id)
+    if _recent_duplicate(sf, "CaseComment", case_id, "CommentBody", body):
+        return {"created": False, "dry_run": False, "id": None, "deduped": True}
     try:
-        res = client_for(tenant_id).CaseComment.create(
+        res = sf.CaseComment.create(
             {"ParentId": case_id, "CommentBody": body[:4000], "IsPublished": bool(published)}
         )
         return {"created": True, "dry_run": False, "id": res.get("id")}
@@ -537,10 +614,16 @@ def add_case_comment(case_id: str, body: str, *, published: bool = False,
 # case bootstrap from an inbound message (Phase 20e / 20f)
 # --------------------------------------------------------------------------
 def _thread_msg_ids(case: dict[str, Any]) -> list[str]:
-    """RFC Message-IDs the inbound email threads onto (In-Reply-To +
-    References), de-duplicated, each offered with and without angle brackets
-    (Salesforce stores `EmailMessage.MessageIdentifier` without them)."""
+    """RFC Message-IDs this inbound email is linked to — In-Reply-To,
+    References, **and its own Message-ID**. De-duplicated, each with and
+    without angle brackets (Salesforce stores `EmailMessage.MessageIdentifier`
+    without them). Including the message's own id lets `find_case_by_thread`
+    reuse a Case that Salesforce Email-to-Case already created for this exact
+    mail — so the poller and E2C don't both open a Case."""
     raw: list[str] = []
+    v = case.get("message_id")
+    if isinstance(v, str) and v.strip():
+        raw.append(v.strip())
     v = case.get("in_reply_to")
     if isinstance(v, str) and v.strip():
         raw.append(v.strip())
@@ -613,9 +696,12 @@ def log_email_message(
     sf = client_for(tenant_id)
     try:
         if mid:
+            # Salesforce Email-to-Case stores MessageIdentifier WITH angle
+            # brackets; match both forms or `sf_case` records a duplicate.
+            forms = ", ".join(f"'{_soql_lit(v)}'" for v in (mid, f"<{mid}>"))
             dup = sf.query(
                 f"SELECT Id FROM EmailMessage WHERE ParentId = '{_soql_lit(case_id)}' "
-                f"AND MessageIdentifier = '{_soql_lit(mid)}' LIMIT 1"
+                f"AND MessageIdentifier IN ({forms}) LIMIT 1"
             ).get("records", [])
             if dup:
                 return {"created": False, "dry_run": False, "id": dup[0]["Id"], "idempotent": True}
@@ -980,6 +1066,17 @@ def ensure_case(
                 out["sf_id"] = match["sf_id"]
                 out["case_number"] = match.get("case_number")
                 out["reused"] = True
+                # Phase 27c — carry the current Status/Owner so the pipeline
+                # doesn't downgrade a Case a human has already moved on.
+                try:
+                    cur = sf.query(
+                        "SELECT Status, OwnerId FROM Case WHERE Id = "
+                        f"'{_soql_lit(out['sf_id'])}' LIMIT 1"
+                    ).get("records", [])
+                    if cur:
+                        out["status"], out["owner_id"] = cur[0].get("Status"), cur[0].get("OwnerId")
+                except Exception:  # noqa: BLE001
+                    pass
 
         if not out["sf_id"]:
             payload = {
@@ -996,6 +1093,7 @@ def ensure_case(
                 payload["SuppliedEmail"] = email
             cres = sf.Case.create(payload)
             out["sf_id"], out["created"] = cres.get("id"), True
+            out["status"] = status
 
         if aid:
             out["account"] = _account_snapshot(sf, aid)

@@ -14,7 +14,11 @@
 name: support-automation
 
 x-svc: &svc
-  build: .
+  build:
+    context: .
+    args:
+      # set MEDIA=1 in .env to bake in the Phase 25 image-OCR / video stack
+      MEDIA: "${MEDIA:-0}"
   env_file: .env
   environment:
     # the .env path is a host path; the key is bind-mounted at /app/sf_jwt
@@ -24,6 +28,11 @@ x-svc: &svc
     - ./sf_jwt:/app/sf_jwt:ro          # Salesforce JWT bearer key (gitignored)
     - model-cache:/root/.cache         # fastembed / HF model — survives rebuilds
   stop_grace_period: 20s
+  logging:                             # cap `docker logs` growth on a long-lived VM
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
 
 services:
   # inbound Gmail -> `jobs`. --interval is the poll cadence in seconds; drop it
@@ -44,6 +53,13 @@ services:
   cdc:
     <<: *svc
     command: python -m ingestion.sf_cdc_watch
+
+  # Phase 24c — Slack Socket Mode. One persistent WebSocket (no public URL):
+  # an agent's in-thread replies drive `reasoning.handle_agent_message`, and on
+  # approval the drafted customer reply is sent. No-op without SLACK_APP_TOKEN.
+  slackbot:
+    <<: *svc
+    command: python -m interpreter.slack_socket
 
   # receives the Salesforce -> automation push (POST /api/hooks/salesforce/case).
   # Expose it to Salesforce with a Cloudflare quick tunnel (scripts/dev_serve.sh).

@@ -104,6 +104,22 @@ export function NodeInspector({
         <NotifyForm config={config} onConfig={onConfig} />
       )}
 
+      {node.data.nodeType === "notify_human" && (
+        <NotifyHumanForm config={config} onConfig={onConfig} />
+      )}
+
+      {node.data.nodeType === "ai_prompt" && (
+        <AiPromptForm config={config} onConfig={onConfig} />
+      )}
+
+      {node.data.nodeType === "sf_context" && (
+        <SfContextForm config={config} onConfig={onConfig} />
+      )}
+
+      {node.data.nodeType === "attachments" && (
+        <AttachmentsForm config={config} onConfig={onConfig} />
+      )}
+
       {node.data.nodeType === "identify" && (
         <IdentifyForm config={config} onConfig={onConfig} />
       )}
@@ -357,6 +373,265 @@ function NotifyForm({
           value={typeof config.fallback_target === "string" ? config.fallback_target : ""}
           placeholder="(optional)"
           onChange={(e) => set({ fallback_target: e.target.value.trim() || null })}
+        />
+      </div>
+    </div>
+  );
+}
+
+function AiPromptForm({
+  config,
+  onConfig,
+}: {
+  config: Record<string, unknown>;
+  onConfig: (v: Record<string, unknown>) => void;
+}) {
+  const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
+  const str = (k: string, d = "") => (typeof config[k] === "string" ? (config[k] as string) : d);
+  const num = (k: string, d: number) => (typeof config[k] === "number" ? (config[k] as number) : d);
+  const images = str("images", "none");
+
+  return (
+    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+      <div className="muted" style={{ fontSize: 11 }}>
+        Runs one LLM call and writes the result to <code>state.{str("output_key", "ai_output")}</code>.
+        Templates interpolate <code>{"{case.subject}"}</code>,{" "}
+        <code>{"{sf_context.account.tier}"}</code>, <code>{"{attachment_text}"}</code>,{" "}
+        <code>{"{classification.topic}"}</code> … Edges branch on the output; the
+        routing stays a plain expression.
+      </div>
+
+      <label style={{ marginTop: 6, display: "block" }}>system prompt</label>
+      <textarea rows={3} value={str("system")} onChange={(e) => set({ system: e.target.value })} />
+
+      <label style={{ marginTop: 4, display: "block" }}>user prompt (template)</label>
+      <textarea rows={4} value={str("user")} onChange={(e) => set({ user: e.target.value })} />
+
+      <div className="row" style={{ marginTop: 4 }}>
+        <span className="muted" style={{ width: 90 }}>output key</span>
+        <input value={str("output_key", "ai_output")}
+               onChange={(e) => set({ output_key: e.target.value.trim() || "ai_output" })} />
+      </div>
+      <div className="row" style={{ marginTop: 4 }}>
+        <span className="muted" style={{ width: 90 }}>model</span>
+        <input value={str("model", "openai/gpt-oss-120b")}
+               onChange={(e) => set({ model: e.target.value.trim() })} />
+      </div>
+      <div className="row" style={{ marginTop: 4 }}>
+        <span className="muted" style={{ width: 90 }}>max tokens</span>
+        <input type="number" value={num("max_tokens", 600)}
+               onChange={(e) => set({ max_tokens: Number(e.target.value) || 600 })} />
+        <span className="muted" style={{ width: 44, marginLeft: 8 }}>temp</span>
+        <input type="number" step={0.1} min={0} max={1} value={num("temperature", 0.2)}
+               onChange={(e) => set({ temperature: Number(e.target.value) })} />
+      </div>
+
+      <label style={{ marginTop: 6, display: "block" }}>images (vision)</label>
+      <select value={images} onChange={(e) => set({ images: e.target.value })}>
+        <option value="none">none — text only</option>
+        <option value="auto">auto — send every image attachment</option>
+      </select>
+      <div className="muted" style={{ fontSize: 11 }}>
+        with images set, the call goes to a vision model (free OpenRouter →
+        paid Anthropic). OCR text is already in <code>{"{attachment_text}"}</code>{" "}
+        for free — only turn this on for visual understanding.
+      </div>
+
+      <label className="row" style={{ gap: 6, marginTop: 6 }}>
+        <input type="checkbox" style={{ width: "auto" }}
+               checked={config.json_schema != null && config.json_schema !== ""}
+               onChange={(e) => set({ json_schema: e.target.checked ? { type: "object", properties: {} } : null })} />
+        parse the reply as JSON (edit the schema in the raw config below)
+      </label>
+      <div className="row" style={{ marginTop: 4 }}>
+        <span className="muted" style={{ width: 90 }}>on error</span>
+        <select value={str("on_error", "passthrough")}
+                onChange={(e) => set({ on_error: e.target.value })}>
+          <option value="passthrough">passthrough (output = null)</option>
+          <option value="fail">fail the run</option>
+        </select>
+      </div>
+    </div>
+  );
+}
+
+function SfContextForm({
+  config,
+  onConfig,
+}: {
+  config: Record<string, unknown>;
+  onConfig: (v: Record<string, unknown>) => void;
+}) {
+  const want = Array.isArray(config.want)
+    ? (config.want as string[])
+    : ["account", "contacts", "leads", "cases", "team"];
+  const toggle = (k: string) =>
+    onConfig({
+      ...config,
+      want: want.includes(k) ? want.filter((x) => x !== k) : [...want, k],
+    });
+  const OPTS: [string, string][] = [
+    ["account", "Account + parent hierarchy (organization)"],
+    ["contacts", "Contact + siblings on the Account"],
+    ["leads", "Lead (when the sender isn't a Contact)"],
+    ["cases", "Related Cases (open / total + recent)"],
+    ["team", "Account team / owner (Users)"],
+  ];
+  return (
+    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+      <div className="muted" style={{ fontSize: 11 }}>
+        Loads the Salesforce picture around the Case into{" "}
+        <code>state.sf_context</code>. Put it right after <code>identify</code>.
+      </div>
+      {OPTS.map(([k, label]) => (
+        <label className="row" key={k} style={{ gap: 6, marginTop: 4 }}>
+          <input type="checkbox" style={{ width: "auto" }}
+                 checked={want.includes(k)} onChange={() => toggle(k)} />
+          {label}
+        </label>
+      ))}
+    </div>
+  );
+}
+
+function AttachmentsForm({
+  config,
+  onConfig,
+}: {
+  config: Record<string, unknown>;
+  onConfig: (v: Record<string, unknown>) => void;
+}) {
+  const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
+  return (
+    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+      <div className="muted" style={{ fontSize: 11 }}>
+        Fetches image (and, opt-in, video) attachments on the Case → local OCR
+        / transcription → folded into <code>classify</code> / <code>draft</code>{" "}
+        automatically, and available to <code>ai_prompt</code>’s vision mode.
+      </div>
+      <div className="row" style={{ marginTop: 6 }}>
+        <span className="muted" style={{ width: 90 }}>source</span>
+        <select value={typeof config.source === "string" ? config.source : "salesforce"}
+                onChange={(e) => set({ source: e.target.value })}>
+          <option value="salesforce">Salesforce (ContentDocument)</option>
+          <option value="email">inbound email</option>
+          <option value="auto">both</option>
+        </select>
+      </div>
+      <div className="row" style={{ marginTop: 4 }}>
+        <span className="muted" style={{ width: 90 }}>max images</span>
+        <input type="number" min={1} max={10}
+               value={typeof config.max_images === "number" ? config.max_images : 5}
+               onChange={(e) => set({ max_images: Math.max(1, Math.min(10, Number(e.target.value) || 5)) })} />
+      </div>
+      <label className="row" style={{ gap: 6, marginTop: 4 }}>
+        <input type="checkbox" style={{ width: "auto" }}
+               checked={config.ocr !== false} onChange={(e) => set({ ocr: e.target.checked })} />
+        run OCR on images
+      </label>
+      <label className="row" style={{ gap: 6, marginTop: 4 }}>
+        <input type="checkbox" style={{ width: "auto" }}
+               checked={config.skip_signatures !== false}
+               onChange={(e) => set({ skip_signatures: e.target.checked })} />
+        skip signature / logo images (tiny, banner-shaped, <code>image00x.png</code>,
+        or seen before from that sender)
+      </label>
+      <label className="row" style={{ gap: 6, marginTop: 4 }}>
+        <input type="checkbox" style={{ width: "auto" }}
+               checked={config.video === true} onChange={(e) => set({ video: e.target.checked })} />
+        process video (transcribe audio + OCR keyframes)
+      </label>
+      {config.video === true && (
+        <div className="row" style={{ marginTop: 4 }}>
+          <span className="muted" style={{ width: 90 }}>keyframes</span>
+          <input type="number" min={1} max={12}
+                 value={typeof config.video_frames === "number" ? config.video_frames : 4}
+                 onChange={(e) => set({ video_frames: Math.max(1, Math.min(12, Number(e.target.value) || 4)) })} />
+          <span className="muted" style={{ width: 70, marginLeft: 8 }}>max secs</span>
+          <input type="number" min={30} max={1800}
+                 value={typeof config.video_max_seconds === "number" ? config.video_max_seconds : 300}
+                 onChange={(e) => set({ video_max_seconds: Math.max(30, Math.min(1800, Number(e.target.value) || 300)) })} />
+        </div>
+      )}
+      {config.video === true && (
+        <div className="muted" style={{ fontSize: 11 }}>
+          adds the image-heavy <code>faster-whisper</code> + <code>ffmpeg</code>{" "}
+          path; leave off unless screen recordings are common. Only the first{" "}
+          <em>max secs</em> is processed.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NotifyHumanForm({
+  config,
+  onConfig,
+}: {
+  config: Record<string, unknown>;
+  onConfig: (v: Record<string, unknown>) => void;
+}) {
+  const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
+  const mention = (config.mention as Record<string, unknown>) || {};
+  const channel = typeof config.channel === "string" ? config.channel : "both";
+  const rounds = typeof config.max_rounds === "number" ? config.max_rounds : 3;
+
+  return (
+    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+      <div className="muted" style={{ fontSize: 11 }}>
+        Tags the responsible agent and <strong>opens the Slack reasoning
+        dialogue</strong>: the bot picks the questions that matter for this case,
+        asks them in one message with its own read, and drafts the customer
+        reply only after the agent works through the critical points and
+        approves. Nothing is sent automatically. Put this after every terminal
+        branch.
+      </div>
+
+      <label style={{ marginTop: 6, display: "block" }}>channel</label>
+      <select value={channel} onChange={(e) => set({ channel: e.target.value })}>
+        <option value="both">Slack + Salesforce Chatter</option>
+        <option value="slack">Slack only</option>
+        <option value="salesforce_chatter">Salesforce Chatter only</option>
+      </select>
+
+      <div className="row" style={{ marginTop: 6 }}>
+        <span className="muted" style={{ width: 130 }}>slack channel</span>
+        <input
+          value={typeof config.slack_channel === "string" ? config.slack_channel : ""}
+          placeholder="#support-escalations or Cxxxxxxxx"
+          onChange={(e) => set({ slack_channel: e.target.value.trim() })}
+        />
+      </div>
+
+      <div className="row" style={{ marginTop: 4 }}>
+        <span className="muted" style={{ width: 130 }}>max clarify rounds</span>
+        <input
+          type="number"
+          min={0}
+          max={6}
+          value={rounds}
+          onChange={(e) => set({ max_rounds: Math.max(0, Math.min(6, Number(e.target.value) || 0)) })}
+        />
+      </div>
+      <div className="muted" style={{ fontSize: 11 }}>
+        short follow-ups the bot may send when a <em>critical</em> point is still
+        open, before it drafts anyway (default 3).
+      </div>
+
+      <div className="row" style={{ marginTop: 6 }}>
+        <span className="muted" style={{ width: 130 }}>@mention (Slack id)</span>
+        <input
+          value={typeof mention.slack_user_id === "string" ? mention.slack_user_id : ""}
+          placeholder="Uxxxxxxxx (else resolved by agent email)"
+          onChange={(e) => set({ mention: { ...mention, slack_user_id: e.target.value.trim() } })}
+        />
+      </div>
+      <div className="row" style={{ marginTop: 4 }}>
+        <span className="muted" style={{ width: 130 }}>@mention (SF id)</span>
+        <input
+          value={typeof mention.mention_id === "string" ? mention.mention_id : ""}
+          placeholder="005xxxxxxxxxxxx (Chatter @mention)"
+          onChange={(e) => set({ mention: { ...mention, mention_id: e.target.value.trim() } })}
         />
       </div>
     </div>

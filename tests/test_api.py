@@ -31,7 +31,8 @@ client = TestClient(app)
 
 # ── offline ────────────────────────────────────────────────────────────
 def test_health_ok():
-    assert client.get("/api/health").json() == {"ok": True}
+    body = client.get("/api/health").json()
+    assert body["ok"] is True and "components" in body
 
 
 def test_node_types_lists_the_registry():
@@ -127,6 +128,20 @@ def test_structural_errors_catches_bad_graphs(flow, expect_substr):
 def test_mermaid_import_endpoint_needs_a_token():
     r = client.post("/api/flows/import/mermaid", json={"text": "flowchart TD\n A-->B"})
     assert r.status_code == 401
+
+
+def test_trace_needs_a_token():
+    assert client.get("/api/trace/500ABC").status_code == 401
+
+
+def test_trace_retry_needs_a_token():
+    assert client.post("/api/trace/500ABC/retry").status_code == 401
+
+
+def test_trace_retry_404s_for_an_unknown_key(auth_headers):
+    # audit WF-5 — a real token, but no run the caller's tenants can see
+    r = client.post("/api/trace/500NONEXISTENT/retry", headers=auth_headers)
+    assert r.status_code == 404
 
 
 def test_assist_endpoints_need_a_token():

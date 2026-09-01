@@ -50,6 +50,12 @@ class _Query:
         self._filters[k] = v
         return self
 
+    def order(self, *_a, **_k):
+        return self
+
+    def limit(self, *_a, **_k):
+        return self
+
     def execute(self):
         if getattr(self, "_inserted", None) is not None:
             return _Result([self._inserted])
@@ -86,7 +92,7 @@ def _seed_run(sb, **over):
         "run_id": PARENT_RUN, "flow_id": "f0f0f0f0-0000-4000-8000-000000000000",
         "team": "email", "tenant_id": "00000000-0000-0000-0000-000000000000",
         "human_action": "pending", "created_at": "2026-08-31T07:40:00Z",
-        "draft": "the bot's draft reply",
+        "draft": "the bot's draft reply", "case_id": "500xxTEST",
         "case_payload": {"sf_id": "500xxTEST", "subject": "webhook help",
                          "body": "how do I test a webhook", "channel": "email",
                          "from": "cust@example.com"},
@@ -100,26 +106,48 @@ def _seed_run(sb, **over):
 def _no_mailbox(monkeypatch):
     monkeypatch.setattr("interpreter.mailbox.load_channel", lambda *_a, **_k: None)
     monkeypatch.setattr(worker.salesforce, "available", lambda: True)
+    monkeypatch.setattr(worker, "_case_owned_by_user", lambda *_a, **_k: False)
 
 
-def test_agent_comment_triggers_a_customer_reply(monkeypatch):
+def test_check_resolution_never_sends_on_a_comment(monkeypatch):
+    """Phase 24d — the only send path is the Slack reasoning dialogue.
+    Even an explicit 'send it' CaseComment is just recorded as context."""
     sb = _seed_run(FakeSB())
     monkeypatch.setattr(worker.salesforce, "agent_response_since",
-                        lambda *a, **k: {"guidance": "Tell them to POST to the URL with a test payload.",
+                        lambda *a, **k: {"guidance": "send this response to customer",
                                          "guidance_at": "x", "outbound_email": None})
     monkeypatch.setattr(agent_reply, "resume_from_guidance",
-                        lambda *a, **k: {"sent": True, "auto_sent": True, "via": "smtp",
-                                         "reply": "Hi! POST a test payload to your webhook URL."})
+                        lambda *a, **k: pytest.fail("check_resolution must never send"))
+    monkeypatch.setattr(worker, "_FEEDBACK_MAX_CHECKS", 3)
 
-    out = worker._check_resolution({"run_id": PARENT_RUN}, sb)
-
-    assert out["human_action"] == "guided_resume"
+    out = worker._check_resolution({"run_id": PARENT_RUN, "checks": 0}, sb)
+    assert out["waiting"] and out["note_seen"] is True
     parent = next(r for r in sb.tables["runs"].rows if r["run_id"] == PARENT_RUN)
-    assert parent["human_action"] == "guided_resume"
-    resume = [r for r in sb.tables["runs"].inserted if r["source"] == "agent_resume"]
-    assert len(resume) == 1
-    assert resume[0]["outcome"] == "auto_reply"
-    assert resume[0]["flow_id"] == parent["flow_id"] and resume[0]["team"] == "email"
+    assert parent["human_action"] == "pending"
+    assert "send this response" in (parent.get("human_reply") or "")
+
+
+def test_a_plain_investigation_note_does_not_email_the_customer(monkeypatch):
+    sb = _seed_run(FakeSB())
+    monkeypatch.setattr(worker.salesforce, "agent_response_since",
+                        lambda *a, **k: {"guidance": "Checking with billing — will update here shortly.",
+                                         "guidance_at": "x", "is_send_command": False,
+                                         "outbound_email": None})
+    monkeypatch.setattr(agent_reply, "resume_from_guidance",
+                        lambda *a, **k: pytest.fail("a non-directive note must not send"))
+    monkeypatch.setattr(worker, "_FEEDBACK_MAX_CHECKS", 3)
+
+    out = worker._check_resolution({"run_id": PARENT_RUN, "checks": 0}, sb)
+
+    assert out["waiting"] and out["note_seen"] is True
+    parent = next(r for r in sb.tables["runs"].rows if r["run_id"] == PARENT_RUN)
+    assert parent["human_action"] == "pending"                       # not resolved
+    assert "Checking with billing" in (parent.get("human_reply") or "")
+    assert not [r for r in sb.tables["runs"].inserted if r.get("source") == "agent_resume"]
+
+    # ... and when the poll window ends it's `human_handling`, not `no_reply`
+    last = worker._check_resolution({"run_id": PARENT_RUN, "checks": 2}, sb)
+    assert last["human_action"] == "human_handling"
 
 
 def test_agent_emailed_customer_directly_just_scores_the_draft(monkeypatch):
@@ -187,3 +215,48 @@ def test_resume_sends_via_salesforce_when_no_mailbox(monkeypatch):
     assert out["auto_sent"] is True and out["via"] == "email"
     assert calls["cid"] == "500y" and calls["body"] == "polished reply"
     assert calls["k"].get("to_email") == "c@x.com"
+
+
+# ── guidance applied on top of the bot's own draft ──────────────────
+def test_bare_approval_sends_the_bot_draft_verbatim(monkeypatch):
+    # no LLM call for a plain "send it" — the stored draft goes out as-is
+    monkeypatch.setattr(agent_reply.llm, "complete",
+                        lambda *a, **k: pytest.fail("approval must not call the LLM"))
+    for note in ("send it", "Send this response to customer.", "LGTM", "approved"):
+        assert agent_reply.polish(note, {"subject": "s", "body": "b"},
+                                  draft="Hi Vishnu, here is the full answer.") == \
+            "Hi Vishnu, here is the full answer."
+
+
+def test_substantive_note_is_applied_to_the_draft(monkeypatch):
+    got = {}
+    monkeypatch.setattr(agent_reply.llm, "complete",
+                        lambda *a, **k: got.update(k) or "final reply")
+    out = agent_reply.polish("also mention the SLA is 24h",
+                             {"subject": "s", "body": "b"}, draft="Hi, draft body.")
+    assert out == "final reply"
+    assert "draft body" in got["user"] and "SLA is 24h" in got["user"]
+
+
+def test_check_resolution_reads_a_chatter_feedcomment_as_guidance(monkeypatch):
+    """The bot @mentions on the Case *feed*, so a rep's reply is a FeedComment,
+    not a CaseComment — agent_response_since must see both."""
+    from interpreter import salesforce
+
+    class _SF:
+        def query(self, soql):
+            if "FROM CaseComment" in soql:
+                return {"records": [
+                    {"CommentBody": "[bot draft — review before sending]\n\nx",
+                     "CreatedDate": "2026-09-01T02:56:00.000+0000"}]}
+            if "FROM FeedComment" in soql:
+                return {"records": [
+                    {"CommentBody": "<p>send this response to customer.</p>",
+                     "CreatedDate": "2026-09-01T02:57:23.000+0000"}]}
+            return {"records": []}
+
+    monkeypatch.setattr(salesforce, "available", lambda: True)
+    monkeypatch.setattr(salesforce, "client_for", lambda *a, **k: _SF())
+    r = salesforce.agent_response_since("500X", "2026-09-01T02:55:00Z")
+    assert r["guidance"] == "send this response to customer."   # the bot draft is skipped
+    assert "is_send_command" not in r                            # Phase 24d — removed

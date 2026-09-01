@@ -17,6 +17,7 @@ import type {
   PolicyRule,
   NodeTypesResp,
   SfMeta,
+  TraceResult,
   RunDetail,
   RunResult,
   RunRow,
@@ -154,6 +155,14 @@ export const api = {
 
   salesforce: {
     meta: () => req<SfMeta>("/salesforce/meta"),
+  },
+
+  trace: {
+    get: (key: string) => req<TraceResult>(`/trace/${encodeURIComponent(key.trim())}`),
+    md: (key: string) => req<string>(`/trace/${encodeURIComponent(key.trim())}?format=md`),
+    retry: (key: string) =>
+      req<{ job_id: string; sf_id: string }>(
+        `/trace/${encodeURIComponent(key.trim())}/retry`, { method: "POST" }),
   },
 
   acceptInvitations: () =>

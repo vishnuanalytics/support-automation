@@ -4,7 +4,7 @@ flow from the support design doc:
 
   identify -> sf_case -> retrieve -> classify -> team_route -> sf_writeback
     -> draft -> confidence_gate
-        -> auto_reply                     (gate passes, not enterprise, not offboarding)
+        -> notify_human                   (gate passes, not enterprise, not offboarding — Phase 24a: no auto-send)
         -> ask_human   (queue_by_team)    (gate fails + routed to csm/sales — that team owns it, Case reassigned)
         -> notify      (target_by_type)   (gate fails + support + forced escalation — ping the Type's rep, Case stays put)
         -> clarify     (handover_queue)   (gate fails + support + not forced — ask the customer, then hand to Team_Support)
@@ -50,8 +50,8 @@ HANDOVER_QUEUE_BY_TEAM = {"offboarding": "Team_Offboarding"}
 CLARIFY_HANDOVER_QUEUE = "Team_Support"
 
 n_identify, n_sf_case, n_retrieve, n_classify, n_route, n_writeback, \
-    n_draft, n_gate, n_auto, n_ask, n_handover, n_notify, n_clarify = (
-        _nid(i) for i in range(1, 14))
+    n_draft, n_gate, n_auto, n_ask, n_handover, n_notify, n_clarify, \
+    n_case_lookup, n_human = (_nid(i) for i in range(1, 16))
 
 NODES = [
     (n_identify, "identify", "Resolve the sender",
@@ -67,6 +67,9 @@ NODES = [
      {"default": "support"}),
     (n_writeback, "sf_writeback",
      "Write triage fields to the Case (Type, Module, Priority…)", {}),
+    (n_case_lookup, "case_lookup", "Recall similar resolved Cases (Phase 21)",
+     {"k": 3, "pool": 10, "min_similarity": 0.35, "min_memories": 3,
+      "use_graph": True, "skip_modes": ["action"]}),
     (n_draft, "draft", "Draft the reply from context",
      {"model": "openai/gpt-oss-120b", "max_tokens": 700}),
     (n_gate, "confidence_gate", "Tag manager — score & decide",
@@ -74,13 +77,17 @@ NODES = [
       "default_threshold": 0.5,
       "tier_overrides": {"basic": 0.5, "premium": 0.6, "enterprise": 0.75},
       "escalate_topics": ["billing", "refund", "pricing", "legal", "compliance",
-                          "account-access", "data-export", "cancellation"],
-      "escalate_modules": ["Billing & Plans"],
+                          "account-access", "data-export", "cancellation",
+                          "sso", "saml", "login", "locked out", "lockout",
+                          "2fa", "mfa", "password reset"],
+      "escalate_modules": ["Billing & Plans", "Account & Login"],
       "escalate_types": ["Billing", "Account / Login"]}),
-    (n_auto, "auto_reply", "Auto-reply to the customer", {"channel": "email"}),
+    # Phase 24a — no auto-send. `confidence_gate.pass` now also routes to
+    # `notify_human` (every response goes through a human).
     (n_ask, "ask_human",
      "Escalate to the owning team (csm / sales) — reassigns the Case",
-     {"channel": "salesforce_chatter", "queue_by_team": ASK_QUEUE_BY_TEAM,
+     {"channel": "salesforce_chatter", "post_note": False,
+      "queue_by_team": ASK_QUEUE_BY_TEAM,
       "escalate_queue": "Billing_Escalations"}),
     (n_handover, "handover", "Full handover (enterprise / offboarding)",
      {"reason": "enterprise_or_offboarding", "queue_by_team": HANDOVER_QUEUE_BY_TEAM,
@@ -91,6 +98,9 @@ NODES = [
     (n_clarify, "clarify", "Ask the customer for missing detail",
      {"max_questions": 3, "max_rounds": 2, "auto_send": False, "channel": "email",
       "handover_queue": CLARIFY_HANDOVER_QUEUE}),
+    (n_human, "notify_human", "Reason with a human in Slack, then reply",
+     {"channel": "both", "slack_channel": "#support-escalations",
+      "max_rounds": 3, "mention": {"mention_id": "005jV000000fm5WQAQ"}}),
 ]
 
 _LIVE = "tier != 'enterprise' and routed_team != 'offboarding'"
@@ -101,13 +111,16 @@ EDGES = [
     (n_retrieve, n_classify, {}),
     (n_classify, n_route, {}),
     (n_route, n_writeback, {}),
-    (n_writeback, n_draft, {}),
+    (n_writeback, n_case_lookup, {}),
+    (n_case_lookup, n_draft, {}),
     (n_draft, n_gate, {}),
     (n_gate, n_handover, {"if": "tier == 'enterprise' or routed_team == 'offboarding'"}),
-    (n_gate, n_auto, {"if": f"confidence_gate.pass and {_LIVE}"}),
+    (n_gate, n_human, {"if": f"confidence_gate.pass and {_LIVE}"}),
     (n_gate, n_ask, {"if": f"not confidence_gate.pass and {_LIVE} and routed_team in ('csm', 'sales')"}),
     (n_gate, n_notify, {"if": f"{_SUPPORT_FAIL} and confidence_gate.forced_escalation"}),
     (n_gate, n_clarify, {"if": f"{_SUPPORT_FAIL} and not confidence_gate.forced_escalation"}),
+    (n_ask, n_human, {}),
+    (n_handover, n_human, {}),
 ]
 
 
@@ -117,7 +130,7 @@ def flow_json() -> dict:
         "version": 1, "status": "draft",
         "_doc": ("The design doc's single end-to-end workflow: identify -> "
                  "sf_case -> retrieve -> classify -> team_route -> sf_writeback "
-                 "-> draft -> confidence_gate -> {auto_reply | ask_human | "
+                 "-> draft -> confidence_gate -> {notify_human | ask_human | "
                  "handover}. team_route sets routed_team from keyword rules; "
                  "ask_human/handover resolve the Salesforce queue from it."),
         "nodes": [{"node_id": nid, "type": t, "label": lbl, "config": cfg}

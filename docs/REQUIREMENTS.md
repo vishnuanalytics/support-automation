@@ -4,7 +4,7 @@ The **what and why**. `PROJECT_SCOPE.md` is the build log (what's done, what's
 next); this file is the spec every phase is measured against. When a new
 requirement surfaces, add it here first, then build.
 
-Last updated 2026-08-31.
+Last updated 2026-08-31 (Phase 21).
 
 ---
 
@@ -153,7 +153,16 @@ planned future channel — it must slot in as another adapter, not a rewrite
   (OD-1) but self-hosted, free, and fully observable via
   `docker compose logs`.
 - **NFR-3 Cost:** free tooling by default — Groq free tier for the LLM,
-  local `fastembed` embeddings, no paid email API. Target ≤ $5/mo.
+  local `fastembed` embeddings, no paid email API. Target ≤ $5/mo. _(Phase 23:
+  when Groq's daily token quota is spent, `llm.complete` fails over to an
+  **OpenRouter `:free`** model, then the deterministic stub — a quota-exhausted
+  provider no longer stalls the pipeline.)_
+- **NFR-7 Resilience (Phase 23):** every long-running process writes a
+  `system_health` heartbeat; `scripts/health_check.py` alerts when one goes
+  silent or the job failure rate spikes. An errored email channel is retried
+  with backoff, not parked forever. Salesforce writes (`add_case_comment` /
+  `post_chatter`) are idempotent within a 3 h window. CDC ignores the bot's own
+  Case writes. `validate_env()` fails a process fast on bad config.
 - **NFR-4 Security:** bearer tokens verified server-side; per-user
   rate-limiting on write endpoints; secrets only in Vault.
 - **NFR-5 Safety:** the system MUST NOT send a customer-facing email on any
@@ -192,12 +201,18 @@ planned future channel — it must slot in as another adapter, not a rewrite
 - EmailMessage on the Case (in + out); thread-based Case reuse.
 - Web config UI; KB ingestion; run observability; human feedback loop.
 
+**Decided — one intake path (SF-1, 2026-09-01)**
+- **Salesforce native Email-to-Case (Path B) is the intake.** The mail routes
+  straight to Salesforce, which opens the Case; CDC fires `case_created`. The
+  platform-owned IMAP poller (Path A) is off. Enforced by `SF_INTAKE_MODE`
+  (default `salesforce_e2c`): `mailbox.list_pollable_channels` / `email_watch.
+  tick` yield nothing unless the mode is `poller` or `both`, so a channel row
+  left `active` in the DB can't silently double-create Cases.
+
 **Later**
 - Freshworks chat channel (FR-20).
 - Dedicated support mailbox (OD-2).
 - Persistent-worker deployment (OD-1).
-- Salesforce native Email-to-Case *intake* (Path B) as an alternative to the
-  platform-owned poller.
 - Other channels (phone, web form, Slack).
 
 **Explicitly out**
@@ -215,7 +230,7 @@ planned future channel — it must slot in as another adapter, not a rewrite
 | **OD-1** | Persistent-worker host (Oracle/GCP free VM vs. keep pinger) | Deferred; pinger is the interim. Risk: PAT dependency, Actions minutes. |
 | **OD-2** | Dedicated `support@` mailbox vs. personal Gmail | Deferred; loop-breakers handle the noise but it's not production-clean. |
 | **OD-3** | Groq daily quota exhaustion → stub drafts | May need a paid key at volume. |
-| **OD-4** | Chatter @mention endpoint 404s in this org | Falls back to a plain FeedItem (works, no mention). |
+| **OD-4** | ~~Chatter @mention endpoint 404s in this org~~ | **Resolved 2026-09-01 — was a wrong URL, not an org limit.** `post_chatter` used `connect/records/feed-elements` (→ 404 → no-mention FeedItem fallback); the correct endpoint is `chatter/feed-elements`. @mention works on the DE org. `notify` / `clarify` now @mention the resolved rep (a queue member via `routing.queue_member`, else `mention_id`). |
 | **OD-5** | Email-to-Case not enabled → FR-7 / FR-12 blocked | Admin action required (C-1). |
 
 ---
@@ -259,7 +274,7 @@ Tracked in `PROJECT_SCOPE.md`; summary as of 2026-08-30.
 | **FR-21** Team routing | `team_route` node → `state.routed_team` ∈ {support, csm, sales, offboarding} from keyword rules (renewal/expansion → csm, pricing/pre-sales → sales, cancellation/data-export → offboarding, else support). The design doc's "One team, one flow" as a routing step. |
 | **FR-22** Team-aware escalation | `ask_human` / `handover` resolve `Case.OwnerId` to the routed team's queue (`queue_by_team`); a `support` billing escalation → `Billing_Escalations`; enterprise → `Enterprise_Support`. |
 | **FR-23** Team roster in SF | `Contact.Team__c` + `Contact.TeamRole__c`; 2 real Users (Support/CSM managers) + 13 Contacts, 1 Manager + 2 Members per team. `scripts/sf_seed_teams.py`. |
-| **FR-24** Salesforce → automation push (callout) | `POST /api/hooks/salesforce/case` (shared secret) pulls the Case and queues the flow marked **`sf_entry`** (FR-17a; was hard-coded `team='router'`). SF side: an Apex trigger → HTTP Callout (`scripts/sf_deploy_case_hook.py`), fires on a new `Status='New'`, non-Email Case. Request/response — no durable retry, new-Case only. Superseded by FR-25 for durability; safe to keep as a fallback (shared dedupe key). |
+| **FR-24** Salesforce → automation push (callout) — **RETIRED 2026-09-01** | Was: `POST /api/hooks/salesforce/case` + an Apex trigger/`@future` callout (`scripts/sf_deploy_case_hook.py`). The API endpoint still exists (curl-verified) but the SF-side Apex is **removed** (`sf_deploy_case_hook.py --remove`) — with the API not on a public URL it threw `CalloutException: Unable to tunnel through proxy` and emailed the org admin per Case. Superseded entirely by FR-25 (CDC, outbound-only, no public URL). |
 | **FR-25** Salesforce → automation push (CDC, Phase 20l) | `ingestion.sf_cdc_watch` — a long-lived gRPC client on the **Pub/Sub API** streaming `Case` + `EmailMessage` Change Data Capture. Enqueues a `run_flow` job for a new Case, a new **inbound email on an existing Case**, and a **queue (OwnerId) change**. Durable: last `replay_id` per topic persisted in `sf_cdc_state` (migration `043`) → restart resumes (72h retention). Shares `interpreter.sf_ingest.enqueue_case_run` with FR-24. **Live-verified 2026-08-31** — real inbound-email event → `inbound_email` job, other events ignored, replay cursor persisted. docker-compose `cdc` service. |
 
 **Added + built in Phase 20n (2026-08-31):**
@@ -270,9 +285,18 @@ Tracked in `PROJECT_SCOPE.md`; summary as of 2026-08-30.
 | **FR-27** Ask an internal rep without a hand-off | New **`notify`** node (`interpreter/registry.h_notify`): posts a Chatter note (an @mention when the target is a real User/Group id, else names them) + the draft as a private `CaseComment`, and **never changes `Case.OwnerId`** — the Case stays in its open queue. Target resolves from `Case.Type` → `Module__c` → `fallback_target`. `confidence_gate` gained `escalate_types` (`["Billing", "Account / Login"]`) beside `escalate_topics` / `escalate_modules`. The email flow routes a forced escalation here; the router flow routes `support`-team forced escalations here (csm / sales still reassign via `ask_human`). Re-engagement after the rep answers is the existing Phase 20m resume poller. |
 | **FR-27a** Central `notify` routing (Phase 20o) | The `Case.Type` → rep mapping lives in a per-tenant table **`notify_targets`** (migration `045`, RLS), not per-flow node config — a flow editor never pastes ids. `interpreter/routing.resolve_notify_target` reads it; a row resolves `static` (fixed id), `sf_queue` (Queue by name → id), or `sf_team_role` (the current member of `Team_<team>` — a **live** SOQL lookup, so it follows Salesforce roster changes). `h_notify` still lets a node-level `target_by_type` override win. Seeded for tenant `00000000…`; live-verified against the org. |
 | **FR-27b** Editor pickers from live SF metadata | `GET /api/salesforce/meta` (`salesforce.org_metadata`, 5-min cache) serves the org's queues + `Case.Type` / `Module__c` picklists to the flow editor. The Inspector's `clarify` *handover queue* and `notify` *Case.Type overrides* use them (`QueuePicker` / `useSfMeta`), degrading to free text when SF is unreachable. No standalone `notify_targets` admin screen yet — rows managed via SQL. |
+| **FR-29** One comprehensive `sf_entry` flow (Phase 20p) | The email flow (`e5e5e5e5…`, v4) covers every team + scenario: `identify → sf_case → retrieve → classify → team_route → sf_writeback → draft → confidence_gate`, gate 5-way → `handover` (enterprise / offboarding) · `ask_human` (csm / sales — they own the relationship) · `auto_reply` (support, confident) · `notify` (support, forced escalation — pings the `Case.Type` rep, Case stays in `Team_Email`) · `clarify` (support, unclear — ask the customer, 2 rounds → `Team_Support`). Migration `046`. Routing matrix verified by `scripts/run_scenarios.py` / `tests/test_flow_scenarios.py` (10 scenarios × 3 tiers). Live e2e pending. |
 | **FR-28** Round-capped clarify → support queue | `clarify` gained `handover_queue`: once `max_rounds` (2) of asking the customer is exhausted it reassigns the Case to that queue (`Team_Support`) so a human owns it. The email + router flows send a non-forced low-confidence Case to `clarify` instead of a blind `ask_human`. |
 
 Flows updated: `flow_email_l0l1.json` (`ask_human` removed, `notify` + `clarify` added, gate split 4-way) and `flow_case_router.json` (`notify` + `clarify` added, gate split 5-way). Migration `044` **applied 2026-08-31** to the live email flow → published **v3** (the router flow isn't seeded to this DB — its change stays in `scripts/seed_router_flow.py` + the portable JSON). Web Inspector gains a `notify` form + `clarify` handover-queue field.
+
+**Added + built in Phase 21 (2026-08-31):**
+
+| Req | How |
+|---|---|
+| **FR-30** Answer from resolution history | New `case_memory` store (migration `048`): one row per resolved Case + a 384-d embedding, `match_case_memory` pgvector kNN, RLS. `ingestion/case_memory_sync.py` populates it from accepted `runs` resolutions (+ `--from-salesforce` for closed Cases). New `case_lookup` node (migration `049`, email flow **v7**) recalls the closest resolutions and, when they closely match, `draft` grounds the reply in them (a CONFIRMED DUPLICATE leads). `interpreter/case_memory.py` does the kNN + taxonomy/recency/duplicate boosts; `sync_graph()` MERGEs `(:Case)-[:RESOLVED_BY]->(:Reply)` / `-[:ABOUT]->` / `-[:SIMILAR_TO]->` into Neo4j. All best-effort → no memory / no embedder / Neo4j down = a no-op. |
+| **FR-32** One timeline per Case (observability) | `GET /api/trace/{Case number \| Case id \| run_id \| job_id}` merges `jobs` + `runs` + every trace node + errors into a time-ordered story. Flags `degraded_llm` (stub mode — Groq quota), `stale_jobs`, `failed_jobs` + error text, `labels_written`/`labels_skipped`, `final_queue`, ms/tokens. `?format=md` = a plain-text report. Web **Trace** tab: search → timeline, each node expandable to its `data`. Answers "why did the bot do this / why did the Case fail to create / why these labels / why did it go stale" without SQL-spelunking `runs` + `jobs` + `tenant_integrations` + `docker logs`. `runs.trace` was already the "why" (FR-19) — this surfaces it. |
+| **FR-31** Pattern vs proof | `classify` emits `answer_mode` (informational \| diagnostic \| action \| status). `case_lookup` is **skipped for `action`** (a person does it) and for **`diagnostic`** the near-matches become `investigation_hints` only — `prior_resolutions` is forced empty so `draft` never states a customer-specific fact from memory; the draft prompt tells it to say what it will check and defer to a specialist rather than guess. A resolution whose text cites the customer's own IDs / timestamps / logs is stored `generalizable=false` → hint only, never reply copy. |
 
 **Still open:**
 
@@ -280,5 +304,5 @@ Flows updated: `flow_email_l0l1.json` (`ask_human` removed, `notify` + `clarify`
 |---|---|
 | C-1 | ✅ Email-to-Case enabled (2026-08-30) — inbound `EmailMessage` on the Case now works; the **Email** action + **Emails** related list are live. Outbound draft `EmailMessage` via API stays blocked by design → FR-13 uses a `CaseComment`. |
 | NFR-2 | cron-job.org pinger not set up; scheduled runs unreliable. |
-| FR-24 | the SF-side record-triggered Flow + Named Credential aren't created yet — needs the API at a public URL (deploy or tunnel). The webhook itself is live and `curl`-verified. |
+| FR-24 | ✅ retired 2026-09-01 — the Apex trigger/class/Named Credential were deleted (`sf_deploy_case_hook.py --remove`); they were emailing the admin a `CalloutException` per Case because the API isn't public. CDC (FR-25) is the sole push path. |
 | FR-25 | ✅ done (2026-08-31) — migration `043` applied; subscriber live-verified against the org. Remaining: run it as a persistent process (docker-compose `cdc`) alongside the `worker`. |

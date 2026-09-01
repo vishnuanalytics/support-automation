@@ -28,6 +28,7 @@ from interpreter.runs import build_row
 
 _HERMETIC = ("SF_USERNAME", "SF_PASSWORD", "SF_SECURITY_TOKEN", "SF_CONSUMER_KEY",
              "SF_CONSUMER_SECRET", "SF_PRIVATE_KEY", "SF_PRIVATE_KEY_FILE", "GROQ_API_KEY",
+             "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY",
              "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GITHUB_TOKEN",
              "SLACK_CLIENT_ID", "SLACK_CLIENT_SECRET", "SLACK_SIGNING_SECRET")
 
@@ -623,6 +624,22 @@ def test_slack_github_available_false_without_creds():
     assert github.available() is False
 
 
+def _fake_col(row: dict, key: str):
+    """Resolve a PostgREST-style ``col->>'child'`` / ``col->>child`` filter key
+    against a plain dict row, so fixtures can store the nested value either as
+    the literal filter key or as a real nested ``col`` dict."""
+    if key in row:
+        return row.get(key)
+    for sep in ("->>", "->"):
+        if sep in key:
+            parent, child = key.split(sep, 1)
+            child = child.strip("'\"")
+            val = row.get(parent)
+            if isinstance(val, dict):
+                return val.get(child)
+    return row.get(key)
+
+
 class _FakeTable:
     def __init__(self, store, name):
         self.store, self.name, self._filters = store, name, []
@@ -640,7 +657,7 @@ class _FakeTable:
             return type("R", (), {"data": out})()
         rows = self.store.get(self.name, [])
         for k, v in self._filters:
-            rows = [r for r in rows if r.get(k) == v]
+            rows = [r for r in rows if _fake_col(r, k) == v]
         return type("R", (), {"data": rows})()
 
 
@@ -881,7 +898,8 @@ def test_clarify_auto_send_emails_the_customer(monkeypatch):
 
 
 def test_clarify_round_increments_from_prior_need_info_runs():
-    sb = _FakeSB({"runs": [{"case_id": "500Z", "outcome": "need_info", "clarify_round": 1}]})
+    sb = _FakeSB({"runs": [{"case_payload": {"sf_id": "500Z"}, "outcome": "need_info",
+                            "clarify_round": 1}]})
     state = {"case": {"sf_id": "500Z", "body": "still stuck"}, "confidence": 0.1}
     out = h_clarify(state, {"_node_id": "c", "_sb": sb})
     assert out["clarification"]["round"] == 2
@@ -890,7 +908,8 @@ def test_clarify_round_increments_from_prior_need_info_runs():
 
 
 def test_clarify_exhausted_after_max_rounds_hands_to_human():
-    sb = _FakeSB({"runs": [{"case_id": "500Z", "outcome": "need_info", "clarify_round": 2}]})
+    sb = _FakeSB({"runs": [{"case_payload": {"sf_id": "500Z"}, "outcome": "need_info",
+                            "clarify_round": 2}]})
     state = {"case": {"sf_id": "500Z", "contact": {"email": "c@x.com"}, "body": "x"},
              "confidence": 0.1}
     out = h_clarify(state, {"_node_id": "c", "auto_send": True, "max_rounds": 2, "_sb": sb})
@@ -907,13 +926,17 @@ def test_build_row_persists_clarify_round():
     assert build_row(flow, final, case={"sf_id": "500Z"}, source="api")["clarify_round"] == 2
 
 
-def test_build_row_need_info_is_recorded_but_not_pending():
+def test_build_row_need_info_on_a_real_case_schedules_a_resolution_check():
     flow = {"flow_id": "f", "tenant_id": "t", "team": "support-triage"}
     final = {"outcome": {"action": "need_info", "questions": ["what plan?"]},
              "trace": [], "confidence": 0.1}
+    # Phase 23c: need_info / notify on a real Case are now `pending` too — a
+    # rep answering in Chatter/comments should still reach the customer.
     row = build_row(flow, final, case={"sf_id": "500X"}, source="api")
-    assert row["outcome"] == "need_info"
-    assert row["human_action"] is None
+    assert row["outcome"] == "need_info" and row["human_action"] == "pending"
+    # no sf_id -> nothing to watch
+    row2 = build_row(flow, final, case={"case_id": "synthetic"}, source="api")
+    assert row2["human_action"] is None
 
 
 @register("_t_gate17")

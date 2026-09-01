@@ -18,11 +18,27 @@ to this resolver when the node config has no match. Everything degrades to
 from __future__ import annotations
 
 import logging
+import os
+import time
 from typing import Any
 
 from interpreter import salesforce
 
 log = logging.getLogger("interpreter.routing")
+
+# TTL cache — routing config + the SF lookups it does barely change, and this
+# runs on every escalation. Keeps us well under the Dev-Edition API cap.
+_TTL_S = float(os.environ.get("NOTIFY_ROUTE_TTL_S", "300"))
+_cache: dict[str, tuple[float, Any]] = {}
+
+
+def _cache_get(key: str) -> Any:
+    hit = _cache.get(key)
+    return hit[1] if hit and hit[0] > time.monotonic() else None
+
+
+def _cache_put(key: str, value: Any) -> None:
+    _cache[key] = (time.monotonic() + _TTL_S, value)
 
 
 def _default_sb():
@@ -32,11 +48,14 @@ def _default_sb():
 
 
 def _fetch_rows(tenant_id: str | None, sb) -> list[dict[str, Any]]:
+    if sb is None and "PYTEST_CURRENT_TEST" in os.environ:
+        return []                     # offline tests monkeypatch this or pass sb
     try:
         sb = sb or _default_sb()
         q = (sb.table("notify_targets")
              .select("match_kind,match_value,resolver,sf_target_id,sf_target_type,"
-                     "sf_team,sf_role,sf_queue,label,active")
+                     "sf_team,sf_role,sf_queue,label,active,"
+                     "slack_channel,slack_usergroup,urgency")
              .eq("active", True))
         if tenant_id:
             q = q.eq("tenant_id", str(tenant_id))
@@ -74,6 +93,40 @@ def _sf_team_member(team: str | None, tenant_id: str | None) -> tuple[str | None
     return None, None
 
 
+def queue_member(queue_ref: str | None, tenant_id: str | None = None) -> tuple[str | None, str | None]:
+    """(user_id, name) of an active member of the queue — Chatter can't
+    @mention a Queue group, so `notify` / `clarify` mention a person in it.
+    `queue_ref` = a Queue DeveloperName / Name / Id. Cached; best-effort."""
+    if not queue_ref or not salesforce.available():
+        return None, None
+    ck = f"qm:{queue_ref}"
+    hit = _cache_get(ck)
+    if hit is not None:
+        return hit
+    try:
+        sf = salesforce.client_for(tenant_id)
+        gid = queue_ref
+        if not (len(queue_ref) in (15, 18) and queue_ref[:3] in ("00G",)):
+            q = salesforce._soql_lit(queue_ref)
+            rows = sf.query("SELECT Id FROM Group WHERE Type = 'Queue' AND "
+                            f"(DeveloperName = '{q}' OR Name = '{q}') LIMIT 1").get("records", [])
+            gid = rows[0]["Id"] if rows else None
+        if gid:
+            g = salesforce._soql_lit(gid)
+            rows = sf.query(
+                "SELECT Id, Name FROM User WHERE IsActive = true AND Id IN "
+                f"(SELECT UserOrGroupId FROM GroupMember WHERE GroupId = '{g}') LIMIT 1"
+            ).get("records", [])
+            if rows:
+                out = (rows[0]["Id"], rows[0].get("Name"))
+                _cache_put(ck, out)
+                return out
+    except Exception as e:  # noqa: BLE001
+        log.warning("queue_member(%s): %s", queue_ref, e)
+    _cache_put(ck, (None, None))
+    return None, None
+
+
 def _sf_queue_id(name: str | None, tenant_id: str | None) -> str | None:
     if not (name and salesforce.available()):
         return None
@@ -102,15 +155,22 @@ def resolve_notify_target(
 
     Returns `{"id", "type", "label", "resolver"}` (id/type may be `None` when
     the row is note-only or the live lookup found nobody), or `None` when no
-    row matches / the table is unavailable.
+    row matches / the table is unavailable. Result is cached `NOTIFY_ROUTE_TTL_S`
+    (default 300 s) so an escalation storm doesn't hammer the SF API.
     """
+    ck = f"resolve:{tenant_id}:{case_type}:{module}"
+    cached = _cache_get(ck)
+    if cached is not None:
+        return None if cached == "__none__" else cached
+
     rows = _fetch_rows(tenant_id, sb)
     if not rows:
-        return None
+        return None                       # table down — don't cache a transient miss
     by_type = {r["match_value"]: r for r in rows if r.get("match_kind") == "case_type"}
     by_mod = {r["match_value"]: r for r in rows if r.get("match_kind") == "module"}
     row = (case_type and by_type.get(case_type)) or (module and by_mod.get(module))
     if not row:
+        _cache_put(ck, "__none__")
         return None
 
     resolver = row.get("resolver") or "static"
@@ -133,4 +193,48 @@ def resolve_notify_target(
         if name and not row.get("label"):
             role = row.get("sf_role") or "Manager"
             out["label"] = f"{name} ({row['sf_team']} {role})"
+
+    _cache_put(ck, out)
+    return out
+
+
+def resolve_slack_route(
+    tenant_id: str | None,
+    *,
+    routed_team: str | None = None,
+    case_type: str | None = None,
+    module: str | None = None,
+    sb=None,
+) -> dict[str, Any]:
+    """Where a handoff card goes in Slack (Phase 27e). Most-specific match
+    wins: routed_team -> module -> case_type. No match -> #cx-unrouted.
+
+    Returns `{"channel", "usergroup", "urgency", "label"}` — channel is always
+    set (the fallback), usergroup may be None.
+    """
+    fallback = {"channel": os.environ.get("SLACK_UNROUTED_CHANNEL", "#cx-unrouted"),
+               "usergroup": None, "urgency": "high", "label": "unrouted"}
+    ck = f"slackroute:{tenant_id}:{routed_team}:{case_type}:{module}"
+    cached = _cache_get(ck)
+    if cached is not None:
+        return cached
+    rows = _fetch_rows(tenant_id, sb)
+    if not rows:
+        return fallback
+    idx = {(r.get("match_kind"), r.get("match_value")): r for r in rows if r.get("slack_channel")}
+    row = (
+        (routed_team and idx.get(("routed_team", routed_team)))
+        or (module and idx.get(("module", module)))
+        or (case_type and idx.get(("case_type", case_type)))
+    )
+    if not row:
+        _cache_put(ck, fallback)
+        return fallback
+    out = {
+        "channel": row.get("slack_channel") or fallback["channel"],
+        "usergroup": row.get("slack_usergroup"),
+        "urgency": row.get("urgency") or "normal",
+        "label": row.get("label") or routed_team or case_type or "support",
+    }
+    _cache_put(ck, out)
     return out

@@ -1,0 +1,2 @@
+# Test + CI only — not in the runtime image.
+pytest

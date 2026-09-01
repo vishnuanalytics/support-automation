@@ -5,7 +5,9 @@ import type { Flow, FlowEdge, FlowNode } from "../types";
 export type RFNode = Node<{ label: string; nodeType: string; terminal: boolean }>;
 export type RFEdge = Edge<{ condition: Record<string, unknown> }>;
 
-const TERMINAL = new Set(["auto_reply", "ask_human", "handover", "clarify", "notify"]);
+// `notify_human` is the real end of every path now (Phase 24 — no auto-send);
+// ask_human / handover / notify / clarify feed into it.
+const TERMINAL = new Set(["notify_human", "auto_reply"]);
 
 export function toReactFlow(flow: Flow): { nodes: RFNode[]; edges: RFEdge[] } {
   const needsLayout = flow.nodes.some(
@@ -34,13 +36,13 @@ export function toReactFlow(flow: Flow): { nodes: RFNode[]; edges: RFEdge[] } {
 
 export function layout(nodes: RFNode[], edges: RFEdge[]): RFNode[] {
   const g = new Dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
-  g.setGraph({ rankdir: "LR", nodesep: 40, ranksep: 90 });
-  nodes.forEach((n) => g.setNode(n.id, { width: 170, height: 48 }));
+  g.setGraph({ rankdir: "LR", nodesep: 70, ranksep: 140, edgesep: 30 });
+  nodes.forEach((n) => g.setNode(n.id, { width: 200, height: 56 }));
   edges.forEach((e) => g.setEdge(e.source, e.target));
   Dagre.layout(g);
   return nodes.map((n) => {
     const p = g.node(n.id);
-    return { ...n, position: { x: Math.round(p.x - 85), y: Math.round(p.y - 24) } };
+    return { ...n, position: { x: Math.round(p.x - 100), y: Math.round(p.y - 28) } };
   });
 }
 

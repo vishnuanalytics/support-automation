@@ -29,8 +29,12 @@ def build_row(flow: dict, final: dict, *, case: dict, source: str,
     outcome = final.get("outcome") or {}
     case_id = case.get("case_id") or case.get("sf_id") or case.get("id")
     action = outcome.get("action")
-    # a run that went to a human, on a real Case, will get a resolution check
-    pending = action in ("ask_human", "handover") and bool(case.get("sf_id") or case.get("id"))
+    # a run that went to a human, on a real Case, gets a resolution check
+    # (Phase 20m: an agent CaseComment -> the bot polishes it into a customer
+    # reply and sends it). `notify` and `clarify`/`need_info` count too — a rep
+    # answering in Chatter/comments should still reach the customer.
+    pending = (action in ("ask_human", "handover", "notify", "need_info")
+               and bool(case.get("sf_id") or case.get("id")))
     return {
         "flow_id": flow["flow_id"],
         "flow_version": flow.get("flow_version"),
@@ -78,19 +82,58 @@ def record_run(flow: dict, final: dict, *, case: dict, source: str = "api",
         except Exception as e:  # noqa: BLE001
             log.warning("could not link action_request %s to run %s: %s", ar_id, run_id, e)
 
+    # Phase 27c — the flow's nodes wrote `case_events` rows with no run_id
+    # (the run didn't exist yet). Stamp them now, best-effort.
+    sf_id = case.get("sf_id") or case.get("id")
+    if run_id and sf_id:
+        try:
+            import datetime as _dt
+
+            from interpreter import case_events
+
+            since = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(minutes=15)).isoformat()
+            case_events.link_run(sb, case_sf_id=str(sf_id), run_id=run_id, since_iso=since)
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not link case_events to run %s: %s", run_id, e)
+
     # close the loop later: if this went to a human on a real Case, schedule a
-    # resolution check (Phase 11). Best-effort.
+    # resolution check (Phase 11). Best-effort. Phase 24: skipped when a Slack
+    # reasoning session owns the case — that dialogue is the resolution path.
     if run_id and row.get("human_action") == "pending":
         try:
             import datetime as _dt
 
             from interpreter import jobs
 
-            delay = int(os.environ.get("FEEDBACK_DELAY_MIN", "20"))
-            run_after = (_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(minutes=delay)).isoformat()
-            jobs.enqueue("check_resolution", {"run_id": run_id},
-                         dedupe_key=run_id, run_after=run_after, sb=sb)
+            # reasoning_sessions.case_id is the SF record id (500…); row.case_id
+            # is the CaseNumber, so match on the id from the payload.
+            sf_id = case.get("sf_id") or case.get("id")
+            has_session = False
+            if sf_id:
+                try:
+                    has_session = bool(
+                        sb.table("reasoning_sessions").select("session_id")
+                        .eq("case_id", sf_id).not_.in_("state", ("sent", "abandoned"))
+                        .limit(1).execute().data)
+                except Exception:  # noqa: BLE001
+                    has_session = False
+            if has_session:
+                log.info("run %s: reasoning session owns the case — no check_resolution", run_id)
+            else:
+                delay = _int_env("FEEDBACK_DELAY_MIN", 20)
+                run_after = (_dt.datetime.now(_dt.timezone.utc)
+                             + _dt.timedelta(minutes=delay)).isoformat()
+                jobs.enqueue("check_resolution", {"run_id": run_id},
+                             dedupe_key=run_id, run_after=run_after, sb=sb)
         except Exception as e:  # noqa: BLE001
             log.warning("could not schedule resolution check for %s: %s", run_id, e)
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(str(os.environ.get(name, default)).strip())
+    except (TypeError, ValueError):
+        log.warning("%s=%r is not an int; using %d", name, os.environ.get(name), default)
+        return default
 
     return run_id

@@ -1,0 +1,7 @@
+# Optional external connectors (Phase 15 Google Docs, Phase 20 Gmail-OAuth
+# provider). Lazily imported — the runtime services import fine without these
+# and only a Google endpoint / the Gmail provider needs them. Installed on
+# GitHub Actions (gdoc_sync) and in dev; NOT baked into the base image.
+google-auth
+google-auth-oauthlib
+google-api-python-client

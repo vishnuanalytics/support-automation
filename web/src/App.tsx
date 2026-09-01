@@ -6,13 +6,14 @@ import { Login } from "./auth/Login";
 import { FlowList } from "./flows/FlowList";
 import { FlowEditor } from "./flows/FlowEditor";
 import { RunsView } from "./runs/RunsView";
+import { TraceView } from "./trace/TraceView";
 import { KnowledgeView } from "./kb/KnowledgeView";
 import { RulesView } from "./rules/RulesView";
 import { TeamView } from "./team/TeamView";
 import { ChannelsView } from "./channels/ChannelsView";
 import { FlowGuideView } from "./guide/FlowGuideView";
 
-type View = "editor" | "runs" | "knowledge" | "rules" | "guide" | "team" | "channels";
+type View = "editor" | "runs" | "trace" | "knowledge" | "rules" | "guide" | "team" | "channels";
 
 export function App() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
@@ -79,6 +80,9 @@ export function App() {
             <button className={view === "runs" ? "primary" : ""} onClick={() => setView("runs")}>
               Runs
             </button>
+            <button className={view === "trace" ? "primary" : ""} onClick={() => setView("trace")}>
+              Trace
+            </button>
             <button className={view === "knowledge" ? "primary" : ""} onClick={() => setView("knowledge")}>
               Knowledge
             </button>
@@ -121,6 +125,7 @@ export function App() {
           />
         )}
         {view === "runs" && <div className="muted">observability — recent interpreter runs across your tenants</div>}
+        {view === "trace" && <div className="muted">one timeline per Case — jobs, runs, nodes and errors, in order</div>}
         {view === "knowledge" && (
           <div className="muted">
             internal SOPs &amp; runbooks per team — a <code>kb_lookup</code> node
@@ -153,6 +158,8 @@ export function App() {
           <KnowledgeView />
         ) : view === "runs" ? (
           <RunsView />
+        ) : view === "trace" ? (
+          <TraceView />
         ) : flowId ? (
           <FlowEditor
             key={flowId}

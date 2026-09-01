@@ -74,6 +74,28 @@ class CaseState(TypedDict, total=False):
     #  contact_created, account_created, inbound_email: {id, ...}, dry_run}
     sf_case: dict[str, Any]
 
+    # Phase 21 — Case-resolution memory (case_lookup node)
+    prior_resolutions: list[dict[str, Any]]   # citable past resolutions the draft may quote
+    investigation_hints: list[str]            # leads for a human / evidence step — never reply copy
+
+    # Phase 23d — notify_human node: {slack: {...}, chatter: {...}, mention: {...}}
+    human_alert: dict[str, Any]
+
+    # Phase 25 — image attachments (attachments node). `_attachment_blobs` is
+    # {blob_key: bytes} for the ai_prompt vision path; it is never persisted.
+    attachments: list[dict[str, Any]]
+    attachment_text: str
+    _attachment_blobs: dict[str, Any]
+
+    # Phase 25 — sf_context node: {account, organization, contact, siblings,
+    # lead, cases: {open,total,recent}, account_team}
+    sf_context: dict[str, Any]
+
+    # Phase 25 — every `ai_prompt` node writes {output_key: value} in here
+    # (a declared channel so a dynamic key isn't dropped by the graph merge).
+    # Edges / templates read `ai.<output_key>...`.
+    ai: Annotated[dict[str, Any], operator.or_]
+
     draft: str                 # proposed reply text
     draft_confidence: float    # 0..1, model's own confidence in the draft
     groundedness: dict[str, Any]      # {score 0..1, backend, unsupported[]} — is the draft supported by the context

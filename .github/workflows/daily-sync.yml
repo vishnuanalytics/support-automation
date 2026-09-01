@@ -34,7 +34,7 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements.txt -r requirements-ingest.txt -r requirements-connectors.txt
 
       - name: Scrape docs.zapier.com -> Supabase
         env:
@@ -51,3 +51,35 @@ jobs:
           NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
           NEO4J_DATABASE: ${{ secrets.NEO4J_DATABASE }}
         run: python -m ingestion.neo4j_sync
+
+      # Phase 21 — refresh the Case-resolution memory that feeds `draft`
+      # (audit D1: this was never scheduled). Best-effort; needs SF creds only
+      # for the --from-salesforce enrichment, so plain --once here.
+      - name: Refresh case_memory from resolved runs
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          NEO4J_URI: ${{ secrets.NEO4J_URI }}
+          NEO4J_USERNAME: ${{ secrets.NEO4J_USERNAME }}
+          NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
+          NEO4J_DATABASE: ${{ secrets.NEO4J_DATABASE }}
+        run: python -m ingestion.case_memory_sync --once
+
+      # audit C3 — trim old finished jobs / settled runs
+      - name: Purge old jobs + runs
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m scripts.purge_old
+
+      # Phase 26 — re-rank the free OpenRouter models (they churn weekly) so
+      # llm.py's fallback chains stay current.
+      - name: Refresh the free-model roster
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: python -m scripts.refresh_llm_roster

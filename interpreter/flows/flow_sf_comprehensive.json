@@ -1,0 +1,126 @@
+{
+  "flow_id": "c0mprehe-5555-4555-8555-555555555555",
+  "tenant_id": "00000000-0000-0000-0000-000000000000",
+  "team": "email",
+  "name": "SF comprehensive — context + images + AI triage",
+  "version": 1,
+  "status": "draft",
+  "_doc": "Phase 25 template. identify -> sf_context -> attachments -> retrieve -> ai_prompt(triage) -> classify -> team_route -> sf_writeback -> case_lookup -> draft -> confidence_gate -> {handover | ask_human | notify | clarify} -> notify_human. Every node config is fully specified. Not seeded to any DB — flip the sf_entry flag in the editor when ready.",
+  "nodes": [
+    { "node_id": "c5000001", "type": "identify", "label": "Resolve the sender (Contact / Account / Lead)",
+      "config": { "email_field": "from", "domain_match": true, "create_lead_if_missing": false,
+        "free_email_domains": ["gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "icloud.com", "proton.me"] } },
+
+    { "node_id": "c5000002", "type": "sf_context", "label": "Load the Salesforce picture (org / people / cases)",
+      "config": { "want": ["account", "contacts", "leads", "cases", "team"] } },
+
+    { "node_id": "c5000003", "type": "attachments", "label": "Fetch Case images + video → OCR / transcript",
+      "config": { "source": "salesforce", "max_images": 5, "ocr": true,
+        "video": false, "video_frames": 4, "video_max_seconds": 300 } },
+
+    { "node_id": "c5000004", "type": "retrieve", "label": "Retrieve KB context",
+      "config": { "source": ["supabase", "neo4j"], "top_k": 6, "use_rerank": true, "min_score": 0.0 } },
+
+    { "node_id": "c5000005", "type": "ai_prompt", "label": "AI triage — intent, severity, image read",
+      "config": {
+        "system": "You are a senior support engineer triaging an inbound case. Judge from the message, the account context, and any text read from attached images. Be terse and honest about uncertainty.",
+        "user": "# Case\n{case.subject}\n{case.body}\n\n# Account\n{sf_context.account.name} — tier {sf_context.account.tier}, {sf_context.cases.open} open / {sf_context.cases.total} total cases\n\n# Text from attached images\n{attachment_text}",
+        "model": "openai/gpt-oss-120b",
+        "temperature": 0.1,
+        "max_tokens": 500,
+        "output_key": "triage",
+        "json_schema": {
+          "type": "object",
+          "properties": {
+            "intent": { "type": "string", "enum": ["question", "how_to", "bug", "billing", "account_access", "feature_request", "cancellation", "status_check", "other"] },
+            "severity": { "type": "string", "enum": ["low", "normal", "high", "critical"] },
+            "needs_customer_data": { "type": "boolean" },
+            "churn_or_legal_risk": { "type": "boolean" },
+            "image_summary": { "type": "string" },
+            "one_line": { "type": "string" }
+          },
+          "required": ["intent", "severity"]
+        },
+        "images": "none",
+        "cache": true,
+        "on_error": "passthrough"
+      } },
+
+    { "node_id": "c5000006", "type": "classify", "label": "Classify tier / type / topic / urgency",
+      "config": { "tier_field": "sf_context.account.tier", "region_field": "sf_context.account.region",
+        "default_tier": "basic", "model": "openai/gpt-oss-20b" } },
+
+    { "node_id": "c5000007", "type": "team_route", "label": "Route to a team",
+      "config": { "default": "support" } },
+
+    { "node_id": "c5000008", "type": "sf_writeback", "label": "Write triage fields to the Case",
+      "config": {
+        "object": "Case",
+        "field_map": { "urgency": "Priority", "topic": "Topic__c", "case_type": "Type", "region": "Region__c" },
+        "value_maps": { "Priority": { "critical": "High", "high": "High", "normal": "Medium", "low": "Low" } },
+        "append": { "Description": "summary" } } },
+
+    { "node_id": "c5000009", "type": "case_lookup", "label": "Recall similar resolved Cases",
+      "config": { "k": 3, "pool": 10, "min_similarity": 0.35, "min_memories": 3, "use_graph": true, "skip_modes": ["action"] } },
+
+    { "node_id": "c500000a", "type": "draft", "label": "Draft the reply from context",
+      "config": { "model": "openai/gpt-oss-120b", "max_tokens": 900, "internal_kb_key": "internal_kb" } },
+
+    { "node_id": "c500000b", "type": "confidence_gate", "label": "Gate on answer quality",
+      "config": {
+        "weights": { "retrieval": 0.55, "draft": 0.1, "groundedness": 0.35 },
+        "default_threshold": 0.5,
+        "tier_overrides": { "basic": 0.5, "premium": 0.6, "enterprise": 0.75 },
+        "escalate_types": ["Billing", "Account / Login"],
+        "escalate_modules": ["Billing & Plans", "Account & Login"],
+        "escalate_topics": ["billing", "refund", "pricing", "legal", "compliance", "account-access", "data-export", "cancellation", "sso", "saml", "login", "locked out", "2fa", "mfa", "password reset"],
+        "escalate_answer_modes": ["action"] } },
+
+    { "node_id": "c500000c", "type": "handover", "label": "Full handover (enterprise / offboarding / action)",
+      "config": { "reason": "enterprise_or_offboarding_or_action", "enterprise_queue": "Enterprise_Support",
+        "queue_by_team": { "offboarding": "Team_Offboarding" } } },
+
+    { "node_id": "c500000d", "type": "ask_human", "label": "Escalate to the owning team (csm / sales)",
+      "config": { "channel": "salesforce_chatter", "post_note": false,
+        "queue_by_team": { "csm": "Team_CSM", "sales": "Team_Sales" }, "escalate_queue": "Billing_Escalations" } },
+
+    { "node_id": "c500000e", "type": "notify", "label": "Ping the Type's rep (Case stays in the queue)",
+      "config": { "channel": "salesforce_chatter", "target_by_type": {}, "target_by_module": {}, "fallback_target": null } },
+
+    { "node_id": "c500000f", "type": "clarify", "label": "Ask the customer for missing detail",
+      "config": { "max_questions": 3, "max_rounds": 2, "auto_send": false, "channel": "email", "handover_queue": "Team_Support" } },
+
+    { "node_id": "c5000010", "type": "notify_human", "label": "Reason with a human in Slack, then reply",
+      "config": { "channel": "both", "slack_channel": "#support-escalations",
+        "slack_channel_by_team": { "csm": "#csm-escalations", "sales": "#sales-escalations", "offboarding": "#retention", "default": "#support-escalations" },
+        "max_rounds": 3, "mention": { "mention_id": "005jV000000fm5WQAQ" } } }
+  ],
+  "edges": [
+    { "source_node_id": "c5000001", "target_node_id": "c5000002", "condition": {} },
+    { "source_node_id": "c5000002", "target_node_id": "c5000003", "condition": {} },
+    { "source_node_id": "c5000003", "target_node_id": "c5000004", "condition": {} },
+    { "source_node_id": "c5000004", "target_node_id": "c5000005", "condition": {} },
+    { "source_node_id": "c5000005", "target_node_id": "c5000006", "condition": {} },
+    { "source_node_id": "c5000006", "target_node_id": "c5000007", "condition": {} },
+    { "source_node_id": "c5000007", "target_node_id": "c5000008", "condition": {} },
+    { "source_node_id": "c5000008", "target_node_id": "c5000009", "condition": {} },
+    { "source_node_id": "c5000009", "target_node_id": "c500000a", "condition": {} },
+    { "source_node_id": "c500000a", "target_node_id": "c500000b", "condition": {} },
+
+    { "source_node_id": "c500000b", "target_node_id": "c500000c",
+      "condition": { "if": "tier == 'enterprise' or routed_team == 'offboarding' or answer_mode == 'action' or ai.triage.churn_or_legal_risk == True" } },
+    { "source_node_id": "c500000b", "target_node_id": "c500000d",
+      "condition": { "if": "routed_team in ('csm', 'sales') and tier != 'enterprise' and answer_mode != 'action' and ai.triage.churn_or_legal_risk != True" } },
+    { "source_node_id": "c500000b", "target_node_id": "c5000010",
+      "condition": { "if": "confidence_gate.pass and tier != 'enterprise' and routed_team == 'support' and answer_mode != 'action' and ai.triage.churn_or_legal_risk != True" } },
+    { "source_node_id": "c500000b", "target_node_id": "c500000e",
+      "condition": { "if": "not confidence_gate.pass and tier != 'enterprise' and routed_team == 'support' and confidence_gate.forced_escalation and answer_mode != 'action' and ai.triage.churn_or_legal_risk != True" } },
+    { "source_node_id": "c500000b", "target_node_id": "c500000f",
+      "condition": { "if": "not confidence_gate.pass and tier != 'enterprise' and routed_team == 'support' and not confidence_gate.forced_escalation and answer_mode != 'action' and ai.triage.churn_or_legal_risk != True" } },
+
+    { "source_node_id": "c500000c", "target_node_id": "c5000010", "condition": {} },
+    { "source_node_id": "c500000d", "target_node_id": "c5000010", "condition": {} },
+    { "source_node_id": "c500000e", "target_node_id": "c5000010", "condition": {} },
+    { "source_node_id": "c500000f", "target_node_id": "c5000010", "condition": {} }
+  ]
+}

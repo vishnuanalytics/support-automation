@@ -122,21 +122,33 @@ def test_email_l0l1_portable_flow_compiles_and_routes():
     build_graph(flow)   # raises on a bad entry / unknown type / routing gap
     types = [n["type"] for n in flow["nodes"]]
     assert types[0] == "identify" and types[1] == "sf_case"
-    # Phase 20n: ask_human is gone from this flow — a low-confidence Case now
-    # either pings the Type's rep in place (notify) or asks the customer (clarify).
-    assert {"sf_case", "sf_writeback", "auto_reply", "notify", "clarify", "handover"} <= set(types)
-    assert "ask_human" not in types
-    # the four confidence_gate branches are mutually exclusive + exhaustive
+    # Phase 20p: the single comprehensive sf_entry flow — team_route + a 5-way gate.
+    # Phase 24a: `auto_reply` removed — no path auto-sends; gate.pass -> notify_human.
+    assert {"team_route", "sf_writeback", "notify_human", "ask_human",
+            "notify", "clarify", "handover"} <= set(types)
+    assert "auto_reply" not in types
+    # classify -> team_route -> sf_writeback
+    assert any(e["source_node_id"] == "classify" and e["target_node_id"] == "team_route"
+               for e in flow["edges"])
+    # the five confidence_gate branches are mutually exclusive + exhaustive.
+    # Audit WF-1: an `action` answer_mode (the reply asks us to *do* something,
+    # not just explain) is pulled out of every self-serve branch and routed to
+    # `handover` — a human has to perform the action.
     gate_conds = sorted(
         e["condition"]["if"] for e in flow["edges"]
         if e["source_node_id"] == "confidence_gate"
     )
     assert gate_conds == [
-        "confidence_gate.pass and tier != 'enterprise'",
-        "not confidence_gate.pass and tier != 'enterprise' and confidence_gate.forced_escalation",
-        "not confidence_gate.pass and tier != 'enterprise' and not confidence_gate.forced_escalation",
-        "tier == 'enterprise'",
+        "confidence_gate.pass and tier != 'enterprise' and routed_team == 'support' and answer_mode != 'action'",
+        "not confidence_gate.pass and tier != 'enterprise' and routed_team == 'support' and confidence_gate.forced_escalation and answer_mode != 'action'",
+        "not confidence_gate.pass and tier != 'enterprise' and routed_team == 'support' and not confidence_gate.forced_escalation and answer_mode != 'action'",
+        "routed_team in ('csm', 'sales') and tier != 'enterprise' and answer_mode != 'action'",
+        "tier == 'enterprise' or routed_team == 'offboarding' or answer_mode == 'action'",
     ]
+    # the action-mode carve-out lands on handover
+    assert next(e["target_node_id"] for e in flow["edges"]
+                if e["source_node_id"] == "confidence_gate"
+                and "answer_mode == 'action'" in e["condition"]["if"]) == "handover"
 
 
 # --------------------------------------------------------------------------

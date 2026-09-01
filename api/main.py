@@ -26,10 +26,14 @@ Run:  uvicorn api.main:app --reload
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import uuid
+from datetime import datetime as _dt
 from typing import Any
+
+log = logging.getLogger("api")
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -98,6 +102,36 @@ NODE_DEFAULTS: dict[str, dict[str, Any]] = {
     "auto_reply": {},
     "ask_human": {"channel": "salesforce_chatter"},
     "handover": {"reason": "policy"},
+    "team_route": {"default": "support"},
+    "case_lookup": {"k": 3, "pool": 10, "min_similarity": 0.35},
+    # Phase 25 — image attachments, Salesforce context, generic AI prompt
+    "attachments": {"source": "salesforce", "max_images": 5, "ocr": True,
+                    "skip_signatures": True, "min_image_px": 350,
+                    "video": False, "video_frames": 4, "video_max_seconds": 300},
+    "sf_context": {"want": ["account", "contacts", "leads", "cases", "team"]},
+    "ai_prompt": {
+        "system": "You are a support triage assistant.",
+        "user": "Case: {case.subject}\n{case.body}\n\nAccount: {sf_context.account.name} "
+                "(tier {sf_context.account.tier})\nImage text: {attachment_text}",
+        "model": "openai/gpt-oss-120b",
+        "temperature": 0.2,
+        "max_tokens": 600,
+        "output_key": "ai_output",
+        "json_schema": None,
+        "images": "none",
+        "cache": True,
+        "on_error": "passthrough",
+    },
+    "notify": {"channel": "salesforce_chatter", "target_by_type": {}, "fallback_target": None},
+    "clarify": {"max_questions": 3, "max_rounds": 2, "auto_send": False, "channel": "email"},
+    # Phase 24 — every path ends here: tag the agent + open the Slack reasoning
+    # dialogue; the customer reply is drafted and sent only on the agent's OK.
+    "notify_human": {
+        "channel": "both",
+        "slack_channel": "#support-escalations",
+        "max_rounds": 3,
+        "mention": {},
+    },
 }
 
 
@@ -294,7 +328,23 @@ def _require_owner(c: Caller, tenant_id: str) -> None:
 # ── endpoints ──────────────────────────────────────────────────────────
 @app.get("/api/health")
 def health() -> dict:
-    return {"ok": True}
+    """Liveness + the last heartbeat age (seconds) of each pipeline component,
+    so one URL covers the whole stack for an uptime monitor."""
+    import time as _t
+
+    out: dict = {"ok": True, "components": {}}
+    try:
+        rows = _service.table("system_health").select("component,last_healthy_at").execute().data or []
+        now = _t.time()
+        for r in rows:
+            try:
+                ts = _dt.fromisoformat(str(r["last_healthy_at"]).replace("Z", "+00:00")).timestamp()
+                out["components"][r["component"]] = round(now - ts, 1)
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception as e:  # noqa: BLE001
+        out["components_error"] = str(e)
+    return out
 
 
 @app.get("/api/node-types")
@@ -838,6 +888,147 @@ def get_run(run_id: str, c: Caller = Depends(caller)) -> dict:
     if not rows:
         raise HTTPException(404, "run not found")
     return rows[0]
+
+
+# ── Phase 22: one timeline per Case (jobs + runs + nodes + errors) ─────
+def _q(fn):
+    """run a supabase query, swallow any error -> []."""
+    try:
+        return fn() or []
+    except Exception as e:  # noqa: BLE001
+        log.warning("trace query failed: %s", e)
+        return []
+
+
+@app.get("/api/trace/{key}")
+def get_trace(key: str, format: str = "json", c: Caller = Depends(caller)):
+    """Everything that happened for a Case, in order. `key` = a Salesforce
+    Case id, a Case number, a run_id, or a job_id. `?format=md` -> plain text.
+    Read-only, auth-gated, and **scoped to the caller's tenants** — the service
+    client is only used so it can join `jobs` (which have no RLS)."""
+    from api.trace import build_timeline, render_markdown
+
+    key = key.strip()
+    S = _service
+    my_tenants = {
+        str(r["tenant_id"]) for r in
+        (c.sb.table("tenant_members").select("tenant_id").eq("user_id", c.user_id)
+         .execute().data or [])
+    }
+    if not my_tenants:
+        raise HTTPException(403, "not a member of any tenant")
+
+    def _mine(rows: list[dict]) -> list[dict]:
+        return [r for r in rows if str(r.get("tenant_id")) in my_tenants]
+
+    runs: dict[str, dict] = {}
+    for r in _mine(
+            _q(lambda: S.table("runs").select("*").eq("run_id", key).execute().data)
+            + _q(lambda: S.table("runs").select("*").eq("case_id", key).execute().data)
+            + _q(lambda: S.table("runs").select("*").eq("case_payload->>sf_id", key).execute().data)
+            + _q(lambda: S.table("runs").select("*").eq("case_payload->>case_number", key).execute().data)):
+        runs[r["run_id"]] = r
+
+    # widen: every case id / number / idempotency key those runs touched
+    # ids/ikeys are derived ONLY from the caller's own runs — the widen + jobs
+    # lookups below must not reach into another tenant's rows.
+    ids: set[str] = set()
+    ikeys: set[str] = set()
+    for r in runs.values():
+        cp = r.get("case_payload") or {}
+        for v in (r.get("case_id"), cp.get("sf_id"), cp.get("case_number")):
+            if v:
+                ids.add(str(v))
+        if r.get("idempotency_key"):
+            ikeys.add(r["idempotency_key"])
+    if runs:
+        ids.add(key)          # the raw key is safe once we know it's ours
+
+    # a bare Case number typed straight from Salesforce -> resolve to its Id
+    if key.isdigit() and len(key) >= 5:
+        try:
+            from interpreter import salesforce as _sf
+            if _sf.available():
+                rec = _sf.client_for(None).query(
+                    f"SELECT Id FROM Case WHERE CaseNumber = '{_sf._soql_lit(key)}' LIMIT 1"
+                ).get("records", [])
+                if rec:
+                    ids.add(rec[0]["Id"])
+        except Exception as e:  # noqa: BLE001
+            log.warning("trace: CaseNumber->Id lookup failed: %s", e)
+
+    for i in list(ids):
+        for r in _mine(_q(lambda i=i: S.table("runs").select("*").eq("case_id", i).execute().data)
+                       + _q(lambda i=i: S.table("runs").select("*").eq("case_payload->>sf_id", i).execute().data)):
+            runs.setdefault(r["run_id"], r)
+
+    jobs: dict[str, dict] = {}
+    for jid in list(ids) + ([key] if runs else []):
+        for j in (_q(lambda jid=jid: S.table("jobs").select("*").eq("job_id", jid).execute().data)
+                  + _q(lambda jid=jid: S.table("jobs").select("*").ilike("dedupe_key", f"%{jid}%").execute().data)
+                  + _q(lambda jid=jid: S.table("jobs").select("*").eq("payload->case->>sf_id", jid).execute().data)):
+            jobs[j["job_id"]] = j
+    for ik in ikeys:
+        for j in _q(lambda ik=ik: S.table("jobs").select("*").eq("payload->>idempotency_key", ik).execute().data):
+            jobs[j["job_id"]] = j
+    # a job belongs to this trace only if it references one of the caller's runs
+    # / ids / idempotency keys — never surface a bare cross-tenant job_id match.
+    _run_ids = set(runs)
+    jobs = {
+        jid: j for jid, j in jobs.items()
+        if (j.get("payload") or {}).get("run_id") in _run_ids
+        or (j.get("payload") or {}).get("idempotency_key") in ikeys
+        or any(i and i in str(j.get("dedupe_key") or "") for i in (ids | _run_ids))
+        or str(((j.get("payload") or {}).get("case") or {}).get("sf_id") or "") in ids
+    }
+
+    if not runs and not jobs:
+        raise HTTPException(404, f"nothing found for {key!r} (Case id / number / run_id / job_id)")
+
+    channel_rows = _q(lambda: S.table("tenant_integrations")
+                      .select("kind,status,last_error,last_poll_at,tenant_id")
+                      .in_("tenant_id", list(my_tenants)).execute().data)
+
+    t = build_timeline(key=key, runs=list(runs.values()), jobs=list(jobs.values()),
+                       channel_errors=[r for r in channel_rows if r.get("last_error")])
+    if format == "md":
+        return PlainTextResponse(render_markdown(t))
+    return t
+
+
+@app.post("/api/trace/{key}/retry")
+def retry_trace(key: str, c: Caller = Depends(caller)) -> dict:
+    """Re-enqueue the flow for the Case behind `key` (audit WF-5). Auth +
+    tenant-scoped: only works when `key` resolves to a run in the caller's
+    tenant. Returns {job_id, flow_id, sf_id, trigger}."""
+    from interpreter import jobs as _jobs
+    from interpreter.sf_ingest import enqueue_case_run
+
+    key = key.strip()
+    S = _service
+    my_tenants = {
+        str(r["tenant_id"]) for r in
+        (c.sb.table("tenant_members").select("tenant_id").eq("user_id", c.user_id)
+         .execute().data or [])
+    }
+    rows = (_q(lambda: S.table("runs").select("*").eq("run_id", key).execute().data)
+            + _q(lambda: S.table("runs").select("*").eq("case_id", key).execute().data)
+            + _q(lambda: S.table("runs").select("*").eq("case_payload->>sf_id", key).execute().data)
+            + _q(lambda: S.table("runs").select("*").eq("case_payload->>case_number", key).execute().data))
+    rows = [r for r in rows if str(r.get("tenant_id")) in my_tenants]
+    if not rows:
+        raise HTTPException(404, f"no run in your tenant for {key!r}")
+    rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+    r = rows[0]
+    cp = r.get("case_payload") or {}
+    sf_id = cp.get("sf_id") or cp.get("id") or r.get("case_id")
+    if not sf_id or not str(sf_id).startswith("500"):
+        raise HTTPException(422, "this run has no Salesforce Case id to re-run")
+    ik = f"retry:{sf_id}:{int(time.time())}"
+    jid = enqueue_case_run(S, sf_id, dedupe_key=ik, idempotency_key=ik,
+                           trigger="retry", flow_id=r.get("flow_id"))
+    log.info("trace retry by %s: case %s -> job %s", c.user_id, sf_id, jid)
+    return {"job_id": jid, "flow_id": r.get("flow_id"), "sf_id": sf_id, "trigger": "retry"}
 
 
 # ── Phase 14: self-serve internal knowledge base ──────────────────────

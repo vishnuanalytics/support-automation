@@ -703,6 +703,160 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**Phase 27 — the Case Control Plane (in progress, 2026-09-01).** One
+AI-managed Case queue: classify + route + track `Status` + hand off via
+Omni-Channel, so no case sits unowned / unmoved / unwatched. Full design +
+build plan: `docs/` artifact
+`https://claude.ai/code/artifact/403e72fa-beef-4f12-809f-7511f6d81ca0`;
+Salesforce-org steps: **`docs/CASE_CONTROL_PLANE_SF.md`**.
+
+Repo side done (branch `phase-27-case-control-plane`, 312 offline pytest):
+- **27a** — migration `062`: `case_events` (append-only per-Case audit log,
+  RLS, separate from `runs.trace`) + `sla_policy` ((tier, routed_team) →
+  ack/resolve; seed ack 30 / resolve 4·8·24h). `scripts/sf_support_setup.py`
+  gains a `cp_fields` stage (9 Case fields incl. `Routed_Team__c` picklist),
+  Status += `Triaged`/`In Progress`/`Resolved`, queues `AI_Intake` /
+  `Unrouted_Review` / `SLA_Breach`.
+- **27c** — `interpreter/case_events.py` (record/link_run); `registry.py`
+  `_cp_fields`/`_cp_write` wired into every node: `sf_writeback` → `Status =
+  Triaged` (guarded — won't downgrade an advanced Case) + `Routed_Team__c` +
+  run linkage; `confidence_gate` → `AI_Confidence__c`; `ask_human`/`handover`
+  → `Escalated` + `Routed_Team__c` + `Next_Action_Due__c` (+30m) +
+  `Escalation_Reason__c`; `clarify` → `Waiting on Customer` (+72h) or
+  `Escalated` when exhausted; `notify`/`notify_human` → `In Progress` +
+  `Handoff_Slack_Ts__c`. `salesforce.get_case`/`ensure_case` now surface
+  `Status`/`OwnerId`.
+- **27d** — `interpreter/sweeps.py`: `queue_sweep` (overdue / stuck /
+  escalated-unaccepted → nudge+re-route, then `SLA_Breach__c` + page),
+  `cdc_reconcile` (Cases with no `runs` row → enqueue), `reasoning_ttl`
+  (stale `reasoning_sessions` → nudge → escalate+abandon). Run in the
+  `api.worker` loop, self-re-enqueue; `SWEEP_DRY_RUN=1` / `SWEEPS_DISABLED=1`.
+  `health_check` flags an SLA-breach spike.
+- **27e** — migration `063`: `notify_targets` gains
+  `slack_channel`/`slack_usergroup`/`urgency` + `match_kind = routed_team`.
+  `routing.resolve_slack_route` (routed_team > module > case_type →
+  `#cx-*` + `@*-oncall`; miss → `#cx-unrouted`). `alert.py` reasoning-thread
+  root @mentions the usergroup + carries tier/type/team/confidence/nearest
+  resolutions.
+
+Not built (needs the org / Slack app — see the SF runbook): **27b**
+Omni-Channel config (Service Channel, Routing/Presence Configs, the
+`Route_Support_Case` Omni-Channel Flow + record-triggered Flow), **27f**
+assignment-rule cutover to `→ AI_Intake`, **27g** native Escalation Rule +
+`Closed`-needs-`Type` validation rule + list views, the Slack channels /
+usergroups, and the interactive card buttons (**27h** — needs the Slack app
+interactivity endpoint).
+
+**Audit remediation pass done (2026-09-01) — WF / NEO / SB / Oracle items.**
+One batch closing the yellow/green items from the deployment audit. 291
+offline pytest + web build green.
+- **24d** (committed `57c9bbc`): removed the Salesforce "approve" shortcuts —
+  `_send_bot_draft` / `bot_send_draft` trigger / `looks_like_send_command` /
+  the `Send_Bot_Draft_to_Customer` QuickAction + `Bot_*` fields in the SF org.
+  Slack reasoning is the only send path now.
+- **WF-1** — migration `061`: the email flow's `confidence_gate` now carves
+  `answer_mode == 'action'` out of every self-serve branch → `handover`
+  (a human performs the action). `escalate_answer_modes: ["action"]` on the
+  node; email `sf_entry` flow → **v13**; portable `flow_email_l0l1.json` updated.
+- **WF-3** — `h_clarify`'s round counter keys on `runs.case_payload->>'sf_id'`,
+  not `runs.case_id` (which `get_case` fills with the CaseNumber → the counter
+  silently reset every pass, so `max_rounds` never bit).
+- **WF-4** — `scripts/health_check.py`: alerts when >30 % of the last hour's
+  runs fell back to the offline LLM stub, and when a `neo4j` heartbeat exists
+  but has gone stale (graph enrichment silently off).
+- **WF-5** — `POST /api/trace/{key}/retry` (auth + tenant-scoped): re-enqueues
+  the flow for the Case behind a run/case/sf_id/case-number key. Editor gets a
+  **retry** button on the trace view (`web/src/trace/TraceView.tsx`).
+- **WF-6 / NEO-3** — `case_memory_sync` tags same-account near-duplicates and
+  `case_memory.py` MERGEs `(:Case)-[:DUPLICATE_OF]->(:Case)` for score ≥ 0.92
+  same-account pairs where the other case resolved earlier. `_enrich_from_sf`
+  now also pulls `AccountId` / `IsClosed` / `ClosedDate`; a Case that closed
+  and reopened is marked `resolution_kind="reopened"`, `generalizable=False`
+  (dropped from the citable set).
+- **NEO-2** — `neo4j_sync` emits a `beat("neo4j", …)` heartbeat after each sync.
+- **NEO-4** — `neo4j_sync.ensure_constraints` adds uniqueness constraints for
+  `:Case {sf_id}`, `:Reply {case_sf_id}`, `:Module {name}` (try/except).
+- **NEO-5** — `case_memory._graph_duplicates(sf_ids, tenant_id=…)` now pins
+  **both** ends of the `(:Case)-[:DUPLICATE_OF]->(:Case)` traversal to the
+  caller's tenant, so a duplicate edge from another tenant's Case on the
+  shared graph can't boost this tenant's ranking. `lookup()` forwards its
+  `tenant_id`.
+- **SB-2** — the running stack needs no pooler (PostgREST HTTP only). The one
+  direct connection — the nightly `pg_dump` on the Oracle VM — is documented
+  to use the **Session pooler** URI (`…pooler.supabase.com:5432`), not
+  "Direct connection" (IPv6-only on the free tier; the Always-Free VM has no
+  IPv6) and not the transaction pooler (`pg_dump` needs session state). See
+  `docs/DEPLOY_ORACLE.md`.
+- **SF-1** — one intake path, decided **and enforced**: Salesforce native
+  Email-to-Case (Path B) opens the Case, CDC fires `case_created`; the IMAP
+  poller (Path A) is off. New `SF_INTAKE_MODE` env (default `salesforce_e2c`;
+  `poller` / `both` opt in): `mailbox.poller_is_intake()` gates
+  `list_pollable_channels` **and** `email_watch.tick` → both return nothing
+  unless the poller is in the mode, so an `active` channel row can't silently
+  double-create Cases. `config.validate_env` warns on a bad value; `.env.example`
+  documents it. (The DB channel row is also `status='inactive'` today.)
+- **SB-5** — CLAUDE.md: migrations are applied by hand only (Supabase MCP
+  `apply_migration` / SQL editor), never the CLI; `.sql` files are the source
+  of truth, `supabase_migrations` is not kept in sync.
+- **SB-6 / Oracle** — `docs/DEPLOY_ORACLE.md`: nightly `pg_dump` cron (Supabase
+  free tier has no PITR), `chmod 600` on the copied secrets, `fastembed`
+  pre-warm after `up -d`, and a "stop the API / Caddy-for-TLS" note since
+  nothing needs the API inbound (CDC, not HTTP callout).
+- All audit items (WF / NEO / SB / SF / Oracle) are now closed.
+
+**Phase 26 done (2026-09-01) — live free-model roster + signature/logo filter.**
+OpenRouter's free tier churns weekly (all classic `:free` slugs already gone),
+so nothing is hardcoded. Migration `060` = `llm_roster` + `signature_hashes`.
+`scripts/refresh_llm_roster.py` (daily via `daily-sync.yml` + VM cron): scores
+whatever costs $0 on OpenRouter *today* by vendor reputation / context window /
+param hint / modality, writes 6-deep free chains + a cheapest-capable-paid tail
+for `text` / `vision` / `video`. `interpreter/roster.py` caches it (no-op under
+pytest); `llm._fallback_chain` / `_vision_chain` / `_video_chain` build from it
+— free-first, premium only on total failure; env vars still override.
+`attachments.looks_like_signature()` + `signature_hashes` skip an image before
+any OCR / vision call when it's tiny / banner-shaped / named like an inline sig
+(`image00x.png`, `logo`, `linkedin`…) or the same md5 has been seen 2+ times
+from that sender domain — node `skip_signatures` (default on) + `min_image_px`,
+editor checkbox. 296 offline pytest (8 new). Also: runtime image 962→719 MB
+(scraper / Google / pytest deps split into `requirements-{ingest,connectors,dev}.txt`;
+`MEDIA=1` build arg for the OCR/video stack).
+
+**Phase 25 done (2026-09-01) — multimodal + Salesforce context, intelligence
+in nodes.** Routing decisions stay deterministic edge expressions; an
+`ai_prompt` node writes structured output and edges branch on it.
+- `llm.complete(images=[(bytes, mime)])` → a **vision chain**: free OpenRouter
+  vision models → paid Anthropic Haiku (`LLM_VISION_MODELS` / `LLM_VISION_PAID`)
+  → deterministic stub. `_run_chain` extracted; Anthropic/OpenRouter build
+  image content blocks.
+- **`attachments` node** (`interpreter/attachments.py`) — Case images via
+  `ContentDocumentLink`→`ContentVersion` blob + local **RapidOCR** (ONNX, CPU,
+  no torch; import-guarded). Writes `state.attachments` / `.attachment_text`
+  (folded into `classify` + `draft` for free) / `._attachment_blobs` (bytes for
+  vision, not persisted). **Video** (opt-in `video: true`): audio transcript
+  via **faster-whisper** (CT2, CPU, no torch) + `ffmpeg` keyframe sampling →
+  each frame OCR'd; transcript + on-screen text join `attachment_text`, 2
+  keyframes go to `_blobs`. Config `video_frames` / `video_max_seconds`.
+  Dockerfile gains `libgl1 libglib2.0-0 libxcb1 ffmpeg`.
+- **`sf_context` node** (`interpreter/sf_context.py`) — Account (+ parent =
+  organization), Contact + siblings, Lead, Case history, Account team Users →
+  `state.sf_context`. Best-effort.
+- **`ai_prompt` node** — `{system}`/`{user}` templates interpolating
+  `{case.subject}` / `{sf_context.account.tier}` / `{attachment_text}` /
+  `{ai.x}`; `model`, `temperature`, `max_tokens`, `output_key`, `json_schema`,
+  `images` (`none`|`auto`), `cache`, `on_error`. Writes `state.ai[output_key]`
+  — a declared channel with an `operator.or_` reducer so a dynamic key isn't
+  dropped by the graph merge.
+- `state.py`: `attachments` / `attachment_text` / `_attachment_blobs` /
+  `sf_context` / `ai` channels. `builder._context` exposes `sf_context` / `ai`
+  / `attachments` to edge conditions. `classify` `tier_field`/`region_field`
+  resolve against state first.
+- Editor: `AiPromptForm` / `SfContextForm` / `AttachmentsForm` in
+  `Inspector.tsx`; `NODE_DEFAULTS` entries. Comprehensive template
+  `interpreter/flows/flow_sf_comprehensive.json` (every node config filled;
+  **not seeded** — flip `sf_entry` when ready). Gate edges also route
+  `answer_mode == 'action'` and `ai.triage.churn_or_legal_risk` → `handover`.
+- 288 offline pytest (16 new). OCR + video path verified live in the worker container.
+
 **Phases 0–20 built. No open phase.** Migrations `001`–`044`
 (`034`/`035` = Phase 20a: `tenant_integrations` poller columns + the
 Supabase-Vault `integration_secret_*` RPCs; `036` = Phase 20e: the
@@ -717,10 +871,386 @@ this DB; it's the `sf_entry` flow), published as **v3**. The Case-router
 flow `f0f0f0f0…` was never seeded to this DB — migration `044`'s router half
 lives in `scripts/seed_router_flow.py` + the portable JSON for whenever it
 is stood up; `045` = Phase 20o: `notify_targets` — **applied 2026-08-31**,
-seeded 7 rows for tenant `00000000…`).
-193 offline pytest tests + web tsc/vitest (6)/build +
+seeded 7 rows for tenant `00000000…`; `046` = Phase 20p: the email flow →
+the single comprehensive workflow (`team_route` + 5-way gate) — **applied
+2026-08-31**, published **v4**). Migrations `047`–`053` land the resilience
+work and the `notify_human` / double-tag fixes — see the Phase 23* entries
+below; the email `sf_entry` flow is now at **v9**.
+296 offline pytest (24a-f + 25 + 26) tests + web tsc/vitest (6)/build +
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
+
+**Next test email should show:** exactly 1 run, 1 inbound EmailMessage, and
+— on an `ask_human`/`handover` escalation — ONE Chatter @mention (from
+`notify_human`) plus ONE private `[bot draft …]` CaseComment. If Slack is
+wired (`SLACK_ALERT_WEBHOOK` or per-tenant OAuth) the same escalation also
+posts to `#support-escalations` (or the per-team channel).
+
+**To resume the bot after a human:** reply either as a **Case Comment** or as
+a **reply on the bot's Chatter @mention post** — both are picked up within
+`FEEDBACK_POLL_MIN` (5 min, up to 12 checks). "send it" / "send this to the
+customer" sends the bot's stored draft as-is; a substantive note is applied
+to that draft first. Requires the email channel's `auto_send_enabled=true`
+(it is, for tenant `00000000…`), else the polished reply is only left as a
+draft CaseComment.
+
+**Phase 24 (2026-09-01, in progress): human-in-the-loop reasoning before any
+response.** New model: no case gets an AI answer from automation — every
+response goes through a Slack reasoning dialogue with the responsible agent
+(a bank of 4–6 per-type "pointer questions" the bot works through *in full*,
+bot proposing / agent confirming), then an explicit send confirmation. The
+SF approve shortcuts (Chatter `send`, the "Send Bot Draft" button) are being
+removed. Slack becomes bidirectional via **Socket Mode**.
+- **24a done:** migration `055` removes `auto_reply` from the email flow
+  (→ **v11**); `confidence_gate.pass` now routes to `notify_human` like every
+  other branch. Portable JSONs + `seed_router_flow.py` regenerated. The only
+  path that emailed a customer automatically is gone; `notify` / `clarify`
+  remain as interim draft-for-review nodes (folded into `notify_human` in 24c).
+- **24b done:** migration `056` = `reasoning_sessions` (RLS, one-open-per-case
+  unique index) + `pointer_bank` (seed bank per Case.Type, 7 rows).
+  `interpreter/reasoning.py`: `build_pointers` (seed + LLM top-up, 4–6),
+  `open_session`, and the pure `advance(session, text, *, case, llm_fn)` state
+  machine — `awaiting_handoff → reasoning → drafting → awaiting_approval →
+  sent|abandoned`. It works through **every** pointer (test proves it doesn't
+  draft after 3/4 answers), `edit:` re-drafts, `_is_approve` gates the send.
+  `handle_agent_message` is the DB-facing wrapper. 11 new tests.
+- **24c done (code):** `interpreter/slack_socket.py` + a `slackbot`
+  compose service — one persistent Socket Mode WebSocket (`apps.connections.open`
+  → `websockets`), acks every envelope, routes `message`/`app_mention` events
+  through `dispatch()` → `reasoning.handle_agent_message` → posts the reply
+  in-thread → on `action == "send"` runs `_deliver` (reuses `agent_reply`,
+  records a `slack_reasoning` run, marks the escalated run `guided_resume`).
+  `alert.alert_human` reworked: the Slack post is now the **thread root**
+  ("*I have not replied to the customer.* Reply `take` …"), it opens the
+  `reasoning_sessions` row and stamps `slack_channel`/`slack_thread_ts`, and it
+  no longer drops a `[bot draft]` CaseComment. `slack.post_message` gained
+  `thread_ts`; `slack.lookup_user_by_email` + `salesforce.user_email` map the
+  SF agent → Slack. **Live-verified**: pointer bank, `build_pointers` (6),
+  `open_session` + dedupe + `not_.in_` filter, one `handle_agent_message`
+  turn, all against the real DB + Groq. Socket connection itself needs the
+  operator's `SLACK_APP_TOKEN`. Also fixed `llm._RECOVERABLE` to skip a
+  retired provider model (OpenRouter `:free` → 404) instead of hard-failing.
+  266 offline pytest.
+- **Operator TODO (24c):** enable Socket Mode + create the `xapp-` token, add
+  bot scopes (`im:history`, `channels:history`, `groups:history`,
+  `app_mentions:read`, `users:read.email`) + event subs (`message.channels`,
+  `message.groups`, `message.im`, `app_mention`), reinstall, put
+  `SLACK_APP_TOKEN` in `.env`, and give the agent's Slack member id for
+  `notify_human`'s `mention.slack_user_id` (or rely on the email lookup).
+- **24e done (2026-09-01):** the dialogue no longer walks 4–6 pointers one at
+  a time. `reasoning.plan_questions` (LLM) prunes the seed bank to what THIS
+  case needs (a basic case → 1–2, each flagged `critical`), `_ask_all` asks
+  them **in one message** with the bot's read on each, `_ingest` (LLM) maps
+  the agent's free-form reply back to the questions, and it sends at most
+  `max_rounds` (default 3) short follow-ups only for still-open *critical*
+  points before drafting anyway. States: `awaiting_handoff → clarifying →
+  drafting → awaiting_approval → sent|abandoned` (`cursor` = round counter).
+  Migration `057` (`max_rounds` column) + `058` (node config + label → v12).
+  `alert_human` passes `max_rounds` + kb_hits. **Editor:** `NotifyHumanForm`
+  in `Inspector.tsx` (channel / slack_channel / max clarify rounds / @mention
+  ids), `graph.ts` TERMINAL = `notify_human`, `NODE_DEFAULTS` gains
+  team_route/case_lookup/notify/clarify/notify_human. 271 offline pytest +
+  web build green. `_norm()` tolerates pre-24e session rows.
+- **24f done (2026-09-01) — ops hardening from the audit:**
+  - **C1**: `/api/trace/{key}` is now tenant-scoped — resolves the caller's
+    `tenant_members` set and filters every `runs` / `jobs` / `tenant_integrations`
+    read to it (was service-client, any tenant).
+  - **C3/C4**: migration `059` — expression indexes on
+    `runs.case_payload->>'sf_id'|'case_number'`, `runs.case_id/created_at`,
+    `jobs.payload->>'run_id'`, `jobs.payload#>>'{case,sf_id}'`,
+    `jobs(status,created_at)`; a `purge_old(jobs_days, runs_days)` SQL fn +
+    `scripts/purge_old.py`.
+  - **D1**: `daily-sync.yml` now also runs `ingestion.case_memory_sync --once`
+    and `scripts.purge_old` (case_memory was never refreshed on a schedule).
+  - **E4**: `docker-compose.yml` `x-svc` gets `logging: json-file 10m×3`.
+  - **E5**: `docs/DEPLOY_ORACLE.md` — VM cron block (health_check /
+    case_memory_sync / purge_old).
+  - **C2 / SB-2**: the running stack uses the PostgREST HTTP client, not a
+    direct `postgresql://` socket, so the direct-connection cap is N/A. The
+    only direct connection — the Oracle VM's nightly `pg_dump` — is documented
+    to use the **Session pooler** URI (`…pooler.supabase.com:5432`), see
+    DEPLOY_ORACLE.md.
+  272 offline pytest.
+- **24d (still pending):** remove the SF shortcuts + the `check_resolution`
+  comment-send path.
+
+**Phase 23h (2026-09-01): "Send Bot Draft to Customer" quick action + stop
+accidental sends.** Two problems: (a) humans use Chatter for internal
+cross-talk / investigation notes, and `check_resolution` was turning *any*
+new comment into a customer email; (b) there was no one-click "send it".
+- **`salesforce.looks_like_send_command`** + `agent_response_since` now
+  returns `is_send_command`. `_check_resolution` only emails on an **explicit**
+  directive (`send` / `send: <edits>` / `lgtm` / `approved` …); a plain note is
+  appended to the run's `human_reply` as context and polling continues. On
+  give-up: `human_handling` if a human left notes or owns the Case (owner id
+  starts `005`), else `no_reply`.
+- **Quick action** (`scripts/sf_deploy_send_draft_action.py`): the button
+  can't call our API (this org's outbound callouts 503 through a proxy — same
+  reason the Phase 20i Apex hook was retired), so it **arms a Case field**.
+  Deploys `Case.Bot_Send_Draft__c` (checkbox) + `Bot_Send_Note__c` (long text)
+  + a system-context Screen Flow `Send_Bot_Draft_to_Customer` + a Flow quick
+  action. CDC (`plan._send_draft_armed` → `RunSpec(trigger="bot_send_draft")`)
+  picks up the change; `worker._send_bot_draft` emails the newest run's draft
+  (folding in `Bot_Send_Note__c` edits), records a `quick_action` run, marks
+  the escalated run `guided_resume`, and clears the field (a self-write, so
+  CDC's `bot_user_id` filter stops a loop).
+- **Operator step:** run the deploy script, then Setup → Object Manager →
+  Case → Page Layouts → drag "Send Bot Draft to Customer" onto the action bar.
+- No DB migration (the fields live in Salesforce). 296 offline pytest (24a-f + 25 + 26) (11 new).
+
+**Phase 23g (2026-09-01): `notify_human` → a real Slack channel (live test prep).**
+Slack was already connected for tenant `00000000…` (`tenant_integrations`
+kind='slack', workspace **speedy** `T0BTDSDTFB5`, bot `support_automation`
+`U0BT4RG2UP9`, scopes `chat:write` + `chat:write.public`). Migration `054`
+(DB-only — channel ids are workspace-specific, portable JSONs keep the
+`#channel` placeholders) points `notify_human`'s `slack_channel` +
+`slack_channel_by_team.*` at channel id **`C0BTPTFNXS8`** for every team →
+email flow **v10**. Worker restarted to load it. To trigger: an inbound email
+whose subject/body hits a `team_route` csm/sales keyword ("renew", "our
+contract", "add seats" → csm; "pricing", "which plan", "quote" → sales) from a
+non-enterprise sender → gate edge `routed_team in ('csm','sales') and tier !=
+'enterprise'` → `ask_human` → `notify_human` posts to `C0BTPTFNXS8` (bot
+token, `chat.postMessage`) **and** Chatter. Slack @mention still TODO — needs
+the rep's Slack member id (`U…`) in `mention.slack_user_id` (the current
+`mention_id` is a Salesforce id).
+
+**Phase 23f (2026-09-01): the re-engage poller now reads a Chatter reply.**
+Case 00001185 went to `clarify` (`need_info`); the bot @mentioned the rep on
+the Case **feed**; the rep replied *on that feed post* — "send this response
+to customer." — and nothing happened, the run went stale. Cause:
+`salesforce.agent_response_since` only read the **`CaseComment`** object, never
+a Chatter **`FeedComment`** (a reply on a feed item), which is the natural
+place to answer since that is where the @mention lives.
+- `agent_response_since` now takes the newest of a `CaseComment` **or** a
+  `FeedComment` since the run time, strips rich-text HTML, and skips the bot's
+  own notes (`[bot draft…]`, `[triage]…`, the escalation @mention text) via
+  `_looks_bot_written` / `_BOT_COMMENT_PREFIXES`.
+- `agent_reply.resume_from_guidance` / `polish` gain a `draft` arg — the
+  guidance is applied *on top of* the bot's original draft; a bare approval
+  ("send it", "send this response to customer", "lgtm", …) sends the stored
+  draft **verbatim, no LLM call**. `_check_resolution` passes `row["draft"]`.
+- Verified live: the queued `check_resolution` tick picked up the FeedComment
+  and emailed the original draft to the customer (SMTP, mirrored to the Case
+  as an outbound EmailMessage); run → `guided_resume`. 296 offline pytest (24a-f + 25 + 26).
+
+**Phase 23e (2026-09-01): stop the double Chatter tag on an escalated Case.**
+Case 00001184 showed 3 bot feed posts and the rep @mentioned twice: `ask_human`
+posted its *own* @mention Chatter note + a private draft `CaseComment`, **and**
+the downstream `notify_human` (`channel: both`) posted a *second* @mention note.
+Fix — `ask_human`/`handover` gain `config.post_note` (default `true` for
+back-compat); when `false` the node is **routing-only** (still reassigns the
+queue) and `notify_human` owns the single human ping. `notify_human`/`alert_human`
+gain `config.draft_comment` — when `true` it drops the reviewable draft as **one**
+private `CaseComment` (so the draft survives `ask_human` going quiet). Migration
+`053`: email flow **v9** — `post_note:false` on `ask_human`, `draft_comment:true`
+on `notify_human`. Portable JSONs + `seed_router_flow.py` carry it. Also fixed a
+non-hermetic test (`test_notify_human_alerts_slack_and_chatter` was resolving a
+live queue member). 243 offline pytest (4 new). Expected on the next test email:
+**1 run, 1 inbound EmailMessage, ONE @mention, ONE draft comment.**
+
+**Phase 23d (2026-09-01): `notify_human` node — tag a person, Slack and/or Chatter.**
+The escalation used to *stop* at `ask_human` (SF-Chatter only). New
+`@register("notify_human")` (`interpreter/alert.py::alert_human`,
+`slack.post_message`): posts the Case link + summary + draft to **Slack**
+(tenant bot token + channel, else `SLACK_ALERT_WEBHOOK`) **and/or Salesforce
+Chatter** — `config.channel = both | slack | salesforce_chatter`. Person is
+resolved by the *flow*: `mention.slack_user_id` / `_by_team`,
+`mention.sf_user_id` / `sf_team` (→ a `Team_<team>` queue member via
+`routing.queue_member`) / `mention_id` fallback. Slack channel:
+`slack_channel` / `slack_channel_by_team[routed_team]`. Pass-through (keeps the
+upstream `outcome`), so `record_run` still schedules the resolution check.
+Migration `052`: email flow **v8** — `ask_human → notify_human`,
+`handover → notify_human`. Router flow + seeder carry it too. `post_chatter`
+is now fully non-raising. 236 offline pytest (2 new). **Operator TODO:** set
+`SLACK_ALERT_WEBHOOK` (or connect Slack per-tenant) + edit the
+`slack_channel*` placeholders on the `notify_human` node.
+
+**Phase 23c (2026-09-01): Case 00001182/00001183 debug.**
+- **Double EmailMessage → double run** — `log_email_message` stripped angle
+  brackets for its idempotency check but Email-to-Case stores
+  `MessageIdentifier` *with* them, so `sf_case` created a 2nd EmailMessage →
+  2nd `EmailMessageChangeEvent` → extra run. Now matches `IN ('<mid>','mid')`.
+  `latest_inbound_email` returns the EmbMsg `id`; `_run_flow` collapses the
+  Case + EmailMessage CDC events onto one run via `email:<EmbMsg id>`.
+- **Phase 20m never fired for `clarify`/`notify`** — `runs.build_row` only
+  set `human_action='pending'` (→ schedules the resolution check) for
+  `ask_human`/`handover`. Now `notify` + `need_info` on a real Case count
+  too, so an agent CaseComment on a clarified/notified Case gets polished
+  into a customer reply.
+- **@mention never worked — wrong endpoint, not OD-4.** `post_chatter` hit
+  `connect/records/feed-elements` (404 → plain FeedItem). Fixed to
+  `chatter/feed-elements`; verified live. `routing.queue_member(queue)` →
+  an active member (Chatter can't @mention a Queue); `h_clarify` gains
+  `mention_team`/`mention_queue`/`mention_id`, `h_notify` mentions a queue
+  target's member or `mention_id`. Migration `051` sets `mention_team` + a
+  fallback `mention_id` (Gundam Vishnu) on the email flow's clarify+notify.
+  `h_notify.config.draft_inline` collapses the note + draft-comment into one
+  feed row.
+
+**Phase 23b (2026-08-31): Salesforce-end gap fixes.**
+- **Cross-path Case dedup** — `_thread_msg_ids` now also includes the mail's
+  **own** Message-ID, so the poller's `sf_case` reuses a Case that Email-to-Case
+  already opened for the same mail instead of creating a duplicate. (Safe to
+  run both intake paths; still recommend one.)
+- **CDC `case_created` delivers on the first pass** — `_run_flow` overlays the
+  Case's inbound `EmailMessage` and sets `channel="email"` for **both**
+  `case_created` and `inbound_email` triggers, and collapses them onto one
+  run via `idempotency_key = email:<mid>` (was: `case_created` ran with
+  `channel="salesforce"` → `auto_reply` sent nothing; the parallel
+  `EmailMessageChangeEvent` job re-ran to actually deliver).
+- **`update_case_fields(append=…)` is idempotent** — skips a `[triage]` block
+  already present (was stacking one per re-run).
+- **`resolve_notify_target` TTL-cached** (`NOTIFY_ROUTE_TTL_S`, default 300 s)
+  + `SF_DEDUP_WRITES=0` to skip the `_recent_duplicate` SOQL — keeps under the
+  DE API cap on Oracle.
+- **`notify.config.attention_fields`** — optional Case-field writes (e.g.
+  `{"Bot_Attention__c": true}`) so a record-triggered SF Flow can send an
+  Email Alert (OD-4: Connect @mention 404s on this DE org).
+- **`scripts/sf_support_setup.py --only permset`** — a least-privilege
+  `Support_Bot_Integration` Permission Set for the integration user.
+- 234 offline pytest (5 new). **Operator TODO:** assign the permset + downgrade
+  the integration user's profile. (The "keep the Gmail poller `inactive`" TODO
+  is now enforced in code — see SF-1 under the 2026-09-01 audit pass: default
+  `SF_INTAKE_MODE=salesforce_e2c` keeps the poller off regardless of the DB row.)
+
+**Phase 23 (2026-08-31): resilience — Tier 1 + Tier 2.**
+- **LLM fallback chain** (`interpreter/llm.py`): `complete()` tries the chosen
+  model → `LLM_FALLBACK_MODEL` (an **OpenRouter** `:free` model) → the Groq
+  default → the stub, skipping any provider that rate-limits/errors. In-process
+  classify **cache** (`cache=True`, `LLM_CACHE`). `_openrouter_complete` via
+  plain httpx. Fixes the "Groq daily quota → whole pipeline dead" failure.
+- **Channel auto-recovery** (`interpreter/mailbox.py`): `list_pollable_channels`
+  = active + errored-**and-due** channels (backoff 1→30 min by consecutive
+  `error_retries`, cleared on a good poll). One IMAP timeout no longer parks a
+  channel forever.
+- **Heartbeat + alert** (migration `050` `system_health`; `interpreter/health.py`):
+  worker / poller / cdc `beat()` every ~20 s; `/api/health` returns each
+  component's heartbeat age; `scripts/health_check.py` (cron / cron-job.org)
+  alerts to `SLACK_ALERT_WEBHOOK` if a component is silent >15 min or the
+  `run_flow` failure rate >50 %/h.
+- **Salesforce write idempotency** (`salesforce._recent_duplicate`):
+  `add_case_comment` / `post_chatter` skip an identical row posted on the Case
+  in the last 3 h — was stacking duplicate draft comments on re-runs.
+- **CDC self-write filter** (`sf_pubsub/plan.py`): a Case `OwnerId` change whose
+  `commitUser` is the integration user (an `ask_human`/`handover` reassignment)
+  is dropped — the bot no longer re-triggers on its own writes.
+- **Migration CI** (`scripts/check_migrations.py`, wired into `ci.yml`): numbering
+  gaps/dupes + every portable flow compiles. **Config validation at boot**
+  (`interpreter/config.py::validate_env`) on worker/api/poller/cdc — fails loud
+  on a bad `SUPABASE_URL` / missing key (the `.com`-vs-`.co` typo class).
+  `drive_live_scenarios.py` now needs `--go` to enqueue (dry by default).
+  `case_memory_sync` enriches `case_number`/`Type`/`tier` from Salesforce +
+  `--reindex-stale DAYS`.
+- 231 offline pytest (9 new in `test_resilience.py`). Migration `050` applied;
+  Docker stack rebuilt; heartbeats verified live (`/api/health` →
+  `{"worker": 15.0, "poller": 5.9}`).
+
+**Phase 22 (2026-08-31): one timeline per Case.** `GET /api/trace/{key}`
+(`key` = Salesforce Case number / Case id / run_id / job_id; a bare Case
+number is resolved to its Id via SOQL) stitches **`jobs` + `runs` + every
+trace node + errors** into one time-ordered story — so "why did the bot do
+this / why did the Case fail / why these labels / why did it go stale" is
+one lookup, not a SQL hunt across three tables + `docker logs`.
+`api/trace.py::build_timeline` (pure) flags: `degraded_llm` (any node ran in
+stub mode — the Groq-quota tell), `stale_jobs` (stuck `running` past the
+10-min reclaim window), `failed_jobs` (+ the error text), `labels_written`
+/ `labels_skipped` (from `sf_writeback`), `final_queue`, total ms / tokens.
+`?format=md` → a plain-text report to paste into a demo. Web **Trace** tab
+(`web/src/trace/TraceView.tsx`): a search box → the timeline, each node
+expandable to its full `data` (gate math, retrieval, SF payload); errors in
+red, a "LLM STUB (quota)" badge, "copy as text". Read-only, auth-gated, uses
+the service client (to join `jobs`). 4 new tests (`test_trace.py`); 222
+offline pytest. **Verified live** against Case `500jV0…5y4DxQAI` — shows the
+3 Groq-429 job failures, the manual-retry run, every node with timings, the
+`classify [stub]` flag, `team_route` "matched 'account manager' → csm",
+`sf_writeback` labels, gate `0.573 vs 0.50 → PASS`, `ask_human → Team_CSM`.
+
+**Phase 21 (2026-08-31): Case-resolution memory — answer from past
+resolutions, not just docs.** Migrations `048` (`case_memory` table: one row
+per resolved Case + a 384-d embedding + `match_case_memory` pgvector kNN,
+RLS) and `049` (splice `case_lookup` into the email flow between
+`sf_writeback` and `draft` → **v7**).
+- **`interpreter/case_memory.py`** — `looks_specific` / `redact` (the
+  "pattern vs proof" heuristic: a resolution that cites the customer's own
+  IDs / timestamps / log lines is **not** `generalizable` — hint only, never
+  reply copy); `classify_resolution_kind`; `lookup()` — kNN in Supabase,
+  then taxonomy (type/module/tier) + recency + `DUPLICATE_OF` (Neo4j) boosts,
+  split into `citable` (quotable) vs `hints` (leads). `sync_graph()` MERGEs
+  Case/Reply/Module/Agent + `SIMILAR_TO` edges into Neo4j (best-effort).
+- **`ingestion/case_memory_sync.py`** — populates it from resolved `runs`
+  rows (`human_action` in {sent, edited, guided_resume}, minus the bot's own
+  "review before sending" drafts) and, with `--from-salesforce`, closed
+  Cases. Backfilled 14 rows from this env.
+- **`classify`** gains `answer_mode` (informational | diagnostic | action |
+  status). **`case_lookup`** node: skipped for `action`; for `diagnostic`
+  the near-matches become `investigation_hints` only (`prior_resolutions`
+  forced empty — the bot must not state a customer-specific fact from
+  memory). **`draft`** takes a "Prior resolved cases" block (CONFIRMED
+  DUPLICATE leads); groundedness now counts a cited prior resolution as a
+  source. `confidence_gate` gains opt-in `escalate_answer_modes` (off).
+- Degrades fully: no `case_memory` rows / no embedder / Neo4j down → a
+  no-op, `draft` behaves as before. **Verified live:** informational query →
+  2 citable past "how to set up a Zap" replies (rel 0.84); diagnostic query
+  ("CalloutException in MY hook") → 0 citable + 8 hints, `draft` used KB
+  only, outcome `clarify` (didn't guess). 218 offline pytest (13 new in
+  `test_case_memory.py`).
+- **Deferred (Phase 21b/c):** an `investigate` step that pulls the
+  customer's own logs for diagnostic Cases; `DUPLICATE_OF` / `Incident`
+  clustering; the expertise graph driving `notify`/`ask_human` routing;
+  routing `answer_mode=action` straight to a human.
+
+**2026-08-31 — live scenario sweep (7 real Cases through v6).** Drove
+`scripts/drive_live_scenarios.py` (A–G, senders mapped to the tier
+accounts). **6/7 correct first pass:** how-to→`auto_reply` (real draft, SMTP
+sent); billing→`notify` "Billing team [table:sf_queue]" **owner unchanged**;
+renewal→`ask_human`→**Team_CSM**; cancel/GDPR→`handover`→**Team_Offboarding**;
+enterprise-tier→`handover`→**Enterprise_Support**; `Case.Type` set on every
+Case. **One miss → fixed:** "Locked out, SSO/Okta" was LLM-typed `Problem /
+Bug`, so it missed `escalate_types` and the topic `sso-login` didn't
+token-match `account-access` → it went to `clarify`. **Migration `047`**
+widened the gate: `escalate_modules += "Account & Login"`, `escalate_topics
++= sso/saml/login/locked out/lockout/2fa/mfa/password reset`. Re-drove C →
+`notify` (`forced: topic 'sso-login' ~ 'sso'`). (It resolves to the Support
+eng lead via the `Problem / Bug` `notify_targets` row — an SSO outage as a
+technical incident; add a classify override or a topic-keyed row if login
+issues should always hit the identity rep.)
+
+**2026-08-31 — case study: "sent a mail, no automation response".** Root
+cause: **Groq free-tier daily token quota (200K TPD) exhausted** by the
+day's testing — every `run_flow` job was failing 3× with `RateLimitError
+429` at the classify/draft node. `interpreter/llm.py::complete()` now
+catches a post-retry rate-limit and returns the deterministic stub, so a
+Case is still routed + escalated (only draft quality degrades). The
+re-enqueued job then ran clean: the email ("need help for account manager
+zappi") → Email-to-Case → Case `00001170` → CDC → `classify(stub)` →
+`team_route` matched "account manager" → **csm → `ask_human` → reassigned to
+Team_CSM** + Chatter note + draft `CaseComment`; **no customer email** (csm
+owns the relationship — correct). Also observed: the intake is now
+**Salesforce Email-to-Case + CDC**, and the Gmail *poller* channel is
+`status='error'` (an IMAP read timeout) so that redundant second path is
+off. For real-quality drafts today, add `ANTHROPIC_API_KEY` +
+`LLM_DEFAULT_MODEL=claude-sonnet-5` / `LLM_FAST_MODEL=claude-haiku-4-5` to
+`.env` and rebuild the worker.
+
+**Phase 20p (2026-08-31): the email `sf_entry` flow is now the single
+comprehensive workflow — every team, every scenario.** v3 had no team
+routing; v4 splices `team_route` (classify → team_route → sf_writeback) and
+widens `confidence_gate` to a **5-way** split:
+`(enterprise tier OR routed_team==offboarding) → handover [Enterprise_Support
+/ Team_Offboarding]` · `(routed_team ∈ {csm,sales}, non-enterprise) →
+ask_human [Team_CSM / Team_Sales]` · `(support + gate PASS) → auto_reply` ·
+`(support + FAIL + forced escalation) → notify [Case.Type → notify_targets;
+Case stays in Team_Email]` · `(support + FAIL + not forced) → clarify [ask
+the customer; 2 rounds → Team_Support]`. Migration `046` applied → **v4**;
+portable `flow_email_l0l1.json` + `flow_case_router.json` + `seed_router_flow.py`
+all carry the same 13-node shape. `scripts/run_scenarios.py` (fast routing
+check, no LLM) + `tests/test_flow_scenarios.py` (12 cases) — a 10-scenario
+matrix (how-to/vague/billing/login/bug/renewal/pricing/cancellation/enterprise
+× basic/premium/enterprise tiers) all route as expected against the live v4.
+Docker stack rebuilt on v4; SF tier accounts already exist (Northwind
+Ltd=premium/EMEA, Globex Enterprise=enterprise/NA, Indie Dev Co=basic).
+**Live e2e (clarify-exhausted, agent re-engage, customer reply, real inbound
+email) still to run with the worker.**
 
 **Phase 20o (2026-08-31): `notify` targets come from a central table, not
 node config.** So a flow editor never pastes Salesforce ids. Migration `045`

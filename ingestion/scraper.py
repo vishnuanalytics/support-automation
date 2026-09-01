@@ -37,7 +37,10 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse, urljoin, urldefrag
 
 import requests
-from bs4 import BeautifulSoup
+try:                                     # scraper-only (requirements-ingest.txt);
+    from bs4 import BeautifulSoup        # the runtime services import get_supabase
+except ImportError:                      # from here but never scrape.
+    BeautifulSoup = None                 # type: ignore[assignment,misc]
 from fastembed import TextEmbedding
 from supabase import create_client
 from dotenv import load_dotenv

@@ -52,14 +52,19 @@ def _owner_changed(payload: dict) -> bool:
     return bool(payload.get("OwnerId"))
 
 
-def plan_events(payload: dict, replay_hex: str) -> list[RunSpec]:
-    """Return the RunSpec(s) for one decoded change event. Empty list = ignore."""
+def plan_events(payload: dict, replay_hex: str, *, bot_user_id: str | None = None) -> list[RunSpec]:
+    """Return the RunSpec(s) for one decoded change event. Empty list = ignore.
+
+    `bot_user_id`: the integration user's Id. A Case UPDATE whose `commitUser`
+    is the bot itself (an `ask_human` / `handover` reassignment) is dropped —
+    otherwise the bot re-triggers on its own writes (Phase 23)."""
     hdr = payload.get("ChangeEventHeader") or {}
     entity = hdr.get("entityName")
     change_type = hdr.get("changeType") or ""
     record_ids = [r for r in (hdr.get("recordIds") or []) if r]
     if change_type not in _REAL_CHANGE or not record_ids:
         return []
+    self_write = bool(bot_user_id) and hdr.get("commitUser") == bot_user_id
 
     specs: list[RunSpec] = []
 
@@ -70,7 +75,7 @@ def plan_events(payload: dict, replay_hex: str) -> list[RunSpec]:
                 # push paths during a migration never double-processes a
                 # new Case.
                 specs.append(RunSpec(rid, f"sfcase:{rid}", rid, "case_created"))
-            elif change_type == "UPDATE" and _owner_changed(payload):
+            elif change_type == "UPDATE" and _owner_changed(payload) and not self_write:
                 key = f"sfowner:{rid}:{replay_hex}"
                 specs.append(RunSpec(rid, key, key, "case_owner_changed"))
 

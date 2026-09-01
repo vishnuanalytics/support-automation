@@ -79,6 +79,11 @@ class PubSubSubscriber:
         self._processed = 0
         self._lock = threading.Lock()
         self._max_events: int | None = None
+        # the integration user's Id — so we ignore the bot's own Case writes
+        try:
+            self._bot_user_id = salesforce._current_user_id(salesforce.client_for(None))
+        except Exception:  # noqa: BLE001
+            self._bot_user_id = None
 
     # ── auth / channel ────────────────────────────────────────────────
     def _metadata(self, *, refresh: bool = False) -> list[tuple[str, str]]:
@@ -151,7 +156,8 @@ class PubSubSubscriber:
 
                     for ce in resp.events:
                         payload = self._decode(stub, ce.event, meta)
-                        specs = plan_events(payload, ce.replay_id.hex())
+                        specs = plan_events(payload, ce.replay_id.hex(),
+                                            bot_user_id=self._bot_user_id)
                         for s in specs:
                             try:
                                 jid = enqueue_case_run(
@@ -182,6 +188,12 @@ class PubSubSubscriber:
 
                     if not resp.events and resp.latest_replay_id:
                         self._save_replay(topic, resp.latest_replay_id)   # keepalive cursor
+
+                    try:
+                        from interpreter.health import beat
+                        beat("cdc", {"topic": topic.rsplit("/", 1)[-1]}, sb=self.sb)
+                    except Exception:  # noqa: BLE001
+                        pass
 
                     reqs.replenish()
 

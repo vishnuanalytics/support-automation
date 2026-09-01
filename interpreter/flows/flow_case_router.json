@@ -2,78 +2,141 @@
   "flow_id": "f0f0f0f0-0000-4000-8000-000000000000",
   "tenant_id": "00000000-0000-0000-0000-000000000000",
   "team": "router",
-  "name": "Case router — team routing + tag manager",
-  "version": 2,
+  "name": "Case router \u2014 team routing + tag manager",
+  "version": 1,
   "status": "draft",
-  "_doc": "Phase 20n. identify -> sf_case -> retrieve -> classify -> team_route -> sf_writeback -> draft -> confidence_gate. classify sets Case.Type; sf_writeback writes it every pass. confidence_gate routes: (enterprise | offboarding) handover ; (pass) auto_reply ; (fail + routed to csm/sales) ask_human — that team owns the Case, so it IS reassigned to their queue ; (fail + routed to support + forced escalation) notify — ping the Case.Type's internal rep WITHOUT reassigning, the Case stays in its queue ; (fail + routed to support + not forced) clarify — ask the customer, then hand to Team_Support when the round cap is hit.",
+  "_doc": "The design doc's single end-to-end workflow: identify -> sf_case -> retrieve -> classify -> team_route -> sf_writeback -> draft -> confidence_gate -> {notify_human | ask_human | handover}. team_route sets routed_team from keyword rules; ask_human/handover resolve the Salesforce queue from it.",
   "nodes": [
     {
       "node_id": "f0000000-0000-4000-8000-000000000001",
       "type": "identify",
       "label": "Resolve the sender",
-      "config": { "email_field": "contact.email", "domain_match": true }
+      "config": {
+        "email_field": "contact.email",
+        "domain_match": true
+      }
     },
     {
       "node_id": "f0000000-0000-4000-8000-000000000002",
       "type": "sf_case",
       "label": "Create / reuse the Salesforce Case",
-      "config": { "origin": "Web", "status": "New", "reuse": "thread" }
+      "config": {
+        "origin": "Web",
+        "status": "New",
+        "reuse": "thread"
+      }
     },
     {
       "node_id": "f0000000-0000-4000-8000-000000000003",
       "type": "retrieve",
       "label": "Retrieve KB context",
-      "config": { "source": ["supabase"], "top_k": 5, "use_rerank": true }
+      "config": {
+        "source": [
+          "supabase"
+        ],
+        "top_k": 5,
+        "use_rerank": true
+      }
     },
     {
       "node_id": "f0000000-0000-4000-8000-000000000004",
       "type": "classify",
       "label": "Classify tier / type / topic / urgency",
-      "config": { "tier_field": "account.customer_type", "region_field": "account.region", "default_tier": "basic" }
+      "config": {
+        "tier_field": "account.customer_type",
+        "region_field": "account.region",
+        "default_tier": "basic"
+      }
     },
     {
       "node_id": "f0000000-0000-4000-8000-000000000005",
       "type": "team_route",
       "label": "Route to a team (design-doc rules)",
-      "config": { "default": "support" }
+      "config": {
+        "default": "support"
+      }
     },
     {
       "node_id": "f0000000-0000-4000-8000-000000000006",
       "type": "sf_writeback",
-      "label": "Write triage fields to the Case (Type, Module, Priority…)",
+      "label": "Write triage fields to the Case (Type, Module, Priority\u2026)",
       "config": {}
+    },
+    {
+      "node_id": "f0000000-0000-4000-8000-000000000014",
+      "type": "case_lookup",
+      "label": "Recall similar resolved Cases (Phase 21)",
+      "config": {
+        "k": 3,
+        "pool": 10,
+        "min_similarity": 0.35,
+        "min_memories": 3,
+        "use_graph": true,
+        "skip_modes": [
+          "action"
+        ]
+      }
     },
     {
       "node_id": "f0000000-0000-4000-8000-000000000007",
       "type": "draft",
       "label": "Draft the reply from context",
-      "config": { "model": "openai/gpt-oss-120b", "max_tokens": 700 }
+      "config": {
+        "model": "openai/gpt-oss-120b",
+        "max_tokens": 700
+      }
     },
     {
       "node_id": "f0000000-0000-4000-8000-000000000008",
       "type": "confidence_gate",
-      "label": "Tag manager — score & decide",
+      "label": "Tag manager \u2014 score & decide",
       "config": {
-        "weights": { "retrieval": 0.55, "draft": 0.1, "groundedness": 0.35 },
+        "weights": {
+          "retrieval": 0.55,
+          "draft": 0.1,
+          "groundedness": 0.35
+        },
         "default_threshold": 0.5,
-        "tier_overrides": { "basic": 0.5, "premium": 0.6, "enterprise": 0.75 },
-        "escalate_topics": ["billing", "refund", "pricing", "legal", "compliance", "account-access", "data-export", "cancellation"],
-        "escalate_modules": ["Billing & Plans"],
-        "escalate_types": ["Billing", "Account / Login"]
+        "tier_overrides": {
+          "basic": 0.5,
+          "premium": 0.6,
+          "enterprise": 0.75
+        },
+        "escalate_topics": [
+          "billing",
+          "refund",
+          "pricing",
+          "legal",
+          "compliance",
+          "account-access",
+          "data-export",
+          "cancellation",
+          "sso",
+          "saml",
+          "login",
+          "locked out",
+          "lockout",
+          "2fa",
+          "mfa",
+          "password reset"
+        ],
+        "escalate_modules": [
+          "Billing & Plans",
+          "Account & Login"
+        ],
+        "escalate_types": [
+          "Billing",
+          "Account / Login"
+        ]
       }
-    },
-    {
-      "node_id": "f0000000-0000-4000-8000-000000000009",
-      "type": "auto_reply",
-      "label": "Auto-reply to the customer",
-      "config": { "channel": "email" }
     },
     {
       "node_id": "f0000000-0000-4000-8000-000000000010",
       "type": "ask_human",
-      "label": "Escalate to the owning team (csm / sales) — reassigns the Case",
+      "label": "Escalate to the owning team (csm / sales) \u2014 reassigns the Case",
       "config": {
         "channel": "salesforce_chatter",
+        "post_note": false,
         "queue_by_team": {
           "csm": "Team_CSM",
           "sales": "Team_Sales"
@@ -108,42 +171,113 @@
       "node_id": "f0000000-0000-4000-8000-000000000013",
       "type": "clarify",
       "label": "Ask the customer for missing detail",
-      "config": { "max_questions": 3, "max_rounds": 2, "auto_send": false, "channel": "email", "handover_queue": "Team_Support" }
+      "config": {
+        "max_questions": 3,
+        "max_rounds": 2,
+        "auto_send": false,
+        "channel": "email",
+        "handover_queue": "Team_Support"
+      }
+    },
+    {
+      "node_id": "f0000000-0000-4000-8000-000000000015",
+      "type": "notify_human",
+      "label": "Reason with a human in Slack, then reply",
+      "config": {
+        "channel": "both",
+        "slack_channel": "#support-escalations",
+        "max_rounds": 3,
+        "mention": {
+          "mention_id": "005jV000000fm5WQAQ"
+        }
+      }
     }
   ],
   "edges": [
-    { "source_node_id": "f0000000-0000-4000-8000-000000000001", "target_node_id": "f0000000-0000-4000-8000-000000000002", "condition": {} },
-    { "source_node_id": "f0000000-0000-4000-8000-000000000002", "target_node_id": "f0000000-0000-4000-8000-000000000003", "condition": {} },
-    { "source_node_id": "f0000000-0000-4000-8000-000000000003", "target_node_id": "f0000000-0000-4000-8000-000000000004", "condition": {} },
-    { "source_node_id": "f0000000-0000-4000-8000-000000000004", "target_node_id": "f0000000-0000-4000-8000-000000000005", "condition": {} },
-    { "source_node_id": "f0000000-0000-4000-8000-000000000005", "target_node_id": "f0000000-0000-4000-8000-000000000006", "condition": {} },
-    { "source_node_id": "f0000000-0000-4000-8000-000000000006", "target_node_id": "f0000000-0000-4000-8000-000000000007", "condition": {} },
-    { "source_node_id": "f0000000-0000-4000-8000-000000000007", "target_node_id": "f0000000-0000-4000-8000-000000000008", "condition": {} },
-
     {
-      "source_node_id": "f0000000-0000-4000-8000-000000000008",
-      "target_node_id": "f0000000-0000-4000-8000-000000000011",
-      "condition": { "if": "tier == 'enterprise' or routed_team == 'offboarding'" }
+      "source_node_id": "f0000000-0000-4000-8000-000000000001",
+      "target_node_id": "f0000000-0000-4000-8000-000000000002",
+      "condition": {}
+    },
+    {
+      "source_node_id": "f0000000-0000-4000-8000-000000000002",
+      "target_node_id": "f0000000-0000-4000-8000-000000000003",
+      "condition": {}
+    },
+    {
+      "source_node_id": "f0000000-0000-4000-8000-000000000003",
+      "target_node_id": "f0000000-0000-4000-8000-000000000004",
+      "condition": {}
+    },
+    {
+      "source_node_id": "f0000000-0000-4000-8000-000000000004",
+      "target_node_id": "f0000000-0000-4000-8000-000000000005",
+      "condition": {}
+    },
+    {
+      "source_node_id": "f0000000-0000-4000-8000-000000000005",
+      "target_node_id": "f0000000-0000-4000-8000-000000000006",
+      "condition": {}
+    },
+    {
+      "source_node_id": "f0000000-0000-4000-8000-000000000006",
+      "target_node_id": "f0000000-0000-4000-8000-000000000014",
+      "condition": {}
+    },
+    {
+      "source_node_id": "f0000000-0000-4000-8000-000000000014",
+      "target_node_id": "f0000000-0000-4000-8000-000000000007",
+      "condition": {}
+    },
+    {
+      "source_node_id": "f0000000-0000-4000-8000-000000000007",
+      "target_node_id": "f0000000-0000-4000-8000-000000000008",
+      "condition": {}
     },
     {
       "source_node_id": "f0000000-0000-4000-8000-000000000008",
-      "target_node_id": "f0000000-0000-4000-8000-000000000009",
-      "condition": { "if": "confidence_gate.pass and tier != 'enterprise' and routed_team != 'offboarding'" }
+      "target_node_id": "f0000000-0000-4000-8000-000000000011",
+      "condition": {
+        "if": "tier == 'enterprise' or routed_team == 'offboarding'"
+      }
+    },
+    {
+      "source_node_id": "f0000000-0000-4000-8000-000000000008",
+      "target_node_id": "f0000000-0000-4000-8000-000000000015",
+      "condition": {
+        "if": "confidence_gate.pass and tier != 'enterprise' and routed_team != 'offboarding'"
+      }
     },
     {
       "source_node_id": "f0000000-0000-4000-8000-000000000008",
       "target_node_id": "f0000000-0000-4000-8000-000000000010",
-      "condition": { "if": "not confidence_gate.pass and tier != 'enterprise' and routed_team != 'offboarding' and routed_team in ('csm', 'sales')" }
+      "condition": {
+        "if": "not confidence_gate.pass and tier != 'enterprise' and routed_team != 'offboarding' and routed_team in ('csm', 'sales')"
+      }
     },
     {
       "source_node_id": "f0000000-0000-4000-8000-000000000008",
       "target_node_id": "f0000000-0000-4000-8000-000000000012",
-      "condition": { "if": "not confidence_gate.pass and tier != 'enterprise' and routed_team == 'support' and confidence_gate.forced_escalation" }
+      "condition": {
+        "if": "not confidence_gate.pass and tier != 'enterprise' and routed_team == 'support' and confidence_gate.forced_escalation"
+      }
     },
     {
       "source_node_id": "f0000000-0000-4000-8000-000000000008",
       "target_node_id": "f0000000-0000-4000-8000-000000000013",
-      "condition": { "if": "not confidence_gate.pass and tier != 'enterprise' and routed_team == 'support' and not confidence_gate.forced_escalation" }
+      "condition": {
+        "if": "not confidence_gate.pass and tier != 'enterprise' and routed_team == 'support' and not confidence_gate.forced_escalation"
+      }
+    },
+    {
+      "source_node_id": "f0000000-0000-4000-8000-000000000010",
+      "target_node_id": "f0000000-0000-4000-8000-000000000015",
+      "condition": {}
+    },
+    {
+      "source_node_id": "f0000000-0000-4000-8000-000000000011",
+      "target_node_id": "f0000000-0000-4000-8000-000000000015",
+      "condition": {}
     }
   ]
 }

@@ -8,12 +8,18 @@ queues the `handover` / `ask_human` nodes point at, plus the Case picklists
     python scripts/sf_support_setup.py --dry-run
 
 Stages (each idempotent — re-running skips what already exists):
-  queues      9 queues (5 per-team + 4 per-escalation-reason), Case assigned,
-              the running user added as the sole member
-  types       Case.Type  -> software-support values; Case.Status += "Waiting on Customer"
+  queues      12 queues (5 per-team + 4 per-escalation-reason + 3 control-plane:
+              AI_Intake / Unrouted_Review / SLA_Breach), Case assigned, the
+              running user added as the sole member
+  types       Case.Type  -> software-support values; Case.Status += Triaged /
+              In Progress / Resolved / "Waiting on Customer"
   fields      Case.Module__c / Case.Region__c  Text -> restricted Picklist
               Case.SubModule__c  new Picklist, dependent on Module__c
               Case.Topic__c      new Text(255) — the classifier's raw slug
+  cp_fields   Phase 27a case-control-plane fields: Routed_Team__c (picklist),
+              Next_Action__c / Next_Action_Due__c, Escalation_Reason__c,
+              AI_Confidence__c, Last_AI_Run_At__c, Last_Run_Id__c,
+              Handoff_Slack_Ts__c, SLA_Breach__c
   fls         field-level security for the new/changed fields on the admin profile
 
 Needs SF creds in .env and a user with "Customize Application" +
@@ -47,15 +53,23 @@ REASON_QUEUES = [
     ("Enterprise_Support", "Enterprise Support"),
     ("Support_Tier2", "Support Tier 2"),
 ]
-ALL_QUEUES = TEAM_QUEUES + REASON_QUEUES
+# Phase 27a — the case-control-plane queues: one entry queue, a dead-letter
+# for ambiguous classification, and a parking queue for missed SLA timers.
+CONTROL_QUEUES = [
+    ("AI_Intake", "AI Intake"),
+    ("Unrouted_Review", "Unrouted Review"),
+    ("SLA_Breach", "SLA Breach"),
+]
+ALL_QUEUES = TEAM_QUEUES + REASON_QUEUES + CONTROL_QUEUES
 
 CASE_TYPE_VALUES = [
     "Question", "How-to", "Problem / Bug", "Billing",
     "Account / Login", "Feature Request", "Other",
 ]
 CASE_STATUS_VALUES = [  # (label, closed)
-    ("New", False), ("Working", False), ("Escalated", False),
-    ("Waiting on Customer", False), ("Closed", True),
+    ("New", False), ("Triaged", False), ("In Progress", False),
+    ("Working", False), ("Escalated", False), ("Waiting on Customer", False),
+    ("Resolved", False), ("Closed", True),
 ]
 
 MODULE_VALUES = [
@@ -76,11 +90,30 @@ SUBMODULE_BY_MODULE = {
 NEW_TEXT_FIELDS = [
     {"api": "Case.Topic__c", "label": "Topic (raw)", "length": 255},
 ]
+
+# Phase 27a — the case-control-plane fields the pipeline + sweep read/write.
+# `Routed_Team__c` values MUST match the app's `routed_team` strings exactly.
+ROUTED_TEAM_VALUES = ["support", "tier2", "csm", "sales", "offboarding", "billing"]
+CONTROL_PLANE_FIELDS = [
+    {"api": "Case.Routed_Team__c", "label": "Routed Team", "type": "Picklist",
+     "values": ROUTED_TEAM_VALUES},
+    {"api": "Case.Next_Action__c", "label": "Next Action", "type": "Text", "length": 255},
+    {"api": "Case.Next_Action_Due__c", "label": "Next Action Due", "type": "DateTime"},
+    {"api": "Case.Escalation_Reason__c", "label": "Escalation Reason", "type": "Text", "length": 255},
+    {"api": "Case.AI_Confidence__c", "label": "AI Confidence", "type": "Number",
+     "precision": 3, "scale": 2},
+    {"api": "Case.Last_AI_Run_At__c", "label": "Last AI Run At", "type": "DateTime"},
+    {"api": "Case.Last_Run_Id__c", "label": "Last Run Id", "type": "Text", "length": 40},
+    {"api": "Case.Handoff_Slack_Ts__c", "label": "Handoff Slack Ts", "type": "Text", "length": 64},
+    {"api": "Case.SLA_Breach__c", "label": "SLA Breach", "type": "Checkbox"},
+]
+CONTROL_PLANE_FLS = [f["api"] for f in CONTROL_PLANE_FIELDS]
 PICKLIST_CONVERT = [  # Text -> Picklist, restricted
     {"api": "Case.Module__c", "label": "Module", "values": MODULE_VALUES},
     {"api": "Case.Region__c", "label": "Region", "values": REGION_VALUES},
 ]
-FLS_FIELDS = ["Case.Module__c", "Case.Region__c", "Case.SubModule__c", "Case.Topic__c"]
+FLS_FIELDS = ["Case.Module__c", "Case.Region__c", "Case.SubModule__c",
+              "Case.Topic__c"] + CONTROL_PLANE_FLS
 
 
 # ── helpers ─────────────────────────────────────────────────────────────
@@ -213,6 +246,33 @@ def stage_fields(sf, dry: bool) -> None:
         print(f"  Case.SubModule__c: {_create_ok(md.CustomField.create, cf)} (dependent on Module__c)")
 
 
+def stage_cp_fields(sf, dry: bool) -> None:
+    """Phase 27a — the case-control-plane Case fields (Routed_Team__c,
+    Next_Action*, SLA_Breach__c, …). Idempotent: skips a field that exists."""
+    md = sf.mdapi
+    have = _case_fields(sf)
+    for f in CONTROL_PLANE_FIELDS:
+        short = f["api"].split(".")[1]
+        if short in have:
+            print(f"  {f['api']}: exists")
+            continue
+        if dry:
+            spec = f["type"] + (f"({f.get('length') or f.get('precision','')})" if f.get("length") or f.get("precision") else "")
+            print(f"  {f['api']}: WOULD create {spec}")
+            continue
+        kw: dict = {"fullName": f["api"], "label": f["label"], "type": f["type"], "required": False}
+        if f["type"] == "Text":
+            kw["length"] = f["length"]
+        elif f["type"] == "Number":
+            kw["precision"] = f["precision"]
+            kw["scale"] = f["scale"]
+        elif f["type"] == "Picklist":
+            vsd = md.ValueSetValuesDefinition(sorted=False, value=[_cv(md, v) for v in f["values"]])
+            kw["valueSet"] = md.ValueSet(restricted=True, valueSetDefinition=vsd)
+        note = _create_ok(md.CustomField.create, md.CustomField(**kw))
+        print(f"  {f['api']}: {note} {f['type']}")
+
+
 def stage_fls(sf, dry: bool) -> None:
     import os
 
@@ -242,8 +302,50 @@ def stage_fls(sf, dry: bool) -> None:
             print(f"  {api}: FLS failed — {e}")
 
 
+def stage_permset(sf, dry: bool) -> None:
+    """A least-privilege Permission Set for the integration user — so the bot
+    doesn't run as a full admin. Grants Case/EmailMessage/FeedItem/CaseComment
+    + Contact/Account CRUD and read on the roster fields. Assign it, then
+    downgrade the integration user's profile to 'Minimum Access - Salesforce'.
+    """
+    name = "Support_Bot_Integration"
+    obj_perms = {
+        "Case": dict(Read=True, Create=True, Edit=True, Delete=False, ViewAllRecords=True, ModifyAllRecords=False),
+        "EmailMessage": dict(Read=True, Create=True, Edit=True, Delete=False, ViewAllRecords=True, ModifyAllRecords=False),
+        "CaseComment": dict(Read=True, Create=True, Edit=True, Delete=False),
+        "Contact": dict(Read=True, Create=True, Edit=True, Delete=False, ViewAllRecords=True, ModifyAllRecords=False),
+        "Account": dict(Read=True, Create=True, Edit=True, Delete=False, ViewAllRecords=True, ModifyAllRecords=False),
+    }
+    rows = sf.query(f"SELECT Id FROM PermissionSet WHERE Name = '{name}'")["records"]
+    if rows:
+        ps_id = rows[0]["Id"]
+        print(f"  PermissionSet {name}: exists ({ps_id})")
+    elif dry:
+        print(f"  PermissionSet {name}: WOULD create + grant {list(obj_perms)}")
+        return
+    else:
+        ps_id = sf.PermissionSet.create({"Name": name, "Label": "Support Bot Integration"})["id"]
+        print(f"  PermissionSet {name}: created ({ps_id})")
+    if dry:
+        return
+    have = {r["SobjectType"] for r in sf.query(
+        f"SELECT SobjectType FROM ObjectPermissions WHERE ParentId = '{ps_id}'")["records"]}
+    for obj, perms in obj_perms.items():
+        if obj in have:
+            print(f"    {obj}: object perms set"); continue
+        try:
+            sf.ObjectPermissions.create({"ParentId": ps_id, "SobjectType": obj,
+                                         **{f"Permissions{k}": v for k, v in perms.items()}})
+            print(f"    {obj}: granted")
+        except Exception as e:  # noqa: BLE001
+            print(f"    {obj}: failed — {e}")
+    print(f"  -> assign it:  System > Permission Sets > {name} > Manage Assignments > add the integration user")
+    print("  -> then set that user's Profile to 'Minimum Access - Salesforce'")
+
+
 STAGES = {"queues": stage_queues, "types": stage_types,
-          "fields": stage_fields, "fls": stage_fls}
+          "fields": stage_fields, "cp_fields": stage_cp_fields,
+          "fls": stage_fls, "permset": stage_permset}
 
 
 def main() -> int:

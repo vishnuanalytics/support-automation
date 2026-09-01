@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import os
 import time
+
+log = logging.getLogger("interpreter.slack")
 from typing import Any
 
 SCOPES = "chat:write,chat:write.public"
@@ -129,3 +132,57 @@ def update_message(tenant_id: str, channel: str, ts: str, text: str, sb) -> dict
         "channel": channel, "ts": ts, "text": text,
         "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": text}}],
     })
+
+
+def post_message(text: str, *, tenant_id: str | None = None, channel: str | None = None,
+                 sb=None, webhook: str | None = None, thread_ts: str | None = None) -> dict:
+    """Send a plain message to Slack (Phase 23d — the `notify_human` node).
+
+    Prefers the tenant's bot token (`chat.postMessage` to `channel`, so it can
+    thread / react later); falls back to an incoming webhook
+    (`webhook` arg or `SLACK_ALERT_WEBHOOK`). `thread_ts` posts as a reply in
+    that thread (bot path only). Returns {sent, via, ...}; never raises."""
+    webhook = webhook or os.environ.get("SLACK_ALERT_WEBHOOK")
+    # bot token path
+    if tenant_id and channel:
+        try:
+            sb = sb or _sb()
+            payload = {"channel": channel, "text": text,
+                       "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]}
+            if thread_ts:
+                payload["thread_ts"] = thread_ts
+            r = _call("chat.postMessage", _bot_token(tenant_id, sb), payload)
+            return {"sent": True, "via": "bot", "channel": channel, "ts": r.get("ts")}
+        except Exception as e:  # noqa: BLE001
+            last = str(e)
+    else:
+        last = "no tenant bot token / channel"
+    # webhook fallback
+    if webhook:
+        try:
+            import requests
+            resp = requests.post(webhook, json={"text": text}, timeout=10)
+            return {"sent": resp.status_code // 100 == 2, "via": "webhook",
+                    "status": resp.status_code}
+        except Exception as e:  # noqa: BLE001
+            return {"sent": False, "via": "webhook", "error": str(e)}
+    return {"sent": False, "via": None, "error": last}
+
+
+def lookup_user_by_email(email: str, *, tenant_id: str | None = None, sb=None) -> str | None:
+    """Slack user id for an email (`users.lookupByEmail`), or None. Never raises."""
+    if not email:
+        return None
+    try:
+        sb = sb or _sb()
+        r = _call("users.lookupByEmail", _bot_token(tenant_id, sb), {"email": email})
+        return (r.get("user") or {}).get("id")
+    except Exception as e:  # noqa: BLE001
+        log.debug("users.lookupByEmail(%s) failed: %s", email, e)
+        return None
+
+
+def _sb():
+    from ingestion.scraper import get_supabase
+
+    return get_supabase()

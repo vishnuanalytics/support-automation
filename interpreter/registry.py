@@ -85,6 +85,15 @@ def _dig(obj: Any, dotted: str) -> Any:
     return cur
 
 
+def _with_ocr(state: "CaseState", body: str) -> str:
+    """Fold any OCR'd text from image attachments (Phase 25) into the message
+    a classify / draft prompt sees — free, no vision model."""
+    at = (state.get("attachment_text") or "").strip()
+    if not at:
+        return body
+    return f"{body}\n\n--- text read from attached image(s) ---\n{at[:4000]}"
+
+
 _TIER_ALIASES = {
     "basic": "basic", "free": "basic", "starter": "basic", "standard": "basic",
     "premium": "premium", "professional": "premium", "pro": "premium", "team": "premium",
@@ -110,6 +119,87 @@ def _norm_tier(raw: Any) -> str:
 
 def _trace(node_id: str, type_: str, msg: str, data: dict[str, Any] | None = None) -> dict:
     return {"trace": [{"node_id": node_id, "type": type_, "summary": msg, "data": data or {}}]}
+
+
+# --------------------------------------------------------------------------
+# Phase 27c — the case-control-plane writes: Status / Routed_Team__c /
+# Next_Action_Due__c on the Salesforce Case, plus one `case_events` audit row.
+# --------------------------------------------------------------------------
+# `sf_writeback` won't downgrade a Case a human has already moved on.
+_ADVANCED_STATUS = {"in progress", "escalated", "resolved", "closed"}
+_ACK_MINUTES = 30      # design decision: ack SLA is 30 min across the board
+
+
+def _iso_in(minutes: float) -> str:
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
+
+
+def _cp_fields(*, status=None, routed_team=None, next_action=None, due_minutes=None,
+               escalation_reason=None, confidence=None, slack_ts=None,
+               last_run_id=None, stamp_run_at=False) -> dict[str, Any]:
+    """Build the Case field dict for a control-plane write. Only non-empty keys."""
+    f: dict[str, Any] = {}
+    if status:
+        f["Status"] = status
+    if routed_team:
+        f["Routed_Team__c"] = routed_team
+    if next_action:
+        f["Next_Action__c"] = str(next_action)[:255]
+    if due_minutes is not None:
+        f["Next_Action_Due__c"] = _iso_in(due_minutes)
+    if escalation_reason:
+        f["Escalation_Reason__c"] = str(escalation_reason)[:255]
+    if confidence is not None:
+        try:
+            f["AI_Confidence__c"] = round(float(confidence), 2)
+        except (TypeError, ValueError):
+            pass
+    if slack_ts:
+        f["Handoff_Slack_Ts__c"] = str(slack_ts)[:64]
+    if last_run_id:
+        f["Last_Run_Id__c"] = str(last_run_id)[:40]
+    if stamp_run_at:
+        f["Last_AI_Run_At__c"] = _iso_in(0)
+    return f
+
+
+def _cp_write(state: CaseState, config: dict, *, action: str, actor: str = "ai",
+              fields: dict[str, Any] | None = None, reason: str | None = None,
+              routed_team: str | None = None, confidence: float | None = None,
+              slack_ts: str | None = None, slack_channel: str | None = None) -> dict[str, Any]:
+    """Push `fields` to the Case (one API call) and append a `case_events`
+    row. Best-effort — never raises, never blocks the node. Returns the
+    fields actually attempted."""
+    case = state.get("case", {})
+    sf_id = case.get("sf_id") or case.get("id")
+    fields = {k: v for k, v in (fields or {}).items() if v not in (None, "")}
+    prior = str(case.get("status") or "").strip().lower()
+    if fields.get("Status") == "Triaged" and prior in _ADVANCED_STATUS:
+        fields.pop("Status")     # don't stomp a human's In Progress / Escalated
+    if sf_id and fields:
+        try:
+            salesforce.update_case_fields(sf_id, fields, tenant_id=state.get("tenant_id"))
+        except Exception as e:  # noqa: BLE001
+            log.warning("cp_write(%s): %s", sf_id, e)
+    try:
+        from interpreter import case_events
+
+        case_events.record(
+            config.get("_sb"), tenant_id=state.get("tenant_id"),
+            case_sf_id=str(sf_id) if sf_id else "",
+            case_number=case.get("case_number") or (case.get("case_id") if str(case.get("case_id") or "").isdigit() else None),
+            actor=actor, action=action,
+            from_status=case.get("status"),
+            to_status=fields.get("Status"),
+            reason=reason, routed_team=routed_team or fields.get("Routed_Team__c"),
+            slack_ts=slack_ts, slack_channel=slack_channel, run_id=state.get("_run_id"),
+            confidence=confidence if confidence is not None else fields.get("AI_Confidence__c"),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("cp_write case_events(%s): %s", sf_id, e)
+    return fields
 
 
 # --------------------------------------------------------------------------
@@ -147,8 +237,12 @@ def h_retrieve(state: CaseState, config: dict) -> dict:
 @register("classify")
 def h_classify(state: CaseState, config: dict) -> dict:
     case = state.get("case", {})
-    tier_raw = _dig(case, config.get("tier_field", "account.customer_type"))
-    region = _dig(case, config.get("region_field", "account.region"))
+    # tier_field / region_field resolve against state first (so an `sf_context`
+    # node's `sf_context.account.tier` works), then the case.
+    _tf = config.get("tier_field", "account.customer_type")
+    _rf = config.get("region_field", "account.region")
+    tier_raw = _dig(state, _tf) if _dig(state, _tf) is not None else _dig(case, _tf)
+    region = _dig(state, _rf) if _dig(state, _rf) is not None else _dig(case, _rf)
     # When the CRM gives no *recognisable* tier for this sender — missing, or a
     # value like the SF standard `Account.Type` ("Customer") that isn't one of
     # basic/premium/enterprise — `_norm_tier` fails *closed* to `enterprise`
@@ -157,20 +251,28 @@ def h_classify(state: CaseState, config: dict) -> dict:
     tier_defaulted = bool(config.get("default_tier")) and not _tier_known(tier_raw)
     tier = _norm_tier(config["default_tier"] if tier_defaulted else tier_raw)
 
-    body = f"{case.get('subject', '')}\n\n{case.get('body', '')}".strip()
+    body = _with_ocr(state, f"{case.get('subject', '')}\n\n{case.get('body', '')}".strip())
     raw = llm.complete(
         system=(
             "You triage inbound support cases. Return a JSON object with keys: "
             "topic (short slug), "
             "type (one of: Question | How-to | Problem / Bug | Billing | "
             "Account / Login | Feature Request | Other), "
+            "answer_mode (one of: informational | diagnostic | action | status) "
+            "— informational = a how-to / what-is question answerable from docs; "
+            "diagnostic = 'why did THIS happen to my data / account' — needs "
+            "the customer's own logs or records to answer with proof; "
+            "action = a request to DO something (cancel, onboard, change plan, "
+            "export) that a person must carry out; "
+            "status = 'is this broken right now / known issue'. "
             "urgency (one of low|normal|high|critical), "
             "summary (<=200 chars)."
         ),
         user=body or "(empty case)",
         model=config.get("model", llm.FAST_MODEL),
         json_object=True,
-        max_tokens=300,
+        max_tokens=320,
+        cache=True,   # same case text -> same triage; kills retry/re-run cost
     )
     parsed = _safe_json(raw)
     topic = parsed.get("topic", "unknown")
@@ -179,9 +281,11 @@ def h_classify(state: CaseState, config: dict) -> dict:
     # value; else derive deterministically from the topic/body (stub-safe).
     case_type = (salesforce.normalize_case_type(parsed.get("type"))
                  or salesforce.map_case_type(topic, body))
+    answer_mode = _norm_answer_mode(parsed.get("answer_mode"), topic, body)
     classification = {
         "topic": topic,
         "case_type": case_type,
+        "answer_mode": answer_mode,
         "urgency": str(parsed.get("urgency", "normal")).lower(),
         "summary": parsed.get("summary", body[:200]),
         "tier_raw": tier_raw,
@@ -195,10 +299,37 @@ def h_classify(state: CaseState, config: dict) -> dict:
         **_trace(
             config["_node_id"], "classify",
             f"tier={tier} region={region} urgency={classification['urgency']} "
-            f"topic={topic} type={case_type or '-'}",
+            f"topic={topic} type={case_type or '-'} mode={answer_mode}",
             {**classification, "tokens": llm.last_usage},
         ),
     }
+
+
+_ANSWER_MODES = ("informational", "diagnostic", "action", "status")
+_ACTION_KW = ("cancel", "close my account", "close our account", "downgrade",
+              "upgrade my plan", "change our plan", "onboard", "offboard",
+              "delete my account", "delete our account", "export all",
+              "gdpr", "right to be forgotten", "terminate our contract")
+_DIAGNOSTIC_KW = ("why did", "why is my", "why are my", "did my", "did our",
+                  "is my data", "where is my", "where are my", "prove",
+                  "what happened to my", "my zap didn't run", "my zap did not run",
+                  "not showing my", "missing from my")
+_STATUS_KW = ("is this a known issue", "known issue", "is it down", "is the api down",
+              "any outage", "status page", "incident")
+
+
+def _norm_answer_mode(value: str | None, topic: str, body: str) -> str:
+    v = (value or "").strip().lower()
+    if v in _ANSWER_MODES:
+        return v
+    hay = f"{topic} {body}".lower()
+    if any(k in hay for k in _ACTION_KW):
+        return "action"
+    if any(k in hay for k in _STATUS_KW):
+        return "status"
+    if any(k in hay for k in _DIAGNOSTIC_KW):
+        return "diagnostic"
+    return "informational"
 
 
 @register("team_route")
@@ -325,6 +456,16 @@ def h_sf_writeback(state: CaseState, config: dict) -> dict:
         if text:
             append[dest] = f"[triage] {text}"
 
+    # Phase 27c — case-control-plane fields, folded into the same write:
+    # Status -> Triaged (unless a human already advanced it), the routed team,
+    # and the run linkage. `Next_Action_Due__c` is set by the terminal node.
+    prior_status = str(case.get("status") or "").strip().lower()
+    if config.get("advance_status", True) and prior_status not in _ADVANCED_STATUS:
+        fields.setdefault("Status", "Triaged")
+    if state.get("routed_team"):
+        fields.setdefault("Routed_Team__c", state["routed_team"])
+    fields.update(_cp_fields(stamp_run_at=True, last_run_id=state.get("_run_id")))
+
     if not sf_id:
         info = {
             "target": None, "written": {}, "skipped": {}, "dry_run": True,
@@ -345,6 +486,20 @@ def h_sf_writeback(state: CaseState, config: dict) -> dict:
         summary = f"Case {sf_id} [live] wrote {list(result['written'])}"
         if result["skipped"]:
             summary += f", skipped {list(result['skipped'])}"
+    try:
+        from interpreter import case_events
+
+        case_events.record(
+            config.get("_sb"), tenant_id=state.get("tenant_id"),
+            case_sf_id=str(sf_id),
+            case_number=case.get("case_number") or ctx.get("case_number"),
+            actor="ai", action="route",
+            to_status=fields.get("Status"),
+            routed_team=fields.get("Routed_Team__c"),
+            run_id=state.get("_run_id"),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("sf_writeback case_events(%s): %s", sf_id, e)
     return {
         "sf_writeback": result,
         **_trace(config["_node_id"], "sf_writeback", summary, result),
@@ -380,6 +535,12 @@ def h_sf_case(state: CaseState, config: dict) -> dict:
 
     if info.get("sf_id"):
         case["sf_id"] = info["sf_id"]
+        if info.get("case_number"):
+            case["case_number"] = info["case_number"]
+        if info.get("status"):
+            case["status"] = info["status"]          # Phase 27c — don't downgrade
+        if info.get("owner_id"):
+            case["owner_id"] = info["owner_id"]
         # FR-7: the customer's email itself, on the Case (not just Description)
         if case.get("channel") == "email" and not info.get("dry_run"):
             info["inbound_email"] = salesforce.log_email_message(
@@ -425,6 +586,82 @@ def _render_template(tmpl: str, state: CaseState) -> str:
         v = _dig(state, m.group(1).strip())
         return "" if v is None else str(v)
     return re.sub(r"\{\{\s*([\w.]+)\s*\}\}", sub, tmpl).strip()
+
+
+@register("case_lookup")
+def h_case_lookup(state: CaseState, config: dict) -> dict:
+    """Phase 21 — pull the closest past *resolved* Cases so `draft` can answer
+    from real resolutions, not just KB docs. Best-effort: no `case_memory`
+    rows / no embedder -> a no-op, `draft` behaves exactly as before.
+
+    Respects `classification.answer_mode`:
+      * action     -> skipped entirely (a person carries it out).
+      * diagnostic -> `prior_resolutions` is forced empty; matches become
+                      `investigation_hints` only (memory must never state a
+                      customer-specific fact it cannot prove).
+      * informational / status -> full result.
+
+    config: {k=3, pool=10, min_similarity=0.35, min_memories=3,
+             use_graph=true, skip_modes=["action"]}
+    """
+    nid = config["_node_id"]
+    from interpreter import case_memory
+
+    case = state.get("case", {})
+    cls = state.get("classification") or {}
+    mode = cls.get("answer_mode", "informational")
+    tenant_id = state.get("tenant_id")
+    skip_modes = config.get("skip_modes", ["action"])
+
+    def _out(citable, hints, note):
+        return {
+            "prior_resolutions": citable,
+            "investigation_hints": hints,
+            **_trace(nid, "case_lookup", note,
+                     {"citable": len(citable), "hints": len(hints), "mode": mode}),
+        }
+
+    if mode in skip_modes:
+        return _out([], [], f"skipped (answer_mode={mode})")
+    if not tenant_id:
+        return _out([], [], "skipped (no tenant)")
+
+    try:
+        from ingestion.scraper import get_supabase
+
+        sb = config.get("_sb") or get_supabase()
+    except Exception as e:  # noqa: BLE001
+        return _out([], [], f"skipped (no db: {e})")
+
+    min_mem = int(config.get("min_memories", 3))
+    if case_memory.count_for_tenant(sb, tenant_id) < min_mem:
+        return _out([], [], f"skipped (<{min_mem} memories for tenant)")
+
+    query = f"{case.get('subject', '')}\n{case.get('body', '')}\n{cls.get('summary', '')}".strip()
+    module = ((state.get("sf_writeback") or {}).get("written") or {}).get("Module__c") \
+        or salesforce.map_case_fields(cls.get("topic"), None).get("Module__c")
+    res = case_memory.lookup(
+        sb, query, tenant_id=str(tenant_id),
+        case_type=cls.get("case_type"), module=module, tier=state.get("tier"),
+        k=int(config.get("k", 3)), pool=int(config.get("pool", 10)),
+        min_similarity=float(config.get("min_similarity", 0.35)),
+        use_graph=bool(config.get("use_graph", True)),
+    )
+    citable = [] if mode == "diagnostic" else res["citable"]
+    hints = list(res["hints"])
+    if mode == "diagnostic":
+        # the near-matches are leads for the human / an evidence step, not copy
+        hints = [f"{c['subject']}: {summarize_hint(c['resolution_text'])}"
+                 for c in res["citable"]] + hints
+    note = (f"{len(citable)} citable + {len(hints)} hint(s) from {res['scanned']} scanned"
+            if (citable or hints) else f"no match in {res['scanned']} scanned")
+    return _out(citable, hints[:6], note)
+
+
+def summarize_hint(text: str, limit: int = 160) -> str:
+    from interpreter import case_memory
+
+    return case_memory.summarize(text, limit=limit)
 
 
 @register("kb_lookup")
@@ -612,7 +849,7 @@ def h_draft(state: CaseState, config: dict) -> dict:
     case = state.get("case", {})
     retrieval = state.get("retrieval", [])
     context = _context_block(retrieval) or "(no retrieved context)"
-    body = f"Subject: {case.get('subject','')}\n\n{case.get('body','')}".strip()
+    body = _with_ocr(state, f"Subject: {case.get('subject','')}\n\n{case.get('body','')}".strip())
 
     # Phase 14: internal-runbook context from a kb_lookup node upstream wins
     # over the public docs.
@@ -628,12 +865,39 @@ def h_draft(state: CaseState, config: dict) -> dict:
     else:
         user = f"# Case\n{body}\n\n# Documentation context\n{context}"
 
+    # Phase 21: resolutions that actually closed near-identical past Cases.
+    prior = state.get("prior_resolutions") or []
+    mode = (state.get("classification") or {}).get("answer_mode", "informational")
+    if prior:
+        blocks = []
+        for p in prior[:3]:
+            tag = " (CONFIRMED DUPLICATE — lead with this)" if p.get("duplicate") else ""
+            blocks.append(f"[relevance {p.get('relevance', 0):.2f}] Case "
+                          f"{p.get('case_number') or '?'} \"{p.get('subject') or ''}\"{tag}\n"
+                          f"resolution ({p.get('kind')}): {p.get('resolution_text', '')}")
+        user += "\n\n# Prior resolved cases (replies that actually resolved a near-identical issue)\n" \
+                + "\n\n".join(blocks)
+
+    grounding_rule = (
+        "Ground the reply in the KNOWLEDGE BASE and, when they closely match, the "
+        "PRIOR RESOLVED CASES — prefer their wording and steps; if one is a "
+        "CONFIRMED DUPLICATE, lead with it. "
+        if prior else
+        "Using ONLY the provided context, "
+    )
+    if mode == "diagnostic":
+        grounding_rule += (
+            "This is a DIAGNOSTIC request about the customer's own data. Do NOT "
+            "assert what happened to their specific account/records unless the "
+            "context proves it. If it isn't proven, say what you will check and "
+            "that a specialist will follow up with findings — never guess. "
+        )
+
     raw = llm.complete(
         system=(
-            "You are a support agent. Using ONLY the provided context, write a "
-            "concise, friendly reply that resolves the customer's issue. When an "
-            "internal runbook is provided it is authoritative — prefer it over "
-            "the public documentation. "
+            "You are a support agent. " + grounding_rule +
+            "When an internal runbook is provided it is authoritative — prefer it "
+            "over the public documentation. Invent nothing not in the context. "
             "Return a JSON object: {\"reply\": string, \"confidence\": number 0..1} "
             "where confidence reflects how well the context actually answers the case."
         ),
@@ -651,7 +915,9 @@ def h_draft(state: CaseState, config: dict) -> dict:
         model_conf = 0.5
     model_conf = max(0.0, min(1.0, model_conf))
 
-    grounded = groundedness.check(reply, (internal_matches[:5] + retrieval[:5]))
+    prior_as_src = [{"chunk_text": p.get("resolution_text", ""),
+                     "doc_url": f"case:{p.get('case_number')}"} for p in prior[:3]]
+    grounded = groundedness.check(reply, (internal_matches[:5] + prior_as_src + retrieval[:5]))
 
     return {
         "draft": reply,
@@ -661,10 +927,13 @@ def h_draft(state: CaseState, config: dict) -> dict:
             config["_node_id"], "draft",
             f"{len(reply)} chars, model_confidence={model_conf:.2f}, "
             f"groundedness={grounded['score']:.2f} ({grounded['backend']}), "
-            f"sources={len(retrieval[:5])}+{len(internal_matches[:5])} internal",
+            f"sources={len(retrieval[:5])}+{len(internal_matches[:5])} internal"
+            f"+{len(prior_as_src)} prior-case",
             {"draft_confidence": model_conf, "chars": len(reply),
              "groundedness": grounded, "tokens": tokens,
-             "used_internal_kb": bool(internal_matches)},
+             "used_internal_kb": bool(internal_matches),
+             "prior_cases": [p.get("case_number") for p in prior[:3]],
+             "answer_mode": mode},
         ),
     }
 
@@ -761,6 +1030,14 @@ def h_confidence_gate(state: CaseState, config: dict) -> dict:
                  or salesforce.map_case_type(topic))
         if ctype and ctype in esc_types:
             forced = f"type '{ctype}'"
+    # answer_mode escalation (Phase 21, opt-in): an `action` request (cancel,
+    # onboard, export, plan change) is carried out by a person, never
+    # auto-answered. Off by default; a flow sets `escalate_answer_modes`.
+    if not forced:
+        esc_modes = config.get("escalate_answer_modes", [])
+        amode = (state.get("classification") or {}).get("answer_mode")
+        if amode and amode in esc_modes:
+            forced = f"answer_mode '{amode}'"
     if forced:
         passed = False
 
@@ -779,6 +1056,10 @@ def h_confidence_gate(state: CaseState, config: dict) -> dict:
         gate["forced_escalation"] = forced
     reason = (f"forced escalate ({gate['forced_escalation']})" if forced
               else f"score={score:.3f} vs threshold={threshold:.2f} ({tier})")
+    # Phase 27c — surface the gate score on the Case (no status change here).
+    _cp_write(state, config, action="gate",
+              fields=_cp_fields(confidence=score),
+              reason=reason, confidence=score)
     return {
         "confidence": score,
         "confidence_gate": gate,
@@ -885,18 +1166,27 @@ def h_notify(state: CaseState, config: dict) -> dict:
         "draft below, please review before it goes to the customer.\n\n{draft}"
     )
     body = tmpl.format(label=label, confidence=confidence, draft=draft or "(no draft yet)")
+    # `draft_inline: true` -> one feed row (draft in the Chatter note); default
+    # keeps the draft as a separate private CaseComment the agent can copy.
+    inline = bool(config.get("draft_inline"))
 
     if sf_id and outcome["channel"] == "salesforce_chatter":
-        # @mention a User/Group id only — a Queue group id isn't mentionable.
-        mention = (target if _looks_like_sf_id(target)
-                   and target_type in (None, "user", "group") else None)
+        # @mention a real person. A User/Group id is mentionable directly; a
+        # Queue isn't, so mention one of its members; else the fallback id.
+        if _looks_like_sf_id(target) and target_type in (None, "user", "group"):
+            mention = target
+        elif target_type == "queue" and target:
+            from interpreter import routing
+            mention = routing.queue_member(target, state.get("tenant_id"))[0] or config.get("mention_id")
+        else:
+            mention = config.get("mention_id")
         chatter = salesforce.post_chatter(
             sf_id, body, mention_id=mention, tenant_id=state.get("tenant_id")
         )
         outcome["chatter"] = chatter
         mode = "dry-run" if chatter.get("dry_run") else "posted"
         summary = f"Chatter {mode} → {label} [{resolved_via}] (no reassign)"
-        if draft.strip():
+        if draft.strip() and not inline:
             note = salesforce.add_case_comment(
                 sf_id, f"[bot draft — {label}; review before sending]\n\n{draft}",
                 published=False, tenant_id=state.get("tenant_id"),
@@ -904,10 +1194,81 @@ def h_notify(state: CaseState, config: dict) -> dict:
             outcome["draft_comment"] = note
             if note.get("created"):
                 summary += " + draft comment"
+
+        # Optional: also set flag fields on the Case (e.g. Bot_Attention__c)
+        # so a record-triggered SF Flow can fire an Email Alert / Slack in
+        # addition to the @mention. Unknown fields are skipped.
+        af = config.get("attention_fields")
+        if af:
+            rendered = {k: (v.format(label=label, case_type=case_type or "",
+                                     module=module or "") if isinstance(v, str) else v)
+                        for k, v in af.items()}
+            outcome["attention"] = salesforce.update_case_fields(
+                sf_id, rendered, tenant_id=state.get("tenant_id"))
     else:
         summary = f"notify {label!r} (no sf_id — not posted)"
 
+    # Phase 27c — someone's been pinged; the Case is being worked but stays
+    # where it is (no reassign). Ack clock so the sweep notices if ignored.
+    _cp_write(state, config, action="notify",
+              fields=_cp_fields(status="In Progress",
+                                next_action=f"{label} rep to respond in Chatter",
+                                due_minutes=_ACK_MINUTES, confidence=confidence),
+              reason=f"notify {label}", confidence=confidence)
+
     return {"outcome": outcome, **_trace(nid, "notify", summary, outcome)}
+
+
+@register("notify_human")
+def h_notify_human(state: CaseState, config: dict) -> dict:
+    """Ping a named person about an escalated Case on **Slack and/or
+    Salesforce Chatter** — the flow decides who and where, not hard-coded
+    config. Place it after `ask_human` / `handover` (or on any escalation
+    edge). Pass-through: it doesn't change `outcome`, so a terminal node's
+    action is preserved.
+
+    config: {
+      channel: "both" | "slack" | "salesforce_chatter",
+      slack_channel: "#support-escalations",
+      slack_channel_by_team: {"csm": "#csm", "default": "#support"},
+      slack_webhook: "https://hooks.slack.com/…",     # or SLACK_ALERT_WEBHOOK
+      mention: {
+        slack_user_id: "U123", slack_user_by_team: {...},
+        sf_user_id: "005…", sf_team: "Support",       # -> a queue member
+        mention_id: "005…"                            # final fallback
+      },
+      note_tmpl?: "... {cn} {outcome} {conf} {subject} {who} {draft} {link} ..."
+    }
+    """
+    from interpreter import alert
+
+    res = alert.alert_human(dict(state), config)
+    legs = []
+    for k in ("slack", "chatter"):
+        r = res.get(k) or {}
+        if r.get("sent") or r.get("posted"):
+            legs.append(f"{k}:{r.get('via') or ('mention' if r.get('mention_id') else 'ok')}")
+        elif r:
+            legs.append(f"{k}:skip")
+    summary = "alerted " + (", ".join(legs) or "nobody (no channel configured)")
+    if res.get("mention"):
+        summary += f"  ·  @slack={res['mention'].get('slack')} @sf={res['mention'].get('sf')}"
+
+    # Phase 27c — stamp the reasoning-thread ts on the Case and record the
+    # handoff. If we arrived here straight from the gate (support + PASS, no
+    # ask_human) also move the Case to In Progress with an ack clock.
+    sl = res.get("slack") or {}
+    prior = str(state.get("case", {}).get("status") or "").strip().lower()
+    cp = _cp_fields(slack_ts=sl.get("ts"))
+    if prior not in _ADVANCED_STATUS and prior != "escalated":
+        cp.update(_cp_fields(status="In Progress",
+                             next_action="agent to reason through the reply in Slack",
+                             due_minutes=_ACK_MINUTES))
+    _cp_write(state, config, action="notify_human", fields=cp,
+              reason="slack reasoning handoff", slack_ts=sl.get("ts"),
+              slack_channel=sl.get("channel"))
+
+    return {"human_alert": res, **_trace(config["_node_id"], "notify_human", summary, res)}
 
 
 @register("ask_human")
@@ -925,7 +1286,10 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
     }
 
     draft = state.get("draft", "")
-    if channel == "salesforce_chatter" and sf_id:
+    # `post_note: false` -> this node only routes the Case; a downstream
+    # `notify_human` does the Chatter/Slack alert (avoids a double post).
+    post_note = config.get("post_note", True)
+    if post_note and channel == "salesforce_chatter" and sf_id:
         body = (
             f"Support bot needs a human on this case (confidence {confidence}). "
             f"Suggested draft below — please review before sending.\n\n{draft}"
@@ -937,10 +1301,6 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
         mode = "dry-run" if chatter.get("dry_run") else "posted"
         summary = f"Chatter {mode} on Case {sf_id}"
 
-        # FR-13: the suggested reply rides in the Chatter note above. Salesforce
-        # rejects an API-created outbound draft EmailMessage (Incoming=false is
-        # UI-composer-only), so also drop it as a private CaseComment — the
-        # agent copies it into the Email quick action and sends.
         if draft.strip():
             note = salesforce.add_case_comment(
                 sf_id, f"[bot draft — review before sending]\n\n{draft}",
@@ -950,8 +1310,9 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
             if note.get("created"):
                 summary += " + draft comment"
     else:
-        summary = f"handed to human via {channel}"
-        if channel == "salesforce_chatter":
+        summary = ("routed only (alert deferred to notify_human)" if not post_note
+                   else f"handed to human via {channel}")
+        if post_note and channel == "salesforce_chatter":
             summary += " (no sf_id — not posted)"
 
     # Phase 20g/h/i: drop the Case into a human queue. Billing/forced -> the
@@ -965,6 +1326,18 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
             summary += f" → {queue}"
         elif assignment.get("reason"):
             summary += f" (queue: {assignment['reason']})"
+
+    # Phase 27c — Status = Escalated, the routed team (Omni routes on it), and
+    # a 30-min ack clock. Escalation_Reason__c carries the gate's why.
+    team = state.get("routed_team") or "support"
+    esc_reason = ((state.get("confidence_gate") or {}).get("forced_escalation")
+                  or outcome.get("reason"))
+    _cp_write(state, config, action="ask_human",
+              fields=_cp_fields(status="Escalated", routed_team=team,
+                                next_action=f"pick up in {team} queue",
+                                due_minutes=_ACK_MINUTES, escalation_reason=esc_reason,
+                                confidence=confidence),
+              reason=esc_reason, routed_team=team, confidence=confidence)
 
     return {"outcome": outcome, **_trace(config["_node_id"], "ask_human", summary, outcome)}
 
@@ -1001,6 +1374,18 @@ def h_handover(state: CaseState, config: dict) -> dict:
             summary += f" → reassigned ({assignment.get('owner_type')})"
         elif assignment.get("reason"):
             summary += f" (not reassigned: {assignment['reason']})"
+
+    # Phase 27c — Status = Escalated + routed team + ack clock (Omni routes
+    # on Routed_Team__c; the queue assign above is the interim + fallback).
+    team = state.get("routed_team") or "support"
+    _cp_write(state, config, action="handover",
+              fields=_cp_fields(status="Escalated", routed_team=team,
+                                next_action=f"pick up in {team} queue",
+                                due_minutes=_ACK_MINUTES,
+                                escalation_reason=outcome["reason"],
+                                confidence=state.get("confidence")),
+              reason=outcome["reason"], routed_team=team,
+              confidence=state.get("confidence"))
     return {"outcome": outcome, **_trace(config["_node_id"], "handover", summary, outcome)}
 
 
@@ -1059,7 +1444,10 @@ def h_clarify(state: CaseState, config: dict) -> dict:
     # Phase 17d: how many times have we already gone back to this customer?
     # Past `max_rounds` (default 2) we stop asking and hand to a human.
     max_rounds = max(1, int(config.get("max_rounds", 2)))
-    case_key = case.get("case_id") or sf_id
+    # key on the stable SF record id (`runs.case_payload->>sf_id`), NOT
+    # `runs.case_id` — `get_case` maps the CaseNumber into that field, so a
+    # synthetic-vs-real mismatch used to silently reset the counter (WF-3).
+    case_key = sf_id or case.get("case_id")
     prior_rounds = 0
     if case_key:
         try:
@@ -1067,7 +1455,7 @@ def h_clarify(state: CaseState, config: dict) -> dict:
 
             sb = config.get("_sb") or get_supabase()
             rows = (sb.table("runs").select("clarify_round")
-                    .eq("case_id", str(case_key)).eq("outcome", "need_info")
+                    .eq("case_payload->>sf_id", str(case_key)).eq("outcome", "need_info")
                     .execute().data or [])
             prior_rounds = max((int(r.get("clarify_round") or 1) for r in rows), default=0)
         except Exception as e:  # noqa: BLE001 — best-effort; treat as round 1
@@ -1163,9 +1551,21 @@ def h_clarify(state: CaseState, config: dict) -> dict:
              "information from the customer. Suggested questions to send:\n\n")
             + numbered
         )
+        # @mention a real person: a queue member (Chatter can't mention a
+        # Queue), the routed team's lead, else the configured fallback id.
+        mention = config.get("mention_id")
+        try:
+            from interpreter import routing
+            qref = config.get("mention_queue") or (
+                f"Team_{(state.get('routed_team') or '').capitalize()}"
+                if config.get("mention_team") else None)
+            if qref:
+                uid, _ = routing.queue_member(qref, state.get("tenant_id"))
+                mention = uid or mention
+        except Exception:  # noqa: BLE001
+            pass
         delivery = salesforce.post_chatter(
-            sf_id, note, mention_id=config.get("mention_id"),
-            tenant_id=state.get("tenant_id"),
+            sf_id, note, mention_id=mention, tenant_id=state.get("tenant_id"),
         )
 
     auto_sent = bool(auto_send and delivery and delivery.get("sent"))
@@ -1214,6 +1614,25 @@ def h_clarify(state: CaseState, config: dict) -> dict:
     if handover_assignment:
         outcome["handover_queue"] = handover_queue
         outcome["handover_assignment"] = handover_assignment
+    # Phase 27c — when the ball is with the customer, the Case says so and a
+    # 3-business-day clock runs; when exhausted we've escalated, so it's a
+    # 30-min ack clock against the routed team instead.
+    if exhausted:
+        _team = state.get("routed_team") or "support"
+        _cp_write(state, config, action="ask_human",
+                  fields=_cp_fields(status="Escalated", routed_team=_team,
+                                    next_action="clarify exhausted — human to take over",
+                                    due_minutes=_ACK_MINUTES,
+                                    escalation_reason="clarify_exhausted",
+                                    confidence=state.get("confidence")),
+                  reason="clarify_exhausted", routed_team=_team)
+    else:
+        _cp_write(state, config, action="clarify",
+                  fields=_cp_fields(status="Waiting on Customer",
+                                    next_action=f"awaiting customer reply ({len(questions)} q)",
+                                    due_minutes=int(config.get("customer_wait_hours", 72)) * 60),
+                  reason="kb_insufficient")
+
     rnd = f"round {clarify_round}/{max_rounds}"
     if exhausted:
         handed = ""
@@ -1260,3 +1679,190 @@ def _safe_json(s: str) -> dict:
             except json.JSONDecodeError:
                 pass
     return {}
+
+
+# ==========================================================================
+# Phase 25 — image attachments, Salesforce context, generic AI-prompt node
+# ==========================================================================
+def _flat(state: CaseState) -> dict:
+    """A flat view of the bits a prompt template interpolates: `case.subject`,
+    `sf_context.account.tier`, `attachment_text`, `classification.topic`, …"""
+    return {
+        "case": state.get("case", {}),
+        "sf_context": state.get("sf_context", {}),
+        "sender": state.get("sender", {}),
+        "classification": state.get("classification", {}),
+        "attachment_text": state.get("attachment_text", ""),
+        "attachments": state.get("attachments", []),
+        "ai": state.get("ai", {}),
+        "retrieval": state.get("retrieval", {}),
+        "draft": state.get("draft", ""),
+        "tier": state.get("tier"),
+        "region": state.get("region"),
+        "routed_team": state.get("routed_team"),
+    }
+
+
+def _render(tmpl: str, flat: dict) -> str:
+    """`{case.subject}` / `{sf_context.account.name}` -> value; unknown -> ''."""
+    if not tmpl:
+        return ""
+
+    def sub(m: "re.Match") -> str:
+        v = _dig(flat, m.group(1).strip())
+        if v is None:
+            return ""
+        return v if isinstance(v, str) else __import__("json").dumps(v, default=str)[:4000]
+
+    return re.sub(r"\{([a-zA-Z0-9_.]+)\}", sub, tmpl)
+
+
+@register("attachments")
+def h_attachments(state: CaseState, config: dict) -> dict:
+    """Fetch image (and, opt-in, video) attachments on the Case + local
+    OCR / transcription (Phase 25). Writes `state.attachments` +
+    `state.attachment_text` (folded into classify/draft) +
+    `state._attachment_blobs` (image bytes + video keyframes, for `ai_prompt`
+    vision; not persisted). Pass-through, best-effort.
+
+    config: {source="salesforce"|"email"|"auto", max_images=5, ocr=true,
+             video=false, video_frames=4, video_max_seconds=300}
+    """
+    from interpreter import attachments as att
+
+    nid = config["_node_id"]
+    _sb = None
+    if config.get("skip_signatures", True) is not False:
+        try:
+            from ingestion.scraper import get_supabase
+            _sb = get_supabase()
+        except Exception:  # noqa: BLE001
+            _sb = None
+    try:
+        out = att.extract(state.get("case", {}), tenant_id=state.get("tenant_id"),
+                          limit=int(config.get("max_images", att.MAX_IMAGES)),
+                          do_ocr=config.get("ocr", True) is not False,
+                          do_video=bool(config.get("video", False)),
+                          video_frames_n=int(config.get("video_frames", att.VIDEO_FRAMES)),
+                          video_max_seconds=int(config.get("video_max_seconds",
+                                                           att.VIDEO_MAX_SECONDS)),
+                          skip_signatures=config.get("skip_signatures", True) is not False,
+                          sb=_sb,
+                          source=config.get("source", "salesforce"))
+    except Exception as e:  # noqa: BLE001
+        log.warning("attachments node failed: %s", e)
+        out = {"attachments": [], "attachment_text": "", "_blobs": {}}
+
+    atts = out["attachments"]
+    n_vid = sum(1 for a in atts if a.get("kind") == "video")
+    n_sig = sum(1 for a in atts if a.get("skipped"))
+    n_img = sum(1 for a in atts if a.get("kind", "image") == "image" and not a.get("skipped"))
+    chars = len(out["attachment_text"])
+    return {
+        "attachments": atts,
+        "attachment_text": out["attachment_text"],
+        "_attachment_blobs": out["_blobs"],
+        **_trace(nid, "attachments",
+                 f"{n_img} image(s)" + (f" + {n_vid} video(s)" if n_vid else "")
+                 + (f", {n_sig} signature(s) skipped" if n_sig else "")
+                 + f", {chars} chars extracted",
+                 {"images": n_img, "videos": n_vid, "signatures_skipped": n_sig,
+                  "chars": chars, "files": [a["filename"] for a in atts]}),
+    }
+
+
+@register("sf_context")
+def h_sf_context(state: CaseState, config: dict) -> dict:
+    """Load the Salesforce picture around the Case — Account (+ parent =
+    organization), Contact + siblings, Lead, Case history, Account team —
+    into `state.sf_context` (Phase 25). Put it after `identify`. Pass-through.
+
+    config: {want: ["account","contacts","leads","cases","team"]}
+    """
+    from interpreter import sf_context as sfc
+
+    nid = config["_node_id"]
+    want = config.get("want") or list(sfc.ALL_WANT)
+    try:
+        ctx = sfc.load(state.get("sender") or {}, want=set(want),
+                       tenant_id=state.get("tenant_id"))
+    except Exception as e:  # noqa: BLE001
+        log.warning("sf_context node failed: %s", e)
+        ctx = {}
+    acc = (ctx.get("account") or {}).get("name")
+    cs = ctx.get("cases") or {}
+    summary = (f"{acc or 'no account'}"
+               + (f" · {cs.get('open')} open / {cs.get('total')} cases" if cs else "")
+               + (f" · team {len(ctx.get('account_team') or [])}" if ctx.get("account_team") else ""))
+    return {"sf_context": ctx, **_trace(nid, "sf_context", summary,
+                                        {"keys": sorted(ctx)})}
+
+
+@register("ai_prompt")
+def h_ai_prompt(state: CaseState, config: dict) -> dict:
+    """Run a configurable LLM prompt and write the result to `state[output_key]`
+    (Phase 25). Templates interpolate `{case.subject}` /
+    `{sf_context.account.tier}` / `{attachment_text}` etc. With `images` set it
+    sends image attachments to a vision model (free OpenRouter → paid
+    Anthropic). Edges then branch on the structured output — the routing stays
+    a plain expression, the intelligence is this (traced, cached) node.
+
+    config: {
+      system, user,                 # prompt templates
+      model?, temperature=0.2, max_tokens=600,
+      output_key="ai_output",
+      json_schema?: {...},          # ask for + parse JSON
+      images: "none" | "auto" | ["attachments"],   # attachment blobs to send
+      cache=true, on_error="passthrough" | "fail"
+    }
+    """
+    nid = config["_node_id"]
+    flat = _flat(state)
+    system = _render(config.get("system", ""), flat)
+    user = _render(config.get("user", ""), flat) or _render("{case.subject}\n{case.body}", flat)
+    out_key = config.get("output_key") or "ai_output"
+    want_json = bool(config.get("json_schema"))
+    if want_json:
+        system += ("\n\nReturn ONLY a JSON object matching this schema:\n"
+                   + __import__("json").dumps(config["json_schema"])[:2000])
+
+    imgs: list[tuple[bytes, str]] = []
+    mode = config.get("images", "none")
+    if mode and mode != "none":
+        blobs = state.get("_attachment_blobs") or {}
+        by_key = {a.get("blob_key"): a for a in (state.get("attachments") or [])}
+        for k, data in blobs.items():
+            mime = (by_key.get(k) or {}).get("mime", "image/png")
+            imgs.append((data, mime))
+        imgs = imgs[:4]
+
+    try:
+        raw = llm.complete(
+            system=system or "You are a helpful support assistant.",
+            user=user, model=config.get("model") or llm.DEFAULT_MODEL,
+            temperature=float(config.get("temperature", 0.2)),
+            max_tokens=int(config.get("max_tokens", 600)),
+            json_object=want_json,
+            cache=bool(config.get("cache", True)) and not imgs,
+            images=imgs or None,
+        )
+    except Exception as e:  # noqa: BLE001
+        if config.get("on_error") == "fail":
+            raise
+        log.warning("ai_prompt %s failed: %s", out_key, e)
+        return {"ai": {out_key: None}, **_trace(nid, "ai_prompt", f"error → ai.{out_key}=None",
+                                                {"error": str(e)[:300]})}
+
+    value: Any = raw
+    if want_json:
+        value = _safe_json(raw) or {}
+    usage = llm.last_usage or {}
+    return {
+        "ai": {out_key: value},            # declared channel -> merged, not dropped
+        **_trace(nid, "ai_prompt",
+                 f"ai.{out_key} ← {len(raw)} chars"
+                 + (f", {len(imgs)} image(s)" if imgs else "")
+                 + (f", {usage.get('total')} tok" if usage.get("total") else ""),
+                 {"output_key": out_key, "value": value, "images": len(imgs),
+                  "json": want_json, "tokens": usage or None}),
+    }

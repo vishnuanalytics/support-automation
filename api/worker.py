@@ -39,21 +39,18 @@ def _run_flow(payload: dict, sb) -> dict:
     flow_id = payload["flow_id"]
     case = payload["case"]
     key = payload.get("idempotency_key")
-
-    if key:
-        dup = sb.table("runs").select("run_id").eq("flow_id", flow_id) \
-            .eq("idempotency_key", key).execute().data
-        if dup:
-            return {"run_id": dup[0]["run_id"], "idempotent_skip": True}
+    trigger = payload.get("trigger")
 
     # Cases pushed by the Salesforce trigger arrive as a bare id — hydrate
     # the full record here (raises -> the job retries with backoff).
     if case.get("sf_id") and not case.get("subject"):
         case = {**salesforce.get_case(case["sf_id"]), "channel": case.get("channel", "salesforce")}
-        # A CDC `inbound_email` event means the *customer replied*. get_case
-        # returns the (stale) Case Description — overlay the newest incoming
-        # message so the flow re-triages what the customer actually just said.
-        if payload.get("trigger") == "inbound_email":
+        # An email-origin Case (E2C or a customer reply) has an *incoming*
+        # EmailMessage. Overlay it so the flow triages what the customer
+        # actually said, not the stale Case Description — for BOTH the
+        # `case_created` and the `inbound_email` CDC events, so a new
+        # Email-to-Case Case still gets a real reply on the first pass.
+        if trigger in ("inbound_email", "case_created"):
             m = salesforce.latest_inbound_email(case["sf_id"])
             if m and m.get("text"):
                 case.update(body=m["text"], channel="email",
@@ -62,6 +59,17 @@ def _run_flow(payload: dict, sb) -> dict:
                     case["from"] = m["from_addr"]
                 if m.get("message_id"):
                     case["message_id"] = m["message_id"]
+                # collapse the CaseChangeEvent + EmailMessageChangeEvent for
+                # the same mail onto one run: `plan_events` keys the inbound
+                # spec on the EmailMessage *record id*, so match that.
+                if m.get("id"):
+                    key = f"email:{m['id']}"
+
+    if key:
+        dup = sb.table("runs").select("run_id").eq("flow_id", flow_id) \
+            .eq("idempotency_key", key).execute().data
+        if dup:
+            return {"run_id": dup[0]["run_id"], "idempotent_skip": True}
 
     flow = load_flow(flow_id=flow_id, sb=sb, status="published", validate=True)
     final = build_graph(flow).invoke({"case": case, "tenant_id": flow["tenant_id"], "team": flow.get("team"), "trace": []})
@@ -144,21 +152,21 @@ _FEEDBACK_MAX_CHECKS = int(os.environ.get("FEEDBACK_MAX_CHECKS", "12"))
 
 
 def _check_resolution(payload: dict, sb) -> dict:
-    """After an `ask_human` / `handover` on a real Case, poll for what the
-    human did (Phase 11) — and *act on it* (Phase 20m):
+    """Telemetry-only follow-up on an escalated Case that has **no** Slack
+    reasoning session (the normal path is the Slack dialogue — Phase 24). It
+    never sends: it just records what the human did.
 
-      * an agent left a CaseComment  -> treat it as the answer: polish it
-        into a customer reply and send it (`interpreter.agent_reply`), mark
-        the run `guided_resume`, record the resume as its own run.
-      * the agent emailed the customer directly -> just score the draft
+      * a human left a CaseComment -> logged as context on the run.
+      * the agent emailed the customer directly -> score the draft
         (`sent_as_is` / `edited` / `rewrote`).
-      * nothing yet -> re-poll every FEEDBACK_POLL_MIN up to
-        FEEDBACK_MAX_CHECKS, then give up as `no_reply`.
+      * nothing -> re-poll up to FEEDBACK_MAX_CHECKS, then `human_handling`
+        (a human engaged) or `no_reply`.
     """
     run_id = payload["run_id"]
     checks = int(payload.get("checks", 0))
     rows = (sb.table("runs")
-            .select("case_payload, draft, created_at, human_action, tenant_id, flow_id, team")
+            .select("case_payload, draft, created_at, human_action, human_reply, "
+                    "tenant_id, flow_id, team")
             .eq("run_id", run_id).execute().data)
     if not rows:
         return {"run_id": run_id, "skipped": "run gone"}
@@ -176,28 +184,16 @@ def _check_resolution(payload: dict, sb) -> dict:
     if case_id and salesforce.available():
         resp = salesforce.agent_response_since(case_id, since, tenant_id=tenant_id)
 
-    # 1. an agent left internal guidance -> the bot composes + sends the reply
+    # a human left a note -> record it as context on the run; never send.
+    note_seen = False
     if resp.get("guidance"):
-        from interpreter import agent_reply, mailbox
-
-        cfg = mailbox.load_channel(tenant_id, sb) if tenant_id else None
-        out = agent_reply.resume_from_guidance(case, resp["guidance"], cfg=cfg, tenant_id=tenant_id)
-        try:
-            sb.table("runs").insert({
-                "flow_id": row["flow_id"], "tenant_id": tenant_id, "team": row["team"],
-                "source": "agent_resume", "case_id": (str(case_id)[:200] if case_id else None),
-                "subject": (str(case.get("subject") or "")[:500] or None),
-                "outcome": "auto_reply" if out.get("auto_sent") else "draft",
-                "draft": out.get("reply"), "case_payload": case,
-            }).execute()
-        except Exception as e:  # noqa: BLE001
-            log.warning("could not record agent_resume run for %s: %s", run_id, e)
-        sb.table("runs").update({
-            "human_action": "guided_resume",
-            "human_reply": resp["guidance"][:8000],
-            "feedback_checked_at": "now()",
-        }).eq("run_id", run_id).execute()
-        return {"run_id": run_id, "human_action": "guided_resume", "resume": out}
+        note_seen = True
+        prev = row.get("human_reply") or ""
+        if resp["guidance"][:1500] not in prev:
+            merged = (prev + ("\n---\n" if prev else "") + resp["guidance"])[:8000]
+            sb.table("runs").update({
+                "human_reply": merged, "feedback_checked_at": "now()",
+            }).eq("run_id", run_id).execute()
 
     # 2. the agent already replied to the customer -> just score the draft
     if resp.get("outbound_email"):
@@ -208,19 +204,36 @@ def _check_resolution(payload: dict, sb) -> dict:
         }).eq("run_id", run_id).execute()
         return {"run_id": run_id, "human_action": action, "edit_distance": dist}
 
-    # 3. nothing yet -> re-poll, or give up
+    # 3. nothing actionable yet -> re-poll, or give up
     if checks + 1 < _FEEDBACK_MAX_CHECKS:
         import datetime as _dt
         nxt = (_dt.datetime.now(_dt.timezone.utc)
                + _dt.timedelta(minutes=_FEEDBACK_POLL_MIN)).isoformat()
         jobs.enqueue("check_resolution", {"run_id": run_id, "checks": checks + 1},
                      dedupe_key=f"{run_id}:{checks + 1}", run_after=nxt, sb=sb)
-        return {"run_id": run_id, "waiting": True, "checks": checks + 1}
+        return {"run_id": run_id, "waiting": True, "checks": checks + 1,
+                "note_seen": note_seen}
 
+    # give up: a human clearly engaged (left notes, or owns the Case) ->
+    # `human_handling` (not a miss); otherwise a genuine `no_reply`.
+    engaged = note_seen or _case_owned_by_user(case_id, tenant_id)
+    final_action = "human_handling" if engaged else "no_reply"
     sb.table("runs").update({
-        "human_action": "no_reply", "feedback_checked_at": "now()",
+        "human_action": final_action, "feedback_checked_at": "now()",
     }).eq("run_id", run_id).execute()
-    return {"run_id": run_id, "human_action": "no_reply"}
+    return {"run_id": run_id, "human_action": final_action}
+
+
+def _case_owned_by_user(case_id: str | None, tenant_id: str | None) -> bool:
+    """True when a person (not a queue) owns the Case — they've taken it."""
+    if not case_id or not salesforce.available():
+        return False
+    try:
+        owner = salesforce.client_for(tenant_id).Case.get(case_id).get("OwnerId") or ""
+        return owner.startswith("005")   # 005 = User, 00G = Queue/Group
+    except Exception as e:  # noqa: BLE001
+        log.warning("owner check failed for %s: %s", case_id, e)
+        return False
 
 
 def _embed_kb_entry(payload: dict, sb) -> dict:
@@ -280,8 +293,38 @@ def _create_github_issue(payload: dict, sb) -> dict:
     return {"action_request_id": ar_id, **issue}
 
 
+# ── Phase 27d — the case-control-plane safety-net sweeps ──────────────────
+_SWEEP_EVERY_MIN = {"queue_sweep": 5, "cdc_reconcile": 60, "reasoning_ttl": 5}
+
+
+def _reschedule(kind: str, sb) -> None:
+    """Re-enqueue a periodic sweep for its next slot. Bucketed dedupe key so a
+    worker restart can't pile them up."""
+    import datetime as _dt
+
+    mins = _SWEEP_EVERY_MIN[kind]
+    nxt = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(minutes=mins)
+    bucket = int(nxt.timestamp() // (mins * 60))
+    jobs.enqueue(kind, {}, dedupe_key=f"{kind}:{bucket}",
+                 run_after=nxt.isoformat(), sb=sb)
+
+
+def _sweep_handler(fn):
+    def _run(payload: dict, sb) -> dict:
+        from interpreter import sweeps
+
+        try:
+            return getattr(sweeps, fn)(sb)
+        finally:
+            _reschedule(fn, sb)
+    return _run
+
+
 HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
-            "embed_kb_entry": _embed_kb_entry, "create_github_issue": _create_github_issue}
+            "embed_kb_entry": _embed_kb_entry, "create_github_issue": _create_github_issue,
+            "queue_sweep": _sweep_handler("queue_sweep"),
+            "cdc_reconcile": _sweep_handler("cdc_reconcile"),
+            "reasoning_ttl": _sweep_handler("reasoning_ttl")}
 
 JOB_TIMEOUT = int(os.environ.get("WORKER_JOB_TIMEOUT", "120"))
 
@@ -328,6 +371,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--idle-sleep", type=float, default=2.0)
     args = ap.parse_args(argv)
 
+    from interpreter.config import validate_env
+    validate_env()
+
     sb = get_supabase()
     if args.once:
         n = 0
@@ -336,9 +382,20 @@ def main(argv: list[str] | None = None) -> int:
         log.info("drained %d job(s)", n)
         return 0
 
+    from interpreter.health import beat
+
     log.info("worker started; polling every %.1fs", args.idle_sleep)
+    beat("worker", {"pid": os.getpid()}, sb=sb, force=True)
+    if os.environ.get("SWEEPS_DISABLED") != "1":
+        for _k in _SWEEP_EVERY_MIN:          # Phase 27d — seed the periodic sweeps
+            try:
+                jobs.enqueue(_k, {}, dedupe_key=f"{_k}:boot", sb=sb)
+            except Exception as e:  # noqa: BLE001
+                log.warning("could not seed sweep %s: %s", _k, e)
     while True:
-        if not process_one(sb):
+        did = process_one(sb)
+        beat("worker", {"idle": not did}, sb=sb)
+        if not did:
             time.sleep(args.idle_sleep)
 
 

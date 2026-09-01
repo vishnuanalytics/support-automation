@@ -1,7 +1,7 @@
 export type NodeType =
   | "retrieve" | "classify" | "sf_writeback" | "draft"
   | "confidence_gate" | "auto_reply" | "ask_human" | "handover"
-  | "team_route" | "notify" | "clarify" | "identify"
+  | "team_route" | "notify" | "clarify" | "identify" | "case_lookup"
   | string;
 
 export interface FlowNode {
@@ -49,6 +49,36 @@ export interface FlowVersion {
 export interface NodeTypesResp {
   types: string[];
   defaults: Record<string, Record<string, unknown>>;
+}
+
+/** Phase 22 — one timeline per Case: jobs + runs + nodes + errors, in order. */
+export interface TraceEvent {
+  ts: string | null;
+  kind: "job" | "run_start" | "run_end" | "node" | "channel";
+  label: string;
+  status?: string | null;
+  summary?: string | null;
+  error?: string | null;
+  data?: Record<string, unknown>;
+}
+export interface TraceResult {
+  key: string;
+  sf_id: string | null;
+  case_number: string | null;
+  counts: { runs: number; jobs: number; events: number; errors: number };
+  outcome: string | null;
+  human_action: string | null;
+  flow_version: number | null;
+  degraded_llm: boolean;
+  stale_jobs: string[];
+  failed_jobs: string[];
+  errors: string[];
+  labels_written: Record<string, unknown>;
+  labels_skipped: Record<string, unknown>;
+  final_queue: string | null;
+  total_ms: number;
+  total_tokens: number;
+  timeline: TraceEvent[];
 }
 
 /** Phase 20o — Salesforce routing metadata for the flow editor's dropdowns

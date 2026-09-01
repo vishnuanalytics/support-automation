@@ -39,6 +39,8 @@ log = logging.getLogger("ingestion.sf_cdc_watch")
 
 
 def main(argv: list[str] | None = None) -> int:
+    from interpreter.config import validate_env
+    validate_env()
     ap = argparse.ArgumentParser(prog="ingestion.sf_cdc_watch")
     ap.add_argument("--topics", default=None,
                     help="comma-separated CDC channels (default: Case + EmailMessage)")

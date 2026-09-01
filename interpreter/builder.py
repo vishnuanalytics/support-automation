@@ -46,13 +46,21 @@ def _context(state: CaseState) -> dict[str, Any]:
         "draft_confidence": state.get("draft_confidence", 0.0),
         "confidence_gate": gate,
         "classification": state.get("classification") or {},
+        "answer_mode": (state.get("classification") or {}).get("answer_mode") or "informational",
         "entities": state.get("entities") or {},
         "policy": state.get("policy") or {},
         "routed_team": state.get("routed_team") or "",
+        "prior_resolutions": state.get("prior_resolutions") or [],
+        "investigation_hints": state.get("investigation_hints") or [],
         "clarification": state.get("clarification") or {},
         "sender": state.get("sender") or {},
         "outcome": state.get("outcome") or {},
         "case": state.get("case") or {},
+        # Phase 25 — enrichment nodes; edges can branch on `sf_context.*`,
+        # `ai.<key>.*`, `attachments`.
+        "sf_context": state.get("sf_context") or {},
+        "ai": state.get("ai") or {},
+        "attachments": state.get("attachments") or [],
     }
 
 

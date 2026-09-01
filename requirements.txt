@@ -1,40 +1,39 @@
-# ingestion (Phase 1)
-beautifulsoup4
-lxml
-trafilatura
-fastembed
-neo4j
+# Runtime deps for the Docker services (poller / worker / cdc / api / slackbot).
+# Split off, NOT here:
+#   requirements-ingest.txt      Phase 1 scraper (Actions only)
+#   requirements-connectors.txt  Google Docs / Gmail-OAuth (lazy, optional)
+#   requirements-media.txt       image OCR / video (build with MEDIA=1)
+#   requirements-dev.txt         pytest
 
-# shared
+# --- shared ---
 supabase
 python-dotenv
 numpy
 
-# interpreter (Phase 2-4)
+# --- local embeddings (retrieve node) — ONNX, CPU, no torch ---
+fastembed
+
+# --- graph sync target ---
+neo4j
+
+# --- interpreter (Phase 2-4) ---
 langgraph
 groq
 anthropic
 simple-salesforce
+lxml                     # simple_salesforce Metadata API (sf.deploy / sf.mdapi)
 
-# Salesforce CDC subscriber (Phase 20l — ingestion/sf_pubsub)
-# gRPC + Avro for the Pub/Sub API stream. grpcio-tools is only needed to
-# regenerate pubsub_api_pb2*.py from the vendored proto (dev-time, not here).
+# --- Salesforce CDC subscriber (Phase 20l — ingestion/sf_pubsub) ---
 grpcio
 protobuf
 fastavro
 
-# Google Docs connector (Phase 15; optional — no-op unless GOOGLE_CLIENT_ID set)
-google-auth
-google-auth-oauthlib
-google-api-python-client
-
-# Slack + GitHub connectors (Phase 16; optional — no-op unless creds set)
+# --- Slack + GitHub connectors (Phase 16) / Slack Socket Mode (Phase 24c) ---
 requests
+websockets
 
-# api (Phase 5)
+# --- api (Phase 5) ---
 fastapi
-uvicorn[standard]
-
-# tests / CI (Phase 9)
-pytest
+uvicorn
+httptools                # uvicorn HTTP parser (the useful half of [standard])
 httpx

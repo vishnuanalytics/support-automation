@@ -136,8 +136,15 @@ def poll_channel(sb, cfg: "mailbox.MailboxConfig", *, lookback_days: int,
 
 def tick(*, tenant: str | None, lookback_days: int, limit: int, dry_run: bool,
          only_from: "set[str] | None" = None) -> int:
+    if not mailbox.poller_is_intake():
+        if not getattr(tick, "_idle_logged", False):
+            log.info("email poller idle: SF_INTAKE_MODE=%s — Salesforce Email-to-Case is "
+                     "the intake (SF-1). Set SF_INTAKE_MODE=poller (or =both) to enable.",
+                     mailbox.intake_mode())
+            tick._idle_logged = True
+        return 0
     sb = get_supabase()
-    channels = mailbox.list_active_channels(sb)
+    channels = mailbox.list_pollable_channels(sb)   # active + errored-and-due (auto-recovery)
     if tenant:
         channels = [c for c in channels if c.tenant_id == tenant]
     if not channels:
@@ -155,6 +162,8 @@ def tick(*, tenant: str | None, lookback_days: int, limit: int, dry_run: bool,
 
 
 def main(argv: list[str] | None = None) -> int:
+    from interpreter.config import validate_env
+    validate_env()
     ap = argparse.ArgumentParser(prog="ingestion.email_watch")
     ap.add_argument("--tenant", help="only poll this tenant's channel")
     ap.add_argument("--lookback", type=int, default=3, help="days (bounds a first run)")
@@ -175,11 +184,14 @@ def main(argv: list[str] | None = None) -> int:
              dry_run=args.dry_run, only_from=only_from)
         return 0
 
+    from interpreter.health import beat
+
     log.info("watching mailboxes every %.0fs", args.interval)
     while True:
         try:
             tick(tenant=args.tenant, lookback_days=args.lookback, limit=args.limit,
                  dry_run=args.dry_run, only_from=only_from)
+            beat("poller")
         except Exception as e:  # noqa: BLE001
             log.warning("tick failed: %s", e)
         time.sleep(args.interval)
