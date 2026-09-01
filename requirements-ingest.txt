@@ -1,0 +1,4 @@
+# Phase 1 scraper (ingestion/scraper.py) — runs on GitHub Actions
+# (daily-sync.yml), never in the Docker services. Kept out of the image.
+beautifulsoup4
+trafilatura
