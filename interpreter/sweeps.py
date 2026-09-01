@@ -6,6 +6,11 @@ They are the backstop for everything the pipeline + Omni-Channel can't catch.
 
   queue_sweep    every 5 min — overdue / stuck / escalated-unaccepted Cases:
                                nudge + re-route once, then SLA_Breach + page.
+                               Only judges Cases the pipeline has actually
+                               touched (Next_Action_Due__c / Routed_Team__c /
+                               Last_AI_Run_At__c set) — a pre-cutover backlog
+                               or a CDC-not-yet-run Case is left to
+                               cdc_reconcile, not treated as stuck on sight.
   cdc_reconcile  hourly      — Cases with no matching `runs` row -> enqueue
                                (covers CDC's 72h retention cliff / cdc downtime).
   reasoning_ttl  every 5 min — reasoning_sessions stuck open past a ceiling:
@@ -88,7 +93,7 @@ def queue_sweep(sb, *, dry_run: bool | None = None) -> dict:
     try:
         rows = sf.query(
             "SELECT Id, CaseNumber, Status, OwnerId, Routed_Team__c, Next_Action_Due__c, "
-            "SLA_Breach__c, CreatedDate, LastModifiedDate FROM Case "
+            "Last_AI_Run_At__c, SLA_Breach__c, CreatedDate, LastModifiedDate FROM Case "
             "WHERE IsClosed = false AND Status NOT IN ('Resolved', 'Closed') "
             "ORDER BY CreatedDate ASC LIMIT 500"
         ).get("records", [])
@@ -108,12 +113,25 @@ def queue_sweep(sb, *, dry_run: bool | None = None) -> dict:
         team = r.get("Routed_Team__c") or "support"
         cn = r.get("CaseNumber")
 
+        # A Case with none of the control-plane fields set has never been
+        # through the Phase 27c pipeline — predates the cutover, or CDC
+        # hasn't run its first pass yet. Ours to judge only once it shows a
+        # fingerprint of the pipeline touching it; `cdc_reconcile` is the
+        # backstop for "CDC never picked this up at all".
+        touched = bool(due or r.get("Routed_Team__c") or r.get("Last_AI_Run_At__c"))
+        if not touched:
+            continue
+
         reason = hard = None
         if due and due < now:
             over = (now - due).total_seconds() / 60
             reason, hard = "overdue", over > ACK_MIN
         elif status in ("New", "Triaged"):
-            age = _age_min(r.get("CreatedDate"), now)
+            # age since the pipeline last touched it, not since the Case was
+            # first created — a re-triaged Case (customer reply) has an old
+            # CreatedDate but should read as fresh, not stuck.
+            last_touch = r.get("Last_AI_Run_At__c") or r.get("CreatedDate")
+            age = _age_min(last_touch, now)
             if age > STUCK_MIN:
                 reason, hard = "stuck", age > 2 * STUCK_MIN
         elif status == "Escalated" and is_queue:
