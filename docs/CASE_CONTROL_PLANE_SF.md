@@ -71,44 +71,32 @@ running user assigned to it.
 
 ---
 
-## 27f — Cutover (one entry queue)
+## 27f — Cutover (one entry queue)  ✅ applied (2026-09-01)
 
-Two parts. Part A (code) shipped; part B is the one hard-to-reverse step —
-run it in a low-volume window.
+**A. Pipeline-created Cases** — `salesforce.ensure_case` sets `OwnerId =
+AI_Intake` on every Case it creates (a REST create doesn't run assignment
+rules), so CDC / email-poller Cases start in the one queue.
 
-**A. Pipeline-created Cases** — done. `salesforce.ensure_case` now sets
-`OwnerId = AI_Intake` on every Case it creates (a REST create doesn't run
-assignment rules), so CDC / email-poller Cases already start in the one queue.
-
-**B. Email-to-Case / Web-to-Case / manual Cases** — `scripts/sf_assignment_cutover.py`:
-
-```bash
-python scripts/sf_assignment_cutover.py --dry-run   # backs up the current rule, shows the diff
-python scripts/sf_assignment_cutover.py             # replace 'Standard' with one entry -> AI_Intake
-python scripts/sf_assignment_cutover.py --restore   # redeploy the backup
-```
-
-The backup is written to `scripts/_assignment_backup/Case.assignmentRules.json`.
-After the cutover, create a Case from each channel → it lands in `AI_Intake`;
-the pipeline drives from there and escalations route via Omni (27b).
+**B. Email-to-Case / Web-to-Case / manual Cases** — `scripts/sf_assignment_cutover.py`
+**run** — the active `Standard` Case assignment rule now has one entry:
+`formula=true → Queue AI_Intake` (was 6 stock entries). Backup at
+`scripts/_assignment_backup/Case.assignmentRules.json`; revert with
+`python scripts/sf_assignment_cutover.py --restore`.
 
 ---
 
 ## 27g — Backstops
 
-**`scripts/sf_backstops.py`** deploys the two low-risk ones via metadata:
+### `Close_Needs_Type` validation rule  ✅ deployed (2026-09-01)
+`python scripts/sf_backstops.py` — a Case can't be `Closed` without a `Type`
+**and** a non-blank `Description`. `--remove` reverts.
 
-```bash
-python scripts/sf_backstops.py --dry-run
-python scripts/sf_backstops.py            # validation rule + 2 list views
-python scripts/sf_backstops.py --remove
-```
-
-- **`Close_Needs_Type`** validation rule — a Case can't be `Closed` without a
-  `Type` and a non-blank `Description`.
-- **Live Queue** list view — open Cases; columns Case # / Subject / Status /
-  `Routed_Team__c` / `Next_Action__c` / `Next_Action_Due__c` / `AI_Confidence__c` / Owner.
-- **SLA Breach** list view — `SLA_Breach__c = true` AND not closed.
+### Two list views — 60-second Setup task (column tokens fight the API)
+Cases tab → **New List View**:
+- **Live Queue** — filter `Closed = false`; columns Case # / Subject /
+  Status / `Routed_Team__c` / `Next_Action__c` / `Next_Action_Due__c` /
+  `AI_Confidence__c` / Owner; sort by `Next_Action_Due__c` ↑.
+- **SLA Breach** — filter `SLA_Breach__c = true` AND `Closed = false`.
 
 ### Native Case Escalation Rule — skipped (do by hand if wanted)
 The app `queue_sweep` acts at 30 min and is the primary path. If you want a
