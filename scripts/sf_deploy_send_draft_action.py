@@ -85,29 +85,27 @@ FLOW = """\
     <screens>
         <name>Confirm</name>
         <label>Confirm send</label>
-        <allowBack>false</allowBack>
-        <allowFinish>true</allowFinish>
+        <locationX>176</locationX>
+        <locationY>134</locationY>
+        <allowBack>true</allowBack>
+        <allowFinish>false</allowFinish>
         <allowPause>false</allowPause>
-        <fields>
-            <name>Confirm_info</name>
-            <fieldText>&lt;p&gt;This queues the support bot&amp;#39;s suggested reply to be emailed to the customer. Add edits below if needed &amp;mdash; leave blank to send it as drafted.&lt;/p&gt;</fieldText>
-            <fieldType>DisplayText</fieldType>
-        </fields>
-        <fields>
-            <name>Edits</name>
-            <fieldText>Edits (optional)</fieldText>
-            <fieldType>LargeTextBox</fieldType>
-            <isRequired>false</isRequired>
-        </fields>
         <connector>
             <targetReference>Arm_send_flag</targetReference>
         </connector>
+        <fields>
+            <name>Confirm_info</name>
+            <fieldText>&lt;p&gt;This queues the support bot&amp;#39;s suggested reply to be emailed to the customer. Click &lt;b&gt;Next&lt;/b&gt; to send it as drafted, or Cancel to stop.&lt;/p&gt;</fieldText>
+            <fieldType>DisplayText</fieldType>
+        </fields>
         <showFooter>true</showFooter>
         <showHeader>true</showHeader>
     </screens>
     <screens>
         <name>Queued</name>
         <label>Queued</label>
+        <locationX>176</locationX>
+        <locationY>374</locationY>
         <allowBack>false</allowBack>
         <allowFinish>true</allowFinish>
         <allowPause>false</allowPause>
@@ -122,21 +120,11 @@ FLOW = """\
     <recordUpdates>
         <name>Arm_send_flag</name>
         <label>Arm send flag</label>
+        <locationX>176</locationX>
+        <locationY>254</locationY>
         <connector>
             <targetReference>Queued</targetReference>
         </connector>
-        <inputAssignments>
-            <field>Bot_Send_Draft__c</field>
-            <value>
-                <booleanValue>true</booleanValue>
-            </value>
-        </inputAssignments>
-        <inputAssignments>
-            <field>Bot_Send_Note__c</field>
-            <value>
-                <elementReference>Edits</elementReference>
-            </value>
-        </inputAssignments>
         <filterLogic>and</filterLogic>
         <filters>
             <field>Id</field>
@@ -145,9 +133,17 @@ FLOW = """\
                 <elementReference>recordId</elementReference>
             </value>
         </filters>
+        <inputAssignments>
+            <field>Bot_Send_Draft__c</field>
+            <value>
+                <booleanValue>true</booleanValue>
+            </value>
+        </inputAssignments>
         <object>Case</object>
     </recordUpdates>
     <start>
+        <locationX>50</locationX>
+        <locationY>0</locationY>
         <connector>
             <targetReference>Confirm</targetReference>
         </connector>
@@ -172,6 +168,26 @@ QUICK_ACTION = """\
 </QuickAction>
 """
 
+# The integration user (worker) reads Bot_Send_Note__c and clears
+# Bot_Send_Draft__c. A field created via the Metadata API has no field-level
+# security for anyone — not even System Administrator — so grant it here.
+# A Profile deploy is additive: only these fieldPermissions are touched.
+ADMIN_PROFILE = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<Profile xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fieldPermissions>
+        <field>Case.Bot_Send_Draft__c</field>
+        <editable>true</editable>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <field>Case.Bot_Send_Note__c</field>
+        <editable>true</editable>
+        <readable>true</readable>
+    </fieldPermissions>
+</Profile>
+"""
+
 PACKAGE = """\
 <?xml version="1.0" encoding="UTF-8"?>
 <Package xmlns="http://soap.sforce.com/2006/04/metadata">
@@ -182,6 +198,7 @@ PACKAGE = """\
     </types>
     <types><members>Send_Bot_Draft_to_Customer</members><name>Flow</name></types>
     <types><members>Case.Send_Bot_Draft</members><name>QuickAction</name></types>
+    <types><members>Admin</members><name>Profile</name></types>
     <version>%(api)s</version>
 </Package>
 """ % {"api": API}
@@ -206,6 +223,7 @@ def _zip() -> bytes:
         z.writestr("objects/Case.object", CASE_OBJECT)
         z.writestr("flows/Send_Bot_Draft_to_Customer.flow", FLOW)
         z.writestr("quickActions/Case.Send_Bot_Draft.quickAction", QUICK_ACTION)
+        z.writestr("profiles/Admin.profile", ADMIN_PROFILE)
     return buf.getvalue()
 
 
