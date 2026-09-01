@@ -83,18 +83,41 @@ def record_run(flow: dict, final: dict, *, case: dict, source: str = "api",
             log.warning("could not link action_request %s to run %s: %s", ar_id, run_id, e)
 
     # close the loop later: if this went to a human on a real Case, schedule a
-    # resolution check (Phase 11). Best-effort.
+    # resolution check (Phase 11). Best-effort. Phase 24: skipped when a Slack
+    # reasoning session owns the case — that dialogue is the resolution path.
     if run_id and row.get("human_action") == "pending":
         try:
             import datetime as _dt
 
             from interpreter import jobs
 
-            delay = int(os.environ.get("FEEDBACK_DELAY_MIN", "20"))
-            run_after = (_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(minutes=delay)).isoformat()
-            jobs.enqueue("check_resolution", {"run_id": run_id},
-                         dedupe_key=run_id, run_after=run_after, sb=sb)
+            case_id = row.get("case_id")
+            has_session = False
+            if case_id:
+                try:
+                    has_session = bool(
+                        sb.table("reasoning_sessions").select("session_id")
+                        .eq("case_id", case_id).not_.in_("state", ("sent", "abandoned"))
+                        .limit(1).execute().data)
+                except Exception:  # noqa: BLE001
+                    has_session = False
+            if has_session:
+                log.info("run %s: reasoning session owns the case — no check_resolution", run_id)
+            else:
+                delay = _int_env("FEEDBACK_DELAY_MIN", 20)
+                run_after = (_dt.datetime.now(_dt.timezone.utc)
+                             + _dt.timedelta(minutes=delay)).isoformat()
+                jobs.enqueue("check_resolution", {"run_id": run_id},
+                             dedupe_key=run_id, run_after=run_after, sb=sb)
         except Exception as e:  # noqa: BLE001
             log.warning("could not schedule resolution check for %s: %s", run_id, e)
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(str(os.environ.get(name, default)).strip())
+    except (TypeError, ValueError):
+        log.warning("%s=%r is not an int; using %d", name, os.environ.get(name), default)
+        return default
 
     return run_id
