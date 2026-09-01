@@ -703,6 +703,38 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**Phase 25 done (2026-09-01) — multimodal + Salesforce context, intelligence
+in nodes.** Routing decisions stay deterministic edge expressions; an
+`ai_prompt` node writes structured output and edges branch on it.
+- `llm.complete(images=[(bytes, mime)])` → a **vision chain**: free OpenRouter
+  vision models → paid Anthropic Haiku (`LLM_VISION_MODELS` / `LLM_VISION_PAID`)
+  → deterministic stub. `_run_chain` extracted; Anthropic/OpenRouter build
+  image content blocks.
+- **`attachments` node** (`interpreter/attachments.py`) — Case images via
+  `ContentDocumentLink`→`ContentVersion` blob + local **RapidOCR** (ONNX, CPU,
+  no torch; import-guarded). Writes `state.attachments` / `.attachment_text`
+  (folded into `classify` + `draft` for free) / `._attachment_blobs` (bytes for
+  vision, not persisted). Dockerfile gains `libgl1 libglib2.0-0 libxcb1`.
+- **`sf_context` node** (`interpreter/sf_context.py`) — Account (+ parent =
+  organization), Contact + siblings, Lead, Case history, Account team Users →
+  `state.sf_context`. Best-effort.
+- **`ai_prompt` node** — `{system}`/`{user}` templates interpolating
+  `{case.subject}` / `{sf_context.account.tier}` / `{attachment_text}` /
+  `{ai.x}`; `model`, `temperature`, `max_tokens`, `output_key`, `json_schema`,
+  `images` (`none`|`auto`), `cache`, `on_error`. Writes `state.ai[output_key]`
+  — a declared channel with an `operator.or_` reducer so a dynamic key isn't
+  dropped by the graph merge.
+- `state.py`: `attachments` / `attachment_text` / `_attachment_blobs` /
+  `sf_context` / `ai` channels. `builder._context` exposes `sf_context` / `ai`
+  / `attachments` to edge conditions. `classify` `tier_field`/`region_field`
+  resolve against state first.
+- Editor: `AiPromptForm` / `SfContextForm` / `AttachmentsForm` in
+  `Inspector.tsx`; `NODE_DEFAULTS` entries. Comprehensive template
+  `interpreter/flows/flow_sf_comprehensive.json` (every node config filled;
+  **not seeded** — flip `sf_entry` when ready). Gate edges also route
+  `answer_mode == 'action'` and `ai.triage.churn_or_legal_risk` → `handover`.
+- 283 offline pytest (11 new). OCR verified live in the worker container.
+
 **Phases 0–20 built. No open phase.** Migrations `001`–`044`
 (`034`/`035` = Phase 20a: `tenant_integrations` poller columns + the
 Supabase-Vault `integration_secret_*` RPCs; `036` = Phase 20e: the
@@ -722,7 +754,7 @@ the single comprehensive workflow (`team_route` + 5-way gate) — **applied
 2026-08-31**, published **v4**). Migrations `047`–`053` land the resilience
 work and the `notify_human` / double-tag fixes — see the Phase 23* entries
 below; the email `sf_entry` flow is now at **v9**.
-272 offline pytest (24a-f) tests + web tsc/vitest (6)/build +
+283 offline pytest (24a-f + 25) tests + web tsc/vitest (6)/build +
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
 
@@ -840,7 +872,7 @@ new comment into a customer email; (b) there was no one-click "send it".
   CDC's `bot_user_id` filter stops a loop).
 - **Operator step:** run the deploy script, then Setup → Object Manager →
   Case → Page Layouts → drag "Send Bot Draft to Customer" onto the action bar.
-- No DB migration (the fields live in Salesforce). 272 offline pytest (24a-f) (11 new).
+- No DB migration (the fields live in Salesforce). 283 offline pytest (24a-f + 25) (11 new).
 
 **Phase 23g (2026-09-01): `notify_human` → a real Slack channel (live test prep).**
 Slack was already connected for tenant `00000000…` (`tenant_integrations`
@@ -875,7 +907,7 @@ place to answer since that is where the @mention lives.
   draft **verbatim, no LLM call**. `_check_resolution` passes `row["draft"]`.
 - Verified live: the queued `check_resolution` tick picked up the FeedComment
   and emailed the original draft to the customer (SMTP, mirrored to the Case
-  as an outbound EmailMessage); run → `guided_resume`. 272 offline pytest (24a-f).
+  as an outbound EmailMessage); run → `guided_resume`. 283 offline pytest (24a-f + 25).
 
 **Phase 23e (2026-09-01): stop the double Chatter tag on an escalated Case.**
 Case 00001184 showed 3 bot feed posts and the rep @mentioned twice: `ask_human`
