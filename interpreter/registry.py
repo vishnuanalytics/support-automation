@@ -176,13 +176,22 @@ def _cp_write(state: CaseState, config: dict, *, action: str, actor: str = "ai",
     sf_id = case.get("sf_id") or case.get("id")
     fields = {k: v for k, v in (fields or {}).items() if v not in (None, "")}
     prior = str(case.get("status") or "").strip().lower()
-    if fields.get("Status") == "Triaged" and prior in _ADVANCED_STATUS:
-        fields.pop("Status")     # don't stomp a human's In Progress / Escalated
+    # never move a Case *backwards* in the lifecycle within one run — a later
+    # node (e.g. notify_human after ask_human) reads a stale in-state status
+    # and must not undo Escalated -> In Progress / Triaged.
+    _RANK = {"new": 0, "triaged": 1, "in progress": 2, "waiting on customer": 2,
+             "escalated": 3, "resolved": 4, "closed": 5}
+    want = str(fields.get("Status") or "").strip().lower()
+    if want and prior and _RANK.get(want, 0) < _RANK.get(prior, 0):
+        fields.pop("Status")
     if sf_id and fields:
         try:
             salesforce.update_case_fields(sf_id, fields, tenant_id=state.get("tenant_id"))
         except Exception as e:  # noqa: BLE001
             log.warning("cp_write(%s): %s", sf_id, e)
+    # keep the in-run view current so the *next* node doesn't clobber this
+    if isinstance(case, dict) and fields.get("Status"):
+        case["status"] = fields["Status"]
     try:
         from interpreter import case_events
 

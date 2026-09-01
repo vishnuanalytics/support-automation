@@ -141,14 +141,23 @@ def _open_session(state: dict, config: dict, *, sf_uid, slack_uid,
         sb = get_supabase()
         case = state.get("case") or {}
         cls = state.get("classification") or {}
+        # `case_lookup` writes state.investigation_hints (list[str]); retrieval
+        # is a list[dict] of chunks. The old code did `(list).get("docs")` and
+        # threw whenever retrieval was non-empty — which killed the session on
+        # every escalation that had KB matches.
+        kb_hits = (
+            list(state.get("investigation_hints") or [])
+            or [(r.get("heading_path") or r.get("doc_url") or "")
+                for r in (state.get("retrieval") or []) if isinstance(r, dict)][:6]
+            or None
+        )
         sess = reasoning.open_session(
             sb, case=case, tenant_id=state.get("tenant_id"),
             run_id=state.get("run_id"),
             case_type=cls.get("case_type") or state.get("case_type"),
             case_number=(state.get("sf_case") or {}).get("case_number") or case.get("case_number"),
             agent_sf_id=sf_uid, agent_slack_id=slack_uid,
-            kb_hits=(state.get("case_lookup") or {}).get("hints")
-                    or (state.get("retrieval") or {}).get("docs"),
+            kb_hits=kb_hits,
             max_rounds=config.get("max_rounds"),
         )
         sb.table("reasoning_sessions").update({

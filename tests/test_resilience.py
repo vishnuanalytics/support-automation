@@ -329,6 +329,37 @@ def test_notify_human_opens_a_reasoning_session_and_never_dumps_the_draft(monkey
     assert "draft_comment" not in out
 
 
+def test_open_session_survives_a_non_empty_retrieval_list(monkeypatch):
+    """Regression: `_open_session` did `(state['retrieval']).get('docs')` and
+    threw `'list' object has no attribute 'get'` on every escalation that had
+    KB matches — so no reasoning_sessions row was ever created and the Slack
+    dialogue stayed silent."""
+    from interpreter import alert, reasoning
+    from ingestion import scraper
+
+    captured = {}
+
+    class _SB:
+        def table(self, *_): return self
+        def update(self, *_): return self
+        def eq(self, *_): return self
+        def execute(self): return type("R", (), {"data": [{}]})()
+
+    monkeypatch.setattr(scraper, "get_supabase", lambda: _SB())
+    monkeypatch.setattr(
+        reasoning, "open_session",
+        lambda sb, **kw: captured.update(kw) or {"session_id": "s9"})
+
+    sid = alert._open_session(
+        {"case": {"sf_id": "500X"}, "tenant_id": "t",
+         "retrieval": [{"heading_path": "Webhooks > Retries", "doc_url": "u"},
+                       {"doc_url": "u2"}],
+         "classification": {"case_type": "Problem / Bug"}},
+        {}, sf_uid=None, slack_uid="U1", slack_channel="C1", slack_thread_ts="1.1")
+    assert sid == "s9"
+    assert captured["kb_hits"] == ["Webhooks > Retries", "u2"]
+
+
 def test_routing_cache_hits(monkeypatch):
     from interpreter import routing
 
