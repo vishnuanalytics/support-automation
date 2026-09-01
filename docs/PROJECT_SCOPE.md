@@ -703,6 +703,50 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**Phase 27 — the Case Control Plane (in progress, 2026-09-01).** One
+AI-managed Case queue: classify + route + track `Status` + hand off via
+Omni-Channel, so no case sits unowned / unmoved / unwatched. Full design +
+build plan: `docs/` artifact
+`https://claude.ai/code/artifact/403e72fa-beef-4f12-809f-7511f6d81ca0`;
+Salesforce-org steps: **`docs/CASE_CONTROL_PLANE_SF.md`**.
+
+Repo side done (branch `phase-27-case-control-plane`, 312 offline pytest):
+- **27a** — migration `062`: `case_events` (append-only per-Case audit log,
+  RLS, separate from `runs.trace`) + `sla_policy` ((tier, routed_team) →
+  ack/resolve; seed ack 30 / resolve 4·8·24h). `scripts/sf_support_setup.py`
+  gains a `cp_fields` stage (9 Case fields incl. `Routed_Team__c` picklist),
+  Status += `Triaged`/`In Progress`/`Resolved`, queues `AI_Intake` /
+  `Unrouted_Review` / `SLA_Breach`.
+- **27c** — `interpreter/case_events.py` (record/link_run); `registry.py`
+  `_cp_fields`/`_cp_write` wired into every node: `sf_writeback` → `Status =
+  Triaged` (guarded — won't downgrade an advanced Case) + `Routed_Team__c` +
+  run linkage; `confidence_gate` → `AI_Confidence__c`; `ask_human`/`handover`
+  → `Escalated` + `Routed_Team__c` + `Next_Action_Due__c` (+30m) +
+  `Escalation_Reason__c`; `clarify` → `Waiting on Customer` (+72h) or
+  `Escalated` when exhausted; `notify`/`notify_human` → `In Progress` +
+  `Handoff_Slack_Ts__c`. `salesforce.get_case`/`ensure_case` now surface
+  `Status`/`OwnerId`.
+- **27d** — `interpreter/sweeps.py`: `queue_sweep` (overdue / stuck /
+  escalated-unaccepted → nudge+re-route, then `SLA_Breach__c` + page),
+  `cdc_reconcile` (Cases with no `runs` row → enqueue), `reasoning_ttl`
+  (stale `reasoning_sessions` → nudge → escalate+abandon). Run in the
+  `api.worker` loop, self-re-enqueue; `SWEEP_DRY_RUN=1` / `SWEEPS_DISABLED=1`.
+  `health_check` flags an SLA-breach spike.
+- **27e** — migration `063`: `notify_targets` gains
+  `slack_channel`/`slack_usergroup`/`urgency` + `match_kind = routed_team`.
+  `routing.resolve_slack_route` (routed_team > module > case_type →
+  `#cx-*` + `@*-oncall`; miss → `#cx-unrouted`). `alert.py` reasoning-thread
+  root @mentions the usergroup + carries tier/type/team/confidence/nearest
+  resolutions.
+
+Not built (needs the org / Slack app — see the SF runbook): **27b**
+Omni-Channel config (Service Channel, Routing/Presence Configs, the
+`Route_Support_Case` Omni-Channel Flow + record-triggered Flow), **27f**
+assignment-rule cutover to `→ AI_Intake`, **27g** native Escalation Rule +
+`Closed`-needs-`Type` validation rule + list views, the Slack channels /
+usergroups, and the interactive card buttons (**27h** — needs the Slack app
+interactivity endpoint).
+
 **Audit remediation pass done (2026-09-01) — WF / NEO / SB / Oracle items.**
 One batch closing the yellow/green items from the deployment audit. 291
 offline pytest + web build green.
