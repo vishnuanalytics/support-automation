@@ -724,6 +724,28 @@ the single comprehensive workflow (`team_route` + 5-way gate) — **applied
 `tests/test_multiflow.py` (needs Groq quota). **`docs/REQUIREMENTS.md`** is
 the spec; its §9 tracks gaps.
 
+**Phase 23c (2026-09-01): Case 00001182/00001183 debug.**
+- **Double EmailMessage → double run** — `log_email_message` stripped angle
+  brackets for its idempotency check but Email-to-Case stores
+  `MessageIdentifier` *with* them, so `sf_case` created a 2nd EmailMessage →
+  2nd `EmailMessageChangeEvent` → extra run. Now matches `IN ('<mid>','mid')`.
+  `latest_inbound_email` returns the EmbMsg `id`; `_run_flow` collapses the
+  Case + EmailMessage CDC events onto one run via `email:<EmbMsg id>`.
+- **Phase 20m never fired for `clarify`/`notify`** — `runs.build_row` only
+  set `human_action='pending'` (→ schedules the resolution check) for
+  `ask_human`/`handover`. Now `notify` + `need_info` on a real Case count
+  too, so an agent CaseComment on a clarified/notified Case gets polished
+  into a customer reply.
+- **@mention never worked — wrong endpoint, not OD-4.** `post_chatter` hit
+  `connect/records/feed-elements` (404 → plain FeedItem). Fixed to
+  `chatter/feed-elements`; verified live. `routing.queue_member(queue)` →
+  an active member (Chatter can't @mention a Queue); `h_clarify` gains
+  `mention_team`/`mention_queue`/`mention_id`, `h_notify` mentions a queue
+  target's member or `mention_id`. Migration `051` sets `mention_team` + a
+  fallback `mention_id` (Gundam Vishnu) on the email flow's clarify+notify.
+  `h_notify.config.draft_inline` collapses the note + draft-comment into one
+  feed row.
+
 **Phase 23b (2026-08-31): Salesforce-end gap fixes.**
 - **Cross-path Case dedup** — `_thread_msg_ids` now also includes the mail's
   **own** Message-ID, so the poller's `sf_case` reuses a Case that Email-to-Case

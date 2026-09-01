@@ -224,7 +224,7 @@ planned future channel — it must slot in as another adapter, not a rewrite
 | **OD-1** | Persistent-worker host (Oracle/GCP free VM vs. keep pinger) | Deferred; pinger is the interim. Risk: PAT dependency, Actions minutes. |
 | **OD-2** | Dedicated `support@` mailbox vs. personal Gmail | Deferred; loop-breakers handle the noise but it's not production-clean. |
 | **OD-3** | Groq daily quota exhaustion → stub drafts | May need a paid key at volume. |
-| **OD-4** | Chatter @mention endpoint 404s in this org | Falls back to a plain FeedItem (works, no mention). |
+| **OD-4** | ~~Chatter @mention endpoint 404s in this org~~ | **Resolved 2026-09-01 — was a wrong URL, not an org limit.** `post_chatter` used `connect/records/feed-elements` (→ 404 → no-mention FeedItem fallback); the correct endpoint is `chatter/feed-elements`. @mention works on the DE org. `notify` / `clarify` now @mention the resolved rep (a queue member via `routing.queue_member`, else `mention_id`). |
 | **OD-5** | Email-to-Case not enabled → FR-7 / FR-12 blocked | Admin action required (C-1). |
 
 ---
