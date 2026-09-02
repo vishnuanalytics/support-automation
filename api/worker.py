@@ -165,8 +165,8 @@ def _check_resolution(payload: dict, sb) -> dict:
     run_id = payload["run_id"]
     checks = int(payload.get("checks", 0))
     rows = (sb.table("runs")
-            .select("case_payload, draft, created_at, human_action, human_reply, "
-                    "tenant_id, flow_id, team")
+            .select("run_id, case_payload, draft, created_at, human_action, human_reply, "
+                    "tenant_id, flow_id, team, retrieval, trace")
             .eq("run_id", run_id).execute().data)
     if not rows:
         return {"run_id": run_id, "skipped": "run gone"}
@@ -202,6 +202,12 @@ def _check_resolution(payload: dict, sb) -> dict:
             "human_action": action, "human_reply": resp["outbound_email"][:8000],
             "edit_distance": dist, "feedback_checked_at": "now()",
         }).eq("run_id", run_id).execute()
+        # KIL-c — check the reply the agent sent against the KB + case history.
+        try:
+            from interpreter import review
+            review.judge_human_reply(sb, run_row=row, reply_text=resp["outbound_email"])
+        except Exception as e:  # noqa: BLE001
+            log.warning("review.judge_human_reply for %s failed: %s", run_id, e)
         return {"run_id": run_id, "human_action": action, "edit_distance": dist}
 
     # 3. nothing actionable yet -> re-poll, or give up
@@ -259,7 +265,7 @@ def _embed_kb_entry(payload: dict, sb) -> dict:
     """Phase 14 — chunk + embed a large KB entry off the request thread."""
     eid = payload["entry_id"]
     rows = sb.table("kb_entries").select("*").eq("entry_id", eid).execute().data
-    if not rows or rows[0]["status"] != "active":
+    if not rows or rows[0]["status"] not in ("active", "provisional"):
         return {"entry_id": eid, "skipped": "entry gone or archived"}
     e = rows[0]
     url = f"kb://{e['source_id']}/{eid}"
@@ -312,8 +318,31 @@ def _create_github_issue(payload: dict, sb) -> dict:
     return {"action_request_id": ar_id, **issue}
 
 
+def _apply_kb_change(payload: dict, sb) -> dict:
+    """KIL-d — a manager approved a KB update in Slack; write it (provisional)."""
+    from interpreter import kb_writeback
+
+    ar_id = payload["action_request_id"]
+    rows = sb.table("action_requests").select("*").eq("id", ar_id).execute().data
+    if not rows:
+        return {"action_request_id": ar_id, "skipped": "gone"}
+    ar = rows[0]
+    if ar["kind"] != "kb_change":
+        return {"action_request_id": ar_id, "skipped": f"kind={ar['kind']}"}
+    res = kb_writeback.apply_kb_change(sb, ar)
+    try:
+        if ar.get("slack_channel") and ar.get("slack_ts") and slackmod.available():
+            slackmod.update_message(
+                ar["tenant_id"], ar["slack_channel"], ar["slack_ts"],
+                f":books: KB updated (provisional) — {ar['payload'].get('title', '')}", sb)
+    except Exception as e:  # noqa: BLE001
+        log.warning("slack update after kb change failed: %s", e)
+    return {"action_request_id": ar_id, **res}
+
+
 # ── Phase 27d — the case-control-plane safety-net sweeps ──────────────────
-_SWEEP_EVERY_MIN = {"queue_sweep": 5, "cdc_reconcile": 60, "reasoning_ttl": 5}
+_SWEEP_EVERY_MIN = {"queue_sweep": 5, "cdc_reconcile": 60, "reasoning_ttl": 5,
+                    "handoff_watch": 5, "kb_promote": 360}
 
 
 def _reschedule(kind: str, sb) -> None:
@@ -341,9 +370,12 @@ def _sweep_handler(fn):
 
 HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
             "embed_kb_entry": _embed_kb_entry, "create_github_issue": _create_github_issue,
+            "apply_kb_change": _apply_kb_change,
             "queue_sweep": _sweep_handler("queue_sweep"),
             "cdc_reconcile": _sweep_handler("cdc_reconcile"),
-            "reasoning_ttl": _sweep_handler("reasoning_ttl")}
+            "reasoning_ttl": _sweep_handler("reasoning_ttl"),
+            "handoff_watch": _sweep_handler("handoff_watch"),
+            "kb_promote": _sweep_handler("kb_promote")}
 
 JOB_TIMEOUT = int(os.environ.get("WORKER_JOB_TIMEOUT", "120"))
 

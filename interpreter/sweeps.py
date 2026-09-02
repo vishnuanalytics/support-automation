@@ -309,3 +309,53 @@ def reasoning_ttl(sb, *, dry_run: bool | None = None) -> dict:
                actor="system:sweep", action="handover", to_status="Escalated",
                reason="reasoning session TTL", slack_ts=ts, slack_channel=ch)
     return {"open": len(rows), "nudged": nudged, "escalated": escalated, "dry_run": dry}
+
+
+def handoff_watch(sb, *, dry_run: bool | None = None) -> dict:
+    """KIL-e — keep watching every escalated Case: run the contradiction judge
+    on new messages + check for still-open critical questions, flagging the
+    manager thread. `interpreter/handoff_watch.watch_case` does one Case."""
+    from interpreter import handoff_watch as hw
+    from interpreter import salesforce
+
+    dry = _dry() if dry_run is None else dry_run
+    if not salesforce.available():
+        return {"skipped": "no Salesforce creds"}
+    sf = salesforce.client_for(None)
+    try:
+        rows = sf.query(
+            "SELECT Id, CaseNumber, Status, Type, Routed_Team__c, CreatedDate "
+            "FROM Case WHERE IsClosed = false AND Status IN ('Escalated', 'In Progress') "
+            "AND Routed_Team__c != null ORDER BY LastModifiedDate DESC LIMIT 200"
+        ).get("records", [])
+    except Exception as e:  # noqa: BLE001
+        log.warning("handoff_watch query failed: %s", e)
+        return {"error": str(e)[:200]}
+
+    watched = 0
+    flagged: list[str] = []
+    for r in rows:
+        try:
+            res = hw.watch_case(sb, r, sf=sf, dry=dry)
+        except Exception as e:  # noqa: BLE001
+            log.warning("handoff_watch %s: %s", r.get("CaseNumber"), e)
+            continue
+        watched += 1
+        if res.get("flags"):
+            flagged.append(r.get("CaseNumber"))
+    return {"watched": watched, "flagged": flagged, "dry_run": dry}
+
+
+def kb_promote(sb, *, dry_run: bool | None = None) -> dict:
+    """KIL-f — flip `provisional` KB entries (from a review write-back) to
+    `active` once they've aged past `provisional_until` with no open
+    contradiction referencing them."""
+    from interpreter import kb_writeback
+
+    dry = _dry() if dry_run is None else dry_run
+    try:
+        n = kb_writeback.promote_provisional(sb, dry_run=dry)
+    except Exception as e:  # noqa: BLE001
+        log.warning("kb_promote failed: %s", e)
+        return {"error": str(e)[:200]}
+    return {"promoted": n, "dry_run": dry}

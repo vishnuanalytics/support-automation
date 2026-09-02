@@ -293,3 +293,54 @@ export interface Invitation {
   created_at: string;
   accepted_at: string | null;
 }
+
+// ── KIL-f: Knowledge Integrity Loop review queue + metrics ─────────────
+export interface IntegrityVerdict {
+  relation: "entails" | "neutral" | "contradicts";
+  flagged: boolean;
+  novel: boolean;
+  salient: string[];
+  verdicts: { claim: string; relation: string; evidence: string; confidence: number }[];
+  backend: string;
+}
+
+export interface ReviewTask {
+  id: string;
+  case_sf_id: string | null;
+  case_number: string | null;
+  run_id: string | null;
+  kind: "human_reply_review" | "sample";
+  trigger: "contradicts" | "novel" | "sample" | null;
+  statement: string | null;
+  verdict: IntegrityVerdict;
+  contexts: { ref: string | null; kind: string | null; text: string }[];
+  status: "open" | "correct" | "wrong" | "dismissed";
+  reviewer_id: string | null;
+  reviewed_at: string | null;
+  kb_change_id: string | null;
+  created_at: string;
+}
+
+export interface KilMetrics {
+  window_days: number;
+  review: {
+    total: number;
+    open: number;
+    by_trigger: Record<string, number>;
+    by_status: Record<string, number>;
+    resolved: number;
+    flag_precision: number | null;
+    false_flag_rate: number | null;
+    agent_correction_rate: number | null;
+    median_time_to_review_h: number | null;
+  };
+  kb_writeback: {
+    entries: number;
+    provisional: number;
+    active: number;
+    superseded: number;
+    promotion_rate: number | null;
+  };
+  knowledge_freshness_days: number | null;
+  weekly: { week: string; flagged: number }[];
+}

@@ -29,7 +29,7 @@ import requests  # noqa: E402
 import websockets  # noqa: E402
 
 from ingestion.scraper import get_supabase  # noqa: E402
-from interpreter import reasoning, slack  # noqa: E402
+from interpreter import kb_writeback, reasoning, review, slack  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("interpreter.slack_socket")
@@ -63,7 +63,7 @@ def _deliver(sb, session: dict) -> dict:
 
     case_id = session["case_id"]            # the SF record id (500…)
     tenant_id = session.get("tenant_id")
-    _SEL = ("run_id, case_payload, draft, tenant_id, flow_id, team, "
+    _SEL = ("run_id, case_payload, draft, tenant_id, flow_id, team, retrieval, trace, "
             "human_action, subject, source, created_at")
     runs: list = []
     # runs.case_id holds the CaseNumber (get_case maps it), so match on the
@@ -122,6 +122,14 @@ def _deliver(sb, session: dict) -> dict:
                 reason="approved in the Slack reasoning dialogue")
         except Exception as e:  # noqa: BLE001
             log.warning("could not mark %s Resolved after send: %s", case_id, e)
+
+        # KIL-c — check the reply we just sent against the KB + case history.
+        try:
+            if run and out.get("reply"):
+                review.judge_human_reply(
+                    sb, run_row={**run, "case_payload": case}, reply_text=out["reply"])
+        except Exception as e:  # noqa: BLE001
+            log.warning("review.judge_human_reply for %s failed: %s", case_id, e)
 
     return {"sent": bool(out.get("auto_sent")), "via": out.get("via"),
             "error": out.get("error")}
@@ -249,6 +257,59 @@ def dispatch_action(sb, payload: dict, *, post, deliver=None) -> dict:
     thread_ts = cont.get("thread_ts") or msg.get("thread_ts") or msg.get("ts")
     if not (channel and thread_ts):
         return {"skip": "no channel/thread on the interaction"}
+
+    # KIL-c — the human-reply review card (a standalone message, not a
+    # reasoning thread). Handle before the session lookup.
+    if (action_id or "").startswith("review_"):
+        verb = {"review_correct": "correct", "review_wrong": "wrong",
+                "review_dismiss": "dismissed"}.get(action_id)
+        task_id = (actions[0].get("value") or "").strip()
+        user = (payload.get("user") or {}).get("id")
+        row = review.resolve(sb, task_id, status=verb, reviewer_id=user) if (task_id and verb) else None
+        if not row:
+            post(channel, thread_ts, ":information_source: This review is already resolved.")
+            return {"skip": "review task not open", "action": action_id}
+        note = {
+            "correct": ":books: Marked *correct* — drafting a KB update for approval…",
+            "wrong": ":no_entry: Marked *wrong* — the agent will be notified (coaching).",
+            "dismissed": ":white_check_mark: Dismissed — not a conflict.",
+        }[verb]
+        post(channel, thread_ts, f"{note}  _(<@{user}>)_")
+        if verb == "correct":
+            try:
+                change = kb_writeback.draft_change(row)
+                kb_writeback.raise_kb_change(sb, tenant_id=row["tenant_id"],
+                                             task_row=row, change=change)
+            except Exception as e:  # noqa: BLE001
+                log.warning("kb_writeback for task %s failed: %s", task_id, e)
+        return {"action": action_id, "task": task_id, "status": verb}
+
+    # KIL-d — the KB-change approval card.
+    if (action_id or "") in ("kb_approve", "kb_reject"):
+        ar_id = (actions[0].get("value") or "").strip()
+        user = (payload.get("user") or {}).get("id")
+        new_status = "approved" if action_id == "kb_approve" else "rejected"
+        try:
+            upd = (sb.table("action_requests").update({
+                "status": new_status, "decided_by": user, "decided_at": "now()",
+            }).eq("id", ar_id).eq("status", "pending").execute().data or [])
+        except Exception as e:  # noqa: BLE001
+            log.warning("kb approval update: %s", e)
+            upd = []
+        if not upd:
+            post(channel, thread_ts, ":information_source: Already decided.")
+            return {"skip": "kb_change not pending", "action": action_id}
+        if new_status == "approved":
+            try:
+                from interpreter import jobs
+                jobs.enqueue("apply_kb_change", {"action_request_id": ar_id},
+                             dedupe_key=f"kbchange:{ar_id}")
+            except Exception as e:  # noqa: BLE001
+                log.warning("enqueue apply_kb_change: %s", e)
+            post(channel, thread_ts, f":white_check_mark: Approved — publishing (provisional). _(<@{user}>)_")
+        else:
+            post(channel, thread_ts, f":x: Rejected. _(<@{user}>)_")
+        return {"action": action_id, "action_request": ar_id, "status": new_status}
 
     session = _find_session(sb, thread_ts)
     if not session:

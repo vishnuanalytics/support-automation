@@ -17,7 +17,7 @@ import logging
 import re
 from typing import Any, Callable
 
-from . import groundedness, llm, policy, salesforce
+from . import groundedness, integrity, llm, policy, salesforce
 from .retrieval import hybrid_retrieve
 from .state import CaseState
 
@@ -928,18 +928,31 @@ def h_draft(state: CaseState, config: dict) -> dict:
                      "doc_url": f"case:{p.get('case_number')}"} for p in prior[:3]]
     grounded = groundedness.check(reply, (internal_matches[:5] + prior_as_src + retrieval[:5]))
 
+    # KIL-b — does the reply, or the customer's own claim, CONTRADICT the KB or
+    # a past resolution? A contradicting draft forces the gate to escalate.
+    icontexts = integrity.contexts_from_state(
+        {"prior_resolutions": prior, "internal_kb": internal, "retrieval": retrieval})
+    integ = {
+        "draft": integrity.check(reply, icontexts, kind="draft"),
+        "inbound": integrity.check(case.get("body") or "", icontexts, kind="inbound"),
+    }
+    idraft = integ["draft"]
+
     return {
         "draft": reply,
         "draft_confidence": round(model_conf, 4),
         "groundedness": grounded,
+        "integrity": integ,
         **_trace(
             config["_node_id"], "draft",
             f"{len(reply)} chars, model_confidence={model_conf:.2f}, "
             f"groundedness={grounded['score']:.2f} ({grounded['backend']}), "
+            f"integrity={idraft['relation']}"
+            f"{' FLAGGED' if idraft['flagged'] else ''} ({idraft['backend']}), "
             f"sources={len(retrieval[:5])}+{len(internal_matches[:5])} internal"
             f"+{len(prior_as_src)} prior-case",
             {"draft_confidence": model_conf, "chars": len(reply),
-             "groundedness": grounded, "tokens": tokens,
+             "groundedness": grounded, "integrity": integ, "tokens": tokens,
              "used_internal_kb": bool(internal_matches),
              "prior_cases": [p.get("case_number") for p in prior[:3]],
              "answer_mode": mode},
@@ -1047,6 +1060,13 @@ def h_confidence_gate(state: CaseState, config: dict) -> dict:
         amode = (state.get("classification") or {}).get("answer_mode")
         if amode and amode in esc_modes:
             forced = f"answer_mode '{amode}'"
+    # KIL-b — the draft contradicts the KB or a past resolution. Never
+    # auto-send a reply that disagrees with established knowledge; a human
+    # decides. On by default; a flow sets `escalate_on_integrity_conflict: false`.
+    if not forced and config.get("escalate_on_integrity_conflict", True):
+        idraft = (state.get("integrity") or {}).get("draft") or {}
+        if idraft.get("flagged"):
+            forced = "integrity conflict (draft contradicts KB/history)"
     if forced:
         passed = False
 

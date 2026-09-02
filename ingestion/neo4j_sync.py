@@ -116,6 +116,9 @@ def ensure_constraints(driver):
         "CREATE CONSTRAINT case_sf_id IF NOT EXISTS FOR (c:Case) REQUIRE c.sf_id IS UNIQUE",
         "CREATE CONSTRAINT reply_case_sf_id IF NOT EXISTS FOR (r:Reply) REQUIRE r.case_sf_id IS UNIQUE",
         "CREATE CONSTRAINT module_name IF NOT EXISTS FOR (m:Module) REQUIRE m.name IS UNIQUE",
+        # KIL-a — the Case-lifecycle graph MERGEs one (:Message) per turn.
+        "CREATE CONSTRAINT message_id IF NOT EXISTS FOR (mm:Message) REQUIRE mm.id IS UNIQUE",
+        "CREATE CONSTRAINT account_sf_id IF NOT EXISTS FOR (a:Account) REQUIRE a.sf_id IS UNIQUE",
     ):
         try:
             driver.execute_query(cypher, database_=NEO4J_DATABASE)

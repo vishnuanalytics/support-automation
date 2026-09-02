@@ -79,7 +79,9 @@ def alert_human(state: dict, config: dict) -> dict[str, Any]:
         log.warning("slack route lookup failed: %s", e)
     slack_ch = (_pick(config.get("slack_channel_by_team"), team, "default")
                 or config.get("slack_channel") or route.get("channel"))
-    usergroup = route.get("usergroup")
+    # Phase 27e — resolve the on-call handle to `<!subteam^ID>` so Slack
+    # actually pages the group (a bare `@handle` in text is inert).
+    usergroup = slack.usergroup_ref(route.get("usergroup"), tenant_id=tenant_id)
     out: dict[str, Any] = {"mention": {"slack": slack_uid, "sf": sf_uid},
                            "channel": want, "route": route}
 

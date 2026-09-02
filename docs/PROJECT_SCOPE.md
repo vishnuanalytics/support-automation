@@ -703,7 +703,90 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**Phase 27 — the Case Control Plane (in progress, 2026-09-01).** One
+**Phase KIL — Knowledge Integrity Loop (in progress, 2026-09-02).** Catch
+new info that contradicts the KB or case history (inbound tickets, bot
+drafts, human replies), send it to a manager, and fold confirmed
+corrections back into the KB under one-click approval. Plan artifact:
+`https://claude.ai/code/artifact/0ee3262d-4eaf-4669-bf3e-a16d8e9d3dff`;
+requirements FR-33…FR-39 in `docs/REQUIREMENTS.md`. Decisions locked:
+post-send review + 5% sampling (not a gate); after handover flag-to-manager
+only; LLM-drafted KB diff the manager one-click approves; NLI judge over
+retrieved passages (claim graph deferred to KIL-g). Manager = the routed-team
+`@cx-*-oncall` usergroups.
+
+- **KIL-a — built + live-backfilled (2026-09-02).** `ingestion/case_graph_sync.py`
+  syncs the Salesforce Case *lifecycle* (any status, not just closed) into
+  Neo4j: one `(:Case)` + one `(:Message)` per turn (description · in/outbound
+  `EmailMessage` · `CaseComment` — a `[bot draft…]` comment → `role='draft'`
+  `author_kind='bot'` · Chatter `FeedItem`). `case_memory.sync_case_lifecycle()`
+  holds the Cypher; `Message.id` / `Account.sf_id` constraints added.
+  Resumable via **`graph_sync_state`** (migration `064`, RLS like `system_health`).
+  Idempotent; Neo4j/SF down → exit 0. Live backfill: **92 dummy Cases → 174
+  Messages** (108 inbound / 42 draft / 24 agent_reply), `tenant_id` on every
+  node, 14 Cases with a full `draft → agent_reply` pair. 8 offline tests
+  (332 total). The vector side stays with `case_memory_sync --from-salesforce`.
+- **KIL-b — built (2026-09-02).** `interpreter/integrity.py` `check(statement,
+  contexts, *, kind) → {relation, flagged, novel, verdicts, backend}` — a Groq
+  NLI judge (deterministic negation-mismatch heuristic without a key).
+  Wired into `h_draft` (checks the draft + the inbound customer text vs. prior
+  resolutions + internal KB + retrieved docs → `state.integrity`); `h_draft`
+  trace shows `integrity=<relation>`. `h_confidence_gate` gains
+  `escalate_on_integrity_conflict` (default true): a draft that `contradicts`
+  established knowledge → forced escalation. `state.py` + `builder._context`
+  gain `integrity`. Eval `eval/integrity/` (24 labelled cases): real-Groq
+  **acc 0.958 · flag precision 1.000 · recall 1.000** — clears the ≥ 0.80 bar
+  for KIL-c. 12 offline tests (344 total).
+- **KIL-c — built (2026-09-02).** Migration `065`: **`review_tasks`** (RLS
+  read like `action_requests`, unique `(run_id, kind)`). `interpreter/review.py`
+  `judge_human_reply()` — after a human reply is *sent*, runs the KIL-b judge
+  on it against the run's KB + case-history context; `contradicts`/`novel` →
+  a `human_reply_review` task, else `REVIEW_SAMPLE_RATE` (5%) → a `sample`
+  task, and posts a Block-Kit card (Correct → update KB / Wrong → coach /
+  Not a conflict) to the routed-team `#cx-*` channel + manager usergroup.
+  Hooked into `slack_socket._deliver` + `worker._check_resolution` (both
+  best-effort). `slack_socket.dispatch_action` resolves the `review_*` clicks.
+  8 offline tests (352 total).
+- **KIL-d — built (2026-09-02).** Migration `066` (`kb_entries.{source_review_task,
+  supersedes_entry_id, approved_by, provisional_until}` + `provisional`/
+  `superseded` statuses). `interpreter/kb_writeback.py`: `draft_change` (LLM /
+  fallback) proposes a `kb_entries` create-or-supersede; the review card's
+  **Correct** button raises an `action_requests(kind='kb_change')` + an
+  Approve/Reject card; `kb_approve` → worker `_apply_kb_change` →
+  `kb_writeback.apply_kb_change` writes the entry **`provisional`**
+  (`origin='review_writeback'`, `provisional_until = now+7d`), supersedes +
+  de-indexes the old one, enqueues `embed_kb_entry`, MERGEs
+  `(:KBArticle)-[:SUPERSEDES]->`. `promote_provisional()` ages provisional →
+  active. Web Review tab + REST still pending. 8 offline tests (360 total).
+- **KIL-e — built (2026-09-02).** Migration `067` (`handoff_watch_state` —
+  cursor + rate-limit/dedup, RLS like `system_health`).
+  `interpreter/handoff_watch.py` `watch_case()` — for an escalated Case, runs
+  `integrity.check` on every message newer than `last_seen_ts` against the
+  run's KB + case-history context, and (LLM-gated) checks the `pointer_bank`
+  for still-open critical questions; a hit posts one flag to the reasoning
+  thread / routed-team channel, capped at `HANDOFF_MAX_FLAGS` (3) and deduped
+  by signature. **Never contacts the customer.** New `sweeps.handoff_watch`
+  in the `api.worker` loop (every 5 min, self-re-enqueue, `SWEEP_DRY_RUN`).
+  6 offline tests (366 total).
+- **KIL-f — built (2026-09-02).** `interpreter/kil_metrics.py` `compute()` —
+  flag precision / false-flag rate / agent-correction rate / median
+  time-to-review from `review_tasks`, the KB-writeback funnel + promotion
+  rate, knowledge freshness, weekly contradiction count. API `GET
+  /api/review-tasks`, `POST /api/review-tasks/{id}/resolve` (→
+  `kb_writeback` on `correct`), `GET /api/kil/metrics`. Web **Review** tab
+  (`web/src/review/ReviewView.tsx`) — tiles + the queue with Correct / Wrong
+  / Not-a-conflict. `promote_provisional` now holds an entry while an open
+  contradiction still references it (the poisoning guard); a `kb_promote`
+  sweep runs it every 6 h. `sop_conflicts`-as-a-sweep is a noted follow-on.
+  3 offline tests + web build green (369 total).
+
+**Phase KIL COMPLETE (a–f, 2026-09-02); g (atomic claim graph) deferred.
+No open phase.** The loop runs end to end in code — contradiction caught →
+gate escalates or a review card is raised → manager confirms → LLM-drafted
+KB diff approved → worker writes a `provisional` entry (superseding the wrong
+one) → auto-promotes after 7 days unless still disputed. **Next: live
+end-to-end verification against the org + Slack.**
+
+**Phase 27 — the Case Control Plane (done, 2026-09-01/02).** One
 AI-managed Case queue: classify + route + track `Status` + hand off via
 Omni-Channel, so no case sits unowned / unmoved / unwatched. Full design +
 build plan: `docs/` artifact
@@ -786,9 +869,44 @@ table is now real code:**
   reconnect (a dropped socket no longer strands a dialogue mid-turn).
 - `/api/trace/<case>` folds in `case_events` as the timeline spine.
 
-Still not built (org / Slack admin — you're doing these): an Omni agent
-going "Available" + the Slack `#cx-*` channels / usergroups. Everything
-upstream is code-complete.
+**Slack workspace live (2026-09-02).** All 8 `#cx-*` channels created and
+the `support_automation` bot invited to each; 7 on-call usergroups created
+(`@cx-l1-oncall` / `@cx-tier2-oncall` / `@cx-csm-oncall` / `@cx-sales-oncall`
+/ `@trust-oncall` / `@billing-oncall` / `@cx-leads`). Bot granted
+`usergroups:read` + `usergroups:write`. Socket Mode verified connecting
+(`socket connected`, no scope errors) with the operator's `SLACK_APP_TOKEN`.
+Code: `slack.usergroup_ref()` resolves an on-call handle to `<!subteam^ID>`
+(a bare `@handle` in message text does **not** page a group — it was inert);
+`alert.alert_human` now calls it. `notify_targets` csm/sales rows corrected
+to `@cx-csm-oncall` / `@cx-sales-oncall` to match the created handles.
+`slack.SCOPES` (OAuth install) gains `usergroups:read`. 324 offline pytest.
+
+**SF Setup done (2026-09-02).** Presence-status access + the Omni utility
+widget + an agent going "Available — Cases" — all applied by the operator
+(the presence menu only offered Offline because *zero* `ServicePresenceStatus`
+grants existed — sys-admin does **not** get them automatically; a
+`CP_Omni_Presence` permission set with the 3 statuses is the fix). The E-6001
+"Couldn't Connect to Telephony" toast was the stock Phone/Voice softphone
+utility (org has 0 CallCenters) — unrelated to Omni; removed from the console.
+
+**27g "single queue" layout (2026-09-02).** The two design list views already
+existed and match artifact §Salesforce column-for-column: **`Live Queue`**
+(`Closed=0`, scope Everything; Case# · Subject · Status · Routed_Team__c ·
+Next_Action__c · Next_Action_Due__c · AI_Confidence__c · owner) and
+**`SLA Breach`** (`SLA_Breach__c=true` AND `Closed=0`; + Escalation_Reason__c).
+Deployed via `sf project deploy` (mdapi, v64): a Case **compact layout**
+`AI_Control_Plane` (Status · Routed_Team__c · Next_Action_Due__c ·
+AI_Confidence__c · Priority) for the highlights panel, and an **"AI Control
+Plane" section** (Routed_Team__c/Escalation_Reason__c/AI_Confidence__c/
+Handoff_Slack_Ts__c | Next_Action__c/Next_Action_Due__c/Last_AI_Run_At__c/
+Last_Run_Id__c) spliced after "Case Information" on `Case Layout` +
+`Case (Support) Layout`. Additive — every existing section preserved; verified
+by retrieve.
+
+Remaining (Setup clicks, not metadata): set `AI_Control_Plane` as the primary
+Case compact layout; `Live Queue` → Kanban grouped by Status, sort
+Next_Action_Due__c ↑, pin as default; add the Omni Supervisor tab for leads.
+Everything upstream is code-complete.
 
 **27a live-applied + 27a/c/d live-verified (2026-09-01).** Migrations `062`/
 `063` applied; `sf_support_setup.py --only queues --only cp_fields --only

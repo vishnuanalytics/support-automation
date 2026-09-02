@@ -148,6 +148,26 @@ def test_resolve_slack_route_falls_back_to_case_type_then_unrouted(monkeypatch):
     assert miss["channel"] == "#cx-unrouted" and miss["usergroup"] is None
 
 
+def test_usergroup_ref_resolves_handle_to_subteam_mention(monkeypatch):
+    """A bare @handle is inert in Slack text — `usergroup_ref` must turn it
+    into `<!subteam^ID>`, and fall back to the literal handle on any failure."""
+    from interpreter import slack
+    slack._UG_CACHE.clear()
+    monkeypatch.setattr(slack, "_bot_token", lambda t, sb: "xoxb-test")
+    monkeypatch.setattr(slack, "_sb", lambda: None)
+    monkeypatch.setattr(slack, "_call",
+                        lambda m, tok, p: {"usergroups": [{"handle": "cx-csm-oncall", "id": "S123"}]})
+    assert slack.usergroup_ref("@cx-csm-oncall", tenant_id="t") == "<!subteam^S123>"
+    assert slack.usergroup_ref("cx-csm-oncall", tenant_id="t") == "<!subteam^S123>"   # cached, no @
+    assert slack.usergroup_ref("unknown-group", tenant_id="t") == "@unknown-group"    # graceful
+    assert slack.usergroup_ref(None, tenant_id="t") is None
+
+    slack._UG_CACHE.clear()
+    monkeypatch.setattr(slack, "_call",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("missing_scope")))
+    assert slack.usergroup_ref("@cx-csm-oncall", tenant_id="t") == "@cx-csm-oncall"   # API down
+
+
 def test_clarify_sets_waiting_on_customer(capture, monkeypatch):
     monkeypatch.setattr(salesforce, "post_chatter", lambda *a, **k: {"posted": True, "dry_run": True})
     monkeypatch.setattr("interpreter.registry.llm.complete",
