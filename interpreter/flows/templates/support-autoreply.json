@@ -1,0 +1,21 @@
+{
+  "id": "support-autoreply",
+  "name": "Support auto-reply",
+  "category": "Support",
+  "description": "Retrieve from the KB, triage, draft a grounded reply, and auto-send only when the confidence gate passes for the tier — otherwise hand to a human.",
+  "nodes": [
+    {"key": "retrieve", "type": "retrieve", "label": "Retrieve KB"},
+    {"key": "classify", "type": "classify", "label": "Triage"},
+    {"key": "draft", "type": "draft", "label": "Draft reply"},
+    {"key": "gate", "type": "confidence_gate", "label": "Confidence gate"},
+    {"key": "send", "type": "auto_reply", "label": "Auto-reply"},
+    {"key": "human", "type": "ask_human", "label": "Ask a human"}
+  ],
+  "edges": [
+    {"source": "retrieve", "target": "classify"},
+    {"source": "classify", "target": "draft"},
+    {"source": "draft", "target": "gate"},
+    {"source": "gate", "target": "send", "if": "confidence_gate.pass"},
+    {"source": "gate", "target": "human"}
+  ]
+}

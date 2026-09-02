@@ -1,0 +1,19 @@
+{
+  "id": "triage-and-route",
+  "name": "Triage & route",
+  "category": "Support",
+  "description": "Classify the case, pick the owning team, write the labels back to Salesforce, and hand the case to that team's queue.",
+  "nodes": [
+    {"key": "retrieve", "type": "retrieve", "label": "Retrieve KB"},
+    {"key": "classify", "type": "classify", "label": "Classify"},
+    {"key": "route", "type": "team_route", "label": "Pick team"},
+    {"key": "write", "type": "sf_writeback", "label": "Write to Case"},
+    {"key": "hand", "type": "handover", "label": "Hand to team"}
+  ],
+  "edges": [
+    {"source": "retrieve", "target": "classify"},
+    {"source": "classify", "target": "route"},
+    {"source": "route", "target": "write"},
+    {"source": "write", "target": "hand"}
+  ]
+}

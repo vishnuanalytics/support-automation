@@ -1,0 +1,19 @@
+{
+  "id": "draft-then-approve-in-slack",
+  "name": "Draft + Slack approval",
+  "category": "Support",
+  "description": "Always draft a reply, then hand it to the responsible agent in Slack to reason through and send — nothing goes to the customer automatically.",
+  "nodes": [
+    {"key": "retrieve", "type": "retrieve", "label": "Retrieve KB"},
+    {"key": "classify", "type": "classify", "label": "Triage"},
+    {"key": "draft", "type": "draft", "label": "Draft reply"},
+    {"key": "gate", "type": "confidence_gate", "label": "Confidence gate"},
+    {"key": "notify", "type": "notify_human", "label": "Slack reasoning"}
+  ],
+  "edges": [
+    {"source": "retrieve", "target": "classify"},
+    {"source": "classify", "target": "draft"},
+    {"source": "draft", "target": "gate"},
+    {"source": "gate", "target": "notify"}
+  ]
+}

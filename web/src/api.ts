@@ -89,6 +89,12 @@ export const api = {
       req<void>(`/flows/${flowId}/triggers/${id}`, { method: "DELETE" }),
   },
 
+  templates: {
+    list: () =>
+      req<{ id: string; name: string; category: string; description: string }[]>("/templates"),
+    graph: (id: string) => req<FlowCandidate>(`/templates/${encodeURIComponent(id)}`),
+  },
+
   connections: {
     list: () => req<Connection[]>("/connections"),
     create: (b: { slug: string; base_url: string; auth: Record<string, unknown> }) =>

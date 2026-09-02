@@ -15,6 +15,23 @@ export function FlowList({
 }) {
   const [flows, setFlows] = useState<FlowMeta[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  const [templates, setTemplates] = useState<
+    { id: string; name: string; description: string }[]
+  >([]);
+
+  useEffect(() => {
+    api.templates.list().then(setTemplates).catch(() => {});
+  }, []);
+
+  async function fromTemplate(id: string) {
+    if (!id) return;
+    try {
+      const cand = await api.templates.graph(id);
+      await createWithHandoff(cand.name || "New flow", { candidate: cand });
+    } catch (e) {
+      alert((e as ApiError).message);
+    }
+  }
 
   useEffect(() => {
     api
@@ -94,6 +111,23 @@ export function FlowList({
           >
             ⬇ From Mermaid
           </button>
+          {templates.length > 0 && (
+            <select
+              value=""
+              title="start from a ready-made flow"
+              onChange={(e) => {
+                void fromTemplate(e.target.value);
+                e.currentTarget.value = "";
+              }}
+            >
+              <option value="">📋 From template…</option>
+              {templates.map((t) => (
+                <option key={t.id} value={t.id} title={t.description}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
       )}
       {err && <div className="err">{err}</div>}

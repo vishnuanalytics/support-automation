@@ -357,6 +357,23 @@ def node_types() -> dict:
     return {"types": sorted(known_types()), "defaults": NODE_DEFAULTS}
 
 
+@app.get("/api/templates")
+def list_templates_ep(c: Caller = Depends(caller)) -> list[dict]:
+    from interpreter import templates
+    return templates.list_templates()
+
+
+@app.get("/api/templates/{template_id}")
+def get_template_ep(template_id: str, c: Caller = Depends(caller)) -> dict:
+    """P7a — a ready-made flow graph as a candidate the editor loads unsaved
+    (same shape as the AI-generate / Mermaid-import paths)."""
+    from interpreter import templates
+    g = templates.graph(template_id, defaults=NODE_DEFAULTS)
+    if g is None:
+        raise HTTPException(404, "unknown template")
+    return g
+
+
 _SF_META_CACHE: dict = {"at": 0.0, "data": None}
 
 
