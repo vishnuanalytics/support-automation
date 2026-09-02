@@ -746,10 +746,20 @@ retrieved passages (claim graph deferred to KIL-g). Manager = the routed-team
   Hooked into `slack_socket._deliver` + `worker._check_resolution` (both
   best-effort). `slack_socket.dispatch_action` resolves the `review_*` clicks.
   8 offline tests (352 total).
-- **KIL-d…g — planned.** d KB write-back loop (a `correct` verdict → LLM
-  drafts a `kb_entries` diff → `action_request(kb_change)` → worker applies +
-  `SUPERSEDES`; new entries land `provisional`) · e post-handover watcher ·
-  f metrics · g atomic claim graph (deferred).
+- **KIL-d — built (2026-09-02).** Migration `066` (`kb_entries.{source_review_task,
+  supersedes_entry_id, approved_by, provisional_until}` + `provisional`/
+  `superseded` statuses). `interpreter/kb_writeback.py`: `draft_change` (LLM /
+  fallback) proposes a `kb_entries` create-or-supersede; the review card's
+  **Correct** button raises an `action_requests(kind='kb_change')` + an
+  Approve/Reject card; `kb_approve` → worker `_apply_kb_change` →
+  `kb_writeback.apply_kb_change` writes the entry **`provisional`**
+  (`origin='review_writeback'`, `provisional_until = now+7d`), supersedes +
+  de-indexes the old one, enqueues `embed_kb_entry`, MERGEs
+  `(:KBArticle)-[:SUPERSEDES]->`. `promote_provisional()` ages provisional →
+  active. Web Review tab + REST still pending. 8 offline tests (360 total).
+- **KIL-e…g — planned.** e post-handover watcher · f metrics + the
+  "no fresh contradiction" promotion gate + web Review tab · g atomic claim
+  graph (deferred).
 
 **Phase 27 — the Case Control Plane (done, 2026-09-01/02).** One
 AI-managed Case queue: classify + route + track `Status` + hand off via

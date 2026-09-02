@@ -265,7 +265,7 @@ def _embed_kb_entry(payload: dict, sb) -> dict:
     """Phase 14 — chunk + embed a large KB entry off the request thread."""
     eid = payload["entry_id"]
     rows = sb.table("kb_entries").select("*").eq("entry_id", eid).execute().data
-    if not rows or rows[0]["status"] != "active":
+    if not rows or rows[0]["status"] not in ("active", "provisional"):
         return {"entry_id": eid, "skipped": "entry gone or archived"}
     e = rows[0]
     url = f"kb://{e['source_id']}/{eid}"
@@ -318,6 +318,28 @@ def _create_github_issue(payload: dict, sb) -> dict:
     return {"action_request_id": ar_id, **issue}
 
 
+def _apply_kb_change(payload: dict, sb) -> dict:
+    """KIL-d — a manager approved a KB update in Slack; write it (provisional)."""
+    from interpreter import kb_writeback
+
+    ar_id = payload["action_request_id"]
+    rows = sb.table("action_requests").select("*").eq("id", ar_id).execute().data
+    if not rows:
+        return {"action_request_id": ar_id, "skipped": "gone"}
+    ar = rows[0]
+    if ar["kind"] != "kb_change":
+        return {"action_request_id": ar_id, "skipped": f"kind={ar['kind']}"}
+    res = kb_writeback.apply_kb_change(sb, ar)
+    try:
+        if ar.get("slack_channel") and ar.get("slack_ts") and slackmod.available():
+            slackmod.update_message(
+                ar["tenant_id"], ar["slack_channel"], ar["slack_ts"],
+                f":books: KB updated (provisional) — {ar['payload'].get('title', '')}", sb)
+    except Exception as e:  # noqa: BLE001
+        log.warning("slack update after kb change failed: %s", e)
+    return {"action_request_id": ar_id, **res}
+
+
 # ── Phase 27d — the case-control-plane safety-net sweeps ──────────────────
 _SWEEP_EVERY_MIN = {"queue_sweep": 5, "cdc_reconcile": 60, "reasoning_ttl": 5}
 
@@ -347,6 +369,7 @@ def _sweep_handler(fn):
 
 HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
             "embed_kb_entry": _embed_kb_entry, "create_github_issue": _create_github_issue,
+            "apply_kb_change": _apply_kb_change,
             "queue_sweep": _sweep_handler("queue_sweep"),
             "cdc_reconcile": _sweep_handler("cdc_reconcile"),
             "reasoning_ttl": _sweep_handler("reasoning_ttl")}
