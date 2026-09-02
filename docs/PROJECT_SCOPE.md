@@ -725,10 +725,21 @@ retrieved passages (claim graph deferred to KIL-g). Manager = the routed-team
   Messages** (108 inbound / 42 draft / 24 agent_reply), `tenant_id` on every
   node, 14 Cases with a full `draft → agent_reply` pair. 8 offline tests
   (332 total). The vector side stays with `case_memory_sync --from-salesforce`.
-- **KIL-b…g — planned.** b integrity engine (NLI judge + inbound/draft
-  checkpoints) · c human-reply review + sampling (`review_tasks`) · d KB
-  write-back loop (LLM diff → `action_request(kb_change)` → provisional entry)
-  · e post-handover watcher · f metrics · g atomic claim graph (deferred).
+- **KIL-b — built (2026-09-02).** `interpreter/integrity.py` `check(statement,
+  contexts, *, kind) → {relation, flagged, novel, verdicts, backend}` — a Groq
+  NLI judge (deterministic negation-mismatch heuristic without a key).
+  Wired into `h_draft` (checks the draft + the inbound customer text vs. prior
+  resolutions + internal KB + retrieved docs → `state.integrity`); `h_draft`
+  trace shows `integrity=<relation>`. `h_confidence_gate` gains
+  `escalate_on_integrity_conflict` (default true): a draft that `contradicts`
+  established knowledge → forced escalation. `state.py` + `builder._context`
+  gain `integrity`. Eval `eval/integrity/` (24 labelled cases): real-Groq
+  **acc 0.958 · flag precision 1.000 · recall 1.000** — clears the ≥ 0.80 bar
+  for KIL-c. 12 offline tests (344 total).
+- **KIL-c…g — planned.** c human-reply review + sampling (`review_tasks`,
+  post-send hook in `check_resolution`) · d KB write-back loop (LLM diff →
+  `action_request(kb_change)` → provisional entry) · e post-handover watcher
+  · f metrics · g atomic claim graph (deferred).
 
 **Phase 27 — the Case Control Plane (done, 2026-09-01/02).** One
 AI-managed Case queue: classify + route + track `Status` + hand off via

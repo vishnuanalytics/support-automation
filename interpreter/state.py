@@ -100,6 +100,11 @@ class CaseState(TypedDict, total=False):
     draft_confidence: float    # 0..1, model's own confidence in the draft
     groundedness: dict[str, Any]      # {score 0..1, backend, unsupported[]} — is the draft supported by the context
 
+    # KIL-b — the contradiction judge. {draft: {...}, inbound: {...}} where each
+    # is {relation, flagged, novel, verdicts, backend}. A `draft` that
+    # contradicts the KB / case history forces the gate to escalate.
+    integrity: dict[str, Any]
+
     confidence: float          # 0..1, combined gate score
     confidence_gate: dict[str, Any]   # {pass: bool, threshold: float, score: float, tier: str}
 
