@@ -281,6 +281,42 @@ def _embed_kb_entry(payload: dict, sb) -> dict:
     return {"entry_id": eid, "chunks": n}
 
 
+def _crawl_site(payload: dict, sb) -> dict:
+    """P7c — crawl a docs site and land each page as a KB entry + embed it."""
+    from ingestion.webcrawl import crawl
+
+    sid, tid = payload["source_id"], payload["tenant_id"]
+    col_name = payload.get("collection_name", "")
+    try:
+        pages = crawl(payload["url"], max_pages=int(payload.get("max_pages", 20)))
+    except Exception as e:  # noqa: BLE001
+        return {"url": payload["url"], "error": str(e)[:300]}
+
+    made = 0
+    for pg in pages:
+        try:
+            existing = (sb.table("kb_entries").select("entry_id")
+                        .eq("source_id", sid).eq("title", pg["title"])
+                        .eq("origin", "crawl").limit(1).execute().data or [])
+            row = {"source_id": sid, "tenant_id": tid, "title": pg["title"],
+                   "body_md": f"<!-- {pg['url']} -->\n\n{pg['markdown']}", "origin": "crawl",
+                   "created_by": payload.get("created_by"), "updated_by": payload.get("created_by")}
+            if existing:
+                entry = (sb.table("kb_entries").update(row)
+                         .eq("entry_id", existing[0]["entry_id"]).execute().data[0])
+            else:
+                entry = sb.table("kb_entries").insert(row).execute().data[0]
+            # embed off this job (fastembed × N pages would blow JOB_TIMEOUT)
+            jobs.enqueue("embed_kb_entry",
+                         {"entry_id": entry["entry_id"], "source_id": sid,
+                          "collection_name": col_name},
+                         dedupe_key=f"embed:{entry['entry_id']}", sb=sb)
+            made += 1
+        except Exception as e:  # noqa: BLE001
+            log.warning("crawl_site page %s: %s", pg.get("url"), e)
+    return {"url": payload["url"], "pages": len(pages), "entries": made}
+
+
 def _create_github_issue(payload: dict, sb) -> dict:
     """Phase 16 — a human approved a task_dispatch action in Slack."""
     ar_id = payload["action_request_id"]
@@ -374,7 +410,7 @@ def _sweep_handler(fn):
 
 HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
             "embed_kb_entry": _embed_kb_entry, "create_github_issue": _create_github_issue,
-            "apply_kb_change": _apply_kb_change,
+            "apply_kb_change": _apply_kb_change, "crawl_site": _crawl_site,
             "queue_sweep": _sweep_handler("queue_sweep"),
             "cdc_reconcile": _sweep_handler("cdc_reconcile"),
             "reasoning_ttl": _sweep_handler("reasoning_ttl"),

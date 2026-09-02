@@ -85,6 +85,8 @@ def test_templates_need_a_token():
 def test_kb_upload_needs_a_token():
     assert client.post("/api/kb/collections/x/upload",
                        json={"filename": "a.txt", "content_b64": "aGk="}).status_code == 401
+    assert client.post("/api/kb/collections/x/crawl",
+                       json={"url": "https://example.com/docs"}).status_code == 401
 
 
 def test_google_status_needs_a_token_but_callback_is_public():
