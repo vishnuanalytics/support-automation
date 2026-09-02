@@ -65,17 +65,44 @@ export function App() {
   const canEdit = role === "owner" || role === "editor";
   const isOwner = role === "owner";
 
+  const reload = () => {
+    setMemberships(null);
+    setReloadKey((k) => k + 1);
+    api
+      .listTenants()
+      .then((rows) => {
+        setMemberships(rows.length);
+        setRole(rows.length ? "owner" : null);
+      })
+      .catch(() => setMemberships(0));
+  };
+
+  async function createWorkspace() {
+    const name = prompt("Workspace name (e.g. your company)")?.trim();
+    if (!name) return;
+    try {
+      await api.createTenant(name);
+      reload();
+    } catch (e) {
+      alert(String(e));
+    }
+  }
+
   if (session === undefined) return <div style={{ padding: 20 }}>…</div>;
   if (session === null) return <Login />;
 
   if (memberships === 0) {
     return (
       <div className="login col">
-        <h1>No workspace yet</h1>
+        <h1>Set up your workspace</h1>
         <p className="muted">
-          You're signed in as <strong>{session.user.email}</strong> but not a
-          member of any workspace. Ask an owner to invite this email address.
+          You're signed in as <strong>{session.user.email}</strong>. Create a
+          workspace to start building flows — or ask an owner to invite this
+          email to an existing one.
         </p>
+        <button className="primary" onClick={createWorkspace}>
+          Create a workspace
+        </button>
         <button onClick={() => supabase.auth.signOut()}>sign out</button>
       </div>
     );

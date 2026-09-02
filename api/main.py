@@ -408,8 +408,29 @@ def list_flows(c: Caller = Depends(caller)) -> list[dict]:
 def list_tenants(c: Caller = Depends(caller)) -> list[dict]:
     """The caller's tenant memberships — the UI uses this to pick a tenant
     for a new flow (or skip the prompt when there's exactly one)."""
-    return (c.sb.table("tenant_members").select("tenant_id, role")
+    rows = (c.sb.table("tenant_members").select("tenant_id, role")
             .eq("user_id", c.user_id).execute().data or [])
+    names = {t["tenant_id"]: t["name"] for t in
+             (c.sb.table("tenants").select("tenant_id, name").execute().data or [])}
+    return [{**r, "name": names.get(r["tenant_id"])} for r in rows]
+
+
+class TenantIn(BaseModel):
+    name: str
+
+
+@app.post("/api/tenants", status_code=201)
+def create_tenant(body: TenantIn, c: Caller = Depends(caller)) -> dict:
+    """P7d — self-serve: create a named workspace with the caller as owner."""
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(422, "name is required")
+    tid = str(uuid.uuid4())
+    _service.table("tenants").insert(
+        {"tenant_id": tid, "name": name, "created_by": c.user_id}).execute()
+    _service.table("tenant_members").insert(
+        {"tenant_id": tid, "user_id": c.user_id, "role": "owner"}).execute()
+    return {"tenant_id": tid, "name": name, "role": "owner"}
 
 
 # ── Phase 18c: team invitations ──────────────────────────────────────

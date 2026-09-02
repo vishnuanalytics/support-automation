@@ -131,6 +131,35 @@ export function FlowList({
         </div>
       )}
       {err && <div className="err">{err}</div>}
+
+      {canEdit && flows.length === 0 && !err && (
+        <div
+          className="col"
+          style={{
+            gap: 6,
+            border: "1px solid var(--hair, #ddd)",
+            borderRadius: 10,
+            padding: 12,
+            fontSize: 13,
+          }}
+        >
+          <strong>Get started</strong>
+          <ol style={{ margin: 0, paddingLeft: 18, lineHeight: 1.7 }}>
+            <li>
+              Start from a template —{" "}
+              <button
+                onClick={() => fromTemplate("support-autoreply")}
+                style={{ padding: "0 4px" }}
+              >
+                Support auto-reply
+              </button>
+            </li>
+            <li>Add knowledge in the Knowledge tab (upload a file or crawl your docs)</li>
+            <li>Open the flow, send a test in the Run panel, then Publish</li>
+          </ol>
+        </div>
+      )}
+
       {Object.entries(byTenant).map(([tenant, list]) => (
         <div key={tenant}>
           <h3 title={tenant}>tenant …{tenant.slice(0, 8)}</h3>
