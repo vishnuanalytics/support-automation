@@ -306,3 +306,24 @@ Flows updated: `flow_email_l0l1.json` (`ask_human` removed, `notify` + `clarify`
 | NFR-2 | cron-job.org pinger not set up; scheduled runs unreliable. |
 | FR-24 | ✅ retired 2026-09-01 — the Apex trigger/class/Named Credential were deleted (`sf_deploy_case_hook.py --remove`); they were emailing the admin a `CalloutException` per Case because the API isn't public. CDC (FR-25) is the sole push path. |
 | FR-25 | ✅ done (2026-08-31) — migration `043` applied; subscriber live-verified against the org. Remaining: run it as a persistent process (docker-compose `cdc`) alongside the `worker`. |
+
+**Added Phase KIL — Knowledge Integrity Loop (2026-09-02).** Catch new
+information that contradicts the KB or case history (in inbound tickets, bot
+drafts, and human replies), route it to a manager, and fold confirmed
+corrections back into the KB under approval. Plan artifact:
+`https://claude.ai/code/artifact/0ee3262d-4eaf-4669-bf3e-a16d8e9d3dff`.
+Decisions locked: human-reply review is **post-send + 5% sampling** (not a
+gate); after handover the bot **flags to the manager only** (never the
+customer); a confirmed correction produces an **LLM-drafted KB diff the
+manager one-click approves**; contradiction detection is an **NLI judge over
+retrieved passages** (the atomic claim graph is deferred to KIL-g).
+
+| Req | How |
+|---|---|
+| **FR-33** Case-lifecycle graph (**KIL-a — built 2026-09-02**) | `ingestion/case_graph_sync.py` — walks Salesforce Cases of **any** status (not just closed, unlike `case_memory_sync`) and MERGEs one `(:Case)` + one `(:Message)` per turn into Neo4j: the Case description, inbound/outbound `EmailMessage`s, `CaseComment`s (a `[bot draft…]` comment → `role='draft'`/`author_kind='bot'`, else `agent_note`), and Chatter `FeedItem`s. Message text redacted at write time (`case_memory.redact`, 6k limit). `interpreter/case_memory.sync_case_lifecycle()` holds the Cypher; `Message.id` + `Account.sf_id` uniqueness constraints added to `neo4j_sync.ensure_constraints`. Resumable via **`graph_sync_state`** (migration `064`, RLS like `system_health`) — a `case_graph:<tenant>` row holds the `LastModifiedDate` high-water mark + counters. Idempotent (MERGE); Neo4j/SF down → logs + exits 0. `--backfill` / `--since` / `--case` / `--dry-run`. **Live backfill:** 92 dummy Cases → 174 Messages (108 inbound / 42 draft / 24 agent_reply), `tenant_id` on every node, 14 Cases with a full `draft → agent_reply` pair. 8 offline tests. |
+| **FR-34** Contradiction / integrity engine (**KIL-b — planned**) | `interpreter/integrity.py` — an NLI judge (cheap-model triage → strong-model verdict, the `classify`/`draft` split) returning `{relation: entails\|neutral\|contradicts, salient_claim, evidence_span, confidence}` per claim. Checkpoints: **inbound** (customer text vs. KB + history → into the draft context), **draft** (extend `groundedness` to case history → conflict forces `ask_human`). Golden set + precision/recall report; ≥ 0.80 precision before KIL-c auto-flag ships. |
+| **FR-35** Human-reply review + sampling (**KIL-c — planned**) | `review_tasks` table (RLS). Post-send hook in `check_resolution` runs the judge on the agent's outbound; flagged + 5% of non-flagged → a `review_tasks` row + a Slack card to the routed-team manager usergroup (`@cx-*-oncall`, `@cx-leads` fallback). |
+| **FR-36** KB write-back loop (**KIL-d — planned**) | Card actions **Correct → update KB** / **Wrong → coach** / **Not a conflict**. Correct: an LLM drafts a `kb_entries` create/supersede diff → `action_request(kind=kb_change)` (reuses the Phase 16 approval + Slack path) → worker applies (write, `embed_kb_entry`, MERGE `(:KBArticle)` + `SUPERSEDES`, link `(:ReviewTask)-[:RESULTED_IN]->`). New entries land **`provisional`** and promote to `confirmed` only after M clean citations over N days — one bad approval can't poison the KB. Web **Review** tab. |
+| **FR-37** Post-handover watcher (**KIL-e — planned**) | On each sweep / `check_resolution` pass for a handed-over Case, run the engine on any **new** messages + a "missed critical question" check against the case type's `pointer_bank`; rate-limited, dedup-by-signature flags to the manager thread (linked via `Handoff_Slack_Ts__c`). Never contacts the customer. |
+| **FR-38** Integrity metrics (**KIL-f — planned**) | Dashboard: contradictions/week, flag precision & recall, median time-to-review, KB changes/week, agent-correction rate, knowledge freshness (median age of a cited entry), provisional→confirmed rate. `sop_conflicts` folded in as a scheduled KB-vs-KB sweep. |
+| **FR-39** Atomic claim graph (**KIL-g — deferred**) | Extract `(:Claim)` nodes from KB + resolutions, `ASSERTS` edges, check every new claim against the stored set, track contradiction chains over time. Only after KIL-a–f prove the loop. |

@@ -196,6 +196,77 @@ def sync_graph(row: dict[str, Any], similar: list[dict] | None = None) -> bool:
             pass
 
 
+_LIFECYCLE_CYPHER = """
+MERGE (c:Case {sf_id: $sf_id})
+  SET c.case_number = $case_number, c.subject = $subject, c.tenant_id = $tenant_id,
+      c.status = $status, c.is_closed = $is_closed, c.tier = $tier,
+      c.routed_team = $routed_team, c.origin = $origin,
+      c.opened_at = $opened_at, c.closed_at = $closed_at, c.synced_at = $synced_at
+FOREACH (_ IN CASE WHEN $module    IS NULL THEN [] ELSE [1] END |
+  MERGE (m:Module {name: $module})       MERGE (c)-[:ABOUT]->(m))
+FOREACH (_ IN CASE WHEN $case_type  IS NULL THEN [] ELSE [1] END |
+  MERGE (t:CaseType {name: $case_type})  MERGE (c)-[:OF_TYPE]->(t))
+FOREACH (_ IN CASE WHEN $account_id IS NULL THEN [] ELSE [1] END |
+  MERGE (a:Account {sf_id: $account_id}) SET a.tenant_id = $tenant_id
+  MERGE (c)-[:FOR_ACCOUNT]->(a))
+WITH c
+UNWIND $messages AS msg
+  MERGE (mm:Message {id: msg.id})
+    SET mm.case_sf_id = $sf_id, mm.tenant_id = $tenant_id, mm.role = msg.role,
+        mm.author_kind = msg.author_kind, mm.author_id = msg.author_id,
+        mm.ts = msg.ts, mm.text = msg.text
+  MERGE (c)-[:HAS_MESSAGE]->(mm)
+"""
+
+
+def sync_case_lifecycle(case: dict[str, Any], messages: list[dict] | None = None) -> bool:
+    """KIL-a — MERGE one Case + its per-turn (:Message) nodes into Neo4j.
+
+    `case` is a normalised dict (see `ingestion/case_graph_sync._case_row`);
+    `messages` each carry `id / role / author_kind / author_id / ts / text`
+    (text already redacted by the caller). Idempotent (MERGE on `sf_id` /
+    message `id`). Returns False, never raises, when the graph is unreachable.
+    """
+    driver = _driver_or_none()
+    if driver is None:
+        return False
+    db = os.environ.get("NEO4J_DATABASE", "neo4j")
+    try:
+        driver.execute_query(
+            _LIFECYCLE_CYPHER,
+            sf_id=case["sf_id"],
+            case_number=case.get("case_number"),
+            subject=case.get("subject"),
+            tenant_id=str(case.get("tenant_id") or ""),
+            status=case.get("status"),
+            is_closed=bool(case.get("is_closed")),
+            tier=case.get("tier"),
+            routed_team=case.get("routed_team"),
+            origin=case.get("origin"),
+            opened_at=case.get("opened_at"),
+            closed_at=case.get("closed_at"),
+            synced_at=datetime.now(timezone.utc).isoformat(),
+            module=case.get("module"),
+            case_type=case.get("case_type"),
+            account_id=case.get("account_id"),
+            messages=[{"id": m["id"], "role": m.get("role"),
+                       "author_kind": m.get("author_kind"),
+                       "author_id": m.get("author_id"),
+                       "ts": m.get("ts"), "text": m.get("text")}
+                      for m in (messages or []) if m.get("id")],
+            database_=db,
+        )
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.warning("case_memory.sync_case_lifecycle(%s): %s", case.get("sf_id"), e)
+        return False
+    finally:
+        try:
+            driver.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _graph_duplicates(sf_ids: list[str], *, tenant_id: str | None = None) -> set[str]:
     """Which of `sf_ids` are the DUPLICATE_OF target of some other Case *in the
     same tenant* — their resolution should weigh much more. Best-effort.

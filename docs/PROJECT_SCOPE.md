@@ -703,7 +703,34 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**Phase 27 — the Case Control Plane (in progress, 2026-09-01).** One
+**Phase KIL — Knowledge Integrity Loop (in progress, 2026-09-02).** Catch
+new info that contradicts the KB or case history (inbound tickets, bot
+drafts, human replies), send it to a manager, and fold confirmed
+corrections back into the KB under one-click approval. Plan artifact:
+`https://claude.ai/code/artifact/0ee3262d-4eaf-4669-bf3e-a16d8e9d3dff`;
+requirements FR-33…FR-39 in `docs/REQUIREMENTS.md`. Decisions locked:
+post-send review + 5% sampling (not a gate); after handover flag-to-manager
+only; LLM-drafted KB diff the manager one-click approves; NLI judge over
+retrieved passages (claim graph deferred to KIL-g). Manager = the routed-team
+`@cx-*-oncall` usergroups.
+
+- **KIL-a — built + live-backfilled (2026-09-02).** `ingestion/case_graph_sync.py`
+  syncs the Salesforce Case *lifecycle* (any status, not just closed) into
+  Neo4j: one `(:Case)` + one `(:Message)` per turn (description · in/outbound
+  `EmailMessage` · `CaseComment` — a `[bot draft…]` comment → `role='draft'`
+  `author_kind='bot'` · Chatter `FeedItem`). `case_memory.sync_case_lifecycle()`
+  holds the Cypher; `Message.id` / `Account.sf_id` constraints added.
+  Resumable via **`graph_sync_state`** (migration `064`, RLS like `system_health`).
+  Idempotent; Neo4j/SF down → exit 0. Live backfill: **92 dummy Cases → 174
+  Messages** (108 inbound / 42 draft / 24 agent_reply), `tenant_id` on every
+  node, 14 Cases with a full `draft → agent_reply` pair. 8 offline tests
+  (332 total). The vector side stays with `case_memory_sync --from-salesforce`.
+- **KIL-b…g — planned.** b integrity engine (NLI judge + inbound/draft
+  checkpoints) · c human-reply review + sampling (`review_tasks`) · d KB
+  write-back loop (LLM diff → `action_request(kb_change)` → provisional entry)
+  · e post-handover watcher · f metrics · g atomic claim graph (deferred).
+
+**Phase 27 — the Case Control Plane (done, 2026-09-01/02).** One
 AI-managed Case queue: classify + route + track `Status` + hand off via
 Omni-Channel, so no case sits unowned / unmoved / unwatched. Full design +
 build plan: `docs/` artifact
@@ -786,9 +813,44 @@ table is now real code:**
   reconnect (a dropped socket no longer strands a dialogue mid-turn).
 - `/api/trace/<case>` folds in `case_events` as the timeline spine.
 
-Still not built (org / Slack admin — you're doing these): an Omni agent
-going "Available" + the Slack `#cx-*` channels / usergroups. Everything
-upstream is code-complete.
+**Slack workspace live (2026-09-02).** All 8 `#cx-*` channels created and
+the `support_automation` bot invited to each; 7 on-call usergroups created
+(`@cx-l1-oncall` / `@cx-tier2-oncall` / `@cx-csm-oncall` / `@cx-sales-oncall`
+/ `@trust-oncall` / `@billing-oncall` / `@cx-leads`). Bot granted
+`usergroups:read` + `usergroups:write`. Socket Mode verified connecting
+(`socket connected`, no scope errors) with the operator's `SLACK_APP_TOKEN`.
+Code: `slack.usergroup_ref()` resolves an on-call handle to `<!subteam^ID>`
+(a bare `@handle` in message text does **not** page a group — it was inert);
+`alert.alert_human` now calls it. `notify_targets` csm/sales rows corrected
+to `@cx-csm-oncall` / `@cx-sales-oncall` to match the created handles.
+`slack.SCOPES` (OAuth install) gains `usergroups:read`. 324 offline pytest.
+
+**SF Setup done (2026-09-02).** Presence-status access + the Omni utility
+widget + an agent going "Available — Cases" — all applied by the operator
+(the presence menu only offered Offline because *zero* `ServicePresenceStatus`
+grants existed — sys-admin does **not** get them automatically; a
+`CP_Omni_Presence` permission set with the 3 statuses is the fix). The E-6001
+"Couldn't Connect to Telephony" toast was the stock Phone/Voice softphone
+utility (org has 0 CallCenters) — unrelated to Omni; removed from the console.
+
+**27g "single queue" layout (2026-09-02).** The two design list views already
+existed and match artifact §Salesforce column-for-column: **`Live Queue`**
+(`Closed=0`, scope Everything; Case# · Subject · Status · Routed_Team__c ·
+Next_Action__c · Next_Action_Due__c · AI_Confidence__c · owner) and
+**`SLA Breach`** (`SLA_Breach__c=true` AND `Closed=0`; + Escalation_Reason__c).
+Deployed via `sf project deploy` (mdapi, v64): a Case **compact layout**
+`AI_Control_Plane` (Status · Routed_Team__c · Next_Action_Due__c ·
+AI_Confidence__c · Priority) for the highlights panel, and an **"AI Control
+Plane" section** (Routed_Team__c/Escalation_Reason__c/AI_Confidence__c/
+Handoff_Slack_Ts__c | Next_Action__c/Next_Action_Due__c/Last_AI_Run_At__c/
+Last_Run_Id__c) spliced after "Case Information" on `Case Layout` +
+`Case (Support) Layout`. Additive — every existing section preserved; verified
+by retrieve.
+
+Remaining (Setup clicks, not metadata): set `AI_Control_Plane` as the primary
+Case compact layout; `Live Queue` → Kanban grouped by Status, sort
+Next_Action_Due__c ↑, pin as default; add the Omni Supervisor tab for leads.
+Everything upstream is code-complete.
 
 **27a live-applied + 27a/c/d live-verified (2026-09-01).** Migrations `062`/
 `063` applied; `sf_support_setup.py --only queues --only cp_fields --only
