@@ -143,6 +143,8 @@ export const api = {
     listEntries: (id: string) => req<KbEntryRow[]>(`/kb/collections/${id}/entries`),
     createEntry: (id: string, b: { title: string; body_md: string }) =>
       req<KbEntry>(`/kb/collections/${id}/entries`, { method: "POST", body: JSON.stringify(b) }),
+    upload: (id: string, b: { filename: string; content_b64: string }) =>
+      req<KbEntry>(`/kb/collections/${id}/upload`, { method: "POST", body: JSON.stringify(b) }),
     getEntry: (id: string) => req<KbEntry>(`/kb/entries/${id}`),
     updateEntry: (id: string, b: { title?: string; body_md?: string }) =>
       req<KbEntry>(`/kb/entries/${id}`, { method: "PATCH", body: JSON.stringify(b) }),

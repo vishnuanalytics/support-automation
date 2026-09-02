@@ -1434,6 +1434,38 @@ def kb_create_entry(sid: str, body: KbEntryIn, c: Caller = Depends(caller)) -> d
     return _kb_after_write(entry, col, c)
 
 
+class KbUploadIn(BaseModel):
+    filename: str
+    content_b64: str        # raw file bytes, base64 (a data: URL prefix is stripped)
+
+
+@app.post("/api/kb/collections/{sid}/upload", status_code=201)
+def kb_upload_file(sid: str, body: KbUploadIn, c: Caller = Depends(caller)) -> dict:
+    """P7b — a .pdf / .docx / .md / .txt upload becomes a KB entry (text
+    extracted, then chunked + embedded like any other entry)."""
+    import base64 as _b64
+    from interpreter import fileimport
+
+    rate_limit(c.user_id, "kb_write", 60)
+    col = _kb_collection(c, sid)
+    _require_editor(c, col["tenant_id"])
+    raw = body.content_b64.split(",", 1)[-1]        # tolerate a data:...;base64, prefix
+    try:
+        data = _b64.b64decode(raw, validate=False)
+    except Exception:  # noqa: BLE001
+        raise HTTPException(422, "content_b64 is not valid base64")
+    try:
+        title, text = fileimport.extract(body.filename, data)
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(422, str(e))
+    entry = c.sb.table("kb_entries").insert({
+        "source_id": sid, "tenant_id": col["tenant_id"], "title": title,
+        "body_md": text, "origin": "file",
+        "created_by": c.user_id, "updated_by": c.user_id,
+    }).execute().data[0]
+    return _kb_after_write(entry, col, c)
+
+
 @app.get("/api/kb/entries/{eid}")
 def kb_get_entry(eid: str, c: Caller = Depends(caller)) -> dict:
     return _kb_entry(c, eid)

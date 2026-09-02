@@ -82,6 +82,11 @@ def test_templates_need_a_token():
     assert client.get("/api/templates/support-autoreply").status_code == 401
 
 
+def test_kb_upload_needs_a_token():
+    assert client.post("/api/kb/collections/x/upload",
+                       json={"filename": "a.txt", "content_b64": "aGk="}).status_code == 401
+
+
 def test_google_status_needs_a_token_but_callback_is_public():
     assert client.get("/api/integrations/google/status").status_code == 401
     assert client.get("/api/integrations/google/authorize").status_code == 401
