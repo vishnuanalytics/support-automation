@@ -74,6 +74,12 @@ def test_connections_need_a_token_and_http_request_is_a_node_type():
     assert client.delete("/api/connections/x").status_code == 401
     body = client.get("/api/node-types").json()
     assert "http_request" in body["types"] and "http_request" in body["defaults"]
+    assert "transform" in body["types"]
+
+
+def test_templates_need_a_token():
+    assert client.get("/api/templates").status_code == 401
+    assert client.get("/api/templates/support-autoreply").status_code == 401
 
 
 def test_google_status_needs_a_token_but_callback_is_public():

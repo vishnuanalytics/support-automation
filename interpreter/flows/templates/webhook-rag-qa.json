@@ -1,0 +1,17 @@
+{
+  "id": "webhook-rag-qa",
+  "name": "Webhook Q&A over your docs",
+  "category": "Generic",
+  "description": "No Salesforce Case. A webhook posts a question; the flow retrieves from the KB, drafts an answer from context.query, and returns it.",
+  "nodes": [
+    {"key": "in", "type": "trigger", "label": "Webhook in", "config": {"required": ["query"]}},
+    {"key": "retrieve", "type": "retrieve", "label": "Retrieve KB"},
+    {"key": "draft", "type": "draft", "label": "Answer"},
+    {"key": "done", "type": "auto_reply", "label": "Return answer"}
+  ],
+  "edges": [
+    {"source": "in", "target": "retrieve"},
+    {"source": "retrieve", "target": "draft"},
+    {"source": "draft", "target": "done"}
+  ]
+}
