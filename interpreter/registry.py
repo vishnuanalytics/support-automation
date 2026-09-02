@@ -1958,3 +1958,75 @@ def h_ai_prompt(state: CaseState, config: dict) -> dict:
                  {"output_key": out_key, "value": value, "images": len(imgs),
                   "json": want_json, "tokens": usage or None}),
     }
+
+
+@register("http_request")
+def h_http_request(state: CaseState, config: dict) -> dict:
+    """P6c — call an external HTTP API through a named per-tenant connection.
+
+    config: {
+      connection: "<slug>",           # -> connections.base_url + auth
+      method: "GET",
+      path: "/v1/things/{{context.id}}",   # {{ dotted.path }} over state
+      query: {"q": "{{context.term}}"},
+      headers: {"X-Extra": "..."},
+      body: {...} | "{{context.payload}}",   # dict sent as JSON, or a template
+      out_key: "http",                # -> state.context[out_key] = {status, ok, json|text}
+      timeout: 15,
+      on_error: "passthrough" | "fail",
+    }
+
+    The connection is the allow-list: `path` is appended to `base_url`, an
+    absolute URL in `path` is rejected. No LLM. Best-effort — a failure lands
+    `{error}` in `out_key` (unless `on_error="fail"`).
+    """
+    import requests  # noqa: PLC0415
+
+    from . import connections
+
+    nid = config["_node_id"]
+    out_key = config.get("out_key", "http")
+    slug = config.get("connection")
+    conn = connections.resolve(state.get("tenant_id"), slug) if slug else None
+    if not conn:
+        msg = f"unknown connection {slug!r}"
+        if config.get("on_error") == "fail":
+            raise RuntimeError(msg)
+        return {"context": {out_key: {"error": msg}},
+                **_trace(nid, "http_request", msg, {"connection": slug})}
+
+    path = _render_template(str(config.get("path", "")), state)
+    if "://" in path:
+        raise ValueError("http_request `path` must be relative to the connection base_url")
+    url = conn["base_url"].rstrip("/") + "/" + path.lstrip("/")
+    method = str(config.get("method", "GET")).upper()
+    headers = {**connections.auth_headers(conn.get("auth")), **(config.get("headers") or {})}
+    query = {k: _render_template(str(v), state) for k, v in (config.get("query") or {}).items()}
+    raw_body = config.get("body")
+    json_body = None
+    if isinstance(raw_body, dict):
+        json_body = raw_body
+    elif isinstance(raw_body, str) and raw_body.strip():
+        rendered = _render_template(raw_body, state)
+        json_body = _safe_json(rendered) or {"_raw": rendered}
+
+    try:
+        r = requests.request(method, url, headers=headers or None, params=query or None,
+                             json=json_body, timeout=float(config.get("timeout", 15)))
+        ct = (r.headers.get("content-type") or "").lower()
+        payload = r.json() if "json" in ct else None
+        res = {"status": r.status_code, "ok": 200 <= r.status_code < 300,
+               "json": payload, "text": None if payload is not None else r.text[:8000]}
+    except Exception as e:  # noqa: BLE001
+        if config.get("on_error") == "fail":
+            raise
+        res = {"error": f"{type(e).__name__}: {e}"[:300]}
+
+    return {
+        "context": {out_key: res},         # operator.or_ channel -> survives the merge
+        **_trace(nid, "http_request",
+                 f"{method} {url} -> "
+                 + (str(res.get("status")) if "status" in res else res.get("error", "?")),
+                 {"connection": slug, "method": method, "url": url,
+                  "status": res.get("status"), "ok": res.get("ok")}),
+    }
