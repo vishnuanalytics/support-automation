@@ -37,7 +37,8 @@ log = logging.getLogger("api.worker")
 
 def _run_flow(payload: dict, sb) -> dict:
     flow_id = payload["flow_id"]
-    case = payload["case"]
+    case = payload.get("case") or {}
+    context = payload.get("context") or {}      # P5b — generic (webhook/trigger) run
     key = payload.get("idempotency_key")
     trigger = payload.get("trigger")
 
@@ -72,7 +73,7 @@ def _run_flow(payload: dict, sb) -> dict:
             return {"run_id": dup[0]["run_id"], "idempotent_skip": True}
 
     flow = load_flow(flow_id=flow_id, sb=sb, status="published", validate=True)
-    final = build_graph(flow).invoke(initial_state(flow, case=case))
+    final = build_graph(flow).invoke(initial_state(flow, case=case, context=context))
     # nodes like `sf_case` mutate the case in-flight (add sf_id, refresh the
     # account tier) — persist / act on that, not the pre-run input.
     run_case = final.get("case") or case

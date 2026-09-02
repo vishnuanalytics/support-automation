@@ -54,6 +54,12 @@ def test_approvals_endpoints_need_a_token():
     assert client.get("/api/review-tasks").status_code == 401
 
 
+def test_trigger_endpoint_needs_a_token_and_trigger_is_a_node_type():
+    assert client.post("/api/triggers/some-flow", json={"plan": "free"}).status_code == 401
+    body = client.get("/api/node-types").json()
+    assert "trigger" in body["types"] and "trigger" in body["defaults"]
+
+
 def test_google_status_needs_a_token_but_callback_is_public():
     assert client.get("/api/integrations/google/status").status_code == 401
     assert client.get("/api/integrations/google/authorize").status_code == 401

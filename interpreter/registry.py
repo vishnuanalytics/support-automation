@@ -341,6 +341,40 @@ def _norm_answer_mode(value: str | None, topic: str, body: str) -> str:
     return "informational"
 
 
+@register("trigger")
+def h_trigger(state: CaseState, config: dict) -> dict:
+    """P5b — the entry node for a non-Case flow. Shapes the generic
+    `state.context` payload a trigger/webhook adapter produced:
+
+    config: {
+      map:      {"in_key": "out_key", ...}   # rename incoming fields
+      required: ["email", "plan"]            # fields that must be present
+      defaults: {"plan": "free"}             # fill when absent
+    }
+
+    Passes the (mapped/defaulted) context through; on a missing required field
+    it records `context._missing` + a trace note and lets an edge branch on it
+    (`input._missing`) rather than raising — the transport already 400s a
+    malformed body before enqueue.
+    """
+    nid = config["_node_id"]
+    ctx = dict(state.get("context") or {})
+    for k, v in (config.get("defaults") or {}).items():
+        ctx.setdefault(k, v)
+    for src, dst in (config.get("map") or {}).items():
+        if src in ctx:
+            ctx[dst] = ctx.pop(src)
+    missing = [f for f in (config.get("required") or []) if not ctx.get(f)]
+    if missing:
+        ctx["_missing"] = missing
+    trig = ctx.get("_trigger", "?")
+    return {"context": ctx,
+            **_trace(nid, "trigger",
+                     f"trigger={trig}, fields={sorted(k for k in ctx if not k.startswith('_'))}"
+                     + (f", MISSING {missing}" if missing else ""),
+                     {"trigger": trig, "missing": missing})}
+
+
 @register("team_route")
 def h_team_route(state: CaseState, config: dict) -> dict:
     """Phase 20i — pick the team that owns this case (the design doc's
