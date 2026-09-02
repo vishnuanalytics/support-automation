@@ -25,6 +25,7 @@ import {
 import { NodeCard } from "./NodeCard";
 import { EdgeInspector, NodeInspector } from "./Inspector";
 import { RunPanel } from "./RunPanel";
+import { TriggersPanel } from "./TriggersPanel";
 
 export function FlowEditor(props: {
   flowId: string;
@@ -484,6 +485,8 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
           </>
         )}
       </div>
+
+      <TriggersPanel flowId={flowId} canEdit={canEdit} />
 
       <div className="workarea">
         <div className="canvas-wrap">

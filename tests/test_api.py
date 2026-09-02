@@ -60,6 +60,14 @@ def test_trigger_endpoint_needs_a_token_and_trigger_is_a_node_type():
     assert "trigger" in body["types"] and "trigger" in body["defaults"]
 
 
+def test_flow_trigger_mgmt_needs_a_token_but_public_webhook_404s_on_a_bad_token():
+    assert client.get("/api/flows/x/triggers").status_code == 401
+    assert client.post("/api/flows/x/triggers", json={"kind": "webhook"}).status_code == 401
+    # the public webhook has no auth — an unknown token is a clean 404, not 401
+    r = client.post("/t/definitely-not-a-real-token", json={"hello": 1})
+    assert r.status_code == 404
+
+
 def test_google_status_needs_a_token_but_callback_is_public():
     assert client.get("/api/integrations/google/status").status_code == 401
     assert client.get("/api/integrations/google/authorize").status_code == 401

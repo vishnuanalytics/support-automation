@@ -344,3 +344,15 @@ export interface KilMetrics {
   knowledge_freshness_days: number | null;
   weekly: { week: string; flagged: number }[];
 }
+
+export interface FlowTrigger {
+  trigger_id: string;
+  kind: "webhook" | "schedule";
+  cron: string | null;
+  label: string | null;
+  enabled: boolean;
+  url?: string;                 // webhook only
+  last_fired_at: string | null;
+  fire_count: number;
+  created_at: string;
+}
