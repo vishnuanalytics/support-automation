@@ -165,8 +165,8 @@ def _check_resolution(payload: dict, sb) -> dict:
     run_id = payload["run_id"]
     checks = int(payload.get("checks", 0))
     rows = (sb.table("runs")
-            .select("case_payload, draft, created_at, human_action, human_reply, "
-                    "tenant_id, flow_id, team")
+            .select("run_id, case_payload, draft, created_at, human_action, human_reply, "
+                    "tenant_id, flow_id, team, retrieval, trace")
             .eq("run_id", run_id).execute().data)
     if not rows:
         return {"run_id": run_id, "skipped": "run gone"}
@@ -202,6 +202,12 @@ def _check_resolution(payload: dict, sb) -> dict:
             "human_action": action, "human_reply": resp["outbound_email"][:8000],
             "edit_distance": dist, "feedback_checked_at": "now()",
         }).eq("run_id", run_id).execute()
+        # KIL-c — check the reply the agent sent against the KB + case history.
+        try:
+            from interpreter import review
+            review.judge_human_reply(sb, run_row=row, reply_text=resp["outbound_email"])
+        except Exception as e:  # noqa: BLE001
+            log.warning("review.judge_human_reply for %s failed: %s", run_id, e)
         return {"run_id": run_id, "human_action": action, "edit_distance": dist}
 
     # 3. nothing actionable yet -> re-poll, or give up

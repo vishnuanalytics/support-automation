@@ -736,10 +736,20 @@ retrieved passages (claim graph deferred to KIL-g). Manager = the routed-team
   gain `integrity`. Eval `eval/integrity/` (24 labelled cases): real-Groq
   **acc 0.958 · flag precision 1.000 · recall 1.000** — clears the ≥ 0.80 bar
   for KIL-c. 12 offline tests (344 total).
-- **KIL-c…g — planned.** c human-reply review + sampling (`review_tasks`,
-  post-send hook in `check_resolution`) · d KB write-back loop (LLM diff →
-  `action_request(kb_change)` → provisional entry) · e post-handover watcher
-  · f metrics · g atomic claim graph (deferred).
+- **KIL-c — built (2026-09-02).** Migration `065`: **`review_tasks`** (RLS
+  read like `action_requests`, unique `(run_id, kind)`). `interpreter/review.py`
+  `judge_human_reply()` — after a human reply is *sent*, runs the KIL-b judge
+  on it against the run's KB + case-history context; `contradicts`/`novel` →
+  a `human_reply_review` task, else `REVIEW_SAMPLE_RATE` (5%) → a `sample`
+  task, and posts a Block-Kit card (Correct → update KB / Wrong → coach /
+  Not a conflict) to the routed-team `#cx-*` channel + manager usergroup.
+  Hooked into `slack_socket._deliver` + `worker._check_resolution` (both
+  best-effort). `slack_socket.dispatch_action` resolves the `review_*` clicks.
+  8 offline tests (352 total).
+- **KIL-d…g — planned.** d KB write-back loop (a `correct` verdict → LLM
+  drafts a `kb_entries` diff → `action_request(kb_change)` → worker applies +
+  `SUPERSEDES`; new entries land `provisional`) · e post-handover watcher ·
+  f metrics · g atomic claim graph (deferred).
 
 **Phase 27 — the Case Control Plane (done, 2026-09-01/02).** One
 AI-managed Case queue: classify + route + track `Status` + hand off via
