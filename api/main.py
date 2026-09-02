@@ -1393,10 +1393,12 @@ def kb_list_collections(c: Caller = Depends(caller)) -> list[dict]:
         entries = (c.sb.table("kb_entries").select("entry_id, status")
                    .eq("source_id", s["source_id"]).execute().data or [])
         active = [e for e in entries if e["status"] == "active"]
+        provisional = [e for e in entries if e["status"] == "provisional"]
         out.append({
             "source_id": s["source_id"], "name": s["name"],
             "description": (s.get("config") or {}).get("description"),
             "tenant_id": s["tenant_id"], "entry_count": len(active),
+            "provisional_count": len(provisional),
             "created_at": s.get("created_at"),
         })
     return out
@@ -1449,7 +1451,9 @@ def kb_delete_collection(sid: str, c: Caller = Depends(caller)) -> None:
 def kb_list_entries(sid: str, c: Caller = Depends(caller)) -> list[dict]:
     _kb_collection(c, sid)
     rows = (c.sb.table("kb_entries")
-            .select("entry_id, title, status, chunk_count, embedded_at, updated_at, updated_by")
+            .select("entry_id, title, status, chunk_count, embedded_at, updated_at, "
+                    "updated_by, origin, gdoc_url, synced_at, sync_error, "
+                    "provisional_until, supersedes_entry_id, source_review_task")
             .eq("source_id", sid).neq("status", "archived")
             .order("updated_at", desc=True).execute().data or [])
     return rows
