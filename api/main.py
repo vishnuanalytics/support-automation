@@ -1466,6 +1466,28 @@ def kb_upload_file(sid: str, body: KbUploadIn, c: Caller = Depends(caller)) -> d
     return _kb_after_write(entry, col, c)
 
 
+class KbCrawlIn(BaseModel):
+    url: str
+    max_pages: int = 20
+
+
+@app.post("/api/kb/collections/{sid}/crawl", status_code=202)
+def kb_crawl_site(sid: str, body: KbCrawlIn, c: Caller = Depends(caller)) -> dict:
+    """P7c — crawl a public docs site (BFS, same host + path prefix) and turn
+    each page into a KB entry. Async — the worker does the fetching."""
+    col = _kb_collection(c, sid)
+    _require_editor(c, col["tenant_id"])
+    if not body.url.startswith(("http://", "https://")):
+        raise HTTPException(422, "url must be http(s)")
+    rate_limit(c.user_id, "kb_write", 60)
+    job_id = jobs.enqueue("crawl_site", {
+        "source_id": sid, "tenant_id": col["tenant_id"], "collection_name": col["name"],
+        "url": body.url, "max_pages": max(1, min(body.max_pages, 50)),
+        "created_by": c.user_id,
+    }, dedupe_key=f"crawl:{sid}:{body.url}", sb=_service)
+    return {"job_id": job_id, "deduped": job_id is None}
+
+
 @app.get("/api/kb/entries/{eid}")
 def kb_get_entry(eid: str, c: Caller = Depends(caller)) -> dict:
     return _kb_entry(c, eid)

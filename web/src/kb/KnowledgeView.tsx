@@ -150,6 +150,18 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
     }
   }
 
+  async function crawlSite() {
+    const u = prompt("Docs site URL to crawl (same host + path prefix, up to ~20 pages)")?.trim();
+    if (!u) return;
+    try {
+      await api.kb.crawl(col.source_id, u);
+      alert("Crawling in the background — pages will appear here as they're embedded.");
+      void load();
+    } catch (e) {
+      alert(e instanceof ApiError ? String(e.detail) : String(e));
+    }
+  }
+
   async function uploadFile(file: File) {
     const b64 = await new Promise<string>((res, rej) => {
       const r = new FileReader();
@@ -175,6 +187,7 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
         </div>
         <div className="row">
           <button onClick={() => setOpenId("new")}>＋ entry</button>
+          <button onClick={crawlSite}>🌐 crawl a site</button>
           <label className="button" style={{ cursor: "pointer" }}>
             ⬆ upload file
             <input
