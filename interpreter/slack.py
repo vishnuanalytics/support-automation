@@ -20,7 +20,7 @@ import time
 log = logging.getLogger("interpreter.slack")
 from typing import Any
 
-SCOPES = "chat:write,chat:write.public"
+SCOPES = "chat:write,chat:write.public,usergroups:read"
 _AUTH = "https://slack.com/oauth/v2/authorize"
 _TOKEN = "https://slack.com/api/oauth.v2.access"
 _API = "https://slack.com/api"
@@ -185,6 +185,50 @@ def lookup_user_by_email(email: str, *, tenant_id: str | None = None, sb=None) -
     except Exception as e:  # noqa: BLE001
         log.debug("users.lookupByEmail(%s) failed: %s", email, e)
         return None
+
+
+# ── usergroup (@on-call) mentions ──────────────────────────────────
+# `usergroups.list` is per-workspace and rarely changes — cache it briefly so
+# an escalation storm doesn't spend a Slack API call per Case.
+_UG_CACHE: dict[str, tuple[float, dict[str, str]]] = {}
+_UG_TTL = 600.0  # seconds
+
+
+def _usergroup_index(tenant_id: str | None, sb) -> dict[str, str]:
+    """{handle -> usergroup id} for the tenant's workspace. Cached; {} on failure."""
+    key = tenant_id or "_"
+    hit = _UG_CACHE.get(key)
+    if hit and (time.time() - hit[0]) < _UG_TTL:
+        return hit[1]
+    try:
+        r = _call("usergroups.list", _bot_token(tenant_id, sb), {})
+        idx = {g["handle"]: g["id"] for g in r.get("usergroups", []) if g.get("handle")}
+    except Exception as e:  # noqa: BLE001
+        log.debug("usergroups.list failed: %s", e)
+        idx = {}
+    _UG_CACHE[key] = (time.time(), idx)
+    return idx
+
+
+def usergroup_ref(handle: str | None, *, tenant_id: str | None = None, sb=None) -> str | None:
+    """Render an on-call usergroup as a *real* Slack mention.
+
+    Slack only notifies a usergroup when the message carries `<!subteam^ID>`; a
+    bare `@handle` in text is inert. Resolves `handle` (with or without a
+    leading `@`) to `<!subteam^ID>` via `usergroups.list`, falling back to the
+    literal `@handle` when the group can't be resolved (no scope / unknown /
+    Slack down). Returns None for a blank handle. Never raises."""
+    if not handle:
+        return None
+    name = handle.lstrip("@").strip()
+    if not name:
+        return None
+    try:
+        sb = sb or _sb()
+        gid = _usergroup_index(tenant_id, sb).get(name)
+    except Exception:  # noqa: BLE001
+        gid = None
+    return f"<!subteam^{gid}>" if gid else f"@{name}"
 
 
 def _sb():

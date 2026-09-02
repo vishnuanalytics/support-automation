@@ -106,19 +106,27 @@ Modified → re-assign to `SLA_Breach`.
 
 ---
 
-## Slack (supports 27e)
+## Slack (supports 27e)  ✅ live (2026-09-02)
 
-Repo-side routing (`resolve_slack_route`, migration `063`) is done. In Slack:
+Repo-side routing (`resolve_slack_route`, migration `063`) is done. In Slack —
+**all done in the `speedy` workspace**:
 
-1. Create channels: `#cx-l1`, `#cx-tier2`, `#cx-csm`, `#cx-sales`,
-   `#cx-offboarding`, `#cx-billing`, `#cx-incident`, `#cx-unrouted`.
-2. Create usergroups: `@cx-l1-oncall`, `@cx-tier2-oncall`, `@cx-csm`,
-   `@cx-sales`, `@trust-oncall`, `@billing-oncall`, `@cx-leads`. Put the test
-   agents in them.
-3. Update `notify_targets.slack_usergroup` if your handles differ from the
-   seed (`update notify_targets set slack_usergroup = '@…' where match_value = '…'`).
-4. Invite the `slackbot` app to every channel (it needs `channels:history` +
-   membership per the Socket-Mode setup).
+1. Channels `#cx-l1`, `#cx-tier2`, `#cx-csm`, `#cx-sales`, `#cx-offboarding`,
+   `#cx-billing`, `#cx-incident`, `#cx-unrouted` created; `support_automation`
+   bot invited to each.
+2. Usergroups `@cx-l1-oncall`, `@cx-tier2-oncall`, `@cx-csm-oncall`,
+   `@cx-sales-oncall`, `@trust-oncall`, `@billing-oncall`, `@cx-leads` created
+   with a test agent in each.
+3. `notify_targets.slack_usergroup` reconciled to the real handles (csm/sales
+   became `@cx-*-oncall`). **A bare `@handle` in message text does not notify a
+   group** — `slack.usergroup_ref()` resolves it to `<!subteam^ID>` via
+   `usergroups.list`, so the bot needs `usergroups:read` (granted).
+4. Bot scopes: `chat:write`, `chat:write.public`, `channels:history`,
+   `groups:history`, `im:history`, `app_mentions:read`, `users:read`,
+   `users:read.email`, `usergroups:read`. App-level token `xapp-…`
+   (`connections:write`) in `.env` as `SLACK_APP_TOKEN`. Socket Mode +
+   Interactivity ON. Verified: `python -m interpreter.slack_socket` →
+   `socket connected`.
 
 ### 27h — interactive card buttons  ✅ built (2026-09-01)
 The handoff-thread root is now a Block Kit card: **Send as-is** (delivers the
