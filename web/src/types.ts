@@ -356,3 +356,11 @@ export interface FlowTrigger {
   fire_count: number;
   created_at: string;
 }
+
+export interface Connection {
+  slug: string;
+  base_url: string;
+  auth: { type?: string; header_name?: string; username?: string };
+  has_secret: boolean;
+  created_at: string;
+}

@@ -104,6 +104,9 @@ NODE_DEFAULTS: dict[str, dict[str, Any]] = {
     "handover": {"reason": "policy"},
     "team_route": {"default": "support"},
     "trigger": {"map": {}, "required": [], "defaults": {}},
+    "http_request": {"connection": "", "method": "GET", "path": "", "query": {},
+                     "out_key": "http", "timeout": 15, "on_error": "passthrough"},
+    "transform": {"map": {}, "set": {}, "drop": [], "into": "context"},
     "case_lookup": {"k": 3, "pool": 10, "min_similarity": 0.35},
     # Phase 25 — image attachments, Salesforce context, generic AI prompt
     "attachments": {"source": "salesforce", "max_images": 5, "ocr": True,
@@ -879,6 +882,45 @@ def fire_webhook(token: str, body: dict[str, Any],
     except Exception:  # noqa: BLE001
         pass
     return {"job_id": job_id, "deduped": job_id is None}
+
+
+# ── P6c: per-tenant HTTP connections for the `http_request` node ─────
+class ConnectionIn(BaseModel):
+    slug: str
+    base_url: str
+    auth: dict[str, Any] = {}        # {type, header_name, token/value/username/password}
+    tenant_id: str | None = None
+
+
+@app.get("/api/connections")
+def list_connections(tenant_id: str | None = None, c: Caller = Depends(caller)) -> list[dict]:
+    from interpreter import connections
+    tid = _caller_tenant(c, tenant_id)
+    rows = (_service.table("connections").select("*")
+            .eq("tenant_id", tid).order("slug").execute().data or [])
+    return [connections.redact(r) for r in rows]       # never the secret
+
+
+@app.post("/api/connections", status_code=201)
+def create_connection(body: ConnectionIn, c: Caller = Depends(caller)) -> dict:
+    from interpreter import connections
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_editor(c, tid)
+    if not body.base_url.startswith(("http://", "https://")):
+        raise HTTPException(422, "base_url must be http(s)")
+    row = (_service.table("connections").upsert({
+        "tenant_id": tid, "slug": body.slug.strip(), "base_url": body.base_url.rstrip("/"),
+        "auth": body.auth, "created_by": c.user_id, "updated_at": _now_iso(),
+    }, on_conflict="tenant_id,slug").execute().data[0])
+    return connections.redact(row)
+
+
+@app.delete("/api/connections/{slug}", status_code=204)
+def delete_connection(slug: str, tenant_id: str | None = None,
+                      c: Caller = Depends(caller)) -> None:
+    tid = _caller_tenant(c, tenant_id)
+    _require_editor(c, tid)
+    _service.table("connections").delete().eq("tenant_id", tid).eq("slug", slug).execute()
 
 
 class SFCaseHookIn(BaseModel):
