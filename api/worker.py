@@ -270,7 +270,8 @@ def _embed_kb_entry(payload: dict, sb) -> dict:
     e = rows[0]
     url = f"kb://{e['source_id']}/{eid}"
     n = _kb_embed(sb, source_id=e["source_id"], url=url, title=e["title"],
-                  body_md=e["body_md"] or "", section=payload.get("collection_name", ""))
+                  body_md=e["body_md"] or "", section=payload.get("collection_name", ""),
+                  status=e.get("status", "active"))
     sb.table("kb_entries").update({
         "chunk_count": n,
         "embed_hash": hashlib.md5((e["body_md"] or "").encode()).hexdigest(),
@@ -342,7 +343,8 @@ def _apply_kb_change(payload: dict, sb) -> dict:
 
 # ── Phase 27d — the case-control-plane safety-net sweeps ──────────────────
 _SWEEP_EVERY_MIN = {"queue_sweep": 5, "cdc_reconcile": 60, "reasoning_ttl": 5,
-                    "handoff_watch": 5, "kb_promote": 360}
+                    "handoff_watch": 5, "kb_promote": 360,
+                    "case_graph_sync": 60, "case_memory_sync": 60}
 
 
 def _reschedule(kind: str, sb) -> None:
@@ -375,7 +377,9 @@ HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
             "cdc_reconcile": _sweep_handler("cdc_reconcile"),
             "reasoning_ttl": _sweep_handler("reasoning_ttl"),
             "handoff_watch": _sweep_handler("handoff_watch"),
-            "kb_promote": _sweep_handler("kb_promote")}
+            "kb_promote": _sweep_handler("kb_promote"),
+            "case_graph_sync": _sweep_handler("case_graph_sync"),
+            "case_memory_sync": _sweep_handler("case_memory_sync")}
 
 JOB_TIMEOUT = int(os.environ.get("WORKER_JOB_TIMEOUT", "120"))
 

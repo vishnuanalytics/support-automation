@@ -207,8 +207,16 @@ def sync(*, since: str | None, limit: int, one_id: str | None, dry: bool) -> int
     cases = _fetch(sf, since=since, limit=limit, one_id=one_id)
     log.info("%d Case(s) to sync", len(cases))
 
-    n_cases = n_msgs = 0
+    _CKPT_EVERY = 50
+    n_cases = n_msgs = ck_c = ck_m = 0
     high_water = since
+
+    def _checkpoint():
+        nonlocal ck_c, ck_m
+        if not dry and ck_c:
+            _save_state(sb, scope, last_modified=high_water, cases=ck_c, messages=ck_m)
+            ck_c = ck_m = 0
+
     for case in cases:
         row = _case_row(case)
         msgs = _messages(case)
@@ -222,12 +230,15 @@ def sync(*, since: str | None, limit: int, one_id: str | None, dry: bool) -> int
         if case_memory.sync_case_lifecycle(row, msgs):
             n_cases += 1
             n_msgs += len(msgs)
+            ck_c += 1
+            ck_m += len(msgs)
         else:
             log.warning("graph MERGE failed for %s — stopping", row["sf_id"])
             break
+        if ck_c >= _CKPT_EVERY:   # advance the high-water mark mid-run so a
+            _checkpoint()         # SIGALRM/crash still makes forward progress
 
-    if not dry and n_cases:
-        _save_state(sb, scope, last_modified=high_water, cases=n_cases, messages=n_msgs)
+    _checkpoint()
     log.info("%s %d Case(s) / %d Message(s)",
              "would sync" if dry else "synced", n_cases, n_msgs)
     return 0

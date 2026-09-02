@@ -13,7 +13,7 @@ from ingestion.scraper import chunk_markdown, content_hash, get_embedder, normal
 
 
 def embed_entry(sb, *, source_id: str, url: str, title: str, body_md: str,
-                section: str, crumb: str | None = None) -> int:
+                section: str, crumb: str | None = None, status: str = "active") -> int:
     """Upsert one logical document and replace its chunks. Returns the chunk
     count. `sb` must be able to write `zapier_docs` / `doc_chunks` (service
     role — those tables are not tenant-RLS'd for writes)."""
@@ -35,7 +35,7 @@ def embed_entry(sb, *, source_id: str, url: str, title: str, body_md: str,
                 "doc_url": url, "chunk_index": i, "chunk_text": c["chunk_text"],
                 "embedding": e, "heading_path": c["heading_path"],
                 "chunk_type": c["chunk_type"], "token_count": c["token_count"],
-                "section": section, "source_id": source_id,
+                "section": section, "source_id": source_id, "entry_status": status,
             }
             for i, (c, e) in enumerate(zip(chunks, vecs))
         ]).execute()

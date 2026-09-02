@@ -539,6 +539,46 @@ def test_draft_folds_internal_kb_as_authoritative(monkeypatch):
     assert out["trace"][0]["data"]["used_internal_kb"] is True
 
 
+def test_draft_puts_provisional_context_behind_confirmed_and_labels_it(monkeypatch):
+    """P1b — an unverified review-writeback chunk never displaces a confirmed
+    passage; it trails under an explicit 'UNVERIFIED' header."""
+    captured = {}
+
+    def fake_complete(system, user, **kw):
+        captured["user"] = user
+        return '{"reply": "ok", "confidence": 0.8}'
+
+    monkeypatch.setattr(_registry.llm, "complete", fake_complete)
+    monkeypatch.setattr(_registry.llm, "last_usage", None, raising=False)
+    state = {
+        "case": {"subject": "webhooks on free?", "body": "can I?"},
+        "retrieval": [
+            {"doc_url": "kb://corr/9", "chunk_text": "Actually webhooks ARE on Free now.",
+             "entry_status": "provisional"},
+            {"doc_url": "https://docs/x", "chunk_text": "Webhooks need a Business plan.",
+             "entry_status": "active"},
+        ],
+    }
+    h_draft(state, {"_node_id": "d", "max_tokens": 200})
+    u = captured["user"]
+    assert "UNVERIFIED corrections" in u
+    # the confirmed passage appears before the UNVERIFIED header; the
+    # provisional one after it
+    assert u.index("Webhooks need a Business plan") < u.index("UNVERIFIED corrections")
+    assert u.index("UNVERIFIED corrections") < u.index("webhooks ARE on Free")
+
+
+def test_draft_with_only_confirmed_context_has_no_unverified_block(monkeypatch):
+    monkeypatch.setattr(_registry.llm, "complete",
+                        lambda system, user, **kw: (globals().__setitem__("_u", user)
+                                                    or '{"reply": "ok", "confidence": 0.8}'))
+    monkeypatch.setattr(_registry.llm, "last_usage", None, raising=False)
+    h_draft({"case": {"subject": "s", "body": "b"},
+             "retrieval": [{"doc_url": "d", "chunk_text": "confirmed fact", "entry_status": "active"}]},
+            {"_node_id": "d"})
+    assert "UNVERIFIED" not in globals()["_u"]
+
+
 # --------------------------------------------------------------------------
 # Phase 16 — policy rules + Slack signature
 # --------------------------------------------------------------------------

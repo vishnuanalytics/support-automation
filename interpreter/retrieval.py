@@ -167,9 +167,11 @@ def graph_expand(
         return []
     rows = (
         sb.table("doc_chunks")
-        .select("chunk_id, doc_url, chunk_index, chunk_text, heading_path, chunk_type, section")
+        .select("chunk_id, doc_url, chunk_index, chunk_text, heading_path, "
+                "chunk_type, section, entry_status")
         .in_("doc_url", neighbour_urls)
         .lt("chunk_index", chunks_per_neighbour)
+        .neq("entry_status", "superseded")           # P1b — never expand into stale chunks
         .execute()
         .data
         or []
@@ -251,6 +253,7 @@ def hybrid_retrieve(
             "rerank_score": r.get("rerank_score"),
             "rrf_score": r.get("_rrf"),
             "from_graph": r.get("_graph", False),
+            "entry_status": r.get("entry_status") or "active",   # P1b
         }
         for r in results
     ]

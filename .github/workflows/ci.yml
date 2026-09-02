@@ -18,8 +18,36 @@ jobs:
       - run: pip install -r requirements.txt -r requirements-dev.txt -r requirements-connectors.txt -r requirements-ingest.txt
       # migration numbering + every portable flow still compiles
       - run: python -m scripts.check_migrations
+      # P2a — live schema vs db/migrations/*.sql (skips cleanly without creds)
+      - name: Verify no schema drift
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m scripts.verify_migrations
       # offline suite only — anything marked `integration` needs Supabase creds
       - run: SKIP_ENV_CHECK=1 pytest -m "not integration" -q
+
+  integration:
+    # P2b — the PostgREST/DB paths the offline suite can't cover (KIL writers,
+    # queue dedupe, RLS). Self-skips when the secrets aren't configured.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-dev.txt -r requirements-connectors.txt -r requirements-ingest.txt
+      - name: pytest -m integration
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          NEO4J_URI: ${{ secrets.NEO4J_URI }}
+          NEO4J_USERNAME: ${{ secrets.NEO4J_USERNAME }}
+          NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
+          NEO4J_DATABASE: ${{ secrets.NEO4J_DATABASE }}
+        run: SKIP_ENV_CHECK=1 pytest -m integration -q
 
   web:
     runs-on: ubuntu-latest

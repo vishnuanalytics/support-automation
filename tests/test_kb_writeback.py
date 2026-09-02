@@ -170,8 +170,10 @@ def test_apply_supersede_marks_old_and_pulls_its_chunks(monkeypatch):
 # ── promotion ───────────────────────────────────────────────────────────
 def test_promote_provisional_flips_aged_entries():
     sb = _SB({"kb_entries": [
-        {"entry_id": "e1", "status": "provisional", "provisional_until": "2000-01-01T00:00:00Z"},
-        {"entry_id": "e2", "status": "provisional", "provisional_until": "2999-01-01T00:00:00Z"},
+        {"entry_id": "e1", "source_id": "s1", "status": "provisional",
+         "provisional_until": "2000-01-01T00:00:00Z"},
+        {"entry_id": "e2", "source_id": "s1", "status": "provisional",
+         "provisional_until": "2999-01-01T00:00:00Z"},
     ]})
     # the fake's lt() isn't a real comparison — filter manually for the assertion
     n = kb_writeback.promote_provisional(sb)
@@ -223,7 +225,7 @@ def test_dispatch_kb_approve_enqueues_apply(monkeypatch):
     enq = []
     monkeypatch.setattr("interpreter.jobs.enqueue",
                         lambda kind, payload, **kw: enq.append((kind, payload)))
-    sb = _SB({"action_requests": [{"id": "ar-1", "status": "pending"}]})
+    sb = _SB({"action_requests": [{"id": "ar-1", "kind": "kb_change", "status": "pending", "payload": {"title": "T"}}]})
     payload = {"type": "block_actions", "user": {"id": "U1"}, "channel": {"id": "C1"},
                "container": {"thread_ts": "1.1"}, "message": {"ts": "1.1"},
                "actions": [{"action_id": "kb_approve", "value": "ar-1"}]}
