@@ -335,3 +335,26 @@ row + Slack card is raised → a manager confirms → an LLM-drafted KB diff is
 approved → the worker writes a `provisional` entry (superseding the wrong one)
 → it auto-promotes after 7 days unless a fresh contradiction still disputes it.
 Remaining: live end-to-end verification against the org + Slack.
+
+**Phase KIL live-verified 2026-09-02** (PR #29) — the smoke drove b→c→d→f end
+to end against real Supabase / Groq / Slack; 4 schema-shape bugs found + fixed.
+
+---
+
+**Added Phase P1–P8 — post-KIL hardening → platform (2026-09-02).** From an
+end-of-KIL review; sequenced in `docs/PROJECT_SCOPE.md`'s Roadmap table.
+Correctness first, then a CI safety net, then the generic-`RunContext` unlock,
+then triggers / connectors / self-serve onboarding.
+
+| Req | How |
+|---|---|
+| **FR-40** Scheduled case-history sync (**P1a**) | `case_graph_sync` (KIL-a) and `case_memory_sync` (Phase 21) run only on a manual `--backfill`. Both MUST run on a schedule — a `worker` sweep (self-re-enqueue, like the Phase 27d sweeps) **and** in `.github/workflows/daily-sync.yml` — so new/updated Cases enter the Neo4j lifecycle graph + the pgvector resolution memory without a hand-run. `SWEEP_DRY_RUN` / a disable flag honoured. |
+| **FR-41** Provisional-aware retrieval (**P1b**) | A `review_writeback` KB entry lands `provisional` (KIL-d) but its chunks go into `doc_chunks` via the same path as `active` entries — so an **unverified** correction is retrieved and cited with equal weight and can override a `live` doc. Fix: stamp `doc_chunks` with the source entry's status; `h_draft` MUST down-weight / visibly flag `provisional` context and never let it override an `active`/`confirmed` passage; `superseded` chunks MUST be excluded from retrieval (today only `delete_entry` on the old URL does this — verify it actually fires). |
+| **FR-42** Tenant-scoped infra + multi-tenant sweeps (**P1c**) | `graph_sync_state` / `handoff_watch_state` are `select using (true)` — any tenant's user can read another tenant's Case ids + cursors. Scope reads to `tenant_members` like every other table. `handoff_watch.watch_case` hardcodes `DEFAULT_TENANT_ID`; the sweep MUST iterate the tenants that have escalated Cases. |
+| **FR-43** Migration verification + integration CI (**P2**) | `scripts/verify_migrations.py` — diff the DDL in `db/migrations/*.sql` against the live `information_schema` and fail on drift (CLAUDE.md keeps `supabase_migrations` deliberately out of sync). A CI job MUST spin an ephemeral Postgres, apply every `.sql` in order, and run `pytest -m integration` against it (Salesforce-dependent tests mocked or skipped). All 4 KIL smoke bugs were invisible to the 369 offline tests. |
+| **FR-44** Unified approvals (**P4**) | Approvals are split across 3 code paths / 2 transports (`/api/integrations/slack/interactions` signed HTTP, `slack_socket.dispatch_action` Socket Mode, KIL-d `kb_approve`) and there is **no web UI for `action_requests`** — a manager not in Slack can't approve a KB change or a GitHub issue. Consolidate into one `interpreter/approvals.py`; add `GET /api/approvals` (merging `review_tasks` + `action_requests`) + a web **Approvals** tab with a REST equivalent of every Slack button. |
+| **FR-45** Generic run context (**P5**) | The run state is `CaseState` — every node handler, the trace, persistence, and `builder._context` assume a Salesforce support Case. A generic **`RunContext`** MUST be introduced alongside it, with `sf_case` as one adapter that produces it, threaded through `builder` / `registry` / `runs` / `trace`. This is the prerequisite for FR-46…FR-48. |
+| **FR-46** Triggers (**P6**) | A flow MUST be startable by a hosted **webhook** (`POST /t/{flow_token}` → enqueue a run with the JSON body as the `RunContext`) and by a **schedule**, decoupled from Case/CDC/email plumbing. |
+| **FR-47** Declarative connectors + connections manager (**P6**) | A connector MUST be data, not a hardcoded Python node handler — a minimal spec (`{auth: oauth2\|apikey, base_url, actions:[…]}`), plus a per-tenant **connections** UI (today only Slack/Google have a Connect button). |
+| **FR-48** Self-serve onboarding (**P7**) | A new user MUST be able to reach first value in ~1 hour with their own data: a **template gallery**, a new-workspace **setup wizard** (pick template → connect trigger → add KB → test → publish), **file upload** (pdf/docx) + **"crawl this URL"** KB ingestion (today: in-app markdown + Google Docs only). |
+| **FR-49** KIL observability (**P8**) | A weekly per-tenant **learning report** (entries corrected, flag-precision trend, knowledge-freshness delta, top recurring contradictions); the web KB tab MUST surface `provisional` / `superseded` entries with a "held: disputed" badge; `health_check.py` MUST cover KIL (flag precision < target, N open review tasks, `slackbot` quiet). Eval depth: human-reply review precision (KIL-c), whether a `draft_change` diff actually resolves the contradiction (KIL-d), end-to-end answer-accuracy lift. |
