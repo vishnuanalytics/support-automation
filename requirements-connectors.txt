@@ -5,3 +5,7 @@
 google-auth
 google-auth-oauthlib
 google-api-python-client
+
+# P7b — KB file upload (optional; only needed for .pdf / .docx)
+pypdf>=4.0
+python-docx>=1.1

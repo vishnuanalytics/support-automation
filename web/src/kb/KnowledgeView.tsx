@@ -150,6 +150,22 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
     }
   }
 
+  async function uploadFile(file: File) {
+    const b64 = await new Promise<string>((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res(String(r.result));
+      r.onerror = () => rej(r.error);
+      r.readAsDataURL(file);
+    });
+    try {
+      await api.kb.upload(col.source_id, { filename: file.name, content_b64: b64 });
+      void load();
+      onChange();
+    } catch (e) {
+      alert(e instanceof ApiError ? String(e.detail) : String(e));
+    }
+  }
+
   return (
     <div className="col" style={{ padding: 16, gap: 12, overflow: "auto" }}>
       <div className="row" style={{ justifyContent: "space-between" }}>
@@ -159,6 +175,19 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
         </div>
         <div className="row">
           <button onClick={() => setOpenId("new")}>＋ entry</button>
+          <label className="button" style={{ cursor: "pointer" }}>
+            ⬆ upload file
+            <input
+              type="file"
+              accept=".pdf,.docx,.md,.markdown,.txt,.csv,.json"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                e.currentTarget.value = "";
+                if (f) void uploadFile(f);
+              }}
+            />
+          </label>
           {gApi.configured &&
             (gApi.connected ? (
               <button onClick={linkGdoc}>＋ Google Doc</button>
