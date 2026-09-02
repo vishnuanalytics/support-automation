@@ -345,6 +345,20 @@ export interface KilMetrics {
   weekly: { week: string; flagged: number }[];
 }
 
+export interface KilDigest {
+  week_of: string;
+  this_week: KilMetrics;
+  deltas: {
+    flagged: number;
+    flag_precision: number | null;
+    false_flag_rate: number | null;
+    knowledge_freshness_days: number | null;
+  };
+  top_contradictions: { claim: string; count: number }[];
+  recent_kb_changes: { title: string; status: string; created_at: string }[];
+  markdown: string;
+}
+
 export interface FlowTrigger {
   trigger_id: string;
   kind: "webhook" | "schedule";

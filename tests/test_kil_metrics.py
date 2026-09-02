@@ -28,6 +28,12 @@ class _Q:
     def gte(self, *a, **k):
         return self
 
+    def lt(self, *a, **k):
+        return self
+
+    def order(self, *a, **k):
+        return self
+
     def limit(self, *a, **k):
         return self
 
@@ -91,3 +97,59 @@ def test_empty_tenant_is_all_zeros_not_a_crash():
     assert m["review"]["flag_precision"] is None
     assert m["kb_writeback"]["entries"] == 0
     assert m["knowledge_freshness_days"] is None
+
+
+# ── P8a: the weekly learning report ────────────────────────────────────
+def test_compute_window_scores_only_resolved_flags():
+    tasks = [
+        {"trigger": "contradicts", "status": "correct", "created_at": _iso(10)},
+        {"trigger": "contradicts", "status": "correct", "created_at": _iso(10)},
+        {"trigger": "novel", "status": "wrong", "created_at": _iso(9)},
+        {"trigger": "sample", "status": "dismissed", "created_at": _iso(9)},
+        {"trigger": "contradicts", "status": "open", "created_at": _iso(8)},
+    ]
+    w = kil_metrics.compute_window(_SB({"review_tasks": tasks}), "t",
+                                   start_days_ago=14, end_days_ago=7)
+    # correct / (correct + wrong) = 2/3
+    assert w["review"]["flag_precision"] == 0.667
+    # dismissed / resolved = 1/4
+    assert w["review"]["false_flag_rate"] == 0.25
+    assert w["knowledge_freshness_days"] is None
+
+
+def test_digest_surfaces_recurring_contradictions_and_kb_changes():
+    tasks = [
+        {"trigger": "contradicts", "status": "open", "created_at": _iso(3),
+         "verdict": {"salient": ["Refunds take 5 business days"]}},
+        {"trigger": "contradicts", "status": "correct", "created_at": _iso(4),
+         "verdict": {"salient": ["refunds take 5 business days"]}},   # same claim, cased
+        {"trigger": "novel", "status": "open", "created_at": _iso(5),
+         "verdict": {"salient": ["EU data stays in Frankfurt"]}},     # seen once — dropped
+    ]
+    kb = [{"title": "Refund SLA", "status": "provisional", "created_at": _iso(1)}]
+    d = kil_metrics.digest(_SB({"review_tasks": tasks, "kb_entries": kb}), "t", weeks=4)
+
+    assert set(d) >= {"week_of", "this_week", "deltas", "top_contradictions",
+                      "recent_kb_changes"}
+    top = d["top_contradictions"]
+    assert top and top[0]["claim"] == "refunds take 5 business days"
+    assert top[0]["count"] == 2
+    assert all(c["count"] >= 2 for c in top)          # the one-off is filtered
+    assert d["recent_kb_changes"][0]["title"] == "Refund SLA"
+    assert "flagged" in d["deltas"]
+
+
+def test_render_digest_is_slack_markdown():
+    tasks = [{"trigger": "contradicts", "status": "correct", "created_at": _iso(2),
+              "reviewed_at": _iso(1), "verdict": {"salient": ["a claim", "a claim"]}}]
+    d = kil_metrics.digest(_SB({"review_tasks": tasks, "kb_entries": []}), "t")
+    text = kil_metrics.render_digest(d)
+    assert isinstance(text, str)
+    assert text.startswith("*Knowledge Integrity — week ")
+    assert "Flag precision:" in text and "KB changes:" in text
+
+
+def test_pct_formats_ratios_and_none():
+    assert kil_metrics._pct(None) == "—"
+    assert kil_metrics._pct(0.5) == "50%"
+    assert kil_metrics._pct(1) == "100%"

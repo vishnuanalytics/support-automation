@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
-import type { ActionRequest, KilMetrics, ReviewTask } from "../types";
+import type { ActionRequest, KilDigest, KilMetrics, ReviewTask } from "../types";
 
 const STATUS = ["open", "correct", "wrong", "dismissed", "all"] as const;
 
 export function ReviewView() {
   const [metrics, setMetrics] = useState<KilMetrics | null>(null);
+  const [digest, setDigest] = useState<KilDigest | null>(null);
   const [rows, setRows] = useState<ReviewTask[]>([]);
   const [ars, setArs] = useState<ActionRequest[]>([]);
   const [status, setStatus] = useState<(typeof STATUS)[number]>("open");
@@ -104,7 +105,33 @@ export function ReviewView() {
                 : "—"
             }
           />
+          <button
+            style={{ alignSelf: "center" }}
+            onClick={() =>
+              digest
+                ? setDigest(null)
+                : api.review.digest().then(setDigest).catch((e: ApiError) => setErr(e.message))
+            }
+          >
+            {digest ? "hide weekly report" : "📈 weekly report"}
+          </button>
         </div>
+      )}
+
+      {digest && (
+        <pre
+          style={{
+            margin: 0,
+            padding: 12,
+            whiteSpace: "pre-wrap",
+            fontSize: 13,
+            lineHeight: 1.5,
+            background: "var(--card, #f6f7f9)",
+            borderRadius: 8,
+          }}
+        >
+          {digest.markdown.replace(/\*/g, "")}
+        </pre>
       )}
 
       <div className="row" style={{ gap: 4 }}>

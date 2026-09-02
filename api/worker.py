@@ -382,7 +382,7 @@ def _apply_kb_change(payload: dict, sb) -> dict:
 _SWEEP_EVERY_MIN = {"queue_sweep": 5, "cdc_reconcile": 60, "reasoning_ttl": 5,
                     "handoff_watch": 5, "kb_promote": 360,
                     "case_graph_sync": 60, "case_memory_sync": 60,
-                    "fire_schedules": 1}
+                    "fire_schedules": 1, "kil_digest": 30}
 
 
 def _reschedule(kind: str, sb) -> None:
@@ -418,7 +418,8 @@ HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
             "kb_promote": _sweep_handler("kb_promote"),
             "case_graph_sync": _sweep_handler("case_graph_sync"),
             "case_memory_sync": _sweep_handler("case_memory_sync"),
-            "fire_schedules": _sweep_handler("fire_schedules")}
+            "fire_schedules": _sweep_handler("fire_schedules"),
+            "kil_digest": _sweep_handler("kil_digest")}
 
 JOB_TIMEOUT = int(os.environ.get("WORKER_JOB_TIMEOUT", "120"))
 
