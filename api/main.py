@@ -44,7 +44,7 @@ from supabase import create_client
 
 load_dotenv()
 
-from interpreter.builder import build_graph  # noqa: E402
+from interpreter.builder import build_graph, initial_state  # noqa: E402
 from interpreter.flows.validate_flow import Flow, check_flow  # noqa: E402
 from interpreter.loader import (  # noqa: E402
     FlowInvalid, FlowNotFound, definition_hash as flow_definition_hash, load_flow,
@@ -235,7 +235,8 @@ class FlowCreate(BaseModel):
 
 
 class RunIn(BaseModel):
-    case: dict[str, Any]
+    case: dict[str, Any] = {}
+    context: dict[str, Any] = {}   # P5 — generic run payload for a non-Case flow
 
 
 class MermaidIn(BaseModel):
@@ -729,7 +730,7 @@ def run_flow(
     except FlowInvalid as e:
         raise HTTPException(422, {"errors": e.errors})
     try:
-        final = build_graph(flow).invoke({"case": body.case, "tenant_id": flow["tenant_id"], "team": flow.get("team"), "trace": []})
+        final = build_graph(flow).invoke(initial_state(flow, case=body.case, context=body.context))
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"run failed: {type(e).__name__}: {e}")
 

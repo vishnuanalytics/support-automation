@@ -27,7 +27,7 @@ import hashlib  # noqa: E402
 from ingestion.scraper import get_supabase  # noqa: E402
 from ingestion.sources.kb_common import embed_entry as _kb_embed  # noqa: E402
 from interpreter import feedback, github as githubmod, jobs, salesforce, slack as slackmod  # noqa: E402
-from interpreter.builder import build_graph  # noqa: E402
+from interpreter.builder import build_graph, initial_state  # noqa: E402
 from interpreter.loader import load_flow  # noqa: E402
 from interpreter.runs import record_run  # noqa: E402
 
@@ -72,7 +72,7 @@ def _run_flow(payload: dict, sb) -> dict:
             return {"run_id": dup[0]["run_id"], "idempotent_skip": True}
 
     flow = load_flow(flow_id=flow_id, sb=sb, status="published", validate=True)
-    final = build_graph(flow).invoke({"case": case, "tenant_id": flow["tenant_id"], "team": flow.get("team"), "trace": []})
+    final = build_graph(flow).invoke(initial_state(flow, case=case))
     # nodes like `sf_case` mutate the case in-flight (add sf_id, refresh the
     # account tier) — persist / act on that, not the pre-run input.
     run_case = final.get("case") or case

@@ -57,6 +57,11 @@ def _context(state: CaseState) -> dict[str, Any]:
         "sender": state.get("sender") or {},
         "outcome": state.get("outcome") or {},
         "case": state.get("case") or {},
+        # P5 — the generic run payload. `input` is the transport-neutral alias:
+        # a Case flow keeps using `case.*`; a webhook/trigger flow uses
+        # `context.*` (or `input.*`), and both work in an edge condition.
+        "context": state.get("context") or {},
+        "input": state.get("context") or state.get("case") or {},
         # Phase 25 — enrichment nodes; edges can branch on `sf_context.*`,
         # `ai.<key>.*`, `attachments`.
         "sf_context": state.get("sf_context") or {},
@@ -106,6 +111,23 @@ def _make_router(source_id: str, out_edges: list[dict]) -> Callable[[CaseState],
         )
 
     return _router
+
+
+def initial_state(flow: dict[str, Any], *, case: dict | None = None,
+                  context: dict | None = None) -> dict[str, Any]:
+    """The dict to feed `build_graph(flow).invoke(...)`.
+
+    `case`    — the Salesforce-Case pipeline input (`sf_case`, `identify`, …).
+    `context` — a generic (trigger / webhook / manual) run payload; nodes and
+                edge conditions read it as `context.*` / `input.*` (P5).
+    Either or both; both default to `{}`."""
+    return {
+        "case": case or {},
+        "context": context or {},
+        "tenant_id": flow["tenant_id"],
+        "team": flow.get("team"),
+        "trace": [],
+    }
 
 
 def build_graph(flow: dict[str, Any], *, checkpointer=None):
