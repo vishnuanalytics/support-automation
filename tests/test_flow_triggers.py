@@ -24,6 +24,44 @@ def test_trigger_view_builds_a_webhook_url(monkeypatch):
     assert "url" not in v2 and v2["cron"] == "*/5 * * * *"
 
 
+def test_fire_schedules_enqueues_a_due_trigger(monkeypatch):
+    from interpreter import sweeps
+    from datetime import datetime, timezone
+
+    monkeypatch.setattr(sweeps, "_now", lambda: datetime(2026, 9, 2, 9, 0, tzinfo=timezone.utc))
+    enq = []
+    monkeypatch.setattr("interpreter.jobs.enqueue",
+                        lambda kind, payload, **kw: enq.append((kind, payload, kw)))
+
+    updated = []
+
+    class _T:
+        def __init__(self, rows): self.rows = rows
+        def select(self, *a, **k): return self
+        def eq(self, *a, **k): return self
+        def limit(self, n): return self
+        def execute(self): return type("R", (), {"data": self.rows})
+        def update(self, p): updated.append(p); return self
+
+    rows = [
+        {"trigger_id": "s1", "flow_id": "f1", "cron": "0 9 * * *",  # due at 09:00
+         "last_fired_at": "2026-09-02T08:00:00Z", "fire_count": 4, "enabled": True},
+        {"trigger_id": "s2", "flow_id": "f2", "cron": "0 10 * * *",  # not due
+         "last_fired_at": None, "fire_count": 0, "enabled": True},
+        {"trigger_id": "s3", "flow_id": "f3", "cron": "0 9 * * *",   # already fired this minute
+         "last_fired_at": "2026-09-02T09:00:00Z", "fire_count": 1, "enabled": True},
+    ]
+    sb = type("SB", (), {"table": lambda self, n: _T(rows)})()
+    out = sweeps.fire_schedules(sb, dry_run=False)
+
+    assert out["fired"] == ["f1"]
+    assert len(enq) == 1 and enq[0][0] == "run_flow"
+    assert enq[0][1]["flow_id"] == "f1"
+    assert enq[0][1]["context"]["_trigger"] == "schedule"
+    assert enq[0][2]["dedupe_key"] == "sched:s1:202609020900"
+    assert updated and updated[0]["fire_count"] == 5
+
+
 # ── integration ──────────────────────────────────────────────────────
 pytestmark_int = pytest.mark.skipif(
     not (os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SERVICE_KEY")),
