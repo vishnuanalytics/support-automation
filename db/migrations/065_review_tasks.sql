@@ -30,9 +30,12 @@ create table if not exists review_tasks (
   created_at     timestamptz not null default now()
 );
 
--- one review + at most one sample per run
+-- one review + at most one sample per run. Plain (non-partial) so PostgREST
+-- upsert `on_conflict=run_id,kind` works; NULL run_id rows never collide
+-- (Postgres treats NULLs as distinct) which is the intended behaviour for a
+-- flag raised without a recorded run.
 create unique index if not exists uq_review_tasks_run_kind
-  on review_tasks (run_id, kind) where run_id is not null;
+  on review_tasks (run_id, kind);
 create index if not exists idx_review_tasks_open
   on review_tasks (tenant_id, status, created_at);
 

@@ -24,8 +24,16 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                      r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def _is_uuid(s: Any) -> bool:
+    return isinstance(s, str) and bool(_UUID_RE.match(s))
 
 from . import llm
 
@@ -43,8 +51,8 @@ def _kb_ref(contexts: list[dict]) -> tuple[str | None, str | None]:
         ref = c.get("ref") or ""
         if ref.startswith("kb://"):
             rest = ref[len("kb://"):].split("/")
-            if len(rest) == 2:
-                return rest[1], rest[0]
+            if len(rest) == 2 and _is_uuid(rest[1]):
+                return rest[1], (rest[0] if _is_uuid(rest[0]) else None)
     return None, None
 
 
@@ -91,6 +99,8 @@ def draft_change(task_row: dict, *, model: str | None = None) -> dict:
         p = json.loads(raw)
         op = p.get("op") if p.get("op") in ("create", "supersede") else None
         op = op or ("supersede" if target_entry_id else "create")
+        if op == "supersede" and not target_entry_id:
+            op = "create"          # the model asked to replace, but no KB entry was in scope
         return {
             "op": op,
             "title": (p.get("title") or statement[:90]).strip()[:200],
@@ -171,7 +181,7 @@ def _corrections_source(sb, tenant_id: str) -> str:
         return rows[0]["source_id"]
     created = (sb.table("sources").insert({
         "tenant_id": str(tenant_id), "kind": "internal_kb", "name": _CORRECTIONS_NAME,
-        "display_name": "Corrections (from review)",
+        "config": {"label": "Corrections (from review)", "origin": "kil"},
     }).execute().data or [None])[0]
     return created["source_id"]
 
@@ -206,6 +216,8 @@ def apply_kb_change(sb, ar_row: dict, *, enqueue=True) -> dict:
     tenant_id = ar_row["tenant_id"]
     p = ar_row["payload"]
     old_id = p.get("supersedes_entry_id")
+    if not _is_uuid(old_id):
+        old_id = None                       # a create, not a supersede
     approver = ar_row.get("decided_by")
 
     src = _corrections_source(sb, tenant_id)

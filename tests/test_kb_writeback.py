@@ -100,8 +100,8 @@ class _SB:
 
 # ── draft ───────────────────────────────────────────────────────────────
 def test_kb_ref_parses_an_internal_entry_context():
-    eid, sid = kb_writeback._kb_ref([{"ref": "kb://src-9/entry-3", "kind": "kb"}])
-    assert (eid, sid) == ("entry-3", "src-9")
+    eid, sid = kb_writeback._kb_ref([{"ref": "kb://33333333-3333-3333-3333-333333333333/22222222-2222-2222-2222-222222222222", "kind": "kb"}])
+    assert (eid, sid) == ("22222222-2222-2222-2222-222222222222", "33333333-3333-3333-3333-333333333333")
     assert kb_writeback._kb_ref([{"ref": "https://docs/x"}]) == (None, None)
 
 
@@ -112,9 +112,9 @@ def test_fallback_draft_create_vs_supersede():
     assert c["op"] == "create" and c["title"] == "Webhooks require a Business plan."
     assert c["supersedes_entry_id"] is None
 
-    t2 = {**t, "contexts": [{"ref": "kb://s1/e1", "kind": "kb"}]}
+    t2 = {**t, "contexts": [{"ref": "kb://44444444-4444-4444-4444-444444444444/11111111-1111-1111-1111-111111111111", "kind": "kb"}]}
     c2 = kb_writeback.draft_change(t2)
-    assert c2["op"] == "supersede" and c2["supersedes_entry_id"] == "e1"
+    assert c2["op"] == "supersede" and c2["supersedes_entry_id"] == "11111111-1111-1111-1111-111111111111"
 
 
 # ── apply ───────────────────────────────────────────────────────────────
@@ -155,16 +155,16 @@ def test_apply_supersede_marks_old_and_pulls_its_chunks(monkeypatch):
     sb = _SB({
         "sources": [{"source_id": "src-corr", "tenant_id": "00000000-0000-0000-0000-000000000000",
                      "kind": "internal_kb", "name": "kb-corrections"}],
-        "kb_entries": [{"entry_id": "old-1", "source_id": "src-A", "status": "active"}],
+        "kb_entries": [{"entry_id": "55555555-5555-5555-5555-555555555555", "source_id": "66666666-6666-6666-6666-666666666666", "status": "active"}],
     })
     kb_writeback.apply_kb_change(sb, _ar(payload={
-        "op": "supersede", "title": "T", "body_md": "B", "supersedes_entry_id": "old-1",
+        "op": "supersede", "title": "T", "body_md": "B", "supersedes_entry_id": "55555555-5555-5555-5555-555555555555",
         "review_task_id": "task-1"}))
-    old = [r for r in sb.rows("kb_entries") if r["entry_id"] == "old-1"][0]
+    old = [r for r in sb.rows("kb_entries") if r["entry_id"] == "55555555-5555-5555-5555-555555555555"][0]
     assert old["status"] == "superseded"
-    assert deleted == ["kb://src-A/old-1"]
+    assert deleted == ["kb://66666666-6666-6666-6666-666666666666/55555555-5555-5555-5555-555555555555"]
     new = [r for r in sb.rows("kb_entries") if r.get("origin") == "review_writeback"][0]
-    assert new["supersedes_entry_id"] == "old-1" and new["source_id"] == "src-A"
+    assert new["supersedes_entry_id"] == "55555555-5555-5555-5555-555555555555" and new["source_id"] == "66666666-6666-6666-6666-666666666666"
 
 
 # ── promotion ───────────────────────────────────────────────────────────
@@ -184,13 +184,13 @@ def test_promote_provisional_flips_aged_entries():
 def test_promote_holds_an_entry_with_a_fresh_contradiction():
     sb = _SB({
         "kb_entries": [
-            {"entry_id": "e-held", "tenant_id": "T", "status": "provisional",
+            {"entry_id": "77777777-7777-7777-7777-777777777777", "tenant_id": "T", "status": "provisional",
              "provisional_until": "2000-01-01T00:00:00Z", "created_at": "2026-09-01T00:00:00Z"},
         ],
         "review_tasks": [
             {"tenant_id": "T", "kind": "human_reply_review", "status": "open",
              "created_at": "2026-09-02T00:00:00Z",
-             "contexts": [{"ref": "kb://src/e-held", "kind": "kb", "text": "..."}]},
+             "contexts": [{"ref": "kb://33333333-3333-3333-3333-333333333333/77777777-7777-7777-7777-777777777777", "kind": "kb", "text": "..."}]},
         ],
     })
     n = kb_writeback.promote_provisional(sb)
