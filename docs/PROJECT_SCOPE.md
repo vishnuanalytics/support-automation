@@ -757,9 +757,19 @@ retrieved passages (claim graph deferred to KIL-g). Manager = the routed-team
   de-indexes the old one, enqueues `embed_kb_entry`, MERGEs
   `(:KBArticle)-[:SUPERSEDES]->`. `promote_provisional()` ages provisional →
   active. Web Review tab + REST still pending. 8 offline tests (360 total).
-- **KIL-e…g — planned.** e post-handover watcher · f metrics + the
-  "no fresh contradiction" promotion gate + web Review tab · g atomic claim
-  graph (deferred).
+- **KIL-e — built (2026-09-02).** Migration `067` (`handoff_watch_state` —
+  cursor + rate-limit/dedup, RLS like `system_health`).
+  `interpreter/handoff_watch.py` `watch_case()` — for an escalated Case, runs
+  `integrity.check` on every message newer than `last_seen_ts` against the
+  run's KB + case-history context, and (LLM-gated) checks the `pointer_bank`
+  for still-open critical questions; a hit posts one flag to the reasoning
+  thread / routed-team channel, capped at `HANDOFF_MAX_FLAGS` (3) and deduped
+  by signature. **Never contacts the customer.** New `sweeps.handoff_watch`
+  in the `api.worker` loop (every 5 min, self-re-enqueue, `SWEEP_DRY_RUN`).
+  6 offline tests (366 total).
+- **KIL-f…g — planned.** f metrics dashboard + the "no fresh contradiction"
+  promotion gate + web Review tab + `sop_conflicts` as a scheduled KB-vs-KB
+  sweep · g atomic claim graph (deferred).
 
 **Phase 27 — the Case Control Plane (done, 2026-09-01/02).** One
 AI-managed Case queue: classify + route + track `Status` + hand off via

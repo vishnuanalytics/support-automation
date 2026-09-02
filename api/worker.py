@@ -341,7 +341,8 @@ def _apply_kb_change(payload: dict, sb) -> dict:
 
 
 # ── Phase 27d — the case-control-plane safety-net sweeps ──────────────────
-_SWEEP_EVERY_MIN = {"queue_sweep": 5, "cdc_reconcile": 60, "reasoning_ttl": 5}
+_SWEEP_EVERY_MIN = {"queue_sweep": 5, "cdc_reconcile": 60, "reasoning_ttl": 5,
+                    "handoff_watch": 5}
 
 
 def _reschedule(kind: str, sb) -> None:
@@ -372,7 +373,8 @@ HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
             "apply_kb_change": _apply_kb_change,
             "queue_sweep": _sweep_handler("queue_sweep"),
             "cdc_reconcile": _sweep_handler("cdc_reconcile"),
-            "reasoning_ttl": _sweep_handler("reasoning_ttl")}
+            "reasoning_ttl": _sweep_handler("reasoning_ttl"),
+            "handoff_watch": _sweep_handler("handoff_watch")}
 
 JOB_TIMEOUT = int(os.environ.get("WORKER_JOB_TIMEOUT", "120"))
 
