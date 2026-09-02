@@ -27,6 +27,13 @@ class CaseState(TypedDict, total=False):
     tenant_id: str             # the flow's tenant — for per-tenant integration creds (Phase 12)
     team: str                  # the flow's team — scopes policy_rules lookup (Phase 16)
 
+    # P5 — the generic run payload. A flow that does NOT operate on a Salesforce
+    # Case reads its input from here (`context.*`, or `input.*` in an edge
+    # condition) instead of `case.*`; a trigger / webhook adapter populates it.
+    # `sf_case` still fills `case`. Merge-friendly (operator.or_) like `ai`, so
+    # any node can add derived values without a dedicated state key.
+    context: Annotated[dict[str, Any], operator.or_]
+
     # ---- derived by nodes ------------------------------------------------------
     query: str                 # search query built by the retrieve node
     retrieval: list[dict[str, Any]]   # ranked chunks: {doc_url, chunk_text, score, ...}

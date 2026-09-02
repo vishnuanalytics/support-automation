@@ -146,6 +146,44 @@ def _h_end(state, config):
     return {"outcome": {"action": config["_label"]}, "trace": []}
 
 
+# P5 — a node that operates on the generic run payload, not a Case
+@register("_t_ctx")
+def _h_ctx(state, config):
+    got = (state.get("context") or {}).get("plan")
+    return {"context": {"seen_plan": got}, "trace": []}
+
+
+def test_generic_context_flows_through_the_graph_and_edges(monkeypatch):
+    """P5 — a flow with no Case: `initial_state(context=…)` carries the payload,
+    a node reads `state['context']`, and an edge branches on `input.*`."""
+    from interpreter.builder import build_graph, initial_state
+
+    flow = {
+        "flow_id": "f", "tenant_id": "t", "team": "support", "name": "n",
+        "version": 1, "status": "draft",
+        "nodes": [
+            {"node_id": "c", "type": "_t_ctx", "label": "ctx", "config": {}},
+            {"node_id": "paid", "type": "_t_end", "label": "paid_path", "config": {}},
+            {"node_id": "free", "type": "_t_end", "label": "free_path", "config": {}},
+        ],
+        "edges": [
+            {"edge_id": "e1", "source_node_id": "c", "target_node_id": "free",
+             "condition": {"if": "input.plan == 'free'"}},
+            {"edge_id": "e2", "source_node_id": "c", "target_node_id": "paid",
+             "condition": {}},
+        ],
+    }
+    g = build_graph(flow)
+
+    free = g.invoke(initial_state(flow, context={"plan": "free"}))
+    assert free["outcome"]["action"] == "free_path"
+    assert free["context"]["seen_plan"] == "free"        # node read it
+    assert free["context"]["plan"] == "free"             # original payload survived the merge
+
+    paid = g.invoke(initial_state(flow, context={"plan": "pro"}))
+    assert paid["outcome"]["action"] == "paid_path"
+
+
 def _routing_flow():
     return {
         "flow_id": "f", "tenant_id": "t", "team": "support", "name": "t",

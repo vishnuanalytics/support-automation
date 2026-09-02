@@ -22,7 +22,7 @@ import sys
 
 from dotenv import load_dotenv
 
-from .builder import build_graph, describe_graph
+from .builder import build_graph, describe_graph, initial_state
 from .loader import load_flow
 
 load_dotenv()
@@ -91,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
     print(describe_graph(flow))
     print(f"\nrunning case {case.get('case_id', '?')}: {case.get('subject', '')!r}\n")
 
-    final = graph.invoke({"case": case, "tenant_id": flow["tenant_id"], "team": flow.get("team"), "trace": []})
+    final = graph.invoke(initial_state(flow, case=case))
 
     if not args.no_record:
         from .runs import record_run

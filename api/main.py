@@ -44,7 +44,7 @@ from supabase import create_client
 
 load_dotenv()
 
-from interpreter.builder import build_graph  # noqa: E402
+from interpreter.builder import build_graph, initial_state  # noqa: E402
 from interpreter.flows.validate_flow import Flow, check_flow  # noqa: E402
 from interpreter.loader import (  # noqa: E402
     FlowInvalid, FlowNotFound, definition_hash as flow_definition_hash, load_flow,
@@ -103,6 +103,7 @@ NODE_DEFAULTS: dict[str, dict[str, Any]] = {
     "ask_human": {"channel": "salesforce_chatter"},
     "handover": {"reason": "policy"},
     "team_route": {"default": "support"},
+    "trigger": {"map": {}, "required": [], "defaults": {}},
     "case_lookup": {"k": 3, "pool": 10, "min_similarity": 0.35},
     # Phase 25 — image attachments, Salesforce context, generic AI prompt
     "attachments": {"source": "salesforce", "max_images": 5, "ocr": True,
@@ -235,7 +236,8 @@ class FlowCreate(BaseModel):
 
 
 class RunIn(BaseModel):
-    case: dict[str, Any]
+    case: dict[str, Any] = {}
+    context: dict[str, Any] = {}   # P5 — generic run payload for a non-Case flow
 
 
 class MermaidIn(BaseModel):
@@ -729,7 +731,7 @@ def run_flow(
     except FlowInvalid as e:
         raise HTTPException(422, {"errors": e.errors})
     try:
-        final = build_graph(flow).invoke({"case": body.case, "tenant_id": flow["tenant_id"], "team": flow.get("team"), "trace": []})
+        final = build_graph(flow).invoke(initial_state(flow, case=body.case, context=body.context))
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"run failed: {type(e).__name__}: {e}")
 
@@ -771,6 +773,27 @@ def enqueue_run(flow_id: str, body: EnqueueIn, c: Caller = Depends(caller)) -> d
         {"flow_id": flow_id, "case": body.case, "idempotency_key": body.idempotency_key},
         dedupe_key=body.idempotency_key,
         sb=_service,
+    )
+    if job_id is None:
+        return {"job_id": None, "deduped": True}
+    return {"job_id": job_id}
+
+
+@app.post("/api/triggers/{flow_id}", status_code=202)
+def trigger_run(flow_id: str, body: dict[str, Any],
+                idempotency_key: str | None = None,
+                c: Caller = Depends(caller)) -> dict:
+    """P5b — start a flow from a generic payload (a `trigger` flow, no Case).
+    The JSON body becomes `state.context`; the flow reads it as `context.*` /
+    `input.*`. Async — returns a job id."""
+    from interpreter import triggers
+    rate_limit(c.user_id, "enqueue", 120)
+    _require_visible(c, flow_id)
+    ctx = triggers.webhook_context(body, source="webhook")["context"]
+    job_id = jobs.enqueue(
+        "run_flow",
+        {"flow_id": flow_id, "context": ctx, "idempotency_key": idempotency_key},
+        dedupe_key=idempotency_key, sb=_service,
     )
     if job_id is None:
         return {"job_id": None, "deduped": True}
