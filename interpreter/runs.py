@@ -27,6 +27,11 @@ def _slim_retrieval(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def build_row(flow: dict, final: dict, *, case: dict, source: str,
               idempotency_key: str | None = None) -> dict[str, Any]:
     outcome = final.get("outcome") or {}
+    # P5d — a generic (trigger/webhook) run has no Case; record its `context`
+    # payload so `case_payload` / the trace view still reconstruct the run.
+    if not case:
+        ctx = final.get("context") or {}
+        case = {k: v for k, v in ctx.items() if not str(k).startswith("_")}
     case_id = case.get("case_id") or case.get("sf_id") or case.get("id")
     action = outcome.get("action")
     # a run that went to a human, on a real Case, gets a resolution check

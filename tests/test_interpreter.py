@@ -327,6 +327,17 @@ def test_build_row_shapes_a_runs_record():
     assert "chunk_text" not in row["retrieval"][0]
 
 
+def test_build_row_records_the_context_payload_for_a_generic_run():
+    flow = {"flow_id": "f", "tenant_id": "t", "team": "support"}
+    final = {"outcome": {"action": "done"},
+             "context": {"subject": "webhook: churn risk", "account_id": "A9",
+                         "_trigger": "webhook", "_received_at": "2026-…"}}
+    row = build_row(flow, final, case={}, source="worker")
+    assert row["case_payload"] == {"subject": "webhook: churn risk", "account_id": "A9"}
+    assert row["subject"] == "webhook: churn risk"
+    assert row["human_action"] is None and row["case_id"] is None
+
+
 # --------------------------------------------------------------------------
 # Phase 7 — fail-closed tier, groundedness, gate weighting
 # --------------------------------------------------------------------------
