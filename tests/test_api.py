@@ -82,6 +82,10 @@ def test_templates_need_a_token():
     assert client.get("/api/templates/support-autoreply").status_code == 401
 
 
+def test_create_workspace_needs_a_token():
+    assert client.post("/api/tenants", json={"name": "Acme"}).status_code == 401
+
+
 def test_kb_upload_needs_a_token():
     assert client.post("/api/kb/collections/x/upload",
                        json={"filename": "a.txt", "content_b64": "aGk="}).status_code == 401
