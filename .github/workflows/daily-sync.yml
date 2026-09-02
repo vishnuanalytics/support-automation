@@ -52,10 +52,12 @@ jobs:
           NEO4J_DATABASE: ${{ secrets.NEO4J_DATABASE }}
         run: python -m ingestion.neo4j_sync
 
-      # Phase 21 — refresh the Case-resolution memory that feeds `draft`
-      # (audit D1: this was never scheduled). Best-effort; needs SF creds only
-      # for the --from-salesforce enrichment, so plain --once here.
-      - name: Refresh case_memory from resolved runs
+      # Phase 21 / P1a (FR-40) — refresh the Case-resolution memory that feeds
+      # `draft`, and the Neo4j Case-lifecycle graph the KIL loop reads. Both
+      # also run as `worker` sweeps (every 60 min); this is the belt-and-braces
+      # scheduled path. The SF_* secrets are optional — without them the
+      # `--from-salesforce` half is skipped and only resolved `runs` are synced.
+      - name: Refresh case_memory (resolved runs + closed SF Cases)
         continue-on-error: true
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -64,7 +66,26 @@ jobs:
           NEO4J_USERNAME: ${{ secrets.NEO4J_USERNAME }}
           NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
           NEO4J_DATABASE: ${{ secrets.NEO4J_DATABASE }}
-        run: python -m ingestion.case_memory_sync --once
+          SF_USERNAME: ${{ secrets.SF_USERNAME }}
+          SF_CONSUMER_KEY: ${{ secrets.SF_CONSUMER_KEY }}
+          SF_PRIVATE_KEY: ${{ secrets.SF_PRIVATE_KEY }}
+          SF_DOMAIN: ${{ secrets.SF_DOMAIN }}
+        run: python -m ingestion.case_memory_sync --from-salesforce --once
+
+      - name: Sync the Case-lifecycle graph -> Neo4j (KIL-a)
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          NEO4J_URI: ${{ secrets.NEO4J_URI }}
+          NEO4J_USERNAME: ${{ secrets.NEO4J_USERNAME }}
+          NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
+          NEO4J_DATABASE: ${{ secrets.NEO4J_DATABASE }}
+          SF_USERNAME: ${{ secrets.SF_USERNAME }}
+          SF_CONSUMER_KEY: ${{ secrets.SF_CONSUMER_KEY }}
+          SF_PRIVATE_KEY: ${{ secrets.SF_PRIVATE_KEY }}
+          SF_DOMAIN: ${{ secrets.SF_DOMAIN }}
+        run: python -m ingestion.case_graph_sync
 
       # audit C3 — trim old finished jobs / settled runs
       - name: Purge old jobs + runs

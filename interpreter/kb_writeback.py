@@ -289,7 +289,7 @@ def promote_provisional(sb, *, dry_run: bool = False) -> int:
     `active` — unless an open contradiction still references the entry."""
     now = datetime.now(timezone.utc).isoformat()
     rows = (sb.table("kb_entries")
-            .select("entry_id, tenant_id, title, created_at")
+            .select("entry_id, source_id, tenant_id, title, created_at")
             .eq("status", "provisional").lt("provisional_until", now)
             .execute().data or [])
     ready = [r for r in rows if not _has_fresh_contradiction(sb, r)]
@@ -301,5 +301,8 @@ def promote_provisional(sb, *, dry_run: bool = False) -> int:
     for r in ready:
         sb.table("kb_entries").update({"status": "active", "updated_at": "now()"}) \
           .eq("entry_id", r["entry_id"]).execute()
+        # P1b — the entry's chunks are now trusted context.
+        sb.table("doc_chunks").update({"entry_status": "active"}) \
+          .eq("doc_url", f"kb://{r['source_id']}/{r['entry_id']}").execute()
     log.info("promoted %d provisional KB entr(y/ies) to active (%d held)", len(ready), held)
     return len(ready)

@@ -359,3 +359,34 @@ def kb_promote(sb, *, dry_run: bool | None = None) -> dict:
         log.warning("kb_promote failed: %s", e)
         return {"error": str(e)[:200]}
     return {"promoted": n, "dry_run": dry}
+
+
+def case_graph_sync(sb, *, dry_run: bool | None = None) -> dict:
+    """P1a (FR-40) — keep the Neo4j Case-lifecycle graph current. Resumes from
+    the `graph_sync_state` checkpoint; a no-op when Salesforce/Neo4j are down."""
+    from ingestion import case_graph_sync as _cgs
+
+    dry = _dry() if dry_run is None else dry_run
+    try:
+        _cgs.sync(since=None, limit=2000, one_id=None, dry=dry)
+    except Exception as e:  # noqa: BLE001
+        log.warning("case_graph_sync sweep: %s", e)
+        return {"error": str(e)[:200]}
+    return {"ok": True, "dry_run": dry}
+
+
+def case_memory_sync(sb, *, dry_run: bool | None = None) -> dict:
+    """P1a (FR-40) — refresh the pgvector resolution memory that feeds `draft`
+    (from accepted `runs` + closed Salesforce Cases)."""
+    from ingestion import case_memory_sync as _cms
+
+    dry = _dry() if dry_run is None else dry_run
+    argv = ["--from-salesforce", "--once"] + (["--dry-run"] if dry else [])
+    try:
+        _cms.main(argv)
+    except SystemExit:
+        pass
+    except Exception as e:  # noqa: BLE001
+        log.warning("case_memory_sync sweep: %s", e)
+        return {"error": str(e)[:200]}
+    return {"ok": True, "dry_run": dry}

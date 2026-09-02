@@ -857,7 +857,16 @@ def h_task_dispatch(state: CaseState, config: dict) -> dict:
 def h_draft(state: CaseState, config: dict) -> dict:
     case = state.get("case", {})
     retrieval = state.get("retrieval", [])
-    context = _context_block(retrieval) or "(no retrieved context)"
+    # P1b (FR-41) — a `provisional` chunk is an unverified review-writeback
+    # correction. Keep it available but never let it displace a confirmed
+    # passage: confirmed context leads, provisional trails in a labelled block.
+    confirmed = [r for r in retrieval if (r.get("entry_status") or "active") != "provisional"]
+    provisional = [r for r in retrieval if (r.get("entry_status") or "active") == "provisional"]
+    context = _context_block(confirmed) or "(no retrieved context)"
+    if provisional:
+        context += ("\n\n# UNVERIFIED corrections (pending review — use only if the "
+                    "confirmed context above does not answer, and say the reply is "
+                    "provisional)\n" + _context_block(provisional, max_chunks=2))
     body = _with_ocr(state, f"Subject: {case.get('subject','')}\n\n{case.get('body','')}".strip())
 
     # Phase 14: internal-runbook context from a kb_lookup node upstream wins

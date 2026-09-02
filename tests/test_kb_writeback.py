@@ -170,8 +170,10 @@ def test_apply_supersede_marks_old_and_pulls_its_chunks(monkeypatch):
 # ── promotion ───────────────────────────────────────────────────────────
 def test_promote_provisional_flips_aged_entries():
     sb = _SB({"kb_entries": [
-        {"entry_id": "e1", "status": "provisional", "provisional_until": "2000-01-01T00:00:00Z"},
-        {"entry_id": "e2", "status": "provisional", "provisional_until": "2999-01-01T00:00:00Z"},
+        {"entry_id": "e1", "source_id": "s1", "status": "provisional",
+         "provisional_until": "2000-01-01T00:00:00Z"},
+        {"entry_id": "e2", "source_id": "s1", "status": "provisional",
+         "provisional_until": "2999-01-01T00:00:00Z"},
     ]})
     # the fake's lt() isn't a real comparison — filter manually for the assertion
     n = kb_writeback.promote_provisional(sb)
