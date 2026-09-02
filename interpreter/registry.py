@@ -94,6 +94,23 @@ def _with_ocr(state: "CaseState", body: str) -> str:
     return f"{body}\n\n--- text read from attached image(s) ---\n{at[:4000]}"
 
 
+def _run_text(state: "CaseState") -> tuple[str, str]:
+    """(subject, body) for the retrieve / classify / draft prompts. The Case
+    fields when there is a Case; otherwise the generic run payload (P5c) —
+    `context.subject`|`title`, then `context.body`|`text`|`query`|`message`,
+    then a stringified dump of the non-`_` context fields."""
+    case = state.get("case") or {}
+    if case.get("subject") or case.get("body"):
+        return case.get("subject", "") or "", case.get("body", "") or ""
+    ctx = state.get("context") or {}
+    subject = ctx.get("subject") or ctx.get("title") or ""
+    body = (ctx.get("body") or ctx.get("text") or ctx.get("query")
+            or ctx.get("message") or ctx.get("question") or "")
+    if not (subject or body) and ctx:
+        body = "\n".join(f"{k}: {v}" for k, v in ctx.items() if not str(k).startswith("_"))
+    return subject, body
+
+
 _TIER_ALIASES = {
     "basic": "basic", "free": "basic", "starter": "basic", "standard": "basic",
     "premium": "premium", "professional": "premium", "pro": "premium", "team": "premium",
@@ -216,10 +233,8 @@ def _cp_write(state: CaseState, config: dict, *, action: str, actor: str = "ai",
 # --------------------------------------------------------------------------
 @register("retrieve")
 def h_retrieve(state: CaseState, config: dict) -> dict:
-    case = state.get("case", {})
-    query = " ".join(
-        p for p in (case.get("subject", ""), case.get("body", "")) if p
-    ).strip() or case.get("subject", "") or ""
+    _subj, _body = _run_text(state)          # P5c — Case fields or `context.*`
+    query = " ".join(p for p in (_subj, _body) if p).strip() or _subj or ""
     sources = config.get("source", ["supabase"])
     results, score = hybrid_retrieve(
         query,
@@ -260,7 +275,8 @@ def h_classify(state: CaseState, config: dict) -> dict:
     tier_defaulted = bool(config.get("default_tier")) and not _tier_known(tier_raw)
     tier = _norm_tier(config["default_tier"] if tier_defaulted else tier_raw)
 
-    body = _with_ocr(state, f"{case.get('subject', '')}\n\n{case.get('body', '')}".strip())
+    _subj, _cbody = _run_text(state)          # P5c
+    body = _with_ocr(state, f"{_subj}\n\n{_cbody}".strip())
     raw = llm.complete(
         system=(
             "You triage inbound support cases. Return a JSON object with keys: "
@@ -901,7 +917,8 @@ def h_draft(state: CaseState, config: dict) -> dict:
         context += ("\n\n# UNVERIFIED corrections (pending review — use only if the "
                     "confirmed context above does not answer, and say the reply is "
                     "provisional)\n" + _context_block(provisional, max_chunks=2))
-    body = _with_ocr(state, f"Subject: {case.get('subject','')}\n\n{case.get('body','')}".strip())
+    _subj, _cbody = _run_text(state)          # P5c — Case fields or `context.*`
+    body = _with_ocr(state, f"Subject: {_subj}\n\n{_cbody}".strip())
 
     # Phase 14: internal-runbook context from a kb_lookup node upstream wins
     # over the public docs.

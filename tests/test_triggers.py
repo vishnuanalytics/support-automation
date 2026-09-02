@@ -48,6 +48,31 @@ def test_h_trigger_passthrough_when_complete():
     assert "_missing" not in out["context"]
 
 
+# ── P5c: retrieve / classify / draft read the generic payload ─────────
+def test_run_text_prefers_case_then_context():
+    from interpreter.registry import _run_text
+    # a real Case wins
+    assert _run_text({"case": {"subject": "S", "body": "B"},
+                      "context": {"query": "ignored"}}) == ("S", "B")
+    # no Case -> the generic payload, common key names
+    assert _run_text({"context": {"title": "T", "text": "hello"}}) == ("T", "hello")
+    assert _run_text({"context": {"question": "how do webhooks work"}})[1] == "how do webhooks work"
+    # last resort: dump non-underscore fields
+    s, b = _run_text({"context": {"plan": "free", "region": "EU", "_trigger": "webhook"}})
+    assert "plan: free" in b and "region: EU" in b and "_trigger" not in b
+
+
+def test_h_retrieve_builds_its_query_from_context(monkeypatch):
+    from interpreter import registry
+    seen = {}
+    monkeypatch.setattr(registry, "hybrid_retrieve",
+                        lambda q, **kw: (seen.__setitem__("q", q) or ([], 0.0)))
+    out = registry.h_retrieve({"context": {"query": "reset my api token"}},
+                              {"_node_id": "r", "source": ["supabase"]})
+    assert seen["q"] == "reset my api token"
+    assert out["query"] == "reset my api token"
+
+
 # ── end to end: a Case-less flow driven by a webhook ──────────────────
 def _webhook_flow():
     return {
