@@ -16,6 +16,15 @@ alter table doc_chunks
 create index if not exists idx_doc_chunks_entry_status
   on doc_chunks (entry_status) where entry_status <> 'active';
 
+-- backfill: KIL-d already created provisional/superseded kb_entries whose
+-- chunks (url 'kb://<source_id>/<entry_id>') defaulted to 'active' above.
+update doc_chunks c
+   set entry_status = e.status
+  from kb_entries e
+ where c.doc_url = 'kb://' || e.source_id || '/' || e.entry_id
+   and e.status in ('provisional', 'superseded')
+   and c.entry_status = 'active';
+
 -- ── match_doc_chunks (dense) ──────────────────────────────────────────
 drop function if exists match_doc_chunks(vector, int, uuid[]);
 create function match_doc_chunks(

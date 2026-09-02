@@ -46,6 +46,10 @@ _CREATE_FN = re.compile(
 _CREATE_IDX = re.compile(
     r"create\s+(?:unique\s+)?index\s+(?:concurrently\s+)?(?:if\s+not\s+exists\s+)?([a-z_][a-z0-9_]*)\s+on",
     re.I)
+_DROP_TABLE = re.compile(r"drop\s+table\s+(?:if\s+exists\s+)?(?:public\.)?([a-z_][a-z0-9_]*)", re.I)
+_DROP_FN = re.compile(r"drop\s+function\s+(?:if\s+exists\s+)?(?:public\.)?([a-z_][a-z0-9_]*)", re.I)
+_DROP_IDX = re.compile(r"drop\s+index\s+(?:if\s+exists\s+)?(?:public\.)?([a-z_][a-z0-9_]*)", re.I)
+_DROP_COL = re.compile(r"drop\s+column\s+(?:if\s+exists\s+)?([a-z_][a-z0-9_]*)", re.I)
 _COL_LINE = re.compile(r"^\s*\"?([a-z_][a-z0-9_]*)\"?\s+[a-z]", re.I)
 # lines inside a CREATE TABLE body that are constraints, not columns
 _NOT_A_COL = re.compile(r"^\s*(constraint|primary\s+key|unique|foreign\s+key|check|like)\b", re.I)
@@ -62,6 +66,17 @@ def parse_expectations() -> dict:
     indexes: set[str] = set()
     for f in sorted(MIG.glob("*.sql")):
         raw = _strip_sql_comments(f.read_text())
+        # drops first, so a `drop … ; create …` in the same file nets to exists
+        for name in _DROP_TABLE.findall(raw):
+            tables.discard(name.lower())
+            columns = {c for c in columns if c[0] != name.lower()}
+        for name in _DROP_FN.findall(raw):
+            functions.discard(name.lower())
+        for name in _DROP_IDX.findall(raw):
+            indexes.discard(name.lower())
+        for tbl, rest in _ADD_COLUMN.findall(raw):
+            for col in _DROP_COL.findall(rest):
+                columns.discard((tbl.lower(), col.lower()))
         for name, body in _CREATE_TABLE.findall(raw):
             tables.add(name.lower())
             for line in body.splitlines():

@@ -70,7 +70,10 @@ jobs:
           SF_CONSUMER_KEY: ${{ secrets.SF_CONSUMER_KEY }}
           SF_PRIVATE_KEY: ${{ secrets.SF_PRIVATE_KEY }}
           SF_DOMAIN: ${{ secrets.SF_DOMAIN }}
-        run: python -m ingestion.case_memory_sync --from-salesforce --once
+        # main() is if/else on --from-salesforce, so run both paths
+        run: |
+          python -m ingestion.case_memory_sync --once
+          python -m ingestion.case_memory_sync --from-salesforce --once
 
       - name: Sync the Case-lifecycle graph -> Neo4j (KIL-a)
         continue-on-error: true

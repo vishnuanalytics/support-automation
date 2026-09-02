@@ -935,7 +935,10 @@ def h_draft(state: CaseState, config: dict) -> dict:
 
     prior_as_src = [{"chunk_text": p.get("resolution_text", ""),
                      "doc_url": f"case:{p.get('case_number')}"} for p in prior[:3]]
-    grounded = groundedness.check(reply, (internal_matches[:5] + prior_as_src + retrieval[:5]))
+    # P1b (FR-41) — grounding is measured against CONFIRMED context only, so a
+    # reply that only parrots an unverified correction does not score as
+    # grounded (which could otherwise push the gate to auto-send).
+    grounded = groundedness.check(reply, (internal_matches[:5] + prior_as_src + confirmed[:5]))
 
     # KIL-b — does the reply, or the customer's own claim, CONTRADICT the KB or
     # a past resolution? A contradicting draft forces the gate to escalate.

@@ -368,7 +368,10 @@ def case_graph_sync(sb, *, dry_run: bool | None = None) -> dict:
 
     dry = _dry() if dry_run is None else dry_run
     try:
-        _cgs.sync(since=None, limit=2000, one_id=None, dry=dry)
+        # small batch — the worker caps a handler at JOB_TIMEOUT (120s) and this
+        # does a SOQL child query + Neo4j MERGE per Case; it checkpoints
+        # incrementally so a timeout still advances the high-water mark.
+        _cgs.sync(since=None, limit=300, one_id=None, dry=dry)
     except Exception as e:  # noqa: BLE001
         log.warning("case_graph_sync sweep: %s", e)
         return {"error": str(e)[:200]}
@@ -376,17 +379,18 @@ def case_graph_sync(sb, *, dry_run: bool | None = None) -> dict:
 
 
 def case_memory_sync(sb, *, dry_run: bool | None = None) -> dict:
-    """P1a (FR-40) — refresh the pgvector resolution memory that feeds `draft`
-    (from accepted `runs` + closed Salesforce Cases)."""
+    """P1a (FR-40) — refresh the pgvector resolution memory that feeds `draft`.
+    `case_memory_sync.main` is if/else on `--from-salesforce`, so run it twice:
+    accepted in-app `runs`, then closed Salesforce Cases."""
     from ingestion import case_memory_sync as _cms
 
     dry = _dry() if dry_run is None else dry_run
-    argv = ["--from-salesforce", "--once"] + (["--dry-run"] if dry else [])
-    try:
-        _cms.main(argv)
-    except SystemExit:
-        pass
-    except Exception as e:  # noqa: BLE001
-        log.warning("case_memory_sync sweep: %s", e)
-        return {"error": str(e)[:200]}
+    tail = (["--dry-run"] if dry else [])
+    for argv in (["--once", *tail], ["--from-salesforce", "--once", *tail]):
+        try:
+            _cms.main(argv)
+        except SystemExit:
+            pass
+        except Exception as e:  # noqa: BLE001
+            log.warning("case_memory_sync sweep %s: %s", argv, e)
     return {"ok": True, "dry_run": dry}
