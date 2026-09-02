@@ -935,6 +935,52 @@ def kil_metrics_ep(days: int = 30, tenant_id: str | None = None,
     return kil_metrics.compute(c.sb, tid, days=min(max(days, 1), 180))
 
 
+# ── P4 (FR-44): one approvals inbox — review tasks + action requests ──
+class ActionDecisionIn(BaseModel):
+    decision: str  # 'approve' | 'reject'
+
+
+@app.get("/api/approvals")
+def list_approvals(c: Caller = Depends(caller)) -> dict:
+    """Everything waiting on a human, in one place — so a manager never has to
+    be in Slack to clear it. Both reads are RLS-scoped to the caller."""
+    tasks = (c.sb.table("review_tasks")
+             .select("id, case_sf_id, case_number, run_id, kind, trigger, statement, "
+                     "verdict, contexts, status, kb_change_id, created_at")
+             .eq("status", "open").order("created_at", desc=True).limit(200)
+             .execute().data or [])
+    ars = (c.sb.table("action_requests")
+           .select("id, run_id, rule_name, kind, payload, status, slack_channel, "
+                   "slack_ts, created_at")
+           .eq("status", "pending").order("created_at", desc=True).limit(200)
+           .execute().data or [])
+    return {"review_tasks": tasks, "action_requests": ars}
+
+
+@app.post("/api/approvals/action-requests/{ar_id}")
+def decide_action_request_ep(ar_id: str, body: ActionDecisionIn,
+                             c: Caller = Depends(caller)) -> dict:
+    from interpreter import approvals
+    if body.decision not in ("approve", "reject"):
+        raise HTTPException(422, "decision must be approve | reject")
+    seen = (c.sb.table("action_requests").select("id")
+            .eq("id", ar_id).execute().data or [])
+    if not seen:
+        raise HTTPException(404, "action request not found")
+    rate_limit(c.user_id, "review", 60)
+    res = approvals.decide_action_request(
+        _service, ar_id, approve=(body.decision == "approve"), decided_by=c.user_id)
+    if res.get("skipped"):
+        raise HTTPException(409, f"already {res['skipped']}")
+    sl, ar = res["slack"], res["ar"]
+    try:
+        if sl["channel"] and sl["ts"] and slackmod.available():
+            slackmod.update_message(ar["tenant_id"], sl["channel"], sl["ts"], sl["text"], _service)
+    except Exception:  # noqa: BLE001
+        pass
+    return {"status": res["status"], "job_kind": res["job_kind"]}
+
+
 # ── Phase 22: one timeline per Case (jobs + runs + nodes + errors) ─────
 def _q(fn):
     """run a supabase query, swallow any error -> []."""

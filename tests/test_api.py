@@ -47,6 +47,13 @@ def test_kb_endpoints_need_a_token():
     assert client.post("/api/kb/collections", json={"name": "x"}).status_code == 401
 
 
+def test_approvals_endpoints_need_a_token():
+    assert client.get("/api/approvals").status_code == 401
+    assert client.post("/api/approvals/action-requests/abc",
+                       json={"decision": "approve"}).status_code == 401
+    assert client.get("/api/review-tasks").status_code == 401
+
+
 def test_google_status_needs_a_token_but_callback_is_public():
     assert client.get("/api/integrations/google/status").status_code == 401
     assert client.get("/api/integrations/google/authorize").status_code == 401
