@@ -890,6 +890,59 @@ def get_run(run_id: str, c: Caller = Depends(caller)) -> dict:
     return rows[0]
 
 
+# ── KIL-f: the Knowledge Integrity Loop review queue + metrics ─────────
+class ReviewResolveIn(BaseModel):
+    status: str  # 'correct' | 'wrong' | 'dismissed'
+
+
+@app.get("/api/review-tasks")
+def list_review_tasks(status: str | None = "open", limit: int = 100,
+                      c: Caller = Depends(caller)) -> list[dict]:
+    q = (c.sb.table("review_tasks")
+         .select("id, case_sf_id, case_number, run_id, kind, trigger, statement, "
+                 "verdict, contexts, status, reviewer_id, reviewed_at, kb_change_id, "
+                 "slack_channel, slack_ts, created_at")
+         .order("created_at", desc=True).limit(min(max(limit, 1), 500)))
+    if status and status != "all":
+        q = q.eq("status", status)
+    return q.execute().data or []
+
+
+@app.post("/api/review-tasks/{task_id}/resolve")
+def resolve_review_task(task_id: str, body: ReviewResolveIn,
+                        c: Caller = Depends(caller)) -> dict:
+    from interpreter import kb_writeback, review
+    if body.status not in ("correct", "wrong", "dismissed"):
+        raise HTTPException(422, "status must be correct | wrong | dismissed")
+    # RLS-checked read first: the caller must be able to see the task
+    seen = (c.sb.table("review_tasks").select("id, tenant_id")
+            .eq("id", task_id).execute().data or [])
+    if not seen:
+        raise HTTPException(404, "review task not found")
+    rate_limit(c.user_id, "review", 60)
+    row = review.resolve(_service, task_id, status=body.status, reviewer_id=c.user_id)
+    if not row:
+        raise HTTPException(409, "task already resolved")
+    kb_change = None
+    if body.status == "correct":
+        try:
+            change = kb_writeback.draft_change(row)
+            ar = kb_writeback.raise_kb_change(_service, tenant_id=row["tenant_id"],
+                                              task_row=row, change=change)
+            kb_change = {"action_request_id": (ar or {}).get("id"), "change": change}
+        except Exception as e:  # noqa: BLE001
+            log.warning("resolve_review_task kb_writeback: %s", e)
+    return {"task": row, "kb_change": kb_change}
+
+
+@app.get("/api/kil/metrics")
+def kil_metrics_ep(days: int = 30, tenant_id: str | None = None,
+                   c: Caller = Depends(caller)) -> dict:
+    from interpreter import kil_metrics
+    tid = _caller_tenant(c, tenant_id)
+    return kil_metrics.compute(c.sb, tid, days=min(max(days, 1), 180))
+
+
 # ── Phase 22: one timeline per Case (jobs + runs + nodes + errors) ─────
 def _q(fn):
     """run a supabase query, swallow any error -> []."""

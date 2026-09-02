@@ -344,3 +344,18 @@ def handoff_watch(sb, *, dry_run: bool | None = None) -> dict:
         if res.get("flags"):
             flagged.append(r.get("CaseNumber"))
     return {"watched": watched, "flagged": flagged, "dry_run": dry}
+
+
+def kb_promote(sb, *, dry_run: bool | None = None) -> dict:
+    """KIL-f — flip `provisional` KB entries (from a review write-back) to
+    `active` once they've aged past `provisional_until` with no open
+    contradiction referencing them."""
+    from interpreter import kb_writeback
+
+    dry = _dry() if dry_run is None else dry_run
+    try:
+        n = kb_writeback.promote_provisional(sb, dry_run=dry)
+    except Exception as e:  # noqa: BLE001
+        log.warning("kb_promote failed: %s", e)
+        return {"error": str(e)[:200]}
+    return {"promoted": n, "dry_run": dry}

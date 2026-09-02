@@ -767,9 +767,24 @@ retrieved passages (claim graph deferred to KIL-g). Manager = the routed-team
   by signature. **Never contacts the customer.** New `sweeps.handoff_watch`
   in the `api.worker` loop (every 5 min, self-re-enqueue, `SWEEP_DRY_RUN`).
   6 offline tests (366 total).
-- **KIL-f…g — planned.** f metrics dashboard + the "no fresh contradiction"
-  promotion gate + web Review tab + `sop_conflicts` as a scheduled KB-vs-KB
-  sweep · g atomic claim graph (deferred).
+- **KIL-f — built (2026-09-02).** `interpreter/kil_metrics.py` `compute()` —
+  flag precision / false-flag rate / agent-correction rate / median
+  time-to-review from `review_tasks`, the KB-writeback funnel + promotion
+  rate, knowledge freshness, weekly contradiction count. API `GET
+  /api/review-tasks`, `POST /api/review-tasks/{id}/resolve` (→
+  `kb_writeback` on `correct`), `GET /api/kil/metrics`. Web **Review** tab
+  (`web/src/review/ReviewView.tsx`) — tiles + the queue with Correct / Wrong
+  / Not-a-conflict. `promote_provisional` now holds an entry while an open
+  contradiction still references it (the poisoning guard); a `kb_promote`
+  sweep runs it every 6 h. `sop_conflicts`-as-a-sweep is a noted follow-on.
+  3 offline tests + web build green (369 total).
+
+**Phase KIL COMPLETE (a–f, 2026-09-02); g (atomic claim graph) deferred.
+No open phase.** The loop runs end to end in code — contradiction caught →
+gate escalates or a review card is raised → manager confirms → LLM-drafted
+KB diff approved → worker writes a `provisional` entry (superseding the wrong
+one) → auto-promotes after 7 days unless still disputed. **Next: live
+end-to-end verification against the org + Slack.**
 
 **Phase 27 — the Case Control Plane (done, 2026-09-01/02).** One
 AI-managed Case queue: classify + route + track `Status` + hand off via

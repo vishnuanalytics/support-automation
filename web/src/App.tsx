@@ -6,6 +6,7 @@ import { Login } from "./auth/Login";
 import { FlowList } from "./flows/FlowList";
 import { FlowEditor } from "./flows/FlowEditor";
 import { RunsView } from "./runs/RunsView";
+import { ReviewView } from "./review/ReviewView";
 import { TraceView } from "./trace/TraceView";
 import { KnowledgeView } from "./kb/KnowledgeView";
 import { RulesView } from "./rules/RulesView";
@@ -13,7 +14,16 @@ import { TeamView } from "./team/TeamView";
 import { ChannelsView } from "./channels/ChannelsView";
 import { FlowGuideView } from "./guide/FlowGuideView";
 
-type View = "editor" | "runs" | "trace" | "knowledge" | "rules" | "guide" | "team" | "channels";
+type View =
+  | "editor"
+  | "runs"
+  | "review"
+  | "trace"
+  | "knowledge"
+  | "rules"
+  | "guide"
+  | "team"
+  | "channels";
 
 export function App() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
@@ -79,6 +89,9 @@ export function App() {
             </button>
             <button className={view === "runs" ? "primary" : ""} onClick={() => setView("runs")}>
               Runs
+            </button>
+            <button className={view === "review" ? "primary" : ""} onClick={() => setView("review")}>
+              Review
             </button>
             <button className={view === "trace" ? "primary" : ""} onClick={() => setView("trace")}>
               Trace
@@ -158,6 +171,8 @@ export function App() {
           <KnowledgeView />
         ) : view === "runs" ? (
           <RunsView />
+        ) : view === "review" ? (
+          <ReviewView />
         ) : view === "trace" ? (
           <TraceView />
         ) : flowId ? (

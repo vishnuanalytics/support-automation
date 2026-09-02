@@ -48,6 +48,10 @@ class _Q:
         self.filters[f"{k}<"] = v
         return self
 
+    def gte(self, k, v):
+        self.filters[f"{k}>="] = v
+        return self
+
     def limit(self, n):
         return self
 
@@ -55,7 +59,7 @@ class _Q:
         store = self.tbl.store
         if self._pending is None:                       # a select
             rows = [r for r in store if all(r.get(k) == v for k, v in self.filters.items()
-                                            if not k.endswith("<"))]
+                                            if k.isidentifier())]
             return type("R", (), {"data": rows})
         op, payload = self._pending
         if op == "insert":
@@ -66,7 +70,7 @@ class _Q:
             return type("R", (), {"data": [row]})
         # update
         hit = [r for r in store if all(r.get(k) == v for k, v in self.filters.items()
-                                       if not k.endswith("<"))]
+                                       if k.isidentifier())]
         for r in hit:
             r.update(payload)
         self.tbl.log.append(("update", self.tbl.name, dict(payload), dict(self.filters)))
@@ -175,6 +179,23 @@ def test_promote_provisional_flips_aged_entries():
     # asserts the call path runs and updates. Real Postgres does the date filter.
     assert n >= 1
     assert any(r["status"] == "active" for r in sb.rows("kb_entries"))
+
+
+def test_promote_holds_an_entry_with_a_fresh_contradiction():
+    sb = _SB({
+        "kb_entries": [
+            {"entry_id": "e-held", "tenant_id": "T", "status": "provisional",
+             "provisional_until": "2000-01-01T00:00:00Z", "created_at": "2026-09-01T00:00:00Z"},
+        ],
+        "review_tasks": [
+            {"tenant_id": "T", "kind": "human_reply_review", "status": "open",
+             "created_at": "2026-09-02T00:00:00Z",
+             "contexts": [{"ref": "kb://src/e-held", "kind": "kb", "text": "..."}]},
+        ],
+    })
+    n = kb_writeback.promote_provisional(sb)
+    assert n == 0
+    assert sb.rows("kb_entries")[0]["status"] == "provisional"
 
 
 # ── slack wiring ───────────────────────────────────────────────────────

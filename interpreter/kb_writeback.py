@@ -252,17 +252,42 @@ def apply_kb_change(sb, ar_row: dict, *, enqueue=True) -> dict:
 
 
 # ── promotion (the poisoning guard) ─────────────────────────────────────
+def _has_fresh_contradiction(sb, entry: dict) -> bool:
+    """An open `human_reply_review` task raised *after* this entry whose judged
+    contexts reference it — the entry is disputed, don't promote it yet."""
+    eid = entry["entry_id"]
+    try:
+        rows = (sb.table("review_tasks")
+                .select("contexts, created_at")
+                .eq("tenant_id", str(entry.get("tenant_id")))
+                .eq("kind", "human_reply_review").eq("status", "open")
+                .gte("created_at", entry.get("created_at") or "1970-01-01")
+                .limit(500).execute().data or [])
+    except Exception as e:  # noqa: BLE001
+        log.warning("_has_fresh_contradiction: %s", e)
+        return False
+    for t in rows:
+        if any(eid in (c.get("ref") or "") for c in (t.get("contexts") or [])):
+            return True
+    return False
+
+
 def promote_provisional(sb, *, dry_run: bool = False) -> int:
     """Flip `provisional` entries whose `provisional_until` has passed to
-    `active`. (KIL-f will add the 'no fresh contradiction' condition.)"""
+    `active` — unless an open contradiction still references the entry."""
     now = datetime.now(timezone.utc).isoformat()
-    rows = (sb.table("kb_entries").select("entry_id, title")
+    rows = (sb.table("kb_entries")
+            .select("entry_id, tenant_id, title, created_at")
             .eq("status", "provisional").lt("provisional_until", now)
             .execute().data or [])
-    if dry_run or not rows:
-        return len(rows)
-    for r in rows:
+    ready = [r for r in rows if not _has_fresh_contradiction(sb, r)]
+    held = len(rows) - len(ready)
+    if dry_run or not ready:
+        if held:
+            log.info("promote_provisional: %d held (disputed)", held)
+        return len(ready)
+    for r in ready:
         sb.table("kb_entries").update({"status": "active", "updated_at": "now()"}) \
           .eq("entry_id", r["entry_id"]).execute()
-    log.info("promoted %d provisional KB entr(y/ies) to active", len(rows))
-    return len(rows)
+    log.info("promoted %d provisional KB entr(y/ies) to active (%d held)", len(ready), held)
+    return len(ready)

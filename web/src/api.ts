@@ -16,6 +16,8 @@ import type {
   Member,
   PolicyRule,
   NodeTypesResp,
+  ReviewTask,
+  KilMetrics,
   SfMeta,
   TraceResult,
   RunDetail,
@@ -188,6 +190,17 @@ export const api = {
   },
 
   actionRequests: (limit = 50) => req<ActionRequest[]>(`/action-requests?limit=${limit}`),
+
+  review: {
+    list: (status = "open") =>
+      req<ReviewTask[]>(`/review-tasks?status=${encodeURIComponent(status)}`),
+    resolve: (id: string, status: "correct" | "wrong" | "dismissed") =>
+      req<{ task: ReviewTask; kb_change: unknown }>(`/review-tasks/${id}/resolve`, {
+        method: "POST",
+        body: JSON.stringify({ status }),
+      }),
+    metrics: (days = 30) => req<KilMetrics>(`/kil/metrics?days=${days}`),
+  },
 
   runStats: () => req<RunStats>("/runs/stats"),
   listRuns: (q: { flow_id?: string; outcome?: string; limit?: number } = {}) => {
