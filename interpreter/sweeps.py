@@ -394,3 +394,49 @@ def case_memory_sync(sb, *, dry_run: bool | None = None) -> dict:
         except Exception as e:  # noqa: BLE001
             log.warning("case_memory_sync sweep %s: %s", argv, e)
     return {"ok": True, "dry_run": dry}
+
+
+def fire_schedules(sb, *, dry_run: bool | None = None) -> dict:
+    """P6b — enqueue a run for each `flow_triggers` schedule trigger that is
+    due (`interpreter.cron.due`). Deduped per (trigger, minute) so two worker
+    ticks in the same minute fire once."""
+    from interpreter import cron, jobs, triggers
+
+    dry = _dry() if dry_run is None else dry_run
+    try:
+        rows = (sb.table("flow_triggers").select("*")
+                .eq("kind", "schedule").eq("enabled", True).limit(500).execute().data or [])
+    except Exception as e:  # noqa: BLE001
+        log.warning("fire_schedules query: %s", e)
+        return {"error": str(e)[:200]}
+
+    now = _now()
+    fired: list[str] = []
+    for t in rows:
+        expr = (t.get("cron") or "").strip()
+        if not expr:
+            continue
+        try:
+            if not cron.due(expr, _parse(t.get("last_fired_at")), now):
+                continue
+        except ValueError as e:                       # a bad cron string
+            log.warning("fire_schedules: trigger %s bad cron %r: %s", t["trigger_id"], expr, e)
+            continue
+        fired.append(t["flow_id"])
+        if dry:
+            continue
+        ctx = triggers.schedule_context(cron=expr,
+                                        params={"trigger_id": t["trigger_id"],
+                                                "label": t.get("label")})["context"]
+        bucket = now.strftime("%Y%m%d%H%M")
+        jobs.enqueue("run_flow",
+                     {"flow_id": t["flow_id"], "context": ctx},
+                     dedupe_key=f"sched:{t['trigger_id']}:{bucket}", sb=sb)
+        try:
+            sb.table("flow_triggers").update({
+                "last_fired_at": now.isoformat(),
+                "fire_count": (t.get("fire_count") or 0) + 1,
+            }).eq("trigger_id", t["trigger_id"]).execute()
+        except Exception as e:  # noqa: BLE001
+            log.warning("fire_schedules update %s: %s", t["trigger_id"], e)
+    return {"schedules": len(rows), "fired": fired, "dry_run": dry}
