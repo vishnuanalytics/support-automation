@@ -8,6 +8,7 @@ import type {
   FlowMeta,
   FlowVersion,
   FlowTrigger,
+  Connection,
   ActionRequest,
   GoogleStatus,
   Invitation,
@@ -86,6 +87,13 @@ export const api = {
       req<FlowTrigger>(`/flows/${flowId}/triggers`, { method: "POST", body: JSON.stringify(b) }),
     remove: (flowId: string, id: string) =>
       req<void>(`/flows/${flowId}/triggers/${id}`, { method: "DELETE" }),
+  },
+
+  connections: {
+    list: () => req<Connection[]>("/connections"),
+    create: (b: { slug: string; base_url: string; auth: Record<string, unknown> }) =>
+      req<Connection>("/connections", { method: "POST", body: JSON.stringify(b) }),
+    remove: (slug: string) => req<void>(`/connections/${encodeURIComponent(slug)}`, { method: "DELETE" }),
   },
   rollbackFlow: (id: string, version: number) =>
     req<{ published_version: number }>(`/flows/${id}/rollback`, {

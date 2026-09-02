@@ -12,6 +12,7 @@ import { KnowledgeView } from "./kb/KnowledgeView";
 import { RulesView } from "./rules/RulesView";
 import { TeamView } from "./team/TeamView";
 import { ChannelsView } from "./channels/ChannelsView";
+import { ConnectionsView } from "./channels/ConnectionsView";
 import { FlowGuideView } from "./guide/FlowGuideView";
 
 type View =
@@ -23,7 +24,8 @@ type View =
   | "rules"
   | "guide"
   | "team"
-  | "channels";
+  | "channels"
+  | "connections";
 
 export function App() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
@@ -115,6 +117,11 @@ export function App() {
                 Channels
               </button>
             )}
+            {isOwner && (
+              <button className={view === "connections" ? "primary" : ""} onClick={() => setView("connections")}>
+                Connections
+              </button>
+            )}
           </div>
           <div className="row" style={{ gap: 6 }}>
             {role && !canEdit && (
@@ -159,7 +166,9 @@ export function App() {
         )}
       </div>
       <div className={view === "editor" && flowId ? "editor" : "pane"}>
-        {view === "team" ? (
+        {view === "connections" ? (
+          <ConnectionsView />
+        ) : view === "team" ? (
           <TeamView />
         ) : view === "channels" ? (
           <ChannelsView />

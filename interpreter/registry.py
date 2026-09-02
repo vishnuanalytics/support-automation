@@ -2030,3 +2030,33 @@ def h_http_request(state: CaseState, config: dict) -> dict:
                  {"connection": slug, "method": method, "url": url,
                   "status": res.get("status"), "ok": res.get("ok")}),
     }
+
+
+@register("transform")
+def h_transform(state: CaseState, config: dict) -> dict:
+    """P6c — reshape `state.context` between nodes, no LLM.
+
+    config: {
+      map:  {"out_key": "context.http.json.total", ...}   # copy a value by dotted path
+      set:  {"out_key": "{{context.a}}-{{context.b}}", ...}  # templated literal
+      drop: ["scratch_key", ...]                          # null out context keys
+      into: "context"                                     # target bag (default)
+    }
+
+    `map` reads any dotted path over the whole state (`context.*`, `ai.*`,
+    `classification.*`, …); `set` renders `{{ dotted.path }}` templates.
+    """
+    nid = config["_node_id"]
+    patch: dict[str, Any] = {}
+    for out, src in (config.get("map") or {}).items():
+        patch[out] = _dig(state, str(src))
+    for out, tmpl in (config.get("set") or {}).items():
+        patch[out] = _render_template(str(tmpl), state)
+    for k in (config.get("drop") or []):
+        patch[k] = None
+    into = config.get("into", "context")
+    return {into: patch,
+            **_trace(nid, "transform",
+                     f"{into}: set {sorted(k for k, v in patch.items() if v is not None)}"
+                     + (f", dropped {config.get('drop')}" if config.get("drop") else ""),
+                     {"keys": list(patch)})}

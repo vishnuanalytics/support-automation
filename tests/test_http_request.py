@@ -98,3 +98,26 @@ def test_http_request_on_error_fail_raises(monkeypatch, conn):
     out = h_http_request({"tenant_id": "t", "context": {}},
                          {"_node_id": "h", "connection": "vendor", "path": "/x", "out_key": "y"})
     assert "error" in out["context"]["y"]
+
+
+# ── transform node ──────────────────────────────────────────────────
+def test_transform_maps_and_templates_into_context():
+    from interpreter.registry import h_transform
+    state = {"context": {"http": {"json": {"total": 7, "name": "acme"}}},
+             "classification": {"topic": "billing"}}
+    out = h_transform(state, {"_node_id": "x",
+                              "map": {"count": "context.http.json.total",
+                                      "topic": "classification.topic"},
+                              "set": {"summary": "{{context.http.json.name}} · {{context.http.json.total}}"},
+                              "drop": ["http"]})
+    c = out["context"]
+    assert c["count"] == 7 and c["topic"] == "billing"
+    assert c["summary"] == "acme · 7"
+    assert c["http"] is None            # nulled
+    assert out["trace"][0]["type"] == "transform"
+
+
+def test_transform_respects_into():
+    from interpreter.registry import h_transform
+    out = h_transform({"context": {"a": 1}}, {"_node_id": "x", "map": {"b": "context.a"}, "into": "ai"})
+    assert out["ai"] == {"b": 1} and "context" not in out

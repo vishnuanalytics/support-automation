@@ -106,6 +106,7 @@ NODE_DEFAULTS: dict[str, dict[str, Any]] = {
     "trigger": {"map": {}, "required": [], "defaults": {}},
     "http_request": {"connection": "", "method": "GET", "path": "", "query": {},
                      "out_key": "http", "timeout": 15, "on_error": "passthrough"},
+    "transform": {"map": {}, "set": {}, "drop": [], "into": "context"},
     "case_lookup": {"k": 3, "pool": 10, "min_similarity": 0.35},
     # Phase 25 — image attachments, Salesforce context, generic AI prompt
     "attachments": {"source": "salesforce", "max_images": 5, "ocr": True,
