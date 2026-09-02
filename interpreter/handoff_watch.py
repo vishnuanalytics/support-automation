@@ -158,13 +158,31 @@ def _flag(post, channel, thread_ts, text) -> bool:
         return False
 
 
-def watch_case(sb, case: dict, *, sf=None, post=None, dry: bool = False) -> dict:
+def _tenant_for_case(sb, case_id: str, case_number: str | None) -> str:
+    """The tenant that owns this Case — from its latest `runs` row; falls back
+    to `DEFAULT_TENANT_ID` (one SF org == one tenant in this deployment)."""
+    default = os.environ.get("DEFAULT_TENANT_ID", "00000000-0000-0000-0000-000000000000")
+    try:
+        for col, val in (("case_payload->>sf_id", case_id), ("case_id", case_number)):
+            if not val:
+                continue
+            rows = (sb.table("runs").select("tenant_id")
+                    .eq(col, val).order("created_at", desc=True).limit(1).execute().data or [])
+            if rows and rows[0].get("tenant_id"):
+                return str(rows[0]["tenant_id"])
+    except Exception as e:  # noqa: BLE001
+        log.warning("handoff_watch._tenant_for_case %s: %s", case_id, e)
+    return default
+
+
+def watch_case(sb, case: dict, *, tenant_id: str | None = None, sf=None,
+               post=None, dry: bool = False) -> dict:
     """Run one watch pass for one escalated Case. `case` is a Salesforce record
     dict (Id, CaseNumber, Routed_Team__c, CreatedDate, …)."""
     from . import salesforce, slack
     case_id = case["Id"]
     cn = case.get("CaseNumber")
-    tenant_id = os.environ.get("DEFAULT_TENANT_ID", "00000000-0000-0000-0000-000000000000")
+    tenant_id = tenant_id or _tenant_for_case(sb, case_id, cn)
     team = case.get("Routed_Team__c") or "support"
 
     st = {}

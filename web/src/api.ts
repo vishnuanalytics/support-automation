@@ -202,6 +202,16 @@ export const api = {
     metrics: (days = 30) => req<KilMetrics>(`/kil/metrics?days=${days}`),
   },
 
+  approvals: {
+    list: () =>
+      req<{ review_tasks: ReviewTask[]; action_requests: ActionRequest[] }>("/approvals"),
+    decide: (arId: string, decision: "approve" | "reject") =>
+      req<{ status: string; job_kind: string | null }>(
+        `/approvals/action-requests/${arId}`,
+        { method: "POST", body: JSON.stringify({ decision }) },
+      ),
+  },
+
   runStats: () => req<RunStats>("/runs/stats"),
   listRuns: (q: { flow_id?: string; outcome?: string; limit?: number } = {}) => {
     const p = new URLSearchParams();

@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
-import type { KilMetrics, ReviewTask } from "../types";
+import type { ActionRequest, KilMetrics, ReviewTask } from "../types";
 
 const STATUS = ["open", "correct", "wrong", "dismissed", "all"] as const;
 
 export function ReviewView() {
   const [metrics, setMetrics] = useState<KilMetrics | null>(null);
   const [rows, setRows] = useState<ReviewTask[]>([]);
+  const [ars, setArs] = useState<ActionRequest[]>([]);
   const [status, setStatus] = useState<(typeof STATUS)[number]>("open");
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -15,8 +16,27 @@ export function ReviewView() {
   const load = () => {
     api.review.list(status).then(setRows).catch((e: ApiError) => setErr(e.message));
     api.review.metrics(30).then(setMetrics).catch(() => {});
+    api.approvals
+      .list()
+      .then((r) => setArs(r.action_requests))
+      .catch(() => {});
   };
   useEffect(load, [status]);
+
+  const decide = async (ar: ActionRequest, decision: "approve" | "reject") => {
+    setBusy(ar.id);
+    setErr(null);
+    setNote(null);
+    try {
+      await api.approvals.decide(ar.id, decision);
+      setNote(decision === "approve" ? "Approved — the worker will apply it." : "Rejected.");
+      load();
+    } catch (e) {
+      setErr((e as ApiError).message);
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const resolve = async (t: ReviewTask, s: "correct" | "wrong" | "dismissed") => {
     setBusy(t.id);
@@ -42,10 +62,11 @@ export function ReviewView() {
 
   return (
     <div className="pane col" style={{ gap: 16, maxWidth: 900 }}>
-      <h2 style={{ margin: 0 }}>Knowledge integrity review</h2>
+      <h2 style={{ margin: 0 }}>Approvals</h2>
       <p style={{ margin: 0, color: "var(--muted, #667)" }}>
-        Sent replies the contradiction judge flagged against the knowledge base or case
-        history, plus a random sample. Confirm whether the reply was right.
+        Everything waiting on a human — knowledge-base changes and internal task
+        requests to approve, plus sent replies the contradiction judge flagged
+        against the KB or case history.
       </p>
 
       {metrics && (
@@ -97,6 +118,69 @@ export function ReviewView() {
       {note && <div className="banner">{note}</div>}
       {err && <div className="banner err">{err}</div>}
 
+      {ars.length > 0 && (
+        <div className="col" style={{ gap: 10 }}>
+          <h3 style={{ margin: "4px 0 0" }}>Awaiting approval</h3>
+          {ars.map((ar) => {
+            const p = ar.payload as Record<string, string>;
+            return (
+              <div
+                key={ar.id}
+                className="col"
+                style={{
+                  gap: 8,
+                  border: "1px solid var(--hair, #ddd)",
+                  borderRadius: 10,
+                  padding: "12px 14px",
+                }}
+              >
+                <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                  <Pill tone="mute">
+                    {ar.kind === "kb_change" ? "KB update" : ar.kind}
+                  </Pill>
+                  <strong>{p.title || ar.rule_name || ar.kind}</strong>
+                  <span style={{ color: "var(--muted, #667)", fontSize: 12 }}>
+                    {new Date(ar.created_at).toLocaleString()}
+                  </span>
+                </div>
+                {p.body_md && (
+                  <pre
+                    style={{
+                      whiteSpace: "pre-wrap",
+                      fontSize: 13,
+                      background: "var(--sunk, #f0f2f3)",
+                      borderRadius: 8,
+                      padding: "8px 10px",
+                      margin: 0,
+                    }}
+                  >
+                    {p.body_md}
+                  </pre>
+                )}
+                {p.rationale && (
+                  <div style={{ fontSize: 12, color: "var(--muted, #667)" }}>
+                    why: {p.rationale}
+                  </div>
+                )}
+                <div className="row" style={{ gap: 6 }}>
+                  <button
+                    className="primary"
+                    disabled={busy === ar.id}
+                    onClick={() => decide(ar, "approve")}
+                  >
+                    Approve &amp; publish
+                  </button>
+                  <button disabled={busy === ar.id} onClick={() => decide(ar, "reject")}>
+                    Reject
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <h3 style={{ margin: "8px 0 0" }}>Flagged replies</h3>
       {rows.length === 0 && <p style={{ color: "var(--muted, #667)" }}>Nothing here.</p>}
 
       <div className="col" style={{ gap: 12 }}>

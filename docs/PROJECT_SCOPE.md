@@ -703,7 +703,8 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**Phase KIL — Knowledge Integrity Loop (in progress, 2026-09-02).** Catch
+**Phase KIL — Knowledge Integrity Loop (COMPLETE a–f + live-verified,
+2026-09-02; PR #29).** Catch
 new info that contradicts the KB or case history (inbound tickets, bot
 drafts, human replies), send it to a manager, and fold confirmed
 corrections back into the KB under one-click approval. Plan artifact:
@@ -779,12 +780,41 @@ retrieved passages (claim graph deferred to KIL-g). Manager = the routed-team
   sweep runs it every 6 h. `sop_conflicts`-as-a-sweep is a noted follow-on.
   3 offline tests + web build green (369 total).
 
-**Phase KIL COMPLETE (a–f, 2026-09-02); g (atomic claim graph) deferred.
-No open phase.** The loop runs end to end in code — contradiction caught →
-gate escalates or a review card is raised → manager confirms → LLM-drafted
-KB diff approved → worker writes a `provisional` entry (superseding the wrong
-one) → auto-promotes after 7 days unless still disputed. **Next: live
-end-to-end verification against the org + Slack.**
+**Phase KIL COMPLETE (a–f, 2026-09-02); g (atomic claim graph) deferred.**
+The loop runs end to end — contradiction caught → gate escalates or a review
+card is raised → manager confirms → LLM-drafted KB diff approved → worker
+writes a `provisional` entry (superseding the wrong one) → auto-promotes
+after 7 days unless still disputed. **Live-verified 2026-09-02** — smoke
+drove b→c→d→f against real Supabase / Groq / Slack (`review_tasks` row +
+`#cx-l1` card → LLM diff → `action_requests` → `apply` → `provisional`
+`kb_entries` row → metrics); 4 bugs found + fixed (partial unique index vs.
+PostgREST upsert; a bad `sources` column; non-uuid supersede id; a watcher
+context selecting a missing column). PR **#29** (`phase-kil` → `main`).
+
+---
+
+## Roadmap — post-KIL hardening → platform (2026-09-02)
+
+From an end-of-KIL review. **Correctness before features → CI safety net
+before the invasive refactor → consolidate before building on top → the
+generic `RunContext` unlock before triggers / connectors / onboarding.**
+Requirements FR-40…FR-49 in `docs/REQUIREMENTS.md`. Do these in order; each
+is a verifiable chunk.
+
+| # | Phase | Chunk | Depends on |
+|---|---|---|---|
+| **P1** ✅ | Correctness (done 2026-09-02, branch `phase-p1`) | **1a** `case_graph_sync` + `case_memory_sync` are now `api.worker` sweeps (every 60 min, self-re-enqueue) + steps in `daily-sync.yml` · **1b** migration `068`: `doc_chunks.entry_status`; the 3 `match_doc_chunks*` fns drop `superseded` chunks + return `entry_status`; `embed_entry(status=)` stamps it; `h_draft` puts `provisional` context **behind** confirmed in a labelled "UNVERIFIED" block; `promote_provisional` flips the chunks too · **1c** migration `069`: `graph_sync_state` / `handoff_watch_state` reads scoped to `tenant_members`; `handoff_watch.watch_case` derives `tenant_id` from the Case's latest run instead of hardcoding. 371 offline tests; migrations 068/069 applied; live retrieval verified. |
+| **P2** ✅ | CI safety net (done 2026-09-02) | **2a** `scripts/verify_migrations.py` — parses CREATE TABLE / ADD COLUMN / CREATE FUNCTION / INDEX out of `db/migrations/*.sql` and diffs against the live schema via a new `introspect_schema()` RPC (migration `070`); flags missing objects **and** live tables no migration creates. In `ci.yml`. · **2b** a new `integration` CI job runs `pytest -m integration` (self-skips without secrets) + `tests/test_kil_integration.py` — 3 real-DB tests covering the `on_conflict` idempotency, the KIL writers' columns, and the RPC; 3 of the 4 KIL smoke bugs would fail here. 375 offline + 3 integration tests; live drift check: clean. |
+| **P3** | Quality pass | `/simplify` + `/code-review` over the KIL diff + sweep/worker layer; consolidate the **3 approval code paths** into one `interpreter/approvals.py`; dedupe `case_graph_sync` ↔ `case_memory_sync`; one shared `tests/fakes.py` for the recording-fake `_SB` | P2 |
+| **P4** ✅ | Unified approvals (done 2026-09-02) | `interpreter/approvals.py` (P3) + `GET /api/approvals` (open `review_tasks` + pending `action_requests`, RLS-scoped) + `POST /api/approvals/action-requests/{id}` (`approve`/`reject` via REST → `decide_action_request` + Slack card edit). The web **Approvals** tab (renamed from Review) adds an *Awaiting approval* section — KB-change diff / task payload with Approve & publish / Reject — above the flagged-replies queue. A manager never has to be in Slack. |
+| **P5** | Structural unlock | generic **`RunContext`** alongside `CaseState`; `sf_case` becomes one adapter; thread it through `builder` / `registry` / `runs` / `trace`. Most invasive — after CI. | P2 |
+| **P6** | Triggers + connectors | webhook + schedule trigger endpoints; a minimal declarative connector spec + a connections-manager UI | P5 |
+| **P7** | Self-serve onboarding | template gallery, setup wizard, file-upload KB ingestion, "crawl my site" — the "1 hour to value" path | P5, P6 |
+| **P8** | KIL depth (parallelizable) | KIL learning report (weekly digest) → provisional KB tab → KIL eval depth (human-reply precision, `draft_change` quality) → **KIL-g** claim graph (needs the loop to have run in real use) | KIL |
+
+**Immediate next step: P1 (1a + 1b).** 1b is the one that can put wrong info
+in front of a customer — a `provisional` (unverified) KB correction is
+currently retrieved and cited with the same weight as a `confirmed` entry.
 
 **Phase 27 — the Case Control Plane (done, 2026-09-01/02).** One
 AI-managed Case queue: classify + route + track `Status` + hand off via

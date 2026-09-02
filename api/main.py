@@ -911,7 +911,7 @@ def list_review_tasks(status: str | None = "open", limit: int = 100,
 @app.post("/api/review-tasks/{task_id}/resolve")
 def resolve_review_task(task_id: str, body: ReviewResolveIn,
                         c: Caller = Depends(caller)) -> dict:
-    from interpreter import kb_writeback, review
+    from interpreter import approvals
     if body.status not in ("correct", "wrong", "dismissed"):
         raise HTTPException(422, "status must be correct | wrong | dismissed")
     # RLS-checked read first: the caller must be able to see the task
@@ -920,19 +920,11 @@ def resolve_review_task(task_id: str, body: ReviewResolveIn,
     if not seen:
         raise HTTPException(404, "review task not found")
     rate_limit(c.user_id, "review", 60)
-    row = review.resolve(_service, task_id, status=body.status, reviewer_id=c.user_id)
-    if not row:
+    res = approvals.resolve_review_task(
+        _service, task_id, status=body.status, reviewed_by=c.user_id)
+    if res.get("skipped"):
         raise HTTPException(409, "task already resolved")
-    kb_change = None
-    if body.status == "correct":
-        try:
-            change = kb_writeback.draft_change(row)
-            ar = kb_writeback.raise_kb_change(_service, tenant_id=row["tenant_id"],
-                                              task_row=row, change=change)
-            kb_change = {"action_request_id": (ar or {}).get("id"), "change": change}
-        except Exception as e:  # noqa: BLE001
-            log.warning("resolve_review_task kb_writeback: %s", e)
-    return {"task": row, "kb_change": kb_change}
+    return res
 
 
 @app.get("/api/kil/metrics")
@@ -941,6 +933,52 @@ def kil_metrics_ep(days: int = 30, tenant_id: str | None = None,
     from interpreter import kil_metrics
     tid = _caller_tenant(c, tenant_id)
     return kil_metrics.compute(c.sb, tid, days=min(max(days, 1), 180))
+
+
+# ── P4 (FR-44): one approvals inbox — review tasks + action requests ──
+class ActionDecisionIn(BaseModel):
+    decision: str  # 'approve' | 'reject'
+
+
+@app.get("/api/approvals")
+def list_approvals(c: Caller = Depends(caller)) -> dict:
+    """Everything waiting on a human, in one place — so a manager never has to
+    be in Slack to clear it. Both reads are RLS-scoped to the caller."""
+    tasks = (c.sb.table("review_tasks")
+             .select("id, case_sf_id, case_number, run_id, kind, trigger, statement, "
+                     "verdict, contexts, status, kb_change_id, created_at")
+             .eq("status", "open").order("created_at", desc=True).limit(200)
+             .execute().data or [])
+    ars = (c.sb.table("action_requests")
+           .select("id, run_id, rule_name, kind, payload, status, slack_channel, "
+                   "slack_ts, created_at")
+           .eq("status", "pending").order("created_at", desc=True).limit(200)
+           .execute().data or [])
+    return {"review_tasks": tasks, "action_requests": ars}
+
+
+@app.post("/api/approvals/action-requests/{ar_id}")
+def decide_action_request_ep(ar_id: str, body: ActionDecisionIn,
+                             c: Caller = Depends(caller)) -> dict:
+    from interpreter import approvals
+    if body.decision not in ("approve", "reject"):
+        raise HTTPException(422, "decision must be approve | reject")
+    seen = (c.sb.table("action_requests").select("id")
+            .eq("id", ar_id).execute().data or [])
+    if not seen:
+        raise HTTPException(404, "action request not found")
+    rate_limit(c.user_id, "review", 60)
+    res = approvals.decide_action_request(
+        _service, ar_id, approve=(body.decision == "approve"), decided_by=c.user_id)
+    if res.get("skipped"):
+        raise HTTPException(409, f"already {res['skipped']}")
+    sl, ar = res["slack"], res["ar"]
+    try:
+        if sl["channel"] and sl["ts"] and slackmod.available():
+            slackmod.update_message(ar["tenant_id"], sl["channel"], sl["ts"], sl["text"], _service)
+    except Exception:  # noqa: BLE001
+        pass
+    return {"status": res["status"], "job_kind": res["job_kind"]}
 
 
 # ── Phase 22: one timeline per Case (jobs + runs + nodes + errors) ─────
@@ -1714,27 +1752,16 @@ async def slack_interactions(request: Request) -> PlainTextResponse:
     if not ar_id or decision not in ("approve", "reject"):
         return PlainTextResponse("ignored")
 
-    rows = _service.table("action_requests").select("*").eq("id", ar_id).execute().data
-    if not rows:
-        return PlainTextResponse("unknown request")
-    ar = rows[0]
-    if ar["status"] != "pending":
-        return PlainTextResponse(f"already {ar['status']}")
-
-    new_status = "approved" if decision == "approve" else "rejected"
-    _service.table("action_requests").update({
-        "status": new_status, "decided_by": user, "decided_at": _now_iso(),
-    }).eq("id", ar_id).execute()
-
-    if new_status == "approved":
-        jobs.enqueue("create_github_issue", {"action_request_id": ar_id},
-                     dedupe_key=f"ghissue:{ar_id}", sb=_service)
-        msg = f":hourglass_flowing_sand: *{ar['payload'].get('title')}* — approved by {user}, opening the issue…"
-    else:
-        msg = f":no_entry: *{ar['payload'].get('title')}* — rejected by {user}."
+    from interpreter import approvals
+    res = approvals.decide_action_request(
+        _service, ar_id, approve=(decision == "approve"), decided_by=user)
+    if res.get("skipped"):
+        return PlainTextResponse(res["skipped"] if res["skipped"] != "unknown"
+                                 else "unknown request")
+    sl, ar = res["slack"], res["ar"]
     try:
-        if ar.get("slack_channel") and ar.get("slack_ts"):
-            slackmod.update_message(ar["tenant_id"], ar["slack_channel"], ar["slack_ts"], msg, _service)
+        if sl["channel"] and sl["ts"]:
+            slackmod.update_message(ar["tenant_id"], sl["channel"], sl["ts"], sl["text"], _service)
     except Exception:  # noqa: BLE001
         pass
     return PlainTextResponse("ok")

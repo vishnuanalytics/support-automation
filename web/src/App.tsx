@@ -91,7 +91,7 @@ export function App() {
               Runs
             </button>
             <button className={view === "review" ? "primary" : ""} onClick={() => setView("review")}>
-              Review
+              Approvals
             </button>
             <button className={view === "trace" ? "primary" : ""} onClick={() => setView("trace")}>
               Trace
