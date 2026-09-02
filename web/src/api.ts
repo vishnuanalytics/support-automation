@@ -7,6 +7,7 @@ import type {
   FlowCandidate,
   FlowMeta,
   FlowVersion,
+  FlowTrigger,
   ActionRequest,
   GoogleStatus,
   Invitation,
@@ -78,6 +79,14 @@ export const api = {
       body: JSON.stringify({ sf_entry }),
     }),
   listVersions: (id: string) => req<FlowVersion[]>(`/flows/${id}/versions`),
+
+  triggers: {
+    list: (flowId: string) => req<FlowTrigger[]>(`/flows/${flowId}/triggers`),
+    create: (flowId: string, b: { kind: "webhook" | "schedule"; cron?: string; label?: string }) =>
+      req<FlowTrigger>(`/flows/${flowId}/triggers`, { method: "POST", body: JSON.stringify(b) }),
+    remove: (flowId: string, id: string) =>
+      req<void>(`/flows/${flowId}/triggers/${id}`, { method: "DELETE" }),
+  },
   rollbackFlow: (id: string, version: number) =>
     req<{ published_version: number }>(`/flows/${id}/rollback`, {
       method: "POST",

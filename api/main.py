@@ -800,6 +800,87 @@ def trigger_run(flow_id: str, body: dict[str, Any],
     return {"job_id": job_id}
 
 
+# ── P6a: webhook / schedule triggers for a flow ──────────────────────
+class TriggerIn(BaseModel):
+    kind: str = "webhook"           # 'webhook' | 'schedule'
+    cron: str | None = None         # schedule only
+    label: str | None = None
+
+
+def _public_base() -> str:
+    return os.environ.get("PUBLIC_API_BASE", "").rstrip("/") or "http://localhost:8000"
+
+
+def _trigger_view(t: dict) -> dict:
+    out = {k: t.get(k) for k in ("trigger_id", "kind", "cron", "label", "enabled",
+                                 "last_fired_at", "fire_count", "created_at")}
+    if t.get("kind") == "webhook" and t.get("token"):
+        out["url"] = f"{_public_base()}/t/{t['token']}"
+    return out
+
+
+@app.get("/api/flows/{flow_id}/triggers")
+def list_triggers(flow_id: str, c: Caller = Depends(caller)) -> list[dict]:
+    _require_visible(c, flow_id)
+    rows = (c.sb.table("flow_triggers").select("*")
+            .eq("flow_id", flow_id).order("created_at").execute().data or [])
+    return [_trigger_view(t) for t in rows]
+
+
+@app.post("/api/flows/{flow_id}/triggers", status_code=201)
+def create_trigger(flow_id: str, body: TriggerIn, c: Caller = Depends(caller)) -> dict:
+    flow = _require_visible(c, flow_id)
+    _require_editor(c, flow["tenant_id"])
+    if body.kind not in ("webhook", "schedule"):
+        raise HTTPException(422, "kind must be webhook | schedule")
+    if body.kind == "schedule" and not body.cron:
+        raise HTTPException(422, "a schedule trigger needs a cron expression")
+    row = {"flow_id": flow_id, "tenant_id": flow["tenant_id"], "kind": body.kind,
+           "cron": body.cron, "label": body.label, "created_by": c.user_id}
+    if body.kind == "webhook":
+        row["token"] = secrets.token_urlsafe(24)
+    created = _service.table("flow_triggers").insert(row).execute().data[0]
+    return _trigger_view(created)
+
+
+@app.delete("/api/flows/{flow_id}/triggers/{trigger_id}", status_code=204)
+def delete_trigger(flow_id: str, trigger_id: str, c: Caller = Depends(caller)) -> None:
+    flow = _require_visible(c, flow_id)
+    _require_editor(c, flow["tenant_id"])
+    _service.table("flow_triggers").delete().eq("trigger_id", trigger_id) \
+        .eq("flow_id", flow_id).execute()
+
+
+@app.post("/t/{token}", status_code=202)
+def fire_webhook(token: str, body: dict[str, Any],
+                 idempotency_key: str | None = None) -> dict:
+    """P6a — the public webhook. No auth: the token IS the credential. The JSON
+    body becomes `state.context`; the flow reads `context.*` / `input.*`."""
+    from interpreter import triggers
+    rate_limit(token, "webhook", 300)
+    try:
+        rows = (_service.table("flow_triggers").select("*")
+                .eq("token", token).eq("kind", "webhook").eq("enabled", True)
+                .limit(1).execute().data or [])
+    except Exception:  # noqa: BLE001 — can't verify the token -> reject
+        rows = []
+    if not rows:
+        raise HTTPException(404, "unknown or disabled trigger")
+    trg = rows[0]
+    ctx = triggers.webhook_context(body, source="webhook")["context"]
+    job_id = jobs.enqueue(
+        "run_flow",
+        {"flow_id": trg["flow_id"], "context": ctx, "idempotency_key": idempotency_key},
+        dedupe_key=idempotency_key, sb=_service)
+    try:
+        _service.table("flow_triggers").update({
+            "last_fired_at": _now_iso(), "fire_count": (trg.get("fire_count") or 0) + 1,
+        }).eq("trigger_id", trg["trigger_id"]).execute()
+    except Exception:  # noqa: BLE001
+        pass
+    return {"job_id": job_id, "deduped": job_id is None}
+
+
 class SFCaseHookIn(BaseModel):
     case_id: str
     flow_id: str | None = None       # optional override; else the flow marked `sf_entry`
