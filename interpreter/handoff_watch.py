@@ -81,7 +81,7 @@ def _context_for(sb, case_id: str, case_number: str | None) -> list[dict]:
         for col, val in (("case_payload->>sf_id", case_id), ("case_id", case_number)):
             if not val:
                 continue
-            rows = (sb.table("runs").select("retrieval, trace, internal_kb")
+            rows = (sb.table("runs").select("retrieval, trace")
                     .eq(col, val).order("created_at", desc=True).limit(1).execute().data or [])
             if rows:
                 return review.assemble_contexts(rows[0])
@@ -106,7 +106,10 @@ def _missed_pointers(sb, case_type: str | None, thread_text: str) -> list[str]:
                 or sb.table("pointer_bank").select("pointers")
                 .eq("case_type", "Other").limit(1).execute().data or [])
         pts = rows[0]["pointers"] if rows else []
-        crit = [p.get("q") for p in pts if p.get("critical") and p.get("q")]
+        if isinstance(pts, str):
+            pts = json.loads(pts)
+        crit = [p["q"] for p in pts
+                if isinstance(p, dict) and p.get("critical") and p.get("q")]
     except Exception as e:  # noqa: BLE001
         log.warning("handoff_watch pointer_bank: %s", e)
         return []
