@@ -827,33 +827,100 @@ set as a pre-merge check whenever the judge prompts or `draft_change` change,
 and apply migrations `074`/`075` on any environment that hasn't yet (this
 one already has, via the Supabase MCP).
 
-**Phase 28 — platform activity/audit log (step 1 of 6, COMPLETE
-2026-09-03).** First of a 6-step ordered feature list (infra-first, each
-step reuses the last): 1. this audit log · 2. flow-version rollback audit
-trail + `flow_versions` retention (uses #1) · 3. billing quota enforcement
-(logs through #1) · 4. per-flow cost breakdown · 5. flow templates
-marketplace (logs through #1) · 6. bulk KB export/import. Migration `076`
-`audit_log` (append-only, `case_events`-style conventions — free-text
-`action` slug not an enum, RLS member-read only / **no write policy**,
-every insert goes through the service-role client, matching
-`review_tasks`). `interpreter/audit.py::record()` — best-effort, never
-raises (an audit failure must not break the mutation it's recording).
-Wired into 6 existing endpoints in `api/main.py`: `publish_flow` /
-`rollback_flow` (records `from_version`/`to_version` — this already
-closes most of step 2's "rollback audit note" gap) / `delete_flow` /
-`remove_member` / `decide_action_request_ep` (KB-change + task approvals)
-/ `create_connection` + `delete_connection`. `GET /api/audit` (member-
-readable, like Runs — not owner-gated). Web **Activity** tab (next to
-Runs): a plain table + an action-type filter built from the events seen.
-`tests/test_audit.py` (3 offline tests — row shape, defaults, never
-raises on a broken client). **Live-verified end-to-end** via a real
-authenticated request through the actual FastAPI app (not just the
-helper): publish → `flow.published`; rollback → `flow.rolled_back` with
+**Phase 28 — a 6-step ordered feature list (infra-first, each step
+reuses the last): 1. platform activity/audit log ✅ · 2. flow-version
+rollback audit trail + `flow_versions` retention ✅ · 3. billing quota
+enforcement ✅ · 4. per-flow cost breakdown · 5. flow templates
+marketplace (logs through #1) · 6. bulk KB export/import.**
+
+**Step 1 — platform activity/audit log (COMPLETE 2026-09-03).**
+Migration `076` `audit_log` (append-only, `case_events`-style
+conventions — free-text `action` slug not an enum, RLS member-read only
+/ **no write policy**, every insert goes through the service-role
+client, matching `review_tasks`). `interpreter/audit.py::record()` —
+best-effort, never raises (an audit failure must not break the mutation
+it's recording). Wired into 6 existing endpoints in `api/main.py`:
+`publish_flow` / `rollback_flow` (records `from_version`/`to_version` —
+this already closes most of step 2's "rollback audit note" gap) /
+`delete_flow` / `remove_member` / `decide_action_request_ep` (KB-change
++ task approvals) / `create_connection` + `delete_connection`.
+`GET /api/audit` (member-readable, like Runs — not owner-gated). Web
+**Activity** tab (next to Runs): a plain table + an action-type filter
+built from the events seen. `tests/test_audit.py` (3 offline tests).
+**Live-verified end-to-end** via a real authenticated request through
+the actual FastAPI app (not just the helper): publish →
+`flow.published`; rollback → `flow.rolled_back` with
 `{"from_version": 10, "to_version": 9}`; add/remove a connection →
 `connection.added` / `connection.removed`; `GET /api/audit` returned all
-four, RLS-scoped to the caller's tenant. **Next:** step 2 —
-`flow_versions` has no prune/retention policy yet (grows forever); the
-rollback note itself is now covered by this step's wiring.
+four, RLS-scoped to the caller's tenant.
+
+**Step 2 — flow-version rollback audit trail + retention (COMPLETE
+2026-09-03).** The "rollback note" half was already closed by step 1's
+`rollback_flow` wiring (above) — this step is the remaining
+`flow_versions` retention/pruning debt noted in "Known issues" below.
+Migration `077` `purge_old_flow_versions(keep_last=20, min_age_days=90)`
+— unlike `purge_old()`'s blind age cutoff for `runs` (pure telemetry), a
+`flow_versions` row is a live rollback target, so this keeps the last N
+versions per flow *and* anything newer than `min_age_days`
+unconditionally, and — critically — **never deletes a flow's currently
+published version regardless of age or rank** (`rollback_flow`
+re-points `published_version` at an old version number directly rather
+than re-snapshotting, so a naive "keep the N highest version numbers"
+policy could otherwise delete a live rollback target out from under a
+flow). `scripts/purge_old.py` now also calls this RPC (new
+`--fv-keep-last` / `--fv-min-age-days` flags), so the existing nightly
+`daily-sync.yml` "Purge old jobs + runs" step covers it automatically,
+no workflow change needed. **Live-verified** against a throwaway flow
+with 10 backdated `flow_versions` rows (spanning ~180 days) and an
+intentionally *old, low-ranked* published version: `purge_old_flow_versions(3,
+100)` correctly kept the old published version (protected despite being
+rank-10 and 160 days old) plus the recent top-ranked ones, and deleted
+only the genuinely old, unpublished, low-ranked rows — then
+`python -m scripts.purge_old` against the real (only ~9-day-old)
+database correctly no-opped (`flow_versions=0`), proving the default
+settings don't touch live data.
+
+**Step 3 — billing quota enforcement, warn-only (COMPLETE 2026-09-03).**
+User's explicit call: warn, never block — a hard block risked silently
+dropping a real inbound customer email once the live tenant crosses the
+free plan's 200 runs/month (it was already at ~20-40 from this session's
+own testing). `interpreter/billing.py::check_and_warn(sb, tenant_id)` —
+called from `interpreter/runs.py::record_run` right after every run is
+recorded (so it fires regardless of trigger: manual, webhook, email,
+Salesforce CDC), best-effort. Computes the tenant's current-month
+`usage_summary()` (reusing P9); at ≥80% logs `billing.quota_warning`, at
+≥100% `billing.quota_exceeded` via `audit.record()` (step 1) — **at most
+once per (tenant, period, level)**, deduped against `audit_log` itself
+(no new table). If the tenant already has a Slack digest channel
+configured (`tenant_integrations.config.digest.channel`, reused from
+P8a's KIL digest — no new external setup required), also posts a
+one-line heads-up there; unlimited (`pro`) plans and channel-less
+tenants skip that step silently. Nothing about a run's own execution or
+response is affected — nothing checks the return value to gate anything.
+`tests/test_billing.py` gains 7 offline tests. **Live-verified** against
+an isolated throwaway tenant with synthetic `runs` rows: 160/200 (80%)
+→ `billing.quota_warning` logged once, a second call correctly deduped
+(no duplicate row); pushed to 200/200 (100%) → `billing.quota_exceeded`
+fired. Also **live-verified the real Globex tenant stayed silent** at
+its actual 38/200 (19%) usage — no false positive.
+
+**Found and fixed in passing — a real, pre-existing bug, not
+environment noise:** `interpreter/runs.py::record_run()` had dead code
+— a `return run_id` sitting *after* the unrelated `_int_env()` helper
+function instead of at the end of `record_run`'s own body, so the
+function always implicitly returned `None` regardless of whether the
+run was recorded. This has been silently breaking `POST
+/api/flows/{id}/run`'s `run_id` response field, the worker's job
+result, and the CLI's "recorded run …" message — and was the actual
+cause of `tests/test_api.py::test_run_returns_a_run_id` and
+`test_publish_snapshots_and_run_records_the_version`, two tests
+mischaracterized as "the known live-Supabase seed-flow gap" in every
+verification report across this entire session (P8c through step 2 of
+this phase) without their actual failure text being checked each time.
+Moving the `return` statement fixed both; the other 4 previously-lumped
+failures were re-verified individually and are genuinely the seed-flow
+gap (`FlowNotFound`), unrelated. **Next:** step 4 — per-flow cost
+breakdown.
 
 **Phase 27 — the Case Control Plane (done, 2026-09-01/02).** One
 AI-managed Case queue: classify + route + track `Status` + hand off via
@@ -2148,9 +2215,13 @@ From the 2026-08-29 self-review. Each is intentional MVP scope, not a bug:
 - ~~Flows mutated in place; `version` decorative; `runs` doesn't record
   the flow version; `PUT` non-transactional; no optimistic concurrency.~~
   **Phase 8:** `flow_versions` snapshots, `runs.flow_version`,
-  `replace_flow_graph` RPC, 409 on stale `PUT`. *Residual:* rollback
+  `replace_flow_graph` RPC, 409 on stale `PUT`. ~~*Residual:* rollback
   re-points + restores the draft but doesn't keep a "rolled back from vN"
-  audit note; `flow_versions` has no prune/retention.
+  audit note; `flow_versions` has no prune/retention.~~ **Phase 28
+  steps 1-2 (2026-09-03):** the rollback note is now an `audit_log`
+  entry (`flow.rolled_back`, `{from_version, to_version}`);
+  `purge_old_flow_versions()` (migration `077`) prunes old versions,
+  never the currently published one.
 - ~~No tests for `api/` or `web/`; no CI; brittle `test_multiflow`;
   hand-rolled runner.~~ **Phase 9:** `pytest` + `pytest.ini`,
   `tests/test_api.py` (offline + integration), `web` `vitest`,
