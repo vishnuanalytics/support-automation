@@ -15,6 +15,7 @@ import { ChannelsView } from "./channels/ChannelsView";
 import { ConnectionsView } from "./channels/ConnectionsView";
 import { FlowGuideView } from "./guide/FlowGuideView";
 import { BillingView } from "./billing/BillingView";
+import { ActivityView } from "./activity/ActivityView";
 
 type View =
   | "editor"
@@ -27,7 +28,8 @@ type View =
   | "team"
   | "channels"
   | "connections"
-  | "billing";
+  | "billing"
+  | "activity";
 
 export function App() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
@@ -121,6 +123,9 @@ export function App() {
             <button className={view === "runs" ? "primary" : ""} onClick={() => setView("runs")}>
               Runs
             </button>
+            <button className={view === "activity" ? "primary" : ""} onClick={() => setView("activity")}>
+              Activity
+            </button>
             <button className={view === "review" ? "primary" : ""} onClick={() => setView("review")}>
               Approvals
             </button>
@@ -179,6 +184,7 @@ export function App() {
           />
         )}
         {view === "runs" && <div className="muted">observability — recent interpreter runs across your tenants</div>}
+        {view === "activity" && <div className="muted">who did what — flow publishes/rollbacks, approvals, membership, connections</div>}
         {view === "trace" && <div className="muted">one timeline per Case — jobs, runs, nodes and errors, in order</div>}
         {view === "knowledge" && (
           <div className="muted">
@@ -222,6 +228,8 @@ export function App() {
           <KnowledgeView />
         ) : view === "runs" ? (
           <RunsView />
+        ) : view === "activity" ? (
+          <ActivityView />
         ) : view === "review" ? (
           <ReviewView />
         ) : view === "trace" ? (

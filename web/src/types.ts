@@ -396,3 +396,16 @@ export interface BillingUsage {
   pct_runs_used: number | null;
   pct_tokens_used: number | null;
 }
+
+export interface AuditEvent {
+  event_id: number;
+  tenant_id: string;
+  actor_id: string | null;
+  actor_email: string | null;
+  action: string;
+  target_type: string | null;
+  target_id: string | null;
+  summary: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}

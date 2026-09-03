@@ -476,6 +476,13 @@ def remove_member(user_id: str, tenant_id: str | None = None, c: Caller = Depend
     _service.table("tenant_members").delete() \
         .eq("tenant_id", tid).eq("user_id", user_id).execute()
 
+    from interpreter import audit
+    removed_email = _emails_for([user_id]).get(user_id, "")
+    audit.record(_service, tenant_id=tid, action="member.removed",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="member", target_id=user_id,
+                 summary=f"removed {removed_email or user_id}")
+
 
 @app.get("/api/invitations")
 def list_invitations(c: Caller = Depends(caller)) -> list[dict]:
@@ -695,6 +702,13 @@ def publish_flow(flow_id: str, c: Caller = Depends(caller)) -> dict:
         "status": "published", "published_version": version,
         "version": meta["version"] + 1,
     }).eq("flow_id", flow_id).execute()
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=meta["tenant_id"], action="flow.published",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="flow", target_id=flow_id,
+                 summary=f"published {meta.get('name') or flow_id} v{version}",
+                 metadata={"version": version})
     return {"published_version": version}
 
 
@@ -720,6 +734,15 @@ def rollback_flow(flow_id: str, body: RollbackIn, c: Caller = Depends(caller)) -
     c.sb.table("flows").update({
         "published_version": body.version, "version": meta["version"] + 1,
     }).eq("flow_id", flow_id).execute()
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=meta["tenant_id"], action="flow.rolled_back",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="flow", target_id=flow_id,
+                 summary=(f"rolled back {meta.get('name') or flow_id} "
+                          f"from v{meta.get('published_version')} to v{body.version}"),
+                 metadata={"from_version": meta.get("published_version"),
+                           "to_version": body.version})
     return {"published_version": body.version}
 
 
@@ -728,6 +751,12 @@ def delete_flow(flow_id: str, c: Caller = Depends(caller)) -> None:
     meta = _require_visible(c, flow_id)
     _require_editor(c, meta["tenant_id"])
     c.sb.table("flows").delete().eq("flow_id", flow_id).execute()  # cascades nodes/edges
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=meta["tenant_id"], action="flow.deleted",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="flow", target_id=flow_id,
+                 summary=f"deleted {meta.get('name') or flow_id}")
 
 
 class SfEntryIn(BaseModel):
@@ -950,6 +979,12 @@ def create_connection(body: ConnectionIn, c: Caller = Depends(caller)) -> dict:
         "tenant_id": tid, "slug": body.slug.strip(), "base_url": body.base_url.rstrip("/"),
         "auth": body.auth, "created_by": c.user_id, "updated_at": _now_iso(),
     }, on_conflict="tenant_id,slug").execute().data[0])
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="connection.added",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="connection", target_id=body.slug.strip(),
+                 summary=f"added connection {body.slug.strip()} -> {body.base_url.rstrip('/')}")
     return connections.redact(row)
 
 
@@ -959,6 +994,12 @@ def delete_connection(slug: str, tenant_id: str | None = None,
     tid = _caller_tenant(c, tenant_id)
     _require_editor(c, tid)
     _service.table("connections").delete().eq("tenant_id", tid).eq("slug", slug).execute()
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="connection.removed",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="connection", target_id=slug,
+                 summary=f"removed connection {slug}")
 
 
 class SFCaseHookIn(BaseModel):
@@ -1015,6 +1056,18 @@ def get_job(job_id: str, c: Caller = Depends(caller)) -> dict:
 
 
 # ── runs (Phase 6 observability) ──────────────────────────────────────
+@app.get("/api/audit")
+def list_audit(tenant_id: str | None = None, action: str | None = None,
+               limit: int = 100, c: Caller = Depends(caller)) -> list[dict]:
+    """Phase 28 — the platform activity log. Member-readable, like Runs."""
+    tid = _caller_tenant(c, tenant_id)
+    q = (c.sb.table("audit_log").select("*").eq("tenant_id", tid)
+         .order("created_at", desc=True).limit(min(max(limit, 1), 300)))
+    if action:
+        q = q.eq("action", action)
+    return q.execute().data or []
+
+
 @app.get("/api/runs/stats")
 def runs_stats(c: Caller = Depends(caller)) -> dict:
     rows = (
@@ -1205,6 +1258,13 @@ def decide_action_request_ep(ar_id: str, body: ActionDecisionIn,
             slackmod.update_message(ar["tenant_id"], sl["channel"], sl["ts"], sl["text"], _service)
     except Exception:  # noqa: BLE001
         pass
+
+    from interpreter import audit
+    title = (ar.get("payload") or {}).get("title") or ar.get("kind") or "request"
+    audit.record(_service, tenant_id=ar["tenant_id"], action=f"approval.{res['status']}",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type=ar.get("kind") or "action_request", target_id=ar_id,
+                 summary=f"{res['status']} {title}")
     return {"status": res["status"], "job_kind": res["job_kind"]}
 
 
