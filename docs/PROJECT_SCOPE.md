@@ -957,6 +957,50 @@ already covered by what step 2 built; revisit whether it needs anything
 beyond wiring `agent` into a real flow and measuring against
 `qrels_hard.jsonl`.
 
+**Adopted live (2026-09-03) — Acme/support now runs through `agent`.**
+User's call, after the ROI-identification framing above. Not a
+migration (a one-off content change to one specific seed flow's graph,
+not schema/seed data every environment needs) — a script mirroring
+`api.main.publish_flow`'s exact logic (validate the draft with the real
+`check_flow`, snapshot `flow_versions` with the real `definition_hash`,
+bump the `flows` row) rewired the live graph: the standalone `retrieve`
++ `draft` nodes are gone, replaced by one `agent` node in `draft`'s old
+position (config reuses both nodes' old settings verbatim — same model,
+same `top_k`, per CLAUDE.md's "don't change the seed flows' models
+without a reason"). New topology: `classify → sf_writeback → agent →
+confidence_gate → {handover|ask_human|auto_reply}` (was `retrieve →
+classify → sf_writeback → draft → confidence_gate → …` — `retrieve` no
+longer needs to be the entry point since it never actually depended on
+`classify`'s output; `classify` is now the entry node). Published as
+version 4. Fully reversible — the prior version's `flow_versions` row is
+untouched, so `rollback_flow` restores the old retrieve+draft pair
+instantly if needed. **Verified live:** `test_multiflow.py` 4/4 passed
+against the real published flow, including the exact
+`[ACME-support-auto_reply]` case that had been intermittently failing
+all session under the shared-quota flakiness documented above — it
+passed this run. Total runtime (417s for 4 cases) was noticeably slower
+than the pre-agent baseline (~2-4 min), consistent with the agent's
+extra retrieve+draft+judge calls firing under today's tight quota — a
+real cost, not free.
+
+**`qrels_hard.jsonl` before/after — not run, and not a clean fit as-is.**
+`ingestion/eval/run_eval.py --qrels hard` evaluates raw retrieval recall
+in isolation (a bare question → does the top hybrid_retrieve result
+match `relevant_urls`), independent of any node — it never touches
+`draft`/`groundedness`, so it can't exercise `agent`'s actual decision
+loop (which only reformulates when a *draft's* groundedness score is
+low; there's no draft in that harness at all). Getting a real
+before/after would need a small **purpose-built** comparison script
+(feed each of the 10 hard questions through `h_agent` vs. a single
+`hybrid_retrieve` call, compare recall+iteration count) — not built yet,
+deliberately, both because it's a different piece of work than "wire it
+into a flow" and because running it live right now would hit the same
+quota pressure that made this session's own verification slow (10
+questions × up to 3 agent iterations each, under the fallback chain seen
+all session, could plausibly take 20-30+ minutes and mostly exercise the
+weak fallback model rather than a clean signal). Flagged for the user
+rather than silently spent.
+
 **Audit log coverage extended (2026-09-03) — closes a real gap in Phase
 28 step 1.** User's request: "improve the logs, who changed what." Step 1
 wired `audit.record()` into 6 endpoints (publish/rollback/delete flow,
