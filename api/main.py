@@ -1074,6 +1074,36 @@ def get_run(run_id: str, c: Caller = Depends(caller)) -> dict:
     return rows[0]
 
 
+# ── P9: usage & billing dashboard ───────────────────────────────────────
+@app.get("/api/billing/usage")
+def billing_usage(tenant_id: str | None = None, period: str | None = None,
+                  c: Caller = Depends(caller)) -> dict:
+    """Runs + tokens + a notional cost estimate for one calendar month,
+    against the tenant's static plan quota. Owner-only — same bar as
+    /api/members. No payment processing behind this; see interpreter/billing.py."""
+    from interpreter import billing
+
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    try:
+        period_label, period_start, period_end = billing.month_bounds(period)
+    except (ValueError, TypeError):
+        raise HTTPException(422, "period must be YYYY-MM")
+
+    trows = c.sb.table("tenants").select("plan").eq("tenant_id", tid).execute().data or []
+    plan = (trows[0].get("plan") if trows else None) or "free"
+
+    rows = (
+        c.sb.table("runs").select("tokens_total, tokens_by_model, created_at")
+        .eq("tenant_id", tid)
+        .gte("created_at", period_start).lt("created_at", period_end)
+        .limit(5000).execute().data
+        or []
+    )
+    return {"period_label": period_label,
+            **billing.usage_summary(rows, plan, period_start, period_end)}
+
+
 # ── KIL-f: the Knowledge Integrity Loop review queue + metrics ─────────
 class ReviewResolveIn(BaseModel):
     status: str  # 'correct' | 'wrong' | 'dismissed'
