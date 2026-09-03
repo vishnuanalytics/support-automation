@@ -2190,6 +2190,91 @@ def email_google_callback(code: str = "", state: str = "", error: str = "") -> H
     return page("Gmail connected. You can close this window.")
 
 
+# ── self-serve Salesforce connection + org introspection (2026-09-03) ──
+class SalesforceOrgIn(BaseModel):
+    org_label: str = "default"
+    tenant_id: str | None = None
+    # a raw creds bag mirroring the SF_* env var names -- _build_client
+    # self-detects JWT bearer / OAuth username-password / legacy SOAP by
+    # which keys are present, same as the env-configured client already does.
+    creds: dict[str, str]
+
+
+@app.get("/api/integrations/salesforce")
+def salesforce_orgs(tenant_id: str | None = None, c: Caller = Depends(caller)) -> list[dict]:
+    """Every Salesforce org this tenant has connected — never the secret."""
+    from interpreter import salesforce as _sf
+
+    tid = _caller_tenant(c, tenant_id)
+    rows = (_service.table("tenant_integrations").select("org_label, secret, updated_at")
+            .eq("tenant_id", tid).eq("kind", "salesforce").order("org_label").execute().data or [])
+    return [{"org_label": r["org_label"], "updated_at": r["updated_at"],
+             **_sf.redact_org_secret(r["secret"])} for r in rows]
+
+
+@app.put("/api/integrations/salesforce", status_code=201)
+def salesforce_connect(body: SalesforceOrgIn, c: Caller = Depends(caller)) -> dict:
+    from interpreter import salesforce as _sf
+
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    rate_limit(c.user_id, "integration", 20)
+    if not body.creds.get("SF_USERNAME"):
+        raise HTTPException(422, "SF_USERNAME is required")
+    result = _sf.test_connection(body.creds)
+    if not result["ok"]:
+        raise HTTPException(422, f"could not connect: {result['error']}")
+    _sf.save_tenant_org(tid, body.org_label, body.creds, sb=_service)
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="salesforce_org.connected",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="salesforce_org", target_id=body.org_label,
+                 summary=f"connected Salesforce org {body.org_label!r}")
+    return {"org_label": body.org_label, **_sf.redact_org_secret(body.creds)}
+
+
+@app.delete("/api/integrations/salesforce/{org_label}", status_code=204)
+def salesforce_disconnect(org_label: str, tenant_id: str | None = None,
+                          c: Caller = Depends(caller)) -> None:
+    from interpreter import salesforce as _sf
+
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    _sf.delete_tenant_org(tid, org_label, sb=_service)
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="salesforce_org.disconnected",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="salesforce_org", target_id=org_label,
+                 summary=f"disconnected Salesforce org {org_label!r}")
+
+
+@app.post("/api/integrations/salesforce/test")
+def salesforce_test(body: SalesforceOrgIn, c: Caller = Depends(caller)) -> dict:
+    """Log in with the posted creds and back out — saves nothing."""
+    from interpreter import salesforce as _sf
+
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    rate_limit(c.user_id, "integration", 20)
+    return _sf.test_connection(body.creds)
+
+
+@app.get("/api/integrations/salesforce/{org_label}/schema")
+def salesforce_schema(org_label: str, tenant_id: str | None = None,
+                      c: Caller = Depends(caller)) -> dict:
+    """The connected org's real Case fields (+ picklist values) and Queues
+    — what the flow editor's dropdowns/mapping UI are built from, instead
+    of hardcoded platform field names."""
+    from interpreter import salesforce as _sf
+
+    tid = _caller_tenant(c, tenant_id)
+    _require_editor(c, tid)   # editors build flows, not just owners
+    rate_limit(c.user_id, "integration", 20)
+    return _sf.introspect_org(tid, org_label)
+
+
 # ── Phase 16: policy rules ───────────────────────────────────────────
 class RuleIn(BaseModel):
     team: str

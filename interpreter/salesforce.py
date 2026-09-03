@@ -214,6 +214,90 @@ def delete_tenant_org(tenant_id: str, org_label: str, sb=None) -> None:
     _tenant_clients.pop((str(tenant_id), org_label or "default"), None)
 
 
+_SAFE_ORG_KEYS = ("SF_USERNAME", "SF_DOMAIN")   # everything else in a creds dict is secret
+
+
+def redact_org_secret(creds: dict[str, str]) -> dict[str, Any]:
+    """A tenant_integrations `secret` blob minus everything sensitive, for
+    API responses — same split as `connections.redact()`."""
+    return {
+        **{k: creds[k] for k in _SAFE_ORG_KEYS if k in creds},
+        "has_credentials": any(k not in _SAFE_ORG_KEYS for k in creds),
+    }
+
+
+def test_connection(creds: dict[str, str]) -> dict[str, Any]:
+    """Log in with the given creds and back out — saves nothing. Same
+    `{ok, error}` shape as `mailbox.test_connection`."""
+    try:
+        sf = _build_client(creds)
+        sf.query("SELECT Id FROM Organization LIMIT 1")
+        return {"ok": True, "error": None}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"[:300]}
+
+
+# Field types worth surfacing in a "map your org's fields" UI — picklists
+# (the actual thing we want values from) plus the other shapes a customer
+# might reasonably use for module/region/priority-style categorization.
+_MAPPABLE_FIELD_TYPES = ("picklist", "multipicklist", "reference", "string", "textarea", "boolean")
+
+
+def describe_case_fields(tenant_id: str | None, org_label: str | None = None) -> list[dict[str, Any]]:
+    """The customer's REAL Case object schema — for a field-mapping UI
+    ("which of your fields is Module / Region / Priority") instead of
+    assuming the platform's own custom field names exist in their org.
+    Picklist/multipicklist fields carry their real active values; other
+    mappable types come back with an empty `picklist_values` so the UI can
+    still offer them as a free-text mapping target."""
+    sf = client_for(tenant_id, org_label)
+    desc = sf.Case.describe()
+    out = []
+    for f in desc.get("fields", []):
+        if f.get("type") not in _MAPPABLE_FIELD_TYPES:
+            continue
+        out.append({
+            "name": f["name"], "label": f.get("label") or f["name"],
+            "type": f["type"], "custom": bool(f.get("custom")),
+            "picklist_values": [
+                {"value": pv["value"], "label": pv.get("label") or pv["value"]}
+                for pv in (f.get("picklistValues") or []) if pv.get("active", True)
+            ],
+        })
+    return out
+
+
+def list_queues(tenant_id: str | None, org_label: str | None = None) -> list[dict[str, Any]]:
+    """Queues visible to the connected integration user — the routing
+    targets a `team_route`/`notify` node's config would pick from.
+    (Sharing-rule-scoped by the querying user already; a further "can this
+    user actually ASSIGN to it" check is a real refinement, not done here —
+    Salesforce's permission model for queue membership/assignment rights
+    is deeper than a single query can answer cheaply.)"""
+    sf = client_for(tenant_id, org_label)
+    rows = sf.query(
+        "SELECT Id, Name, DeveloperName FROM Group WHERE Type = 'Queue' ORDER BY Name"
+    ).get("records", [])
+    return [{"id": r["Id"], "name": r["Name"], "developer_name": r.get("DeveloperName")} for r in rows]
+
+
+def introspect_org(tenant_id: str | None, org_label: str | None = None) -> dict[str, Any]:
+    """Everything a flow-editor dropdown needs in one call: the org's real
+    Case fields (+ picklist values) and its Queues. Best-effort per
+    section — a Case-describe failure shouldn't hide Queues the caller CAN
+    see, and vice versa."""
+    out: dict[str, Any] = {"case_fields": [], "queues": [], "errors": []}
+    try:
+        out["case_fields"] = describe_case_fields(tenant_id, org_label)
+    except Exception as e:  # noqa: BLE001
+        out["errors"].append(f"case fields: {type(e).__name__}: {e}"[:300])
+    try:
+        out["queues"] = list_queues(tenant_id, org_label)
+    except Exception as e:  # noqa: BLE001
+        out["errors"].append(f"queues: {type(e).__name__}: {e}"[:300])
+    return out
+
+
 # --------------------------------------------------------------------------
 # read
 # --------------------------------------------------------------------------

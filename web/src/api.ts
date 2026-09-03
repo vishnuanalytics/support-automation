@@ -30,6 +30,8 @@ import type {
   RunResult,
   RunRow,
   RunStats,
+  SalesforceOrg,
+  SalesforceOrgSchema,
   TemplateMeta,
 } from "./types";
 
@@ -118,6 +120,22 @@ export const api = {
     remove: (slug: string, tenantId?: string) =>
       req<void>(`/connections/${encodeURIComponent(slug)}${tenantId ? `?tenant_id=${tenantId}` : ""}`,
         { method: "DELETE" }),
+  },
+
+  salesforceOrgs: {
+    list: (tenantId?: string) =>
+      req<SalesforceOrg[]>(`/integrations/salesforce${tenantId ? `?tenant_id=${tenantId}` : ""}`),
+    connect: (b: { org_label: string; creds: Record<string, string>; tenant_id?: string }) =>
+      req<SalesforceOrg>("/integrations/salesforce", { method: "PUT", body: JSON.stringify(b) }),
+    test: (b: { org_label: string; creds: Record<string, string>; tenant_id?: string }) =>
+      req<{ ok: boolean; error: string | null }>("/integrations/salesforce/test",
+        { method: "POST", body: JSON.stringify(b) }),
+    remove: (orgLabel: string, tenantId?: string) =>
+      req<void>(`/integrations/salesforce/${encodeURIComponent(orgLabel)}` +
+                `${tenantId ? `?tenant_id=${tenantId}` : ""}`, { method: "DELETE" }),
+    schema: (orgLabel: string, tenantId?: string) =>
+      req<SalesforceOrgSchema>(`/integrations/salesforce/${encodeURIComponent(orgLabel)}/schema` +
+                               `${tenantId ? `?tenant_id=${tenantId}` : ""}`),
   },
   rollbackFlow: (id: string, version: number) =>
     req<{ published_version: number }>(`/flows/${id}/rollback`, {
