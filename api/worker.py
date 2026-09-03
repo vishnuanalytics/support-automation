@@ -459,10 +459,10 @@ class _JobTimeout(Exception):
     pass
 
 
-def process_one(sb) -> bool:
+def process_one(sb, *, job_id: str | None = None) -> bool:
     import signal
 
-    job = jobs.claim(sb=sb)
+    job = jobs.claim(sb=sb, job_id=job_id)
     if not job:
         return False
     jid, kind = job["job_id"], job["kind"]

@@ -31,9 +31,15 @@ def enqueue(kind: str, payload: dict[str, Any], *, dedupe_key: str | None = None
         raise
 
 
-def claim(sb=None) -> dict[str, Any] | None:
+def claim(sb=None, *, job_id: str | None = None) -> dict[str, Any] | None:
+    """Claim the oldest claimable job, or -- if `job_id` is given -- that
+    specific row only (immune to another consumer of the same queue
+    claiming a different job first; see migration 080)."""
     sb = sb or get_supabase()
-    data = sb.rpc("claim_job").execute().data
+    if job_id:
+        data = sb.rpc("claim_job", {"p_job_id": job_id}).execute().data
+    else:
+        data = sb.rpc("claim_job").execute().data
     # claim_job() is `RETURNS SETOF jobs`; an empty queue can still come back
     # as a single all-NULL row (PostgREST wraps it). Treat a row with no
     # job_id as "nothing to do".

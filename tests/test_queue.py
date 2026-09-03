@@ -56,10 +56,13 @@ def test_worker_runs_the_job_and_records_the_run(sb, key_and_cleanup):
     from interpreter import jobs
 
     key = key_and_cleanup
-    jobs.enqueue("run_flow",
-                 {"flow_id": GLOBEX_FLOW, "case": _case(key), "idempotency_key": key},
-                 dedupe_key=key, sb=sb)
-    assert process_one(sb) is True
+    job_id = jobs.enqueue("run_flow",
+                           {"flow_id": GLOBEX_FLOW, "case": _case(key), "idempotency_key": key},
+                           dedupe_key=key, sb=sb)
+    # claim this test's own job by id -- immune to the live worker
+    # container (docker-compose, polling this same queue) claiming it
+    # first via the ordinary FIFO claim_job().
+    assert process_one(sb, job_id=job_id) is True
 
     run = sb.table("runs").select("source, flow_version, outcome") \
         .eq("idempotency_key", key).execute().data
@@ -74,10 +77,10 @@ def test_second_job_same_key_does_not_double_run(sb, key_and_cleanup):
 
     key = key_and_cleanup
     p = {"flow_id": GLOBEX_FLOW, "case": _case(key), "idempotency_key": key}
-    jobs.enqueue("run_flow", p, dedupe_key=key, sb=sb)
-    process_one(sb)                                   # first job -> records a run
-    jobs.enqueue("run_flow", p, dedupe_key=key, sb=sb)  # allowed (prev job is done)
-    process_one(sb)                                   # worker sees the dup -> skips
+    j1 = jobs.enqueue("run_flow", p, dedupe_key=key, sb=sb)
+    process_one(sb, job_id=j1)                         # first job -> records a run
+    j2 = jobs.enqueue("run_flow", p, dedupe_key=key, sb=sb)  # allowed (prev job is done)
+    process_one(sb, job_id=j2)                         # worker sees the dup -> skips
 
     runs = sb.table("runs").select("run_id").eq("idempotency_key", key).execute().data
     assert len(runs) == 1
