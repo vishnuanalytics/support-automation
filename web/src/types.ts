@@ -410,3 +410,11 @@ export interface AuditEvent {
   metadata: Record<string, unknown>;
   created_at: string;
 }
+
+export interface TemplateMeta {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  source: "built-in" | "custom";
+}
