@@ -91,6 +91,15 @@ _TYPE_DOC: dict[str, str] = {
                      "GitHub issue) from an UPSTREAM policy_gate match (state.policy.task) "
                      "-- the approval happens asynchronously via the Slack callback, NOT as "
                      "a branch/edge in this graph; terminal, no outgoing edge",
+    "agent": "a drop-in replacement for a retrieve+draft PAIR (never use alongside separate "
+             "retrieve/draft nodes -- it does both itself): retries with a reformulated "
+             "search query, up to config.max_iterations (default 3), only when the "
+             "draft's groundedness is below config.groundedness_threshold (default 0.6) "
+             "-- cheap on the easy case, only spends more on cases that would otherwise be "
+             "escalated. Sets retrieval / retrieval_score / draft / draft_confidence / "
+             "groundedness exactly like retrieve+draft would, so confidence_gate reads it "
+             "unchanged. config.retrieve / config.draft nest that node's own config "
+             "(e.g. {\"retrieve\": {\"top_k\": 5}, \"draft\": {\"max_tokens\": 500}})",
 }
 
 _CONDITION_NAMES = (

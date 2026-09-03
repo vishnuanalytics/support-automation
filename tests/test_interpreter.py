@@ -20,9 +20,9 @@ from interpreter.builder import FlowBuildError, FlowRoutingError, build_graph
 from interpreter.flows.validate_flow import Flow, check_flow
 from interpreter import registry as _registry
 from interpreter.registry import (
-    _norm_tier, h_ask_human, h_clarify, h_classify, h_confidence_gate, h_draft,
-    h_extract, h_identify, h_kb_lookup, h_policy_gate, h_sf_writeback,
-    h_task_dispatch, register,
+    _norm_tier, h_agent, h_ask_human, h_clarify, h_classify, h_confidence_gate,
+    h_draft, h_extract, h_identify, h_kb_lookup, h_policy_gate, h_retrieve,
+    h_sf_writeback, h_task_dispatch, register,
 )
 from interpreter.runs import build_row
 
@@ -626,6 +626,178 @@ def test_draft_with_only_confirmed_context_has_no_unverified_block(monkeypatch):
              "retrieval": [{"doc_url": "d", "chunk_text": "confirmed fact", "entry_status": "active"}]},
             {"_node_id": "d"})
     assert "UNVERIFIED" not in globals()["_u"]
+
+
+# --------------------------------------------------------------------------
+# Phase 29 step 2 — the `agent` node (bounded retrieve+draft ReAct loop)
+# --------------------------------------------------------------------------
+def test_retrieve_honors_query_override():
+    """Additive hook the `agent` node uses to re-query on a later
+    iteration — every existing caller leaves it unset, so this is the only
+    place behavior can differ from before."""
+    seen = {}
+
+    def fake_retrieve(query, **kw):
+        seen["query"] = query
+        return [], 0.0
+
+    import interpreter.registry as reg
+    orig = reg.hybrid_retrieve
+    reg.hybrid_retrieve = fake_retrieve
+    try:
+        h_retrieve({"case": {"subject": "s", "body": "b"}},
+                   {"_node_id": "r", "query_override": "refined query"})
+    finally:
+        reg.hybrid_retrieve = orig
+    assert seen["query"] == "refined query"
+
+
+def test_agent_first_pass_clears_threshold_costs_one_retrieve_and_one_draft(monkeypatch):
+    """The selective-cost property: when the first attempt is already
+    well-grounded, the loop must not iterate — same cost as separate
+    retrieve+draft nodes."""
+    calls = {"retrieve": 0, "complete": 0, "tools": 0}
+
+    def fake_retrieve(query, **kw):
+        calls["retrieve"] += 1
+        return [{"doc_url": "d1", "chunk_text": "widgets need a firmware update"}], 0.9
+
+    def fake_complete(system, user, **kw):
+        calls["complete"] += 1
+        return '{"reply": "widgets need a firmware update", "confidence": 0.9}'
+
+    def fake_tools(*a, **kw):
+        calls["tools"] += 1
+        raise AssertionError("should never reformulate when the first pass is grounded")
+
+    monkeypatch.setattr(_registry, "hybrid_retrieve", fake_retrieve)
+    monkeypatch.setattr(_registry.llm, "complete", fake_complete)
+    monkeypatch.setattr(_registry.llm, "complete_with_tools", fake_tools)
+    monkeypatch.setattr(_registry.llm, "last_usage", None, raising=False)
+
+    state = {"case": {"subject": "firmware", "body": "widgets stuck"}}
+    out = h_agent(state, {"_node_id": "a", "groundedness_threshold": 0.6})
+
+    assert calls == {"retrieve": 1, "complete": 1, "tools": 0}
+    assert out["agent_iterations"] == 1
+    assert out["groundedness"]["score"] >= 0.6
+    assert out["draft"]
+    assert out["trace"][0]["type"] == "agent"
+
+
+def test_agent_reformulates_and_retries_when_first_pass_is_ungrounded(monkeypatch):
+    """A low-groundedness first pass gets one reformulated retry; the
+    second, better-grounded attempt wins."""
+    queries_seen = []
+
+    def fake_retrieve(query, **kw):
+        queries_seen.append(query)
+        if query == "firmware update guide":
+            return [{"doc_url": "d2", "chunk_text": "widgets need a firmware update"}], 0.9
+        return [{"doc_url": "d1", "chunk_text": "unrelated pricing information"}], 0.2
+
+    def fake_complete(system, user, **kw):
+        return '{"reply": "widgets need a firmware update", "confidence": 0.9}'
+
+    def fake_tools(messages, *, system, tools, model=None, max_tokens=1024, temperature=0.2):
+        ToolCall, ToolResult = _registry.llm.ToolCall, _registry.llm.ToolResult
+        return ToolResult(text=None, stop_reason="tool_use", tool_calls=[
+            ToolCall(id="1", name="search_kb", arguments={"query": "firmware update guide"})
+        ])
+
+    monkeypatch.setattr(_registry, "hybrid_retrieve", fake_retrieve)
+    monkeypatch.setattr(_registry.llm, "complete", fake_complete)
+    monkeypatch.setattr(_registry.llm, "complete_with_tools", fake_tools)
+    monkeypatch.setattr(_registry.llm, "last_usage", None, raising=False)
+
+    state = {"case": {"subject": "firmware", "body": "widgets stuck"}}
+    out = h_agent(state, {"_node_id": "a", "groundedness_threshold": 0.6, "max_iterations": 3})
+
+    assert len(queries_seen) == 2
+    assert queries_seen[1] == "firmware update guide"
+    assert out["agent_iterations"] == 2
+    assert out["groundedness"]["score"] >= 0.6
+    assert out["retrieval"][0]["doc_url"] == "d2"
+    assert out["trace"][0]["data"]["attempts"][0]["groundedness"] < 0.6
+    assert out["trace"][0]["data"]["attempts"][1]["groundedness"] >= 0.6
+
+
+def test_agent_stops_at_max_iterations_even_if_the_model_never_gives_up(monkeypatch):
+    """Bounded means bounded: even if the reformulate step always proposes a
+    new query, the loop must not exceed max_iterations."""
+    n = {"retrieve": 0, "tools": 0}
+
+    def fake_retrieve(query, **kw):
+        n["retrieve"] += 1
+        return [{"doc_url": f"d{n['retrieve']}", "chunk_text": "unrelated content"}], 0.1
+
+    def fake_complete(system, user, **kw):
+        return '{"reply": "widgets need a firmware update", "confidence": 0.9}'
+
+    def fake_tools(messages, *, system, tools, model=None, max_tokens=1024, temperature=0.2):
+        n["tools"] += 1
+        ToolCall, ToolResult = _registry.llm.ToolCall, _registry.llm.ToolResult
+        return ToolResult(text=None, stop_reason="tool_use", tool_calls=[
+            ToolCall(id=str(n["tools"]), name="search_kb", arguments={"query": f"retry {n['tools']}"})
+        ])
+
+    monkeypatch.setattr(_registry, "hybrid_retrieve", fake_retrieve)
+    monkeypatch.setattr(_registry.llm, "complete", fake_complete)
+    monkeypatch.setattr(_registry.llm, "complete_with_tools", fake_tools)
+    monkeypatch.setattr(_registry.llm, "last_usage", None, raising=False)
+
+    state = {"case": {"subject": "s", "body": "b"}}
+    out = h_agent(state, {"_node_id": "a", "groundedness_threshold": 0.9, "max_iterations": 3})
+
+    assert n["retrieve"] == 3
+    assert n["tools"] == 2   # one reformulation between each of the 3 attempts
+    assert out["agent_iterations"] == 3
+
+
+def test_agent_survives_a_reformulation_call_error(monkeypatch):
+    """Regression: a live smoke test hit a real Groq 429 inside the
+    reformulation step and it crashed the whole node — unlike complete(),
+    complete_with_tools has no cross-provider fallback and raises visibly.
+    The reformulation is optional (the caller already has a usable first
+    attempt); any exception there must degrade to "give up", never crash
+    a flow run that would otherwise have a perfectly good draft."""
+    def fake_retrieve(query, **kw):
+        return [{"doc_url": "d1", "chunk_text": "unrelated content"}], 0.1
+
+    def fake_complete(system, user, **kw):
+        return '{"reply": "widgets need a firmware update", "confidence": 0.9}'
+
+    def fake_tools(*a, **kw):
+        raise RuntimeError("boom (simulating a live 429)")
+
+    monkeypatch.setattr(_registry, "hybrid_retrieve", fake_retrieve)
+    monkeypatch.setattr(_registry.llm, "complete", fake_complete)
+    monkeypatch.setattr(_registry.llm, "complete_with_tools", fake_tools)
+    monkeypatch.setattr(_registry.llm, "last_usage", None, raising=False)
+
+    state = {"case": {"subject": "s", "body": "b"}}
+    out = h_agent(state, {"_node_id": "a", "groundedness_threshold": 0.9, "max_iterations": 3})
+
+    assert out["agent_iterations"] == 1
+    assert out["draft"]
+
+
+def test_agent_offline_stub_never_reformulates():
+    """No API key -> complete_with_tools returns the stub (no tool calls),
+    so the loop always exits after one attempt — deterministic, matching
+    every other handler's offline behavior."""
+    def fake_retrieve(query, **kw):
+        return [{"doc_url": "d1", "chunk_text": "totally unrelated"}], 0.1
+
+    import interpreter.registry as reg
+    orig = reg.hybrid_retrieve
+    reg.hybrid_retrieve = fake_retrieve
+    try:
+        state = {"case": {"subject": "s", "body": "b"}}
+        out = h_agent(state, {"_node_id": "a", "max_iterations": 3})
+    finally:
+        reg.hybrid_retrieve = orig
+    assert out["agent_iterations"] == 1
 
 
 # --------------------------------------------------------------------------
