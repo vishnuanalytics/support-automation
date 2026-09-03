@@ -46,7 +46,11 @@ _TYPE_DOC: dict[str, str] = {
     "sf_context": "load Account/Contact/Case-history/team around the Case into "
                   "state.sf_context (config.want); place after identify",
     "classify": "triage the case: tier, topic, urgency, summary",
-    "extract": "pull named fields out of the message into state.entities",
+    "extract": "pull named fields out of the message into state.entities -- REQUIRES "
+               "config.fields = {\"field_name\": \"what it means\"}; with no config.fields "
+               "it's a silent no-op (entities stays {}), so always populate it when using "
+               "this node, e.g. `\"config\": {\"fields\": {\"product\": \"the product or plan "
+               "mentioned\", \"error\": \"the exact error text\"}}`",
     "kb_lookup": "consult an internal runbook collection at a checkpoint",
     "team_route": "pick the owning team from config.rules (keyword match) -> "
                   "state.routed_team; downstream nodes read routed_team -- don't "
