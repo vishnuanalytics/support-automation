@@ -186,6 +186,29 @@ def client_for(tenant_id: str | None, org_label: str | None = None, sb=None):
     return _tenant_clients[key]
 
 
+def _try_client(tenant_id: str | None, org_label: str | None = None, sb=None):
+    """`client_for(...)`, or `None` when genuinely no creds resolve for this
+    tenant — not by any org, not by the env fallback.
+
+    Every write/read function below used to gate on `if not available():`
+    first — `available()` only ever checks *env* vars, so a self-serve
+    tenant with their own connected org (`tenant_integrations`) and zero
+    env creds always looked "not configured" and silently dry-ran forever,
+    even though `client_for` would have resolved their real org just fine.
+    (The exact same bug already found and fixed in `org_metadata` two
+    chunks ago — turned out to affect every write path too, not just
+    introspection.) `client_for`'s own Supabase-lookup failures already
+    fall back to the env client; this only catches the case where *that*
+    also has nothing to build a client from (`_build_client` raises
+    `KeyError` on a bare `{}` creds dict) — letting the caller degrade to
+    its dry-run/skip shape instead of crashing the whole case run."""
+    try:
+        return client_for(tenant_id, org_label, sb)
+    except Exception as e:  # noqa: BLE001
+        log.debug("no Salesforce client for tenant=%s org=%s: %s", tenant_id, org_label, e)
+        return None
+
+
 def list_tenant_orgs(tenant_id: str, sb=None) -> list[str]:
     """Every Salesforce `org_label` this tenant has creds for (empty if
     none — the tenant is on the shared env client)."""
@@ -387,10 +410,11 @@ def latest_inbound_email(case_id: str, *, tenant_id: str | None = None,
     """The newest *incoming* EmailMessage on a Case — what the customer last
     said. Used to re-run the flow on a reply instead of on the (stale) Case
     Description. None if no creds / no inbound message / query fails."""
-    if not available():
+    sf = _try_client(tenant_id, org_label)
+    if sf is None:
         return None
     try:
-        rows = client_for(tenant_id, org_label).query(
+        rows = sf.query(
             "SELECT Id, Subject, TextBody, FromAddress, MessageIdentifier, MessageDate "
             f"FROM EmailMessage WHERE ParentId = '{_soql_lit(case_id)}' AND Incoming = true "
             "ORDER BY MessageDate DESC LIMIT 1"
@@ -437,9 +461,9 @@ def agent_response_since(case_id: str, since_iso: str | None = None,
     Never raises."""
     out: dict[str, Any] = {"guidance": None, "guidance_at": None,
                            "outbound_email": None}
-    if not available():
+    sf = _try_client(tenant_id, org_label)
+    if sf is None:
         return out
-    sf = client_for(tenant_id, org_label)
     cid = _soql_lit(case_id)
     since = f" AND CreatedDate > {since_iso}" if since_iso else ""
     from interpreter.mailbox import _strip_html
@@ -525,11 +549,11 @@ def identify_sender(
     if not email or "@" not in email:
         out["reason"] = "no sender email"
         return out
-    if not available():
+    sf = _try_client(tenant_id, org_label)
+    if sf is None:
         out["reason"] = "salesforce not configured"
         return out
 
-    sf = client_for(tenant_id, org_label)
     lit = _soql_lit(email)
     try:
         rows = sf.query(
@@ -615,25 +639,29 @@ def update_case_fields(
     """
     fields = {k: v for k, v in (fields or {}).items() if v not in (None, "")}
     append = {k: v for k, v in (append or {}).items() if v}
-    out: dict[str, Any] = {"written": {}, "skipped": {}, "planned": {}, "dry_run": not available()}
+    sf = _try_client(tenant_id, org_label)
+    out: dict[str, Any] = {"written": {}, "skipped": {}, "planned": {}, "dry_run": sf is None}
 
-    if not available():
+    if sf is None:
         planned = {**fields, **{k: f"(append) {v}" for k, v in append.items()}}
         if planned:
             log.info("[sf dry-run] Case %s <- %s", case_id, planned)
         out["planned"] = planned
         return out
 
-    sf = client_for(tenant_id, org_label)
-
     if append:
-        current = sf.Case.get(case_id)
-        for fld, text in append.items():
-            base = (current.get(fld) or "").strip()
-            # idempotent: a re-run must not stack the same [triage] block again
-            if text and text.strip() and text.strip() in base:
-                continue
-            fields[fld] = f"{base}\n\n{text}".strip() if base else text
+        try:
+            current = sf.Case.get(case_id)
+            for fld, text in append.items():
+                base = (current.get(fld) or "").strip()
+                # idempotent: a re-run must not stack the same [triage] block again
+                if text and text.strip() and text.strip() in base:
+                    continue
+                fields[fld] = f"{base}\n\n{text}".strip() if base else text
+        except Exception as e:  # noqa: BLE001 -- a transient read failure shouldn't
+            # block the field write below; write without the appended text.
+            log.warning("Case %s: append-field read failed (%s); writing fields without append",
+                       case_id, e)
 
     if not fields:
         return out
@@ -652,7 +680,15 @@ def update_case_fields(
                 if not remaining:
                     return out
                 continue
-            raise
+            # Any other failure (rate limit, 5xx, timeout, expired session) --
+            # every sibling write in this module is best-effort / never-raises
+            # (identify_sender, post_chatter, add_case_comment, ...); this was
+            # the one path that still `raise`d here, killing the whole case
+            # run on what is, in practice, the single most common Salesforce
+            # write failure mode. Degrade like the others instead.
+            log.warning("Case %s: update_case_fields failed (%s)", case_id, e)
+            out["error"] = str(e)
+            return out
     return out
 
 
@@ -670,10 +706,13 @@ def user_email(user_id: str, *, tenant_id: str | None = None,
               org_label: str | None = None) -> str | None:
     """Email for a Salesforce User id — used to map an agent to their Slack
     account (`slack.lookup_user_by_email`). None on any failure."""
-    if not user_id or not available():
+    if not user_id:
+        return None
+    sf = _try_client(tenant_id, org_label)
+    if sf is None:
         return None
     try:
-        rows = client_for(tenant_id, org_label).query(
+        rows = sf.query(
             f"SELECT Email FROM User WHERE Id = '{_soql_lit(user_id)}' LIMIT 1"
         ).get("records", [])
         return rows[0].get("Email") if rows else None
@@ -689,11 +728,11 @@ def post_chatter(case_id: str, body: str, *, mention_id: str | None = None,
     running user if None). Falls back to a plain FeedItem if the Connect API
     mention call fails. Dry-run when no creds.
     """
-    if not available():
+    sf = _try_client(tenant_id, org_label)
+    if sf is None:
         log.info("[sf dry-run] Chatter on Case %s: mention=%s body=%r", case_id, mention_id, body)
         return {"posted": False, "dry_run": True, "mention_id": mention_id}
 
-    sf = client_for(tenant_id, org_label)
     if _recent_duplicate(sf, "FeedItem", case_id, "Body", body):
         return {"posted": False, "dry_run": False, "mention_id": mention_id, "deduped": True}
     mention_id = mention_id or _current_user_id(sf)
@@ -755,10 +794,10 @@ def add_case_comment(case_id: str, body: str, *, published: bool = False,
     suggested-reply draft — Salesforce won't take an API-created outbound
     draft `EmailMessage`. Skips an identical comment posted in the last 3h.
     Dry-run with no creds; never raises."""
-    if not available():
+    sf = _try_client(tenant_id, org_label)
+    if sf is None:
         log.info("[sf dry-run] CaseComment on %s (published=%s): %r", case_id, published, body[:80])
         return {"created": False, "dry_run": True, "id": None}
-    sf = client_for(tenant_id, org_label)
     if _recent_duplicate(sf, "CaseComment", case_id, "CommentBody", body):
         return {"created": False, "dry_run": False, "id": None, "deduped": True}
     try:
@@ -806,9 +845,11 @@ def find_case_by_thread(message_ids: "list[str]", *, tenant_id: str | None = Non
     """Given the Message-IDs an inbound email replies to, find the **open**
     Case those messages are already recorded on (via `EmailMessage`). Returns
     {sf_id, case_number} or {} — never raises."""
-    if not message_ids or not available():
+    if not message_ids:
         return {}
-    sf = client_for(tenant_id, org_label)
+    sf = _try_client(tenant_id, org_label)
+    if sf is None:
+        return {}
     lits = ", ".join(f"'{_soql_lit(m)}'" for m in message_ids[:50])
     try:
         rows = sf.query(
@@ -852,11 +893,11 @@ def log_email_message(
     with no creds — never raises."""
     to = ", ".join(to_addrs) if isinstance(to_addrs, list) else (to_addrs or "")
     mid = (message_id or "").strip().strip("<>")
-    if not available():
+    sf = _try_client(tenant_id, org_label)
+    if sf is None:
         log.info("[sf dry-run] EmailMessage on Case %s (incoming=%s) mid=%s", case_id, incoming, mid)
         return {"created": False, "dry_run": True, "id": None}
 
-    sf = client_for(tenant_id, org_label)
     try:
         if mid:
             # Salesforce Email-to-Case stores MessageIdentifier WITH angle
@@ -1071,11 +1112,11 @@ def assign_case(
     reason. Never raises."""
     if not (queue or user_id):
         return {"assigned": False, "reason": "no queue or user configured"}
-    if not available():
+    sf = _try_client(tenant_id, org_label)
+    if sf is None:
         log.info("[sf dry-run] assign Case %s -> queue=%r user=%r", case_id, queue, user_id)
         return {"assigned": False, "dry_run": True, "queue": queue, "user_id": user_id}
 
-    sf = client_for(tenant_id, org_label)
     owner_id, owner_type = user_id, "user"
     try:
         if not owner_id and queue:
@@ -1182,19 +1223,19 @@ def ensure_case(
     domain = email.split("@", 1)[1] if "@" in email else ""
     is_free = domain in FREE_EMAIL_DOMAINS
 
+    sf = _try_client(tenant_id, org_label)
     out: dict[str, Any] = {
         "sf_id": case.get("sf_id"), "case_number": None,
         "contact_id": sender.get("contact_id"), "account_id": sender.get("account_id"),
         "account_name": sender.get("account_name"), "account": {},
         "created": False, "reused": False,
         "contact_created": False, "account_created": False,
-        "dry_run": not available(),
+        "dry_run": sf is None,
     }
-    if not available():
+    if sf is None:
         out["reason"] = "salesforce not configured"
         return out
 
-    sf = client_for(tenant_id, org_label)
     try:
         if case.get("sf_id"):
             if out["account_id"]:
@@ -1304,11 +1345,11 @@ def send_case_reply(
     when there are no creds — never raises.
     """
     subject = subject or "We need a bit more information"
-    if not available():
+    sf = _try_client(tenant_id, org_label)
+    if sf is None:
         log.info("[sf dry-run] reply on Case %s to %s: %r", case_id, to_email, body)
         return {"sent": False, "dry_run": True, "via": "dry_run", "to": to_email}
 
-    sf = client_for(tenant_id, org_label)
     if to_email:
         try:
             sf.restful(

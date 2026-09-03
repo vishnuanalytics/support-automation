@@ -331,3 +331,116 @@ def test_org_metadata_reports_an_error_only_when_both_sections_are_empty(monkeyp
     meta = salesforce.org_metadata("t1")
     assert meta["available"] is False
     assert "error" in meta and "no creds anywhere" in meta["error"]
+
+
+# --------------------------------------------------------------------------
+# _try_client -- the same "available() is env-only, don't gate on it" bug
+# turned out to affect every write/read function in this module, not just
+# org_metadata (found 2026-09-03 during a robustness pass: a self-serve
+# tenant with their own connected org and zero env creds would have every
+# Salesforce write/read silently dry-run forever). Verify the fix directly.
+# --------------------------------------------------------------------------
+class _FakeWriteClient:
+    """A minimal fake covering Case.update / CaseComment.create /
+    FeedItem.create / query / restful -- enough to exercise each fixed
+    function's real (non-dry-run) path."""
+
+    def __init__(self):
+        self.updates: list[tuple[str, dict]] = []
+
+    class Case:
+        @staticmethod
+        def update(case_id, fields):
+            return None
+
+        @staticmethod
+        def get(case_id):
+            return {}
+
+    class CaseComment:
+        @staticmethod
+        def create(rec):
+            return {"id": "00a1"}
+
+    def query(self, soql):
+        return {"records": []}
+
+    def restful(self, path, **kw):
+        return {"id": "chatter1"}
+
+
+def test_try_client_returns_none_when_genuinely_no_creds_anywhere(monkeypatch):
+    """In production, client_for -> _client() -> _build_client({}) raises
+    KeyError when there are truly no creds anywhere (no tenant row, no env
+    creds); _try_client must catch that and return None rather than
+    letting it propagate and kill the whole case run."""
+    def _boom(*a, **k):
+        raise KeyError("SF_USERNAME")
+
+    monkeypatch.setattr(salesforce, "client_for", _boom)
+    assert salesforce._try_client("t1") is None
+
+
+def test_try_client_resolves_the_tenants_own_org_with_zero_env_creds(monkeypatch):
+    monkeypatch.setattr(salesforce, "client_for", lambda *a, **k: _FakeWriteClient())
+    assert salesforce._try_client("t1", "their-own-org") is not None
+
+
+@pytest.mark.parametrize("fn,args,dry_run_key", [
+    ("identify_sender", ("a@b.com",), "reason"),
+    ("post_chatter", ("case1", "hello"), "dry_run"),
+    ("add_case_comment", ("case1", "hello"), "dry_run"),
+    ("log_email_message", ("case1",), "dry_run"),  # incoming= added in kwargs below
+    ("assign_case", ("case1",), "dry_run"),
+    ("send_case_reply", ("case1", "hello"), "dry_run"),
+])
+def test_write_functions_no_longer_gate_on_the_env_only_available_check(monkeypatch, fn, args, dry_run_key):
+    """Each of these used to check `available()` (env-only) before ever
+    trying the tenant's own connected org, so a self-serve tenant with no
+    env creds always got the dry-run shape. With client_for resolving a
+    real (fake) client, they must now attempt the real path instead."""
+    monkeypatch.setattr(salesforce, "client_for", lambda *a, **k: _FakeWriteClient())
+    kwargs = {"tenant_id": "t1", "org_label": "their-own-org"}
+    if fn == "assign_case":
+        kwargs["queue"] = "Support"  # assign_case no-ops with neither queue nor user_id
+    if fn == "log_email_message":
+        kwargs["incoming"] = True
+    result = getattr(salesforce, fn)(*args, **kwargs)
+    assert result.get(dry_run_key) not in (True, "salesforce not configured")
+
+
+def test_update_case_fields_writes_for_a_tenant_with_no_env_creds(monkeypatch):
+    fake = _FakeWriteClient()
+    monkeypatch.setattr(salesforce, "client_for", lambda *a, **k: fake)
+    out = salesforce.update_case_fields("case1", {"Priority": "High"},
+                                        tenant_id="t1", org_label="their-own-org")
+    assert out["dry_run"] is False
+    assert out["written"] == {"Priority": "High"}
+
+
+def test_update_case_fields_degrades_instead_of_raising_on_a_transient_failure(monkeypatch):
+    """Robustness-pass fix: this used to `raise` on any non-field error
+    (rate limit, 5xx, timeout, expired session), killing the whole case
+    run -- every sibling write function in this module is best-effort.
+    A transient failure must now come back as a normal (non-raising)
+    result with an `error` key, matching the others."""
+    class _RateLimited(_FakeWriteClient):
+        class Case:
+            @staticmethod
+            def update(case_id, fields):
+                raise RuntimeError("REQUEST_LIMIT_EXCEEDED")
+
+            @staticmethod
+            def get(case_id):
+                return {}
+
+    monkeypatch.setattr(salesforce, "client_for", lambda *a, **k: _RateLimited())
+    out = salesforce.update_case_fields("case1", {"Priority": "High"}, tenant_id="t1")
+    assert out["written"] == {}
+    assert "REQUEST_LIMIT_EXCEEDED" in out["error"]
+
+
+def test_ensure_case_dry_run_flag_reflects_the_tenants_own_client_not_env(monkeypatch):
+    monkeypatch.setattr(salesforce, "client_for", lambda *a, **k: _FakeWriteClient())
+    out = salesforce.ensure_case({"from": "a@business.com"}, tenant_id="t1", org_label="their-own-org")
+    assert out["dry_run"] is False

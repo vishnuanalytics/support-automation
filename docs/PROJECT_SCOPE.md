@@ -1706,6 +1706,95 @@ all clean. Docker `api` rebuilt and re-verified live after the fix
 (the fix lives in `api/main.py`, served by the Docker container, not
 the Vite dev server used for the click-through itself).
 
+### Robustness pass, part 1 — the `available()` bug was in every SF write/read, not just introspection (2026-09-03)
+
+Track 2 of the three the user selected (browser click-through — done
+above; robustness pass — this and the next entry; onboarding UX
+walkthrough — not started). Spawned a forked agent to survey
+`interpreter/registry.py`'s node handlers and the connector modules for
+real error-handling gaps (not theoretical ones). Its top finding —
+`update_case_fields`'s Salesforce write had no guard against a
+transient failure and would `raise`, killing the whole case run — led
+to checking every other function in `salesforce.py` for the same
+`available()` gate, since `update_case_fields` also had it. That
+turned into the real, much bigger finding.
+
+**The bug**: `available()` only ever checks *env* vars
+(`SF_USERNAME`/`SF_CONSUMER_KEY`/...). `org_metadata` was already fixed
+two chunks ago for gating on it before `client_for` got a chance to
+resolve a tenant's own connected org. **The same `if not available():`
+gate turned out to be sitting in front of 12 more functions** —
+`latest_inbound_email`, `agent_response_since`, `identify_sender`,
+`update_case_fields`, `post_chatter`, `add_case_comment`,
+`find_case_by_thread`, `log_email_message`, `user_email`,
+`assign_case`, `ensure_case`, `send_case_reply` — meaning **every
+Salesforce read and write** (not just the dropdown-metadata reads fixed
+before) silently dry-ran forever for any self-serve tenant with their
+own connected org and zero env creds. This is the core self-serve
+product story from the start of this session ("if the user creates the
+workspace we need to collect these details") — quietly broken for
+every write the whole time, only invisible because this dev box's
+`.env` happens to carry real SF creds, so `available()` was always
+`True` here regardless of which tenant a call was for. `get_case`
+(no `tenant_id` param — genuinely env-only by design, used by the CDC
+subscriber/worker hydration) and `pubsub_auth` (platform-wide Pub/Sub
+auth) keep their `available()` gates; those are correct.
+
+**Fix**: new `_try_client(tenant_id, org_label)` — `client_for(...)`,
+or `None` when neither the tenant's own org nor the env fallback
+resolves (catches `_build_client`'s `KeyError` on a bare `{}` creds
+dict). Every one of the 12 functions now calls `_try_client` first and
+branches on `is None`, instead of gating on `available()` before ever
+trying. Also fixes the fork's original finding along the way:
+`update_case_fields` used to `raise` on any non-field-error (rate
+limit, 5xx, timeout, expired session) — the one write path in the
+module that didn't match every sibling's "best-effort, never raises"
+docstring — now logs + returns `{"error": ...}` like the others. Its
+`append`-mode `sf.Case.get(case_id)` read gained the same treatment (a
+transient failure there no longer blocks the field write).
+
+**Verify:** 11 new tests in `tests/test_salesforce_multi_org.py`
+(`_try_client` resolving/failing correctly; a parametrized check that
+6 of the 12 functions no longer return the dry-run shape once
+`client_for` resolves a fake tenant client; `update_case_fields`
+writing for real *and* degrading instead of raising on a simulated
+`REQUEST_LIMIT_EXCEEDED`; `ensure_case`'s `dry_run` flag tracking the
+real client, not `available()`). Full offline suite 561/561. **Live-verified against the real `acme-dev`
+Salesforce connection**: `salesforce.available = lambda: False` (forcing
+the exact lie the old code effectively told itself for every self-serve
+tenant), then called `identify_sender` for tenant
+`00000000-0000-0000-0000-000000000000` — correctly resolved the real
+Contact/Account (`Gundam Vishnu` / `Gundam Vishnu (Gmail)`) instead of
+returning `{"reason": "salesforce not configured"}`.
+
+**Bonus catch, unrelated to the above but found while re-running this
+PR's CI**: the `integration` job failed 5 tests with `postgrest.
+exceptions.APIError: ... there is no unique or exclusion constraint
+matching the ON CONFLICT specification (42P10)` — `interpreter/
+mailbox.py::save_channel`'s upsert still named `on_conflict="tenant_id,
+kind"`, the *old* `tenant_integrations` primary key from before
+migration `082` (two chunks ago, multi-org Salesforce) widened it to
+`(tenant_id, kind, org_label)`. Postgres rejects an `ON CONFLICT` column
+list that doesn't exactly match a real constraint, so every email-
+channel connect/save had been silently broken since `082` shipped —
+missed because no test exercises `save_channel` against live Postgres
+in the offline suite, and this box's local testing that session didn't
+happen to touch the email channel. Fixed: `on_conflict="tenant_id,kind,
+org_label"` + `org_label: "default"` in the row (email channels don't
+vary it, same "one per tenant by convention" note `082`'s own comment
+already made — this just makes the upsert's conflict target match the
+constraint that comment assumed). The `google`/`slack` OAuth-callback
+upserts in `api/main.py` were checked too — they don't pass
+`on_conflict` at all, so they already use the *real* primary key
+implicitly and were never broken. Verified: the 5 previously-failing
+tests (`test_email_channel_configure_status_and_disconnect`,
+`test_tick_finds_an_active_channel_and_records_a_fetch_error`,
+`test_post_run_against_a_real_channel_dry_runs_the_send`, plus 2 more)
+now pass live. The other 2 CI failures on this run
+(`test_seeded_flow_routes_as_designed` / `test_same_case_diverges_
+across_tenants`) are the already-documented shared-LLM-quota flakiness
+below, not a regression.
+
 ### Scoped, not built: per-tenant case-taxonomy config
 
 Move `map_case_fields`'s module/region/case-type mapping from a global
