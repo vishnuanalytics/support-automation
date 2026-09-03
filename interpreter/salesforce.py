@@ -1136,23 +1136,34 @@ def assign_case(
 
 
 _INTAKE_QUEUE = os.environ.get("SF_INTAKE_QUEUE", "AI_Intake")
-_intake_queue_cache: dict[str, str | None] = {}
+_intake_queue_cache: dict[tuple[str, str], str | None] = {}
 
 
-def _intake_queue_id(sf) -> str | None:
-    """The `AI_Intake` queue Group id (Phase 27f), cached. None if it doesn't
-    exist yet (run sf_support_setup.py --only queues) or lookup fails."""
-    if _INTAKE_QUEUE not in _intake_queue_cache:
+def _intake_queue_id(sf, tenant_id: str | None = None, org_label: str | None = None) -> str | None:
+    """The `AI_Intake` queue Group id (Phase 27f), cached per (tenant, org).
+
+    Robustness pass (2026-09-03): this used to cache by the queue's
+    DeveloperName alone (a single global slot keyed on the string
+    "AI_Intake"), not by tenant. Any two tenants each provisioning their
+    own "AI_Intake" queue (which `scripts/sf_support_setup.py` has every
+    tenant do identically) would have the SECOND tenant's `ensure_case`
+    silently pick up the FIRST tenant's Group id — cross-tenant Case
+    ownership, once two tenants are on genuinely separate Salesforce
+    orgs (today's two demo tenants happen to share one org, which is
+    exactly why this stayed invisible). None if the queue doesn't exist
+    yet or the lookup fails."""
+    key = (tenant_id or "_env", org_label or "default")
+    if key not in _intake_queue_cache:
         try:
             rows = sf.query(
                 f"SELECT Id FROM Group WHERE Type = 'Queue' AND "
                 f"DeveloperName = '{_soql_lit(_INTAKE_QUEUE)}' LIMIT 1"
             ).get("records", [])
-            _intake_queue_cache[_INTAKE_QUEUE] = rows[0]["Id"] if rows else None
+            _intake_queue_cache[key] = rows[0]["Id"] if rows else None
         except Exception as e:  # noqa: BLE001
             log.warning("_intake_queue_id lookup failed: %s", e)
-            _intake_queue_cache[_INTAKE_QUEUE] = None
-    return _intake_queue_cache[_INTAKE_QUEUE]
+            _intake_queue_cache[key] = None
+    return _intake_queue_cache[key]
 
 
 def _account_snapshot(sf, account_id: str) -> dict[str, Any]:
@@ -1312,7 +1323,7 @@ def ensure_case(
                 payload["SuppliedEmail"] = email
             # Phase 27f — every pipeline-created Case starts in the one intake
             # queue (a REST create doesn't run assignment rules).
-            iq = _intake_queue_id(sf)
+            iq = _intake_queue_id(sf, tenant_id, org_label)
             if iq:
                 payload["OwnerId"] = iq
             cres = sf.Case.create(payload)

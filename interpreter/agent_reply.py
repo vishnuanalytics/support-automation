@@ -108,7 +108,12 @@ def resume_from_guidance(case: dict, guidance: str, *, cfg=None,
                                    in_reply_to=case.get("message_id") or "",
                                    references=case.get("references") or [])
             sent = bool(r.get("sent"))
-            if sent and case_id and salesforce.available():
+            # log_email_message() already resolves this tenant's own creds
+            # internally (client_for, not the env-only available()) -- no
+            # need to gate on available() here too, which used to skip this
+            # entirely for a self-serve tenant with no env creds even
+            # though the call underneath would have worked fine.
+            if sent and case_id:
                 try:
                     salesforce.log_email_message(
                         case_id, incoming=False, status=salesforce._EM_SENT,

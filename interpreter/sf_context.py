@@ -47,9 +47,9 @@ def load(sender: dict | None, *, want: "set[str] | list[str] | None" = None,
     sender = sender or {}
     want = set(want or ALL_WANT)
     out: dict[str, Any] = {}
-    if not salesforce.available():
+    sf = salesforce._try_client(tenant_id, org_label)
+    if sf is None:
         return out
-    sf = salesforce.client_for(tenant_id, org_label)
     aid = sender.get("account_id")
     cid = sender.get("contact_id")
     lid = sender.get("lead_id")

@@ -1836,6 +1836,58 @@ suite 569/569. Live-verified `failed_jobs_sweep` against the real
 `jobs` table (dry-run, 0 failed jobs currently — clean query, no
 schema mismatch).
 
+### Robustness pass, part 3 — the `available()` bug reached beyond `salesforce.py`, plus a real cross-tenant cache leak (2026-09-03)
+
+While designing the multi-tenant concurrency stress test the user's
+third selected track asked for, a broader grep for `salesforce.
+available()` across the whole codebase (part 1 only checked
+`salesforce.py` itself) turned up the same bug in 5 more call sites
+still in the live case-processing path: `routing.py`'s
+`queue_member`/`_sf_team_member`/`_sf_queue_id` (resolve a Case's
+notify/handover target), `sf_context.py::load` (the `sf_context` node,
+runs on most flows), `attachments.py::_sf_case_files`, plus 3 redundant
+`available()` gates in `agent_reply.py` and `api/worker.py` sitting in
+front of functions part 1 had *already* fixed internally — the outer
+gate still skipped them entirely for a self-serve tenant. All now use
+`salesforce._try_client` (routing/sf_context/attachments) or just
+dropped the redundant outer check (agent_reply/worker, since the inner
+call already resolves the right tenant). `worker.py::_case_owned_by_user`
+had its own direct unguarded `client_for` call, fixed the same way.
+
+**A second, distinct bug found in the same sweep, this one a real
+cross-tenant leak, not just a self-serve dry-run gap**:
+`salesforce.py::_intake_queue_id` cached the `AI_Intake` queue's Group
+id keyed **only by the queue's constant name** — a single global slot,
+not per tenant. `routing.py::queue_member`'s cache had the same shape
+(`queue_ref` + `org_label`, no `tenant_id`). Since
+`scripts/sf_support_setup.py` has every tenant provision identically-
+named queues, the **second** tenant to create a Case or resolve a
+notify target would silently get the **first** tenant's cached
+(wrong-org) Group id — real cross-tenant Case-ownership risk once two
+tenants are on genuinely separate Salesforce orgs. Today's two demo
+tenants (Acme/Globex) happen to resolve to the exact same underlying
+org (confirmed live: `AI_Intake`'s Group id is identical for both),
+which is exactly why this stayed invisible — it only became visible by
+reading the code with "would this actually work for two *real*,
+*different* customer orgs" in mind, the question a concurrency stress
+test exists to force. Fixed: both caches now key on
+`(tenant_id, org_label)`.
+
+**Verify:** new `tests/test_routing_tenant_scoping.py` (5 tests) —
+directly proves the fix for the cross-tenant scenario: two fake tenant
+clients with different queue members behind the *same* `queue_ref`,
+asserting tenant B's `queue_member()` call returns tenant B's real
+member, not tenant A's cached one (and the equivalent for
+`_intake_queue_id`). Full offline suite 574/574, zero regressions
+despite touching 5 files. Re-ran this PR's CI: the mailbox fix's 5
+tests stayed green; the 2 documented shared-LLM-quota-flaky
+`test_multiflow` tests plus (newly, this run) `test_kb_entry_
+roundtrip_embeds_and_scopes` failed on CI but passed cleanly in
+isolation locally right after — consistent with the same shared-quota
+root cause (reranking/embedding also draws on the shared provider
+pool), not a regression from this chunk (nothing here touches
+retrieval).
+
 ### Scoped, not built: per-tenant case-taxonomy config
 
 Move `map_case_fields`'s module/region/case-type mapping from a global
