@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pathlib
+import socket
 import sys
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from ingestion import webcrawl
+from interpreter import net_safety
 
 _PAGE_A = """<html><head><title>Docs Home</title></head><body>
 <nav>skip me</nav>
@@ -27,10 +29,30 @@ _PAGE_B = """<html><head><title>The Guide</title></head><body>
 
 
 class _Resp:
-    def __init__(self, text):
-        self.status_code = 200
-        self.headers = {"content-type": "text/html; charset=utf-8"}
+    def __init__(self, text, *, status_code=200, headers=None):
+        self.status_code = status_code
+        self.headers = headers or {"content-type": "text/html; charset=utf-8"}
         self.text = text
+        self.is_redirect = status_code in (301, 302, 303, 307, 308)
+        self.is_permanent_redirect = status_code in (301, 308)
+
+
+@pytest.fixture(autouse=True)
+def _resolve_test_hosts_publicly(monkeypatch):
+    """help.acme.com etc. are fake test domains -- is_public_http_url does a
+    real DNS lookup, so every test host needs a resolved (public) address.
+    IP-literal hosts (127.0.0.1, 169.254.169.254, ...) resolve instantly
+    without a network call and must NOT be faked -- those are exactly what
+    the private/loopback/link-local tests below need resolved for real."""
+    real = socket.getaddrinfo
+
+    def fake(host, port):
+        try:
+            return real(host, port)
+        except OSError:
+            return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+    monkeypatch.setattr(net_safety.socket, "getaddrinfo", fake)
 
 
 @pytest.fixture
@@ -58,6 +80,41 @@ def test_ok_host_blocks_private_and_non_http():
     assert not webcrawl._ok_host("http://localhost:8000/x")
     assert not webcrawl._ok_host("http://169.254.169.254/latest/meta-data")
     assert not webcrawl._ok_host("ftp://acme.com/x")
+
+
+def test_get_no_ssrf_refuses_a_redirect_to_a_private_host(monkeypatch):
+    """Security fix — `allow_redirects=True` never re-checked the host a
+    redirect landed on. A page that 302s to link-local/internal metadata
+    must be refused, not silently fetched and indexed into the KB."""
+    calls = []
+
+    class _S:
+        def get(self, url, **kw):
+            calls.append(url)
+            if url == "https://help.acme.com/docs":
+                return _Resp("", status_code=302,
+                            headers={"location": "http://169.254.169.254/latest/meta-data"})
+            raise AssertionError(f"should never fetch the redirect target: {url}")
+
+    import requests
+    with pytest.raises(requests.RequestException):
+        webcrawl._get_no_ssrf(_S(), "https://help.acme.com/docs", timeout=5)
+    assert calls == ["https://help.acme.com/docs"]  # never followed the redirect
+
+
+def test_get_no_ssrf_follows_a_safe_redirect(monkeypatch):
+    class _S:
+        def __init__(self):
+            self.n = 0
+        def get(self, url, **kw):
+            self.n += 1
+            if self.n == 1:
+                return _Resp("", status_code=302,
+                            headers={"location": "https://help.acme.com/docs/guide"})
+            return _Resp(_PAGE_B)
+
+    r = webcrawl._get_no_ssrf(_S(), "https://help.acme.com/docs", timeout=5)
+    assert r.status_code == 200 and "Step one" in r.text
 
 
 def test_clean_markdown_strips_chrome_and_keeps_structure():
