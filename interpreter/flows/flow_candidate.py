@@ -59,6 +59,9 @@ def assemble_candidate(
     nodes: list[dict] = []
 
     for i, rn in enumerate(raw_nodes or []):
+        if not isinstance(rn, dict):
+            warnings.append(f"node #{i}: not an object ({rn!r}) -- skipped")
+            continue
         key = str(rn.get("key") or rn.get("node_id") or rn.get("id") or f"n{i}")
         if _is_uuid(key):
             node_id = key
@@ -89,7 +92,10 @@ def assemble_candidate(
 
     seen: set[tuple] = set()
     edges: list[dict] = []
-    for re_ in raw_edges or []:
+    for i, re_ in enumerate(raw_edges or []):
+        if not isinstance(re_, dict):
+            warnings.append(f"edge #{i}: not an object ({re_!r}) -- skipped")
+            continue
         s_key = str(re_.get("source") or re_.get("source_node_id") or "")
         t_key = str(re_.get("target") or re_.get("target_node_id") or "")
         s = id_for.get(s_key) or (s_key if _is_uuid(s_key) else None)
