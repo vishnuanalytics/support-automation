@@ -1043,8 +1043,10 @@ def create_connection(body: ConnectionIn, c: Caller = Depends(caller)) -> dict:
     from interpreter import connections
     tid = _caller_tenant(c, body.tenant_id)
     _require_editor(c, tid)
-    if not body.base_url.startswith(("http://", "https://")):
-        raise HTTPException(422, "base_url must be http(s)")
+    from interpreter.net_safety import is_public_http_url
+    ok, reason = is_public_http_url(body.base_url)
+    if not ok:
+        raise HTTPException(422, f"base_url rejected: {reason}")
     row = (_service.table("connections").upsert({
         "tenant_id": tid, "slug": body.slug.strip(), "base_url": body.base_url.rstrip("/"),
         "auth": body.auth, "created_by": c.user_id, "updated_at": _now_iso(),

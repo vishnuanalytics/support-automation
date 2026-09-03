@@ -82,6 +82,18 @@ def test_connections_need_a_token_and_http_request_is_a_node_type():
     assert "transform" in body["types"]
 
 
+@pytest.mark.integration
+def test_connection_base_url_rejects_a_private_target(auth_headers):
+    """Security fix (2026-09-03) — create_connection only checked the URL
+    scheme; any host, including internal/cloud-metadata addresses, was
+    accepted. A rejected base_url never reaches the upsert, so this needs
+    no cleanup."""
+    r = client.post("/api/connections", headers=auth_headers,
+                    json={"slug": "ssrf-test", "base_url": "http://169.254.169.254/latest/meta-data"})
+    assert r.status_code == 422
+    assert "non-public" in r.json()["detail"]
+
+
 def test_templates_need_a_token():
     assert client.get("/api/templates").status_code == 401
     assert client.get("/api/templates/support-autoreply").status_code == 401

@@ -13,7 +13,6 @@ items become light markdown; scripts/nav/footer stripped.
 from __future__ import annotations
 
 import logging
-import re
 import time
 from collections import deque
 from urllib.parse import urljoin, urlparse
@@ -21,18 +20,39 @@ from urllib.robotparser import RobotFileParser
 
 import requests
 
+from interpreter.net_safety import is_public_http_url
+
 log = logging.getLogger("ingestion.webcrawl")
 
 _UA = "Mozilla/5.0 (compatible; SupportAutomationKBBot/1.0)"
-_PRIVATE = re.compile(
-    r"^(localhost|127\.|10\.|192\.168\.|169\.254\.|0\.0\.0\.0|\[?::1\]?|metadata\.google)")
 _SKIP_EXT = (".pdf", ".zip", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".mp4",
              ".css", ".js", ".ico", ".woff", ".woff2")
+_MAX_REDIRECTS = 5
 
 
 def _ok_host(url: str) -> bool:
-    p = urlparse(url)
-    return p.scheme in ("http", "https") and bool(p.hostname) and not _PRIVATE.match(p.hostname)
+    ok, _ = is_public_http_url(url)
+    return ok
+
+
+def _get_no_ssrf(session: requests.Session, url: str, *, timeout: float) -> requests.Response:
+    """`requests.get(..., allow_redirects=True)` never re-checks the host a
+    redirect lands on -- a page can 30x to an internal address (or one that
+    only resolves privately after the initial DNS-rebinding-safe check) and
+    `requests` will happily follow it. Follow redirects by hand, validating
+    the resolved IP before every hop, same guard as the pre-queue check."""
+    for _ in range(_MAX_REDIRECTS + 1):
+        if not _ok_host(url):
+            raise requests.RequestException(f"refusing to fetch {url!r} (not a public host)")
+        r = session.get(url, timeout=timeout, allow_redirects=False)
+        if r.is_redirect or r.is_permanent_redirect:
+            nxt = r.headers.get("location")
+            if not nxt:
+                return r
+            url = urljoin(url, nxt)
+            continue
+        return r
+    raise requests.RequestException(f"too many redirects fetching {url!r}")
 
 
 def _clean_markdown(html: str) -> tuple[str, str]:
@@ -101,7 +121,7 @@ def crawl(start_url: str, *, max_pages: int = 20, max_depth: int = 2,
         if rp is not None and not rp.can_fetch(_UA, url):
             continue
         try:
-            r = s.get(url, timeout=timeout, allow_redirects=True)
+            r = _get_no_ssrf(s, url, timeout=timeout)
         except requests.RequestException as e:
             log.warning("crawl %s: %s", url, e)
             continue

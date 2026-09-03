@@ -2343,6 +2343,55 @@ Default to Groq for any LLM calls (classification, draft generation).
 
 ## Known issues / debt
 
+- **Fixed (2026-09-03) — first real security review of the accumulated
+  api/+web/ surface.** Phase 13 (2026-08-29) called for this after Phase
+  5/6; it never happened while Phase 5 through Phase 29 landed. Run as two
+  parallel forked audits (authZ/RLS/secrets; injection/SSRF), same rigor
+  as the `/security-review` skill. **AuthZ/RLS/secrets: clean** — every
+  `_service` (RLS-bypassing) call site checked pairs with an explicit
+  tenant-membership check, `_caller_tenant` genuinely resists tenant
+  impersonation, `_verify_token` is authoritative (real Supabase Auth
+  check, not a decode-only trust), webhook trigger tokens aren't a timing
+  or cross-tenant vector, secrets never round-trip to a client, CORS has
+  no wildcard+credentials hole. One sub-threshold note, not a finding:
+  `GET /api/jobs/{job_id}` only tenant-checks jobs with a `flow_id` in
+  their payload (`crawl_site`/`import_kb_bundle`/`embed_kb_entry` don't);
+  not fixed since no endpoint anywhere leaks another tenant's `job_id` for
+  an attacker to exploit it with — worth tightening for defense-in-depth,
+  not urgent. **Injection/SSRF: two real findings, both fixed.**
+  (1) `ingestion/webcrawl.py`'s "crawl this site" KB feature validated the
+  *hostname string* against a private/loopback prefix regex before the
+  initial request and before queueing each discovered link, but never
+  re-validated after a redirect (`allow_redirects=True`) — a page that
+  302s to `http://169.254.169.254/...` (cloud instance metadata) or an
+  internal service got silently fetched and could land in the tenant's KB
+  (and later an auto-sent reply). The string-match approach was also
+  bypassable by DNS rebinding (a domain resolving publicly when checked,
+  privately when requested). (2) `api/main.py`'s `create_connection` only
+  checked the URL *scheme*, not the host — any tenant **editor** (not just
+  an operator) could point a connection's `base_url` at internal
+  infrastructure and reach it via an `http_request` node.
+  **Fix:** new `interpreter/net_safety.py::is_public_http_url()` —
+  resolves the real IP(s) (`socket.getaddrinfo`) and rejects private /
+  loopback / link-local / reserved / multicast, not a hostname-string
+  match; every resolved address must be safe, not just the first (a
+  round-robin host could otherwise land on a private one). Wired into (1)
+  `webcrawl._get_no_ssrf` — redirects are now followed by hand
+  (`allow_redirects=False`), re-validating the resolved host before every
+  hop, capped at 5; and (2) `create_connection`, rejecting an unsafe
+  `base_url` at creation time (422). **Not touched, a separate, smaller
+  residual:** `h_http_request` itself still uses `requests.request(...)`
+  with default redirect-following against an already-validated
+  connection's `base_url` — lower risk (the host was operator/editor-
+  chosen and validated at creation, not attacker-supplied per-request),
+  not flagged as a finding by the audit, left alone per not expanding
+  scope beyond what was actually found. **Verify:** 9 new offline tests
+  (`tests/test_net_safety.py` — IP literals, DNS-rebinding simulation,
+  mixed-address host rejection; `tests/test_webcrawl.py` — redirect to a
+  private host refused / a safe redirect still followed) + 1 new live
+  integration test (`test_connection_base_url_rejects_a_private_target`,
+  against the real endpoint, no cleanup needed since a rejected `base_url`
+  never reaches the upsert) — 499 offline + this integration test green.
 - **Fixed (2026-09-03):** this Supabase project never had Acme's original
   seed flows (Phase 0/3/4 — `1111…` `support`, `c3c3…` `offboarding`)
   applied at all, only their later Phase 20e `email` flow — `flows`
