@@ -827,6 +827,34 @@ set as a pre-merge check whenever the judge prompts or `draft_change` change,
 and apply migrations `074`/`075` on any environment that hasn't yet (this
 one already has, via the Supabase MCP).
 
+**Phase 28 — platform activity/audit log (step 1 of 6, COMPLETE
+2026-09-03).** First of a 6-step ordered feature list (infra-first, each
+step reuses the last): 1. this audit log · 2. flow-version rollback audit
+trail + `flow_versions` retention (uses #1) · 3. billing quota enforcement
+(logs through #1) · 4. per-flow cost breakdown · 5. flow templates
+marketplace (logs through #1) · 6. bulk KB export/import. Migration `076`
+`audit_log` (append-only, `case_events`-style conventions — free-text
+`action` slug not an enum, RLS member-read only / **no write policy**,
+every insert goes through the service-role client, matching
+`review_tasks`). `interpreter/audit.py::record()` — best-effort, never
+raises (an audit failure must not break the mutation it's recording).
+Wired into 6 existing endpoints in `api/main.py`: `publish_flow` /
+`rollback_flow` (records `from_version`/`to_version` — this already
+closes most of step 2's "rollback audit note" gap) / `delete_flow` /
+`remove_member` / `decide_action_request_ep` (KB-change + task approvals)
+/ `create_connection` + `delete_connection`. `GET /api/audit` (member-
+readable, like Runs — not owner-gated). Web **Activity** tab (next to
+Runs): a plain table + an action-type filter built from the events seen.
+`tests/test_audit.py` (3 offline tests — row shape, defaults, never
+raises on a broken client). **Live-verified end-to-end** via a real
+authenticated request through the actual FastAPI app (not just the
+helper): publish → `flow.published`; rollback → `flow.rolled_back` with
+`{"from_version": 10, "to_version": 9}`; add/remove a connection →
+`connection.added` / `connection.removed`; `GET /api/audit` returned all
+four, RLS-scoped to the caller's tenant. **Next:** step 2 —
+`flow_versions` has no prune/retention policy yet (grows forever); the
+rollback note itself is now covered by this step's wiring.
+
 **Phase 27 — the Case Control Plane (done, 2026-09-01/02).** One
 AI-managed Case queue: classify + route + track `Status` + hand off via
 Omni-Channel, so no case sits unowned / unmoved / unwatched. Full design +

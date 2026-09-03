@@ -1,6 +1,7 @@
 import { supabase } from "./supabase";
 import type {
   AssistResult,
+  AuditEvent,
   BillingUsage,
   EmailChannel,
   EmailChannelSave,
@@ -267,5 +268,14 @@ export const api = {
     if (q.period) p.set("period", q.period);
     const qs = p.toString();
     return req<BillingUsage>(`/billing/usage${qs ? `?${qs}` : ""}`);
+  },
+
+  listAudit: (q: { tenantId?: string; action?: string; limit?: number } = {}) => {
+    const p = new URLSearchParams();
+    if (q.tenantId) p.set("tenant_id", q.tenantId);
+    if (q.action) p.set("action", q.action);
+    if (q.limit) p.set("limit", String(q.limit));
+    const qs = p.toString();
+    return req<AuditEvent[]>(`/audit${qs ? `?${qs}` : ""}`);
   },
 };
