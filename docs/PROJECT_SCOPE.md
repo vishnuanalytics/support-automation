@@ -2259,6 +2259,34 @@ Default to Groq for any LLM calls (classification, draft generation).
 
 ## Known issues / debt
 
+- **Fixed (2026-09-03):** this Supabase project never had Acme's original
+  seed flows (Phase 0/3/4 — `1111…` `support`, `c3c3…` `offboarding`)
+  applied at all, only their later Phase 20e `email` flow — `flows`
+  had exactly 2 rows (Acme/email, Globex/support) instead of 4. Every
+  `pytest -m integration` run all session (locally and in CI) failed
+  `test_multiflow.py`/`test_queue.py`/`test_feedback.py` with
+  `FlowNotFound` for `tenant=00000000… team=support/offboarding`,
+  repeatedly (mis)diagnosed across several PRs as an unfixable
+  environment gap rather than actually checked. Restored by re-applying
+  migrations `003`→`008`→`009`→`019`'s exact seed statements by hand via
+  the Supabase MCP (idempotent — every insert is `on conflict do
+  nothing`; `019`'s global re-snapshot was scoped to `published_version
+  is null` so it didn't touch Globex's already-current version). This
+  surfaced one more real, previously-dormant bug: `008`'s `sf_writeback`
+  node config mapped the classifier's *raw* `topic` slug straight onto
+  the restricted `Module__c` picklist, instead of the picklist-safe
+  `case_module` (`salesforce.map_case_fields()`-derived) every other
+  flow's default `field_map` already uses — an unmapped topic like
+  `"webhook-testing"` got rejected by Salesforce
+  (`INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST`). Fixed going forward (not
+  by editing `008` — migrations aren't amended) by a new migration,
+  `079_fix_acme_sf_writeback_field_map.sql`. **Verified: all 7
+  previously-"known-gap" tests now genuinely pass** (`test_multiflow.py`
+  ×4, `test_queue.py` ×2, `test_feedback.py` ×1). **Still open, needs a
+  GitHub repo secret, not a code fix:** the `integration` CI job's
+  `test_api.py` cascade (`supabase_key is required`) is `SUPABASE_ANON_KEY`
+  not being configured as a repo secret for that job — only the account
+  owner can add it (Settings → Secrets and variables → Actions).
 - ~~`tenant_members` RLS enabled with no policy~~ — **fixed** in `006`
   (`self_membership_read`) and **verified in Phase 4** (`scripts/rls_check.sql`):
   simulated JWTs see only their tenant's flows. The interpreter itself still
