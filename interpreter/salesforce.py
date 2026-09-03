@@ -40,7 +40,7 @@ from typing import Any
 log = logging.getLogger("interpreter.salesforce")
 
 _client_obj = None
-_tenant_clients: dict[str, Any] = {}   # tenant_id -> Salesforce, from tenant_integrations
+_tenant_clients: dict[tuple[str, str], Any] = {}   # (tenant_id, org_label) -> Salesforce
 
 
 def _normalize_domain(raw: str | None) -> str:
@@ -151,25 +151,67 @@ def pubsub_auth(*, refresh: bool = False) -> tuple[str, str, str]:
     return sf.session_id, instance_url, _org_id
 
 
-def client_for(tenant_id: str | None, sb=None):
-    """Per-tenant client from `tenant_integrations` if a row exists, else the
-    env client. (Phase 12 — real multi-tenancy.)"""
+def client_for(tenant_id: str | None, org_label: str | None = None, sb=None):
+    """Per-tenant, per-org client from `tenant_integrations` if a row
+    exists, else the env client. (Phase 12 — real multi-tenancy; multi-org
+    support added 2026-09-03 — every existing call site that doesn't pass
+    `org_label` keeps resolving the tenant's 'default' org, unchanged.)"""
     if not tenant_id:
         return _client()
-    if tenant_id not in _tenant_clients:
+    org_label = org_label or "default"
+    key = (tenant_id, org_label)
+    if key not in _tenant_clients:
         try:
             from ingestion.scraper import get_supabase
 
             sb = sb or get_supabase()
             rows = (
                 sb.table("tenant_integrations").select("secret")
-                .eq("tenant_id", tenant_id).eq("kind", "salesforce").execute().data
+                .eq("tenant_id", tenant_id).eq("kind", "salesforce").eq("org_label", org_label)
+                .execute().data
             )
-            _tenant_clients[tenant_id] = _build_client(rows[0]["secret"]) if rows else _client()
+            _tenant_clients[key] = _build_client(rows[0]["secret"]) if rows else _client()
         except Exception as e:  # noqa: BLE001
-            log.warning("tenant %s SF creds lookup failed (%s); using env client", tenant_id, e)
-            _tenant_clients[tenant_id] = _client()
-    return _tenant_clients[tenant_id]
+            log.warning("tenant %s org %s SF creds lookup failed (%s); using env client",
+                       tenant_id, org_label, e)
+            _tenant_clients[key] = _client()
+    return _tenant_clients[key]
+
+
+def list_tenant_orgs(tenant_id: str, sb=None) -> list[str]:
+    """Every Salesforce `org_label` this tenant has creds for (empty if
+    none — the tenant is on the shared env client)."""
+    from ingestion.scraper import get_supabase
+
+    sb = sb or get_supabase()
+    rows = (
+        sb.table("tenant_integrations").select("org_label")
+        .eq("tenant_id", tenant_id).eq("kind", "salesforce").order("org_label").execute().data or []
+    )
+    return [r["org_label"] for r in rows]
+
+
+def save_tenant_org(tenant_id: str, org_label: str, creds: dict[str, str], sb=None) -> None:
+    """Store (or replace) one named Salesforce org connection for a tenant.
+    `creds` keys mirror the env var names (SF_USERNAME, SF_CONSUMER_KEY,
+    ...) — same shape `_build_client` already expects."""
+    from ingestion.scraper import get_supabase
+
+    sb = sb or get_supabase()
+    sb.table("tenant_integrations").upsert({
+        "tenant_id": str(tenant_id), "kind": "salesforce",
+        "org_label": org_label or "default", "secret": creds,
+    }, on_conflict="tenant_id,kind,org_label").execute()
+    _tenant_clients.pop((str(tenant_id), org_label or "default"), None)
+
+
+def delete_tenant_org(tenant_id: str, org_label: str, sb=None) -> None:
+    from ingestion.scraper import get_supabase
+
+    sb = sb or get_supabase()
+    sb.table("tenant_integrations").delete() \
+        .eq("tenant_id", str(tenant_id)).eq("kind", "salesforce").eq("org_label", org_label).execute()
+    _tenant_clients.pop((str(tenant_id), org_label or "default"), None)
 
 
 # --------------------------------------------------------------------------
