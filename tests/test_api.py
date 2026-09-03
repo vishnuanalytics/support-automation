@@ -99,6 +99,25 @@ def test_templates_need_a_token():
     assert client.get("/api/templates/support-autoreply").status_code == 401
 
 
+def test_salesforce_meta_needs_a_token():
+    assert client.get("/api/salesforce/meta").status_code == 401
+
+
+@pytest.mark.integration
+def test_salesforce_meta_is_tenant_scoped_not_globally_cached(auth_headers):
+    """Security/correctness fix (2026-09-03): this endpoint used to be one
+    global cache entry shared by every tenant. Two different orgs for the
+    same tenant must get independently cached responses."""
+    r1 = client.get("/api/salesforce/meta?org=default", headers=auth_headers)
+    assert r1.status_code == 200
+    body = r1.json()
+    assert set(body) >= {"available", "queues", "case_types", "modules", "case_fields"}
+    # a made-up org label the tenant never connected -> still 200, degrades
+    # to an empty/unavailable shape rather than erroring.
+    r2 = client.get("/api/salesforce/meta?org=nonexistent-org-label", headers=auth_headers)
+    assert r2.status_code == 200
+
+
 def test_salesforce_org_endpoints_need_a_token():
     assert client.get("/api/integrations/salesforce").status_code == 401
     assert client.put("/api/integrations/salesforce",

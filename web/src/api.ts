@@ -238,7 +238,8 @@ export const api = {
   },
 
   salesforce: {
-    meta: () => req<SfMeta>("/salesforce/meta"),
+    meta: (tenantId: string, orgLabel = "default") =>
+      req<SfMeta>(`/salesforce/meta?tenant_id=${tenantId}&org=${encodeURIComponent(orgLabel)}`),
   },
 
   trace: {

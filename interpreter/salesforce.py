@@ -1013,36 +1013,28 @@ def map_case_type(topic: str | None, text: str | None = None) -> str:
 
 
 def org_metadata(tenant_id: str | None = None, org_label: str | None = None) -> dict[str, Any]:
-    """Routing queues + the `Case.Type` / `Case.Module__c` picklist values —
-    for the flow editor's dropdowns (Phase 20o). `available=False` with empty
-    lists when there are no Salesforce creds; never raises. The API layer
-    caches this."""
-    empty = {"available": False, "queues": [], "case_types": [], "modules": []}
-    if not available():
-        return empty
-    try:
-        sf = client_for(tenant_id, org_label)
-        queues = [
-            {"id": r["Id"], "name": r["Name"], "developer_name": r.get("DeveloperName")}
-            for r in sf.query(
-                "SELECT Id, Name, DeveloperName FROM Group WHERE Type = 'Queue' ORDER BY Name"
-            ).get("records", [])
-        ]
-        fields = {f["name"]: f for f in sf.Case.describe()["fields"]}
+    """Legacy shape (`available`/`queues`/`case_types`/`modules`) for the flow
+    editor's older dropdowns — now built on `introspect_org` (which doesn't
+    have this function's old bug: it gated on `available()`, the *env*
+    creds check, so a tenant with their own connected org and no env creds
+    at all always got `available=False`). `api.main.salesforce_meta` is the
+    real caller; kept here (not inlined there) so it's covered by the same
+    offline tests as `introspect_org`."""
+    schema = introspect_org(tenant_id, org_label)
+    by_name = {f["name"]: f for f in schema["case_fields"]}
 
-        def _picklist(name: str) -> list[str]:
-            return [v["value"] for v in fields.get(name, {}).get("picklistValues", [])
-                    if v.get("active", True)]
+    def _picklist(name: str) -> list[str]:
+        return [v["value"] for v in by_name.get(name, {}).get("picklist_values", [])]
 
-        return {
-            "available": True,
-            "queues": queues,
-            "case_types": _picklist("Type"),
-            "modules": _picklist("Module__c"),
-        }
-    except Exception as e:  # noqa: BLE001
-        log.warning("org_metadata: %s", e)
-        return {**empty, "error": str(e)}
+    return {
+        "available": bool(schema["case_fields"] or schema["queues"]),
+        "queues": schema["queues"],
+        "case_types": _picklist("Type"),
+        "modules": _picklist("Module__c"),
+        "case_fields": schema["case_fields"],
+        **({"error": "; ".join(schema["errors"])} if schema["errors"] and not schema["case_fields"]
+           and not schema["queues"] else {}),
+    }
 
 
 def assign_case(

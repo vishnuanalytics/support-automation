@@ -88,6 +88,7 @@ export interface SfMeta {
   queues: { id: string; name: string; developer_name: string | null }[];
   case_types: string[];
   modules: string[];
+  case_fields?: SalesforceCaseField[];
   error?: string;
 }
 
