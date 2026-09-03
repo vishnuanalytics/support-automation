@@ -32,26 +32,53 @@ from interpreter.registry import known_types
 # one-liners so the model picks sensible types. A registered type that's not
 # listed here still works -- this only steers the model.
 _TYPE_DOC: dict[str, str] = {
+    "trigger": "entry node for a webhook/schedule flow (no Case): config.map renames "
+               "incoming fields, config.required + config.defaults validate/fill "
+               "state.context (a missing required field sets input._missing, doesn't fail)",
     "retrieve": "search the knowledge base for context (usually the start)",
     "identify": "resolve the sender: CRM contact / email-domain -> account / unknown",
+    "case_lookup": "pull similar past RESOLVED cases so draft answers from real "
+                   "resolutions, not just KB docs",
+    "sf_case": "resolve/create the Salesforce Case for an inbound message (thread-based "
+               "reuse) -- needed before sf_writeback / ask_human / handover can act on a real Case",
+    "sf_context": "load Account/Contact/Case-history/team around the Case into "
+                  "state.sf_context (config.want); place after identify",
     "classify": "triage the case: tier, topic, urgency, summary",
     "extract": "pull named fields out of the message into state.entities",
     "kb_lookup": "consult an internal runbook collection at a checkpoint",
+    "team_route": "pick the owning team from config.rules (keyword match) -> "
+                  "state.routed_team; downstream nodes read routed_team -- don't "
+                  "re-implement the routing as duplicate if/else edges",
     "policy_gate": "evaluate the team's when->then rules; can override routing",
+    "attachments": "fetch + OCR/transcribe image or video attachments (config.source/"
+                   "ocr/video) -> state.attachments + attachment_text (folded into "
+                   "classify/draft) -- use this for 'read the screenshot' requests",
     "draft": "write the reply from retrieved context; sets draft_confidence + groundedness",
+    "ai_prompt": "a fully custom LLM step -- your own system/user prompt template + "
+                 "optional json_schema (config.system/user/model) -> ai[output_key]; "
+                 "use this instead of draft for a non-standard tone, format, or output",
     "confidence_gate": "score the draft against a per-tier threshold; a pass/fail branch point",
     "sf_writeback": "write triage fields back onto the Salesforce case",
+    "http_request": "call an external API through a named per-tenant connection "
+                    "(config.connection/method/path/body) -> context[out_key]",
+    "transform": "reshape state.context with no LLM: config.map (copy by dotted path) / "
+                 "config.set (templated) / config.drop",
     "auto_reply": "send the drafted reply automatically (terminal)",
     "ask_human": "hand to a human with the draft attached (terminal)",
     "handover": "full handover, nothing sent (terminal)",
     "clarify": "ask the customer the specific missing questions (terminal)",
+    "notify": "ping an internal rep on Salesforce Chatter ONLY, without changing Case "
+              "ownership -- no Slack; use notify_human for Slack",
+    "notify_human": "ping a person about an escalation on Slack and/or Chatter "
+                    "(config.channel/slack_channel/mention) -- the one to use for "
+                    "'post to Slack' requests; place after ask_human/handover",
     "task_dispatch": "raise a Slack-approved internal task, e.g. a GitHub issue (terminal)",
 }
 
 _CONDITION_NAMES = (
     "tier, region, confidence, retrieval_score, draft_confidence, "
     "confidence_gate.pass, classification.topic, classification.urgency, "
-    "policy.action, sender.known, entities.<name>"
+    "routed_team, policy.action, sender.known, entities.<name>"
 )
 
 _SHAPE = (
@@ -90,7 +117,8 @@ _SYSTEM_GENERATE = (
 _SYSTEM_EDIT = (
     "You edit an existing support-automation flow. You are given the current "
     "graph as JSON and a change to make. Output ONLY the COMPLETE updated flow "
-    "as a JSON object of this shape (plus an optional \"summary\" string):\n\n"
+    "as a JSON object of this shape, plus a \"summary\" string -- ALWAYS include "
+    "it, one sentence saying what you changed and why:\n\n"
     f"{_SHAPE}\n\nRules:\n{_RULES}\n"
     "- keep the `key` (it is the node id) of every node you keep; invent a new "
     "short slug only for genuinely new nodes.\n\nNode types:\n" + _type_list()
@@ -122,12 +150,56 @@ def _candidate_from(data: dict, defaults: dict | None,
     )
 
 
+# `assemble_candidate` never hard-fails an unknown type or a dangling edge --
+# it downgrades them to a warning so a broken generation still loads onto the
+# canvas for the user to fix by hand. But both are genuine model mistakes
+# (a hallucinated type name / a node referenced in an edge but never
+# declared), unlike e.g. "several possible start nodes" which can be a
+# legitimate multi-root draft -- so only these two are worth a repair round.
+_HARD_WARNING_MARKERS = ("isn't in the graph", "is not a known node type")
+
+
+def _hard_warnings(warnings: list[str]) -> list[str]:
+    return [w for w in (warnings or []) if any(m in w for m in _HARD_WARNING_MARKERS)]
+
+
+def _is_improvement(prior: dict, fixed: dict) -> bool:
+    key = lambda r: (len(r["errors"]), len(_hard_warnings(r["warnings"])))  # noqa: E731
+    return key(fixed) < key(prior)
+
+
+def _repair_round(system: str, original_user: str, problems: list[str], prior_data: dict,
+                  *, defaults: dict | None, model: str | None, max_tokens: int,
+                  fallback_nodes: list | None = None,
+                  fallback_edges: list | None = None) -> tuple[dict, dict] | None:
+    """One retry: the original request + what's wrong with the model's own
+    previous output. Carries the original context (not just the error list)
+    so the retry stays faithful to what was actually asked for."""
+    if not problems:
+        return None
+    repair_user = (
+        original_user
+        + "\n\n# Your previous attempt had problems\n- " + "\n- ".join(problems)
+        + "\n\nHere is what you produced:\n"
+        + json.dumps({k: prior_data.get(k) for k in ("name", "nodes", "edges", "summary")
+                      if k in prior_data}, indent=2)
+        + "\n\nReturn a corrected COMPLETE flow in the same JSON shape, still "
+        "satisfying the original request above."
+    )
+    fixed_raw = llm.complete(system=system, user=repair_user, model=model or llm.DEFAULT_MODEL,
+                             json_object=True, max_tokens=max_tokens)
+    fixed_data = _parse(fixed_raw)
+    fixed_res = _candidate_from(fixed_data, defaults,
+                                fallback_nodes=fallback_nodes, fallback_edges=fallback_edges)
+    return fixed_data, fixed_res
+
+
 def assist_generate(prompt: str, *, defaults: dict | None = None,
                     model: str | None = None) -> dict:
     """Plain-English description -> candidate flow graph."""
+    user = (prompt or "").strip() or "(no description given)"
     raw = llm.complete(
-        system=_SYSTEM_GENERATE,
-        user=(prompt or "").strip() or "(no description given)",
+        system=_SYSTEM_GENERATE, user=user,
         model=model or llm.DEFAULT_MODEL,
         json_object=True,
         max_tokens=1400,
@@ -135,21 +207,11 @@ def assist_generate(prompt: str, *, defaults: dict | None = None,
     data = _parse(raw)
     res = _candidate_from(data, defaults)
 
-    if res["errors"]:
-        repair_user = (
-            "Your previous flow had these structural problems:\n- "
-            + "\n- ".join(res["errors"])
-            + "\n\nHere is what you produced:\n"
-            + json.dumps({k: data.get(k) for k in ("name", "nodes", "edges")}, indent=2)
-            + "\n\nReturn a corrected COMPLETE flow in the same JSON shape."
-        )
-        fixed_raw = llm.complete(
-            system=_SYSTEM_GENERATE, user=repair_user,
-            model=model or llm.DEFAULT_MODEL, json_object=True, max_tokens=1400,
-        )
-        fixed = _candidate_from(_parse(fixed_raw), defaults)
-        if len(fixed["errors"]) < len(res["errors"]):
-            data, res = _parse(fixed_raw), fixed
+    problems = res["errors"] + _hard_warnings(res["warnings"])
+    fixed = _repair_round(_SYSTEM_GENERATE, user, problems, data,
+                          defaults=defaults, model=model, max_tokens=1400)
+    if fixed and _is_improvement(res, fixed[1]):
+        data, res = fixed
 
     res["name"] = (str(data.get("name") or "").strip() or None)
     res["summary"] = None
@@ -184,6 +246,14 @@ def assist_edit(current: dict, instruction: str, *, defaults: dict | None = None
     )
     data = _parse(raw)
     res = _candidate_from(data, defaults, fallback_nodes=cur_nodes, fallback_edges=cur_edges)
+
+    problems = res["errors"] + _hard_warnings(res["warnings"])
+    fixed = _repair_round(_SYSTEM_EDIT, user, problems, data,
+                          defaults=defaults, model=model, max_tokens=1800,
+                          fallback_nodes=cur_nodes, fallback_edges=cur_edges)
+    if fixed and _is_improvement(res, fixed[1]):
+        data, res = fixed
+
     res["summary"] = (str(data.get("summary") or "").strip() or None)
     res["diff"] = diff_graphs(
         current, {"nodes": res["nodes"], "edges": res["edges"]}
