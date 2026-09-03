@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+from dataclasses import dataclass, field
 from typing import Any
 
 log = logging.getLogger("interpreter.llm")
@@ -588,3 +589,215 @@ def _stub_fields(system: str, user: str) -> dict[str, Any]:
         "reply": _stub(system, user, json_object=False),
         "confidence": round(min(conf, 0.9), 2),
     }
+
+
+# --------------------------------------------------------------------------
+# Agentic AI, step 1 — tool-calling. A new function, not a `tools=` param on
+# `complete()`: a tool-calling response is structurally richer than a string
+# (zero or more tool calls, plus optional text), so bolting it onto
+# `complete()` would give that function a contingent return type depending
+# on whether `tools` was passed -- fragile for a module every node handler
+# imports. `complete()` and its 26 existing callers are untouched by
+# anything below this line.
+#
+# Provider scope: Groq + Anthropic only (matches CLAUDE.md's "Groq default,
+# Anthropic opt-in"), and no cross-provider fallback chain -- if the chosen
+# provider errors, this raises visibly rather than silently retrying on a
+# different provider's tool-calling implementation. OpenRouter / vision
+# tool-calling are residuals, not built here.
+# --------------------------------------------------------------------------
+@dataclass
+class ToolCall:
+    id: str
+    name: str
+    arguments: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ToolResult:
+    text: str | None
+    tool_calls: list[ToolCall]
+    stop_reason: str   # "tool_use" | "stop" | "stub"
+
+
+_TOOL_PROVIDERS = ("groq", "anthropic")
+
+
+def complete_with_tools(
+    messages: list[dict[str, Any]],
+    *,
+    system: str = "",
+    tools: list[dict[str, Any]],
+    model: str | None = None,
+    max_tokens: int = 1024,
+    temperature: float = 0.2,
+) -> ToolResult:
+    """Multi-turn, tool-calling completion for an agentic loop (the caller
+    owns the loop: inspect `tool_calls`, run them, append a `{"role": "tool",
+    "tool_call_id", "content"}` turn, call again).
+
+    `messages`: `{"role": "user", "content": str}` /
+    `{"role": "assistant", "content": str | None, "tool_calls": [{"id",
+    "name", "arguments"}]}` / `{"role": "tool", "tool_call_id", "content"}`.
+
+    `tools`: `[{"name", "description", "parameters": <JSON Schema object>}]`
+    (OpenAI/Groq-shaped; translated to Anthropic's `input_schema` internally).
+
+    Sets `last_usage` exactly like `complete()`, so a caller's token spend
+    is picked up by the existing trace -> billing pipeline
+    (interpreter/runs.py::_token_usage) with no new plumbing.
+    """
+    model = model or DEFAULT_MODEL
+    if not available(model):
+        return _stub_tool_result(messages, tools)
+
+    prov = provider(model)
+    if prov == "groq":
+        return _groq_complete_tools(messages, system, tools, model, max_tokens, temperature)
+    if prov == "anthropic":
+        return _anthropic_complete_tools(messages, system, tools, model, max_tokens, temperature)
+    raise ValueError(
+        f"complete_with_tools: model {model!r} is {prov!r} -- only "
+        f"{_TOOL_PROVIDERS} are supported for tool-calling"
+    )
+
+
+def _groq_tools_wire(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {"type": "function", "function": {
+            "name": t["name"], "description": t.get("description", ""),
+            "parameters": t.get("parameters") or {"type": "object", "properties": {}},
+        }}
+        for t in tools
+    ]
+
+
+def _groq_messages_wire(system: str, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    wire: list[dict[str, Any]] = [{"role": "system", "content": system}]
+    for m in messages:
+        role = m["role"]
+        if role == "user":
+            wire.append({"role": "user", "content": m.get("content") or ""})
+        elif role == "assistant":
+            entry: dict[str, Any] = {"role": "assistant", "content": m.get("content")}
+            if m.get("tool_calls"):
+                entry["tool_calls"] = [
+                    {"id": tc["id"], "type": "function",
+                     "function": {"name": tc["name"], "arguments": json.dumps(tc.get("arguments") or {})}}
+                    for tc in m["tool_calls"]
+                ]
+            wire.append(entry)
+        elif role == "tool":
+            wire.append({"role": "tool", "tool_call_id": m["tool_call_id"],
+                        "content": m.get("content") or ""})
+    return wire
+
+
+def _groq_complete_tools(messages: list[dict[str, Any]], system: str, tools: list[dict[str, Any]],
+                         model: str, max_tokens: int, temperature: float) -> ToolResult:
+    global last_usage
+    try:
+        from groq import RateLimitError
+    except Exception:  # noqa: BLE001
+        RateLimitError = ()  # type: ignore[assignment]
+
+    import time as _time
+
+    kwargs = {
+        "model": model,
+        "messages": _groq_messages_wire(system, messages),
+        "tools": _groq_tools_wire(tools),
+        "tool_choice": "auto",
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+    resp = None
+    for attempt in range(3):
+        try:
+            resp = _groq().chat.completions.create(**kwargs)
+            break
+        except RateLimitError as e:  # type: ignore[misc]
+            if attempt == 2:
+                raise
+            _time.sleep(_retry_after_seconds(e))
+
+    msg = resp.choices[0].message
+    u = getattr(resp, "usage", None)
+    last_usage = ({"prompt": u.prompt_tokens, "completion": u.completion_tokens,
+                  "total": u.total_tokens} if u else None)
+
+    tool_calls: list[ToolCall] = []
+    for tc in (msg.tool_calls or []):
+        try:
+            args = json.loads(tc.function.arguments or "{}")
+        except json.JSONDecodeError:
+            args = {}
+        tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
+    return ToolResult(text=msg.content or None, tool_calls=tool_calls,
+                      stop_reason="tool_use" if tool_calls else "stop")
+
+
+def _anthropic_tools_wire(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {"name": t["name"], "description": t.get("description", ""),
+         "input_schema": t.get("parameters") or {"type": "object", "properties": {}}}
+        for t in tools
+    ]
+
+
+def _anthropic_messages_wire(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    wire: list[dict[str, Any]] = []
+    for m in messages:
+        role = m["role"]
+        if role == "user":
+            wire.append({"role": "user", "content": m.get("content") or ""})
+        elif role == "assistant":
+            content: list[dict[str, Any]] = []
+            if m.get("content"):
+                content.append({"type": "text", "text": m["content"]})
+            for tc in (m.get("tool_calls") or []):
+                content.append({"type": "tool_use", "id": tc["id"], "name": tc["name"],
+                               "input": tc.get("arguments") or {}})
+            wire.append({"role": "assistant", "content": content})
+        elif role == "tool":
+            # Anthropic has no "tool" role -- a tool result is a user turn
+            # carrying a tool_result content block.
+            wire.append({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": m["tool_call_id"],
+                 "content": m.get("content") or ""},
+            ]})
+    return wire
+
+
+def _anthropic_complete_tools(messages: list[dict[str, Any]], system: str, tools: list[dict[str, Any]],
+                              model: str, max_tokens: int, temperature: float) -> ToolResult:
+    global last_usage
+    resp = _anthropic().messages.create(
+        model=model,
+        max_tokens=max_tokens,
+        system=system,
+        messages=_anthropic_messages_wire(messages),
+        tools=_anthropic_tools_wire(tools),
+    )
+    u = getattr(resp, "usage", None)
+    last_usage = ({"prompt": u.input_tokens, "completion": u.output_tokens,
+                  "total": u.input_tokens + u.output_tokens} if u else None)
+
+    tool_calls = [ToolCall(id=b.id, name=b.name, arguments=b.input or {})
+                 for b in resp.content if getattr(b, "type", None) == "tool_use"]
+    text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text") or None
+    return ToolResult(text=text, tool_calls=tool_calls,
+                      stop_reason="tool_use" if tool_calls else "stop")
+
+
+def _stub_tool_result(messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> ToolResult:
+    """No provider configured -- deterministic, not smart: never calls a
+    tool, just a canned final answer. A future agent node's own tests
+    monkeypatch `complete_with_tools` directly for real loop coverage."""
+    global last_usage
+    last_usage = None
+    names = ", ".join(t.get("name", "?") for t in tools) or "no tools"
+    return ToolResult(
+        text=f"(stub: no LLM provider configured -- available tools were: {names})",
+        tool_calls=[], stop_reason="stub",
+    )

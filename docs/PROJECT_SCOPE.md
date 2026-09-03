@@ -827,6 +827,52 @@ set as a pre-merge check whenever the judge prompts or `draft_change` change,
 and apply migrations `074`/`075` on any environment that hasn't yet (this
 one already has, via the Supabase MCP).
 
+**Phase 29 — Agentic AI, a 5-step ordered list (infra-first, same
+discipline as Phase 28): 1. tool-calling plumbing in `interpreter/llm.py`
+✅ · 2. a new `agent` node type (a bounded ReAct loop consuming #1) · 3.
+multi-hop research/retrieval (piggybacks on #2) · 4. self-critique on
+KIL's `draft_change` · 5. autonomous reasoning-session continuation.**
+Before starting, an Explore agent confirmed nothing like this existed:
+every one of the (then) 26 `interpreter/registry.py` node handlers made
+exactly one fixed `llm.complete()` call; `interpreter/reasoning.py`'s
+Slack "reasoning sessions" are entirely human-driven (the LLM never
+picks its own next action); `llm.complete()` had no `tools` parameter.
+
+**Step 1 — tool-calling plumbing (COMPLETE 2026-09-03).** Purely
+additive: a new `complete_with_tools()` function alongside `complete()`,
+not a parameter on it — a tool-calling response is structurally richer
+than a string (zero or more tool calls plus optional text), so bolting
+it onto `complete()`'s `-> str` signature would give that function a
+contingent return type for a module all 26 node handlers import.
+`interpreter/llm.py` gains `ToolCall`/`ToolResult` dataclasses and
+`complete_with_tools(messages, *, system, tools, model, max_tokens,
+temperature)`, dispatching to new `_groq_complete_tools`/
+`_anthropic_complete_tools` (Groq + Anthropic only in v1, matching
+CLAUDE.md's "Groq default, Anthropic opt-in"; OpenRouter/vision
+tool-calling deferred) — each translates a provider-agnostic
+`messages`/`tools` shape into that SDK's real wire format (Groq:
+OpenAI-style `tool_calls` + `role:"tool"` messages; Anthropic:
+`tool_use`/`tool_result` content blocks) and sets `last_usage` exactly
+like `complete()` does, so a future agent node's token spend is picked
+up by P9's billing dashboard with zero new plumbing. No cross-provider
+fallback chain for tool calls (unlike `complete()`) — an error raises
+visibly rather than silently retrying on a different provider's
+tool-calling implementation. The stub path (no API key) never calls a
+tool — a canned final answer, matching `_stub()`'s existing
+"deterministic, not smart" philosophy. **Verify:** 8 new offline tests
+in `tests/test_resilience.py` (Groq + Anthropic tool-call parsing,
+final-text parsing, multi-turn wire-shape assertions, the no-key stub,
+an unsupported-provider `ValueError`) — 26/26 in that file, confirming
+zero regression to the 26 existing `complete()` call sites (the file's
+pre-existing 18 tests are untouched). Full offline suite unaffected.
+**Live-verified against real Groq**: a full agentic loop — `word_length`
+tool call → fed back the real result → the model's final answer
+correctly reflected it. No `ANTHROPIC_API_KEY` in this environment (a
+pre-existing gap, same as `complete()`'s Anthropic path per CLAUDE.md)
+— the Anthropic wire-format translation is covered by mocked offline
+tests instead, same rigor already accepted for `_anthropic_complete`.
+**Next:** step 2 — the `agent` node type.
+
 **Phase 28 — a 6-step ordered feature list (infra-first, each step
 reuses the last): 1. platform activity/audit log ✅ · 2. flow-version
 rollback audit trail + `flow_versions` retention ✅ · 3. billing quota

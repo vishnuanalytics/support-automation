@@ -85,6 +85,156 @@ def test_complete_gives_up_to_stub(monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# Agentic AI step 1 — complete_with_tools()
+# --------------------------------------------------------------------------
+from types import SimpleNamespace  # noqa: E402
+
+_TOOLS = [{"name": "lookup", "description": "look something up",
+          "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}}]
+
+
+def _fake_groq_client(resp, captured):
+    def create(**kwargs):
+        captured.append(kwargs)
+        return resp
+    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+
+
+def _fake_anthropic_client(resp, captured):
+    def create(**kwargs):
+        captured.append(kwargs)
+        return resp
+    return SimpleNamespace(messages=SimpleNamespace(create=create))
+
+
+def _groq_tool_call_resp():
+    tc = SimpleNamespace(id="call_1", function=SimpleNamespace(name="lookup", arguments='{"x": 1}'))
+    msg = SimpleNamespace(content=None, tool_calls=[tc])
+    usage = SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+    return SimpleNamespace(choices=[SimpleNamespace(message=msg)], usage=usage)
+
+
+def _groq_text_resp(text="final answer"):
+    msg = SimpleNamespace(content=text, tool_calls=None)
+    usage = SimpleNamespace(prompt_tokens=8, completion_tokens=4, total_tokens=12)
+    return SimpleNamespace(choices=[SimpleNamespace(message=msg)], usage=usage)
+
+
+def _anthropic_tool_use_resp():
+    block = SimpleNamespace(type="tool_use", id="call_1", name="lookup", input={"x": 1})
+    usage = SimpleNamespace(input_tokens=10, output_tokens=5)
+    return SimpleNamespace(content=[block], usage=usage, stop_reason="tool_use")
+
+
+def _anthropic_text_resp(text="final answer"):
+    block = SimpleNamespace(type="text", text=text)
+    usage = SimpleNamespace(input_tokens=8, output_tokens=4)
+    return SimpleNamespace(content=[block], usage=usage, stop_reason="end_turn")
+
+
+def test_complete_with_tools_groq_parses_a_tool_call(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "x")
+    captured: list[dict] = []
+    monkeypatch.setattr(llm, "_groq", lambda: _fake_groq_client(_groq_tool_call_resp(), captured))
+    res = llm.complete_with_tools(
+        [{"role": "user", "content": "look up x"}], tools=_TOOLS, model="openai/gpt-oss-120b")
+    assert res.stop_reason == "tool_use"
+    assert len(res.tool_calls) == 1
+    tc = res.tool_calls[0]
+    assert tc.id == "call_1" and tc.name == "lookup" and tc.arguments == {"x": 1}
+    assert llm.last_usage == {"prompt": 10, "completion": 5, "total": 15}
+    sent = captured[0]
+    assert sent["tools"][0]["function"]["name"] == "lookup"
+    assert sent["messages"][0] == {"role": "system", "content": ""}
+    assert sent["messages"][1] == {"role": "user", "content": "look up x"}
+
+
+def test_complete_with_tools_groq_parses_final_text(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "x")
+    captured: list[dict] = []
+    monkeypatch.setattr(llm, "_groq",
+                        lambda: _fake_groq_client(_groq_text_resp("the answer is 42"), captured))
+    res = llm.complete_with_tools([{"role": "user", "content": "what is it"}], tools=_TOOLS,
+                                  model="openai/gpt-oss-120b")
+    assert res.stop_reason == "stop"
+    assert res.text == "the answer is 42"
+    assert res.tool_calls == []
+
+
+def test_complete_with_tools_groq_multiturn_wire_shape(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "x")
+    captured: list[dict] = []
+    monkeypatch.setattr(llm, "_groq", lambda: _fake_groq_client(_groq_text_resp("done"), captured))
+    messages = [
+        {"role": "user", "content": "look up x"},
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "call_1", "name": "lookup", "arguments": {"q": "x"}}]},
+        {"role": "tool", "tool_call_id": "call_1", "content": "42"},
+    ]
+    llm.complete_with_tools(messages, tools=_TOOLS, model="openai/gpt-oss-120b")
+    sent_messages = captured[0]["messages"]
+    assert sent_messages[2]["tool_calls"][0]["function"]["arguments"] == '{"q": "x"}'
+    assert sent_messages[3] == {"role": "tool", "tool_call_id": "call_1", "content": "42"}
+
+
+def test_complete_with_tools_anthropic_parses_a_tool_call(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    captured: list[dict] = []
+    monkeypatch.setattr(llm, "_anthropic",
+                        lambda: _fake_anthropic_client(_anthropic_tool_use_resp(), captured))
+    res = llm.complete_with_tools([{"role": "user", "content": "look up x"}], tools=_TOOLS,
+                                  model="claude-sonnet-5")
+    assert res.stop_reason == "tool_use"
+    assert res.tool_calls[0] == llm.ToolCall(id="call_1", name="lookup", arguments={"x": 1})
+    assert llm.last_usage == {"prompt": 10, "completion": 5, "total": 15}
+    assert captured[0]["tools"][0]["input_schema"] == _TOOLS[0]["parameters"]
+
+
+def test_complete_with_tools_anthropic_parses_final_text(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    captured: list[dict] = []
+    monkeypatch.setattr(llm, "_anthropic",
+                        lambda: _fake_anthropic_client(_anthropic_text_resp("42 is the answer"), captured))
+    res = llm.complete_with_tools([{"role": "user", "content": "what"}], tools=_TOOLS,
+                                  model="claude-sonnet-5")
+    assert res.stop_reason == "stop"
+    assert res.text == "42 is the answer"
+
+
+def test_complete_with_tools_anthropic_multiturn_wire_shape(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    captured: list[dict] = []
+    monkeypatch.setattr(llm, "_anthropic",
+                        lambda: _fake_anthropic_client(_anthropic_text_resp("done"), captured))
+    messages = [
+        {"role": "user", "content": "look up x"},
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "call_1", "name": "lookup", "arguments": {"q": "x"}}]},
+        {"role": "tool", "tool_call_id": "call_1", "content": "42"},
+    ]
+    llm.complete_with_tools(messages, tools=_TOOLS, model="claude-sonnet-5")
+    sent = captured[0]["messages"]
+    assert sent[1]["content"][0] == {"type": "tool_use", "id": "call_1", "name": "lookup",
+                                     "input": {"q": "x"}}
+    assert sent[2]["content"][0] == {"type": "tool_result", "tool_use_id": "call_1", "content": "42"}
+
+
+def test_complete_with_tools_no_key_returns_stub():
+    res = llm.complete_with_tools([{"role": "user", "content": "hi"}], tools=_TOOLS)
+    assert res.stop_reason == "stub"
+    assert res.tool_calls == []
+    assert res.text and "lookup" in res.text
+    assert llm.last_usage is None
+
+
+def test_complete_with_tools_unsupported_provider_raises(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "x")
+    with pytest.raises(ValueError, match="only"):
+        llm.complete_with_tools([{"role": "user", "content": "hi"}], tools=_TOOLS,
+                                model="meta-llama/llama-3.3-70b-instruct:free")
+
+
+# --------------------------------------------------------------------------
 # channel auto-recovery
 # --------------------------------------------------------------------------
 def test_error_backoff_grows_and_caps():
