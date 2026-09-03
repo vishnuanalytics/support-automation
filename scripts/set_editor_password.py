@@ -22,9 +22,9 @@ load_dotenv()
 
 import os
 
-URL = os.environ["SUPABASE_URL"]
-SERVICE = os.environ["SUPABASE_SERVICE_KEY"]
-ANON = os.environ.get("SUPABASE_ANON_KEY", SERVICE)
+URL = os.environ["SUPABASE_URL"].strip()
+SERVICE = os.environ["SUPABASE_SERVICE_KEY"].strip()
+ANON = os.environ.get("SUPABASE_ANON_KEY", SERVICE).strip()
 
 
 def main() -> int:

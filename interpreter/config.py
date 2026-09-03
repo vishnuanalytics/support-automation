@@ -29,7 +29,7 @@ def validate_env(*, strict: bool = True) -> list[str]:
     fatal: list[str] = []
     warn: list[str] = []
 
-    url = os.environ.get("SUPABASE_URL", "")
+    url = os.environ.get("SUPABASE_URL", "").strip()
     if not url:
         fatal.append("SUPABASE_URL is not set")
     elif not _SUPA_RE.match(url.rstrip("/")):

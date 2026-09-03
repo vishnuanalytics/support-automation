@@ -46,8 +46,8 @@ BATCH_SIZE = 500
 
 
 def get_supabase():
-    url = os.environ["SUPABASE_URL"]
-    key = os.environ["SUPABASE_SERVICE_KEY"]  # service role -- trusted backend job
+    url = os.environ["SUPABASE_URL"].strip()
+    key = os.environ["SUPABASE_SERVICE_KEY"].strip()  # service role -- trusted backend job
     return create_client(url, key)
 
 

@@ -99,6 +99,7 @@ def live_schema():
     url, key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_SERVICE_KEY")
     if not (url and key):
         return None
+    url, key = url.strip(), key.strip()
     from supabase import create_client
     try:
         sb = create_client(url, key)
