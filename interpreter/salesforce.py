@@ -362,14 +362,15 @@ def get_case(case_id: str) -> dict[str, Any]:
     }
 
 
-def latest_inbound_email(case_id: str, *, tenant_id: str | None = None) -> dict[str, Any] | None:
+def latest_inbound_email(case_id: str, *, tenant_id: str | None = None,
+                         org_label: str | None = None) -> dict[str, Any] | None:
     """The newest *incoming* EmailMessage on a Case — what the customer last
     said. Used to re-run the flow on a reply instead of on the (stale) Case
     Description. None if no creds / no inbound message / query fails."""
     if not available():
         return None
     try:
-        rows = client_for(tenant_id).query(
+        rows = client_for(tenant_id, org_label).query(
             "SELECT Id, Subject, TextBody, FromAddress, MessageIdentifier, MessageDate "
             f"FROM EmailMessage WHERE ParentId = '{_soql_lit(case_id)}' AND Incoming = true "
             "ORDER BY MessageDate DESC LIMIT 1"
@@ -401,7 +402,8 @@ def _looks_bot_written(body: str) -> bool:
 
 
 def agent_response_since(case_id: str, since_iso: str | None = None,
-                         *, tenant_id: str | None = None) -> dict[str, Any]:
+                         *, tenant_id: str | None = None,
+                         org_label: str | None = None) -> dict[str, Any]:
     """What a human has done on a Case since `since_iso` (the bot's run time):
 
       {"guidance": <newest human CaseComment / Chatter FeedComment> | None,
@@ -417,7 +419,7 @@ def agent_response_since(case_id: str, since_iso: str | None = None,
                            "outbound_email": None}
     if not available():
         return out
-    sf = client_for(tenant_id)
+    sf = client_for(tenant_id, org_label)
     cid = _soql_lit(case_id)
     since = f" AND CreatedDate > {since_iso}" if since_iso else ""
     from interpreter.mailbox import _strip_html
@@ -477,6 +479,7 @@ def identify_sender(
     domain_match: bool = True,
     create_lead: bool = False,
     tenant_id: str | None = None,
+    org_label: str | None = None,
 ) -> dict[str, Any]:
     """Resolve who an inbound sender is (Phase 17b).
 
@@ -506,7 +509,7 @@ def identify_sender(
         out["reason"] = "salesforce not configured"
         return out
 
-    sf = client_for(tenant_id)
+    sf = client_for(tenant_id, org_label)
     lit = _soql_lit(email)
     try:
         rows = sf.query(
@@ -583,6 +586,7 @@ def update_case_fields(
     *,
     append: dict[str, str] | None = None,
     tenant_id: str | None = None,
+    org_label: str | None = None,
 ) -> dict[str, Any]:
     """
     Update `fields` on a Case. `append` maps field -> text to append to the
@@ -600,7 +604,7 @@ def update_case_fields(
         out["planned"] = planned
         return out
 
-    sf = client_for(tenant_id)
+    sf = client_for(tenant_id, org_label)
 
     if append:
         current = sf.Case.get(case_id)
@@ -642,13 +646,14 @@ def _current_user_id(sf) -> str | None:
         return None
 
 
-def user_email(user_id: str, *, tenant_id: str | None = None) -> str | None:
+def user_email(user_id: str, *, tenant_id: str | None = None,
+              org_label: str | None = None) -> str | None:
     """Email for a Salesforce User id — used to map an agent to their Slack
     account (`slack.lookup_user_by_email`). None on any failure."""
     if not user_id or not available():
         return None
     try:
-        rows = client_for(tenant_id).query(
+        rows = client_for(tenant_id, org_label).query(
             f"SELECT Email FROM User WHERE Id = '{_soql_lit(user_id)}' LIMIT 1"
         ).get("records", [])
         return rows[0].get("Email") if rows else None
@@ -657,7 +662,8 @@ def user_email(user_id: str, *, tenant_id: str | None = None) -> str | None:
         return None
 
 
-def post_chatter(case_id: str, body: str, *, mention_id: str | None = None, tenant_id: str | None = None) -> dict[str, Any]:
+def post_chatter(case_id: str, body: str, *, mention_id: str | None = None,
+                 tenant_id: str | None = None, org_label: str | None = None) -> dict[str, Any]:
     """
     Post a Chatter FeedItem on the Case, @mentioning `mention_id` (or the
     running user if None). Falls back to a plain FeedItem if the Connect API
@@ -667,7 +673,7 @@ def post_chatter(case_id: str, body: str, *, mention_id: str | None = None, tena
         log.info("[sf dry-run] Chatter on Case %s: mention=%s body=%r", case_id, mention_id, body)
         return {"posted": False, "dry_run": True, "mention_id": mention_id}
 
-    sf = client_for(tenant_id)
+    sf = client_for(tenant_id, org_label)
     if _recent_duplicate(sf, "FeedItem", case_id, "Body", body):
         return {"posted": False, "dry_run": False, "mention_id": mention_id, "deduped": True}
     mention_id = mention_id or _current_user_id(sf)
@@ -723,7 +729,8 @@ def _recent_duplicate(sf, sobject: str, case_id: str, body_field: str, body: str
 
 
 def add_case_comment(case_id: str, body: str, *, published: bool = False,
-                     tenant_id: str | None = None) -> dict[str, Any]:
+                     tenant_id: str | None = None,
+                     org_label: str | None = None) -> dict[str, Any]:
     """Add a `CaseComment` (internal by default). Used for the bot's
     suggested-reply draft — Salesforce won't take an API-created outbound
     draft `EmailMessage`. Skips an identical comment posted in the last 3h.
@@ -731,7 +738,7 @@ def add_case_comment(case_id: str, body: str, *, published: bool = False,
     if not available():
         log.info("[sf dry-run] CaseComment on %s (published=%s): %r", case_id, published, body[:80])
         return {"created": False, "dry_run": True, "id": None}
-    sf = client_for(tenant_id)
+    sf = client_for(tenant_id, org_label)
     if _recent_duplicate(sf, "CaseComment", case_id, "CommentBody", body):
         return {"created": False, "dry_run": False, "id": None, "deduped": True}
     try:
@@ -774,13 +781,14 @@ def _thread_msg_ids(case: dict[str, Any]) -> list[str]:
     return out
 
 
-def find_case_by_thread(message_ids: "list[str]", *, tenant_id: str | None = None) -> dict[str, Any]:
+def find_case_by_thread(message_ids: "list[str]", *, tenant_id: str | None = None,
+                        org_label: str | None = None) -> dict[str, Any]:
     """Given the Message-IDs an inbound email replies to, find the **open**
     Case those messages are already recorded on (via `EmailMessage`). Returns
     {sf_id, case_number} or {} — never raises."""
     if not message_ids or not available():
         return {}
-    sf = client_for(tenant_id)
+    sf = client_for(tenant_id, org_label)
     lits = ", ".join(f"'{_soql_lit(m)}'" for m in message_ids[:50])
     try:
         rows = sf.query(
@@ -815,6 +823,7 @@ def log_email_message(
     message_id: str = "",
     status: str | None = None,
     tenant_id: str | None = None,
+    org_label: str | None = None,
 ) -> dict[str, Any]:
     """Create an `EmailMessage` on the Case so the real email shows in
     Salesforce's Emails related list (not only the Description). `incoming`
@@ -827,7 +836,7 @@ def log_email_message(
         log.info("[sf dry-run] EmailMessage on Case %s (incoming=%s) mid=%s", case_id, incoming, mid)
         return {"created": False, "dry_run": True, "id": None}
 
-    sf = client_for(tenant_id)
+    sf = client_for(tenant_id, org_label)
     try:
         if mid:
             # Salesforce Email-to-Case stores MessageIdentifier WITH angle
@@ -1003,7 +1012,7 @@ def map_case_type(topic: str | None, text: str | None = None) -> str:
     return "Question"
 
 
-def org_metadata(tenant_id: str | None = None) -> dict[str, Any]:
+def org_metadata(tenant_id: str | None = None, org_label: str | None = None) -> dict[str, Any]:
     """Routing queues + the `Case.Type` / `Case.Module__c` picklist values —
     for the flow editor's dropdowns (Phase 20o). `available=False` with empty
     lists when there are no Salesforce creds; never raises. The API layer
@@ -1012,7 +1021,7 @@ def org_metadata(tenant_id: str | None = None) -> dict[str, Any]:
     if not available():
         return empty
     try:
-        sf = client_for(tenant_id)
+        sf = client_for(tenant_id, org_label)
         queues = [
             {"id": r["Id"], "name": r["Name"], "developer_name": r.get("DeveloperName")}
             for r in sf.query(
@@ -1042,6 +1051,7 @@ def assign_case(
     queue: str | None = None,
     user_id: str | None = None,
     tenant_id: str | None = None,
+    org_label: str | None = None,
 ) -> dict[str, Any]:
     """Route a Case to a human — set `OwnerId` to a queue (resolved by
     DeveloperName or Name) or a user. No target / no creds -> a no-op with a
@@ -1052,7 +1062,7 @@ def assign_case(
         log.info("[sf dry-run] assign Case %s -> queue=%r user=%r", case_id, queue, user_id)
         return {"assigned": False, "dry_run": True, "queue": queue, "user_id": user_id}
 
-    sf = client_for(tenant_id)
+    sf = client_for(tenant_id, org_label)
     owner_id, owner_type = user_id, "user"
     try:
         if not owner_id and queue:
@@ -1125,6 +1135,7 @@ def ensure_case(
     create_account: bool = True,
     reuse: str = "thread",
     tenant_id: str | None = None,
+    org_label: str | None = None,
 ) -> dict[str, Any]:
     """Resolve an inbound `case` dict to a real Salesforce Case (Phase 20e/f).
 
@@ -1170,7 +1181,7 @@ def ensure_case(
         out["reason"] = "salesforce not configured"
         return out
 
-    sf = client_for(tenant_id)
+    sf = client_for(tenant_id, org_label)
     try:
         if case.get("sf_id"):
             if out["account_id"]:
@@ -1270,6 +1281,7 @@ def send_case_reply(
     to_email: str | None = None,
     subject: str | None = None,
     tenant_id: str | None = None,
+    org_label: str | None = None,
 ) -> dict[str, Any]:
     """Send a customer-facing reply on a Case (Phase 17c — `clarify.auto_send`).
 
@@ -1283,7 +1295,7 @@ def send_case_reply(
         log.info("[sf dry-run] reply on Case %s to %s: %r", case_id, to_email, body)
         return {"sent": False, "dry_run": True, "via": "dry_run", "to": to_email}
 
-    sf = client_for(tenant_id)
+    sf = client_for(tenant_id, org_label)
     if to_email:
         try:
             sf.restful(

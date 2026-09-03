@@ -203,7 +203,8 @@ def _cp_write(state: CaseState, config: dict, *, action: str, actor: str = "ai",
         fields.pop("Status")
     if sf_id and fields:
         try:
-            salesforce.update_case_fields(sf_id, fields, tenant_id=state.get("tenant_id"))
+            salesforce.update_case_fields(sf_id, fields, tenant_id=state.get("tenant_id"),
+                                          org_label=config.get("org"))
         except Exception as e:  # noqa: BLE001
             log.warning("cp_write(%s): %s", sf_id, e)
     # keep the in-run view current so the *next* node doesn't clobber this
@@ -541,7 +542,7 @@ def h_sf_writeback(state: CaseState, config: dict) -> dict:
         }
 
     result = salesforce.update_case_fields(
-        sf_id, fields, append=append, tenant_id=state.get("tenant_id")
+        sf_id, fields, append=append, tenant_id=state.get("tenant_id"), org_label=config.get("org")
     )
     result["target"] = sf_id
     if result["dry_run"]:
@@ -594,7 +595,7 @@ def h_sf_case(state: CaseState, config: dict) -> dict:
         create_contact=bool(config.get("create_contact", True)),
         create_account=bool(config.get("create_account", True)),
         reuse=str(config.get("reuse", "thread")),
-        tenant_id=state.get("tenant_id"),
+        tenant_id=state.get("tenant_id"), org_label=config.get("org"),
     )
 
     if info.get("sf_id"):
@@ -613,7 +614,7 @@ def h_sf_case(state: CaseState, config: dict) -> dict:
                 to_addrs=case.get("to") or case.get("supplied_email") or "",
                 subject=case.get("subject", ""), body=case.get("body", ""),
                 message_id=case.get("message_id", ""),
-                tenant_id=state.get("tenant_id"),
+                tenant_id=state.get("tenant_id"), org_label=config.get("org"),
             )
     acct = dict(case.get("account") or {})
     for k, v in (info.get("account") or {}).items():
@@ -1390,7 +1391,8 @@ def h_notify(state: CaseState, config: dict) -> dict:
         from interpreter.routing import resolve_notify_target
 
         row = resolve_notify_target(
-            state.get("tenant_id"), case_type, module, sb=config.get("_sb")
+            state.get("tenant_id"), case_type, module, sb=config.get("_sb"),
+            org_label=config.get("org"),
         )
         if row:
             target, target_type = row.get("id"), row.get("type")
@@ -1432,11 +1434,14 @@ def h_notify(state: CaseState, config: dict) -> dict:
             mention = target
         elif target_type == "queue" and target:
             from interpreter import routing
-            mention = routing.queue_member(target, state.get("tenant_id"))[0] or config.get("mention_id")
+            mention = routing.queue_member(
+                target, state.get("tenant_id"), config.get("org")
+            )[0] or config.get("mention_id")
         else:
             mention = config.get("mention_id")
         chatter = salesforce.post_chatter(
-            sf_id, body, mention_id=mention, tenant_id=state.get("tenant_id")
+            sf_id, body, mention_id=mention, tenant_id=state.get("tenant_id"),
+            org_label=config.get("org"),
         )
         outcome["chatter"] = chatter
         mode = "dry-run" if chatter.get("dry_run") else "posted"
@@ -1444,7 +1449,7 @@ def h_notify(state: CaseState, config: dict) -> dict:
         if draft.strip() and not inline:
             note = salesforce.add_case_comment(
                 sf_id, f"[bot draft — {label}; review before sending]\n\n{draft}",
-                published=False, tenant_id=state.get("tenant_id"),
+                published=False, tenant_id=state.get("tenant_id"), org_label=config.get("org"),
             )
             outcome["draft_comment"] = note
             if note.get("created"):
@@ -1459,7 +1464,7 @@ def h_notify(state: CaseState, config: dict) -> dict:
                                      module=module or "") if isinstance(v, str) else v)
                         for k, v in af.items()}
             outcome["attention"] = salesforce.update_case_fields(
-                sf_id, rendered, tenant_id=state.get("tenant_id"))
+                sf_id, rendered, tenant_id=state.get("tenant_id"), org_label=config.get("org"))
     else:
         summary = f"notify {label!r} (no sf_id — not posted)"
 
@@ -1550,7 +1555,8 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
             f"Suggested draft below — please review before sending.\n\n{draft}"
         )
         chatter = salesforce.post_chatter(
-            sf_id, body, mention_id=config.get("mention_id"), tenant_id=state.get("tenant_id")
+            sf_id, body, mention_id=config.get("mention_id"), tenant_id=state.get("tenant_id"),
+            org_label=config.get("org"),
         )
         outcome["chatter"] = chatter
         mode = "dry-run" if chatter.get("dry_run") else "posted"
@@ -1559,7 +1565,7 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
         if draft.strip():
             note = salesforce.add_case_comment(
                 sf_id, f"[bot draft — review before sending]\n\n{draft}",
-                published=False, tenant_id=state.get("tenant_id"),
+                published=False, tenant_id=state.get("tenant_id"), org_label=config.get("org"),
             )
             outcome["draft_comment"] = note
             if note.get("created"):
@@ -1575,7 +1581,8 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
     forced = bool((state.get("confidence_gate") or {}).get("forced_escalation"))
     queue = _route_queue(state, config)
     if sf_id and queue:
-        assignment = salesforce.assign_case(sf_id, queue=queue, tenant_id=state.get("tenant_id"))
+        assignment = salesforce.assign_case(sf_id, queue=queue, tenant_id=state.get("tenant_id"),
+                                            org_label=config.get("org"))
         outcome["assignment"] = assignment
         if assignment.get("assigned"):
             summary += f" → {queue}"
@@ -1622,7 +1629,7 @@ def h_handover(state: CaseState, config: dict) -> dict:
     if sf_id and (queue or config.get("owner_user_id")):
         assignment = salesforce.assign_case(
             sf_id, queue=queue, user_id=config.get("owner_user_id"),
-            tenant_id=state.get("tenant_id"),
+            tenant_id=state.get("tenant_id"), org_label=config.get("org"),
         )
         outcome["assignment"] = assignment
         if assignment.get("assigned"):
@@ -1671,7 +1678,7 @@ def h_identify(state: CaseState, config: dict) -> dict:
         free_domains=config.get("free_email_domains"),
         domain_match=bool(config.get("domain_match", True)),
         create_lead=bool(config.get("create_lead_if_missing", False)),
-        tenant_id=state.get("tenant_id"),
+        tenant_id=state.get("tenant_id"), org_label=config.get("org"),
     )
     acct = f" / account '{sender['account_name']}'" if sender.get("account_matched") else ""
     summary = f"{email or '(no email)'} → {sender['match']}{acct}"
@@ -1795,7 +1802,7 @@ def h_clarify(state: CaseState, config: dict) -> dict:
         delivery = salesforce.send_case_reply(
             sf_id, customer_msg, to_email=recipient,
             subject=config.get("subject", "We need a bit more information"),
-            tenant_id=state.get("tenant_id"),
+            tenant_id=state.get("tenant_id"), org_label=config.get("org"),
         )
     elif sf_id:
         note = (
@@ -1815,12 +1822,13 @@ def h_clarify(state: CaseState, config: dict) -> dict:
                 f"Team_{(state.get('routed_team') or '').capitalize()}"
                 if config.get("mention_team") else None)
             if qref:
-                uid, _ = routing.queue_member(qref, state.get("tenant_id"))
+                uid, _ = routing.queue_member(qref, state.get("tenant_id"), config.get("org"))
                 mention = uid or mention
         except Exception:  # noqa: BLE001
             pass
         delivery = salesforce.post_chatter(
             sf_id, note, mention_id=mention, tenant_id=state.get("tenant_id"),
+            org_label=config.get("org"),
         )
 
     auto_sent = bool(auto_send and delivery and delivery.get("sent"))
@@ -1834,7 +1842,7 @@ def h_clarify(state: CaseState, config: dict) -> dict:
     handover_assignment = None
     if exhausted and sf_id and handover_queue:
         handover_assignment = salesforce.assign_case(
-            sf_id, queue=handover_queue, tenant_id=state.get("tenant_id")
+            sf_id, queue=handover_queue, tenant_id=state.get("tenant_id"), org_label=config.get("org")
         )
 
     clarification = {
@@ -2003,7 +2011,8 @@ def h_attachments(state: CaseState, config: dict) -> dict:
                                                            att.VIDEO_MAX_SECONDS)),
                           skip_signatures=config.get("skip_signatures", True) is not False,
                           sb=_sb,
-                          source=config.get("source", "salesforce"))
+                          source=config.get("source", "salesforce"),
+                          org_label=config.get("org"))
     except Exception as e:  # noqa: BLE001
         log.warning("attachments node failed: %s", e)
         out = {"attachments": [], "attachment_text": "", "_blobs": {}}
@@ -2040,7 +2049,7 @@ def h_sf_context(state: CaseState, config: dict) -> dict:
     want = config.get("want") or list(sfc.ALL_WANT)
     try:
         ctx = sfc.load(state.get("sender") or {}, want=set(want),
-                       tenant_id=state.get("tenant_id"))
+                       tenant_id=state.get("tenant_id"), org_label=config.get("org"))
     except Exception as e:  # noqa: BLE001
         log.warning("sf_context node failed: %s", e)
         ctx = {}
