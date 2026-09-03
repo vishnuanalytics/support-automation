@@ -38,7 +38,9 @@ _TYPE_DOC: dict[str, str] = {
     "retrieve": "search the knowledge base for context (usually the start)",
     "identify": "resolve the sender: CRM contact / email-domain -> account / unknown",
     "case_lookup": "pull similar past RESOLVED cases so draft answers from real "
-                   "resolutions, not just KB docs",
+                   "resolutions, not just KB docs -- output is "
+                   "case_lookup.prior_resolutions / case_lookup.investigation_hints "
+                   "(lists; there is no .found field)",
     "sf_case": "resolve/create the Salesforce Case for an inbound message (thread-based "
                "reuse) -- needed before sf_writeback / ask_human / handover can act on a real Case",
     "sf_context": "load Account/Contact/Case-history/team around the Case into "
@@ -49,7 +51,11 @@ _TYPE_DOC: dict[str, str] = {
     "team_route": "pick the owning team from config.rules (keyword match) -> "
                   "state.routed_team; downstream nodes read routed_team -- don't "
                   "re-implement the routing as duplicate if/else edges",
-    "policy_gate": "evaluate the team's when->then rules; can override routing",
+    "policy_gate": "evaluate the team's when->then rules -- these live in the separate "
+                   "Rules table (policy_rules), NOT in this node's config, so leave "
+                   "config empty. Sets policy.matched / policy.action (a 'route' rule) / "
+                   "policy.task (a 'task' rule, feeds a downstream task_dispatch); "
+                   "there is no policy.pass",
     "attachments": "fetch + OCR/transcribe image or video attachments (config.source/"
                    "ocr/video) -> state.attachments + attachment_text (folded into "
                    "classify/draft) -- use this for 'read the screenshot' requests",
@@ -60,19 +66,27 @@ _TYPE_DOC: dict[str, str] = {
     "confidence_gate": "score the draft against a per-tier threshold; a pass/fail branch point",
     "sf_writeback": "write triage fields back onto the Salesforce case",
     "http_request": "call an external API through a named per-tenant connection "
-                    "(config.connection/method/path/body) -> context[out_key]",
-    "transform": "reshape state.context with no LLM: config.map (copy by dotted path) / "
-                 "config.set (templated) / config.drop",
+                    "(config.connection/method/path/body) -> context[out_key]. "
+                    "`{{...}}` templates are dotted paths straight against state, e.g. "
+                    "{{context.case_id}} or {{case.subject}} -- never {{state.x}}",
+    "transform": "reshape state.context with no LLM: config.map (copy by dotted path, "
+                 "e.g. context.http.json.total) / config.set (`{{dotted.path}}` template, "
+                 "not {{state.x}}) / config.drop",
     "auto_reply": "send the drafted reply automatically (terminal)",
     "ask_human": "hand to a human with the draft attached (terminal)",
     "handover": "full handover, nothing sent (terminal)",
     "clarify": "ask the customer the specific missing questions (terminal)",
     "notify": "ping an internal rep on Salesforce Chatter ONLY, without changing Case "
               "ownership -- no Slack; use notify_human for Slack",
-    "notify_human": "ping a person about an escalation on Slack and/or Chatter "
-                    "(config.channel/slack_channel/mention) -- the one to use for "
-                    "'post to Slack' requests; place after ask_human/handover",
-    "task_dispatch": "raise a Slack-approved internal task, e.g. a GitHub issue (terminal)",
+    "notify_human": "ping a person about an escalation on Slack and/or Chatter -- the "
+                    "one to use for 'post to Slack' requests; place after ask_human/"
+                    "handover. config.channel picks 'slack'|'salesforce_chatter'|'both' "
+                    "(NOT a channel name); the actual Slack channel goes in "
+                    "config.slack_channel, e.g. \"#support-escalations\"",
+    "task_dispatch": "raise a Slack Approve/Reject card for an internal task (e.g. a "
+                     "GitHub issue) from an UPSTREAM policy_gate match (state.policy.task) "
+                     "-- the approval happens asynchronously via the Slack callback, NOT as "
+                     "a branch/edge in this graph; terminal, no outgoing edge",
 }
 
 _CONDITION_NAMES = (
@@ -97,10 +111,20 @@ _RULES = (
     "have no outgoing edge.\n"
     "- a branch node has several outgoing edges: at most one with `\"if\": null` "
     "(the else), the rest with an expression.\n"
-    "- keep it minimal: only the nodes the request needs. No cycles.\n"
-    "- omit `config` unless a specific value is asked for -- defaults are filled in.\n"
+    "- keep it minimal: only the nodes the request needs. No cycles. Don't add a "
+    "terminal node the request didn't ask for -- if it doesn't say what happens with "
+    "the result, stop after the last node it actually described. `auto_reply` "
+    "specifically sends `draft` -- never wire it straight after a node that isn't "
+    "`draft` or `ai_prompt`.\n"
+    "- when the request gives concrete values for a node's own documented config "
+    "(a named mapping, specific rules, a connection/team name, fields to copy) -- "
+    "put them in that node's `config`, don't leave it empty. E.g. for team_route: "
+    "`\"config\": {\"rules\": [{\"team\": \"billing\", \"any\": [\"invoice\", \"payment\"]}, "
+    "...], \"default\": \"support\"}`. Otherwise omit `config` -- defaults are filled in.\n"
     f"- names usable in an `if`: {_CONDITION_NAMES}. "
-    "e.g. \"tier == 'enterprise'\", \"confidence_gate.pass\", \"not confidence_gate.pass\"."
+    "e.g. \"tier == 'enterprise'\", \"confidence_gate.pass\", \"not confidence_gate.pass\". "
+    "Only use a dotted field a node actually sets (see its one-liner below) -- never "
+    "invent one (e.g. there is no `case_lookup.found`)."
 )
 
 
