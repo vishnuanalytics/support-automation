@@ -272,3 +272,43 @@ def test_introspect_org_combines_both_and_degrades_per_section(monkeypatch):
     out = salesforce.introspect_org("t1")
     assert out["case_fields"] == [] and out["queues"] == []
     assert len(out["errors"]) == 2  # both sections failed independently, neither raised
+
+
+# --------------------------------------------------------------------------
+# org_metadata -- the legacy dropdown shape, now an adapter over
+# introspect_org. Fixes a real bug: the old standalone implementation
+# gated on available() (the *env* creds check), so a tenant with their
+# own connected org and NO env creds at all always got available=False.
+# --------------------------------------------------------------------------
+def test_org_metadata_derives_legacy_fields_from_introspect_org(monkeypatch):
+    monkeypatch.setattr(salesforce, "client_for", lambda *a, **k: _FakeSFClient())
+    meta = salesforce.org_metadata("t1")
+    assert meta["available"] is True
+    assert meta["queues"] == [
+        {"id": "00G1", "name": "Billing Queue", "developer_name": "Billing_Queue"},
+        {"id": "00G2", "name": "Support Queue", "developer_name": "Support_Queue"},
+    ]
+    assert meta["case_types"] == []          # _FakeSFClient's Case has no "Type" field
+    assert meta["case_fields"][0]["name"] == "Module__c"
+
+
+def test_org_metadata_available_even_with_no_env_creds_if_the_tenant_org_resolves(monkeypatch):
+    """The bug this replaced: available() only ever checked env vars, so a
+    tenant with their own connected org (no env creds at all) incorrectly
+    got available=False. org_metadata must not repeat that."""
+    for k in _HERMETIC:
+        monkeypatch.delenv(k, raising=False)
+    assert salesforce.available() is False   # confirms the env path really is empty
+    monkeypatch.setattr(salesforce, "client_for", lambda *a, **k: _FakeSFClient())
+    meta = salesforce.org_metadata("t1", "their-own-org")
+    assert meta["available"] is True
+
+
+def test_org_metadata_reports_an_error_only_when_both_sections_are_empty(monkeypatch):
+    def _broken(*a, **k):
+        raise RuntimeError("no creds anywhere")
+
+    monkeypatch.setattr(salesforce, "client_for", _broken)
+    meta = salesforce.org_metadata("t1")
+    assert meta["available"] is False
+    assert "error" in meta and "no creds anywhere" in meta["error"]

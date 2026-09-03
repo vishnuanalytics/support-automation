@@ -707,6 +707,28 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**Current focus (2026-09-03): the self-serve multi-tenant/multi-org
+Salesforce connector, and making the flow editor fetch real data
+instead of hardcoding it** — see "Multi-tenant / multi-Salesforce-org
+scoping" below for the full chunk-by-chunk history. Status: connector
++ introspection + OAuth + org-label threading through every SF-touching
+node handler are all built and live-verified; the flow editor's
+Inspector now fetches real Case fields/Queues/connected-orgs per
+tenant instead of raw JSON for `sf_writeback`/`ask_human`/`handover`/
+`clarify`/`notify` (see "Flow editor Inspector: real Salesforce data
+instead of hardcoded/raw JSON"). **Next up, not started**: the same
+treatment for Slack — `interpreter/slack.py` needs `list_channels`
+(doesn't exist yet) and a public wrapper for `list_usergroups`, `SCOPES`
+needs `channels:read` added (already-connected tenants need to
+reconnect), a new `GET /api/integrations/slack/meta` endpoint, and
+`ChannelPicker`/`UserPicker` components wired into `notify_human`'s
+`slack_channel`/`mention.slack_user_id` fields (currently free text).
+Also deferred, **explicitly out of scope until asked for again**: Google
+Calendar meeting-scheduling as its own node type (design decided — time
+from BOTH the customer's message AND Google Calendar free/busy; needs
+a new `interpreter/gcalendar.py` + widening `gdrive.py`'s OAuth scopes,
+with a reconnect caveat).
+
 **Phase KIL — Knowledge Integrity Loop (COMPLETE a–f + live-verified,
 2026-09-02; PR #29).** Catch
 new info that contradicts the KB or case history (inbound tickets, bot
@@ -1345,6 +1367,81 @@ regressions. Not re-run against a real second live org in this pass —
 in the connector chunk; this chunk only proves (via the new tests) that
 every handler's `config.org` genuinely reaches that already-proven
 mechanism, which is what was actually in question.
+
+### Flow editor Inspector: real Salesforce data instead of hardcoded/raw JSON (2026-09-03)
+
+Per the user's direction ("put all the focus on the multi tenant flow
+with fetching details from salesforce, slack and other channels showing
+in editor these") — the previous chunks built the org-per-tenant
+connector, introspection, and org-label threading, but the flow editor
+itself still had two real gaps: `salesforce_meta` (the endpoint the
+editor's dropdowns call) wasn't tenant/org-aware at all, and the node
+most tied to "don't hardcode SF fields" (`sf_writeback`) had no custom
+form — just raw JSON.
+
+**Bug found and fixed — `api/main.py::salesforce_meta` was a single
+global cache** (`_SF_META_CACHE = {"at": ..., "data": None}`), calling
+`org_metadata()` with no `tenant_id`/`org_label` at all. Every tenant,
+regardless of which org they'd connected via the multi-org connector,
+saw whichever org's metadata happened to be cached first — a real
+cross-tenant data leak in the editor UI (not RLS-bypassing, since it's
+metadata not case data, but still wrong). Fixed: cache is now keyed
+`(tenant_id, org_label)`, 5 min TTL per key, `org_metadata(tid, org)`
+called with both.
+
+**Bug found and fixed — `org_metadata()` gated on the wrong check.** It
+called `available()` (env-var creds only) before doing anything, so a
+tenant with their own connected org via `tenant_integrations` and zero
+env creds always got `available=False` and empty dropdowns — the exact
+tenant this whole self-serve flow exists for. Rewritten as a thin
+adapter over `introspect_org()` (which resolves via `client_for(tenant_id,
+org_label)` directly, no env-only gate). Regression test added
+(`test_org_metadata_available_even_with_no_env_creds_if_the_tenant_org_resolves`)
+that deletes all env SF creds, confirms `available()` is `False`, then
+confirms `org_metadata` still returns `available=True` when the
+tenant's own `client_for` resolves.
+
+**Editor UI**: `web/src/flows/Inspector.tsx` — the SF-meta cache is now
+keyed per `(tenantId, orgLabel)` instead of one global value;
+`QueuePicker`/`ClarifyForm`/`NotifyForm` take a required `tenantId` prop
+threaded from `FlowEditor.tsx`'s `flow.tenant_id`. New `OrgPicker`
+(dropdown of the tenant's connected orgs from
+`GET /api/integrations/salesforce`, falls back to a plain text box when
+the tenant has 0-1 orgs — no point picking from nothing). New
+`SfWritebackForm`: `field_map` (the config `sf_writeback` actually
+writes with) is now a src-key → real-SF-field dropdown sourced from
+`meta.case_fields`, not free text — the field list live-updates when a
+different `org` is picked via `OrgPicker`. `ask_human`/`handover` gained
+a `QueuePicker`-backed `queue` field (previously raw JSON only, despite
+routing to a real SF Queue). All four fall back to plain inputs/JSON
+when the org can't be reached, same degrade-gracefully rule as the
+existing `QueuePicker`.
+
+**Deliberately scoped out of this pass**: `sf_writeback`'s `value_maps`
+(mapping classifier output values to picklist option values) still uses
+the generic raw-JSON fallback rather than a nested per-field editor —
+`field_map` was the higher-value, higher-frequency target.
+`team_route`'s config routes to platform-internal team-name strings, not
+Salesforce data, so it doesn't fit this ask and wasn't touched. **Next
+up, not started**: the Slack half of the same ask — `list_channels`
+doesn't exist in `interpreter/slack.py` yet, `SCOPES` needs
+`channels:read` added (reconnect required for already-connected
+tenants), plus a `GET /api/integrations/slack/meta` endpoint and
+`ChannelPicker`/`UserPicker` components for `notify_human`'s
+`slack_channel`/`mention.slack_user_id` fields (currently free text).
+
+**Verify**: 3 new tests in `tests/test_salesforce_multi_org.py`
+(`org_metadata` derives from `introspect_org`; the no-env-creds
+regression case above; reports an error only when both sections are
+empty), 2 new tests in `tests/test_api.py` (401 without a token; a live
+`@pytest.mark.integration` test against the real Globex tenant
+confirming `GET /api/salesforce/meta?org=...` is tenant-scoped and
+degrades gracefully for an unknown org label). Full offline suite
+541/541. Frontend: `tsc -b` clean, `vitest run` 6/6, `vite build` clean
+(729 kB bundle, pre-existing size warning, not from this chunk). Not
+yet live-verified in the browser against the real `acme-dev` connected
+org (still live for the demo tenant from the introspection chunk) —
+next step before shipping.
 
 ### Scoped, not built: per-tenant case-taxonomy config
 

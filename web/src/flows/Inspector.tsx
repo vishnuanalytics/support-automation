@@ -3,24 +3,32 @@ import { api } from "../api";
 import type { KbCollection, SfMeta } from "../types";
 import type { RFEdge, RFNode } from "./graph";
 
-// Salesforce routing metadata (queues + Case.Type / Module picklists) — fetched
-// once per editor session, shared by the notify / clarify forms.
-const _EMPTY_META: SfMeta = { available: false, queues: [], case_types: [], modules: [] };
-let _metaCache: SfMeta | null = null;
-let _metaPromise: Promise<SfMeta> | null = null;
+// Salesforce routing metadata (queues + real Case fields/picklists,
+// including custom ones) — fetched per (tenant, org) and cached for the
+// editor session; a node's own `config.org` picks which connected org
+// (empty -> 'default'), so switching a node's org refetches that org's
+// real schema instead of showing another org's fields.
+const _EMPTY_META: SfMeta = { available: false, queues: [], case_types: [], modules: [], case_fields: [] };
+const _metaCache = new Map<string, SfMeta>();
+const _metaPromise = new Map<string, Promise<SfMeta>>();
 
-function useSfMeta(): SfMeta {
-  const [meta, setMeta] = useState<SfMeta>(_metaCache ?? _EMPTY_META);
+function useSfMeta(tenantId: string, orgLabel = "default"): SfMeta {
+  const key = `${tenantId}:${orgLabel || "default"}`;
+  const [meta, setMeta] = useState<SfMeta>(_metaCache.get(key) ?? _EMPTY_META);
   useEffect(() => {
-    if (_metaCache) return;
-    _metaPromise =
-      _metaPromise ||
-      api.salesforce.meta().catch(() => _EMPTY_META);
-    _metaPromise.then((m) => {
-      _metaCache = m;
+    if (!tenantId) return;
+    if (_metaCache.has(key)) {
+      setMeta(_metaCache.get(key)!);
+      return;
+    }
+    const p = _metaPromise.get(key) ||
+      api.salesforce.meta(tenantId, orgLabel).catch(() => _EMPTY_META);
+    _metaPromise.set(key, p);
+    p.then((m) => {
+      _metaCache.set(key, m);
       setMeta(m);
     });
-  }, []);
+  }, [key, tenantId, orgLabel]);
   return meta;
 }
 
@@ -31,12 +39,16 @@ function QueuePicker({
   value,
   onChange,
   placeholder,
+  tenantId,
+  orgLabel,
 }: {
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
+  tenantId: string;
+  orgLabel?: string;
 }) {
-  const meta = useSfMeta();
+  const meta = useSfMeta(tenantId, orgLabel);
   if (!meta.available || meta.queues.length === 0) {
     return (
       <input
@@ -61,18 +73,173 @@ function QueuePicker({
   );
 }
 
+// The tenant's connected Salesforce orgs — fetched once per tenant, shared
+// by every node's org picker in this editor session.
+const _orgsCache = new Map<string, string[]>();
+const _orgsPromise = new Map<string, Promise<string[]>>();
+
+function useConnectedOrgs(tenantId: string): string[] {
+  const [orgs, setOrgs] = useState<string[]>(_orgsCache.get(tenantId) ?? []);
+  useEffect(() => {
+    if (!tenantId) return;
+    if (_orgsCache.has(tenantId)) {
+      setOrgs(_orgsCache.get(tenantId)!);
+      return;
+    }
+    const p = _orgsPromise.get(tenantId) ||
+      api.salesforceOrgs.list(tenantId).then((rows) => rows.map((r) => r.org_label)).catch(() => []);
+    _orgsPromise.set(tenantId, p);
+    p.then((labels) => {
+      _orgsCache.set(tenantId, labels);
+      setOrgs(labels);
+    });
+  }, [tenantId]);
+  return orgs;
+}
+
+/** Which connected Salesforce org this node should use (blank = 'default').
+ *  A plain text fallback when the tenant has 0-1 orgs connected — no point
+ *  showing a picker with nothing to pick. */
+function OrgPicker({
+  value,
+  onChange,
+  tenantId,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  tenantId: string;
+}) {
+  const orgs = useConnectedOrgs(tenantId);
+  if (orgs.length <= 1) {
+    return (
+      <input
+        value={value}
+        placeholder="default"
+        onChange={(e) => onChange(e.target.value)}
+      />
+    );
+  }
+  return (
+    <select value={value || "default"} onChange={(e) => onChange(e.target.value)}>
+      {orgs.map((label) => (
+        <option key={label} value={label}>{label}</option>
+      ))}
+    </select>
+  );
+}
+
+// The platform-internal keys `sf_writeback`'s field_map can read from
+// (interpreter/registry.py::h_sf_writeback's `ctx` dict) — offered as
+// suggestions, not a hard list, since a flow can also address nested state.
+const SF_WRITEBACK_SRC_KEYS = [
+  "urgency", "tier", "region", "topic", "summary",
+  "case_type", "case_topic", "case_module", "case_submodule", "case_region",
+];
+
+/** `sf_writeback`'s field_map: platform concept -> a REAL field on this
+ *  tenant's connected Salesforce org, fetched live — not a hardcoded
+ *  platform field name. Falls back to free text when the org isn't
+ *  reachable (dry-run / no creds), same degrade-gracefully rule as
+ *  QueuePicker. */
+function SfWritebackForm({
+  config,
+  onConfig,
+  tenantId,
+}: {
+  config: Record<string, unknown>;
+  onConfig: (v: Record<string, unknown>) => void;
+  tenantId: string;
+}) {
+  const org = typeof config.org === "string" ? config.org : "";
+  const meta = useSfMeta(tenantId, org || undefined);
+  const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
+  const fieldMap = (config.field_map as Record<string, string>) || {};
+  const rows = Object.entries(fieldMap);
+  const fields = meta.case_fields || [];
+
+  const setRows = (next: Record<string, string>) => set({ field_map: next });
+  const updateRow = (i: number, k: string, v: string) => {
+    const next: Record<string, string> = {};
+    rows.forEach(([kk, vv], j) => (next[j === i ? k : kk] = j === i ? v : vv));
+    setRows(next);
+  };
+  const removeRow = (i: number) => {
+    const next: Record<string, string> = {};
+    rows.forEach(([kk, vv], j) => { if (j !== i) next[kk] = vv; });
+    setRows(next);
+  };
+
+  return (
+    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+      <div className="muted" style={{ fontSize: 11 }}>
+        writes triage output onto the Salesforce Case. Left = a platform
+        concept, right = a REAL field on the connected org — fetched live,
+        {meta.available ? ` ${fields.length} mappable fields found.` : " connect an org (Connections tab) to see them."}
+      </div>
+      <div className="row" style={{ marginTop: 6 }}>
+        <span className="muted" style={{ width: 90 }}>org</span>
+        <OrgPicker value={org} onChange={(v) => set({ org: v || undefined })} tenantId={tenantId} />
+      </div>
+      <label style={{ marginTop: 6, display: "block" }}>field_map</label>
+      <datalist id="sfwb-src-keys">
+        {SF_WRITEBACK_SRC_KEYS.map((k) => <option key={k} value={k} />)}
+      </datalist>
+      {rows.map(([k, v], i) => (
+        <div className="row" key={i} style={{ gap: 4 }}>
+          <input
+            value={k}
+            list="sfwb-src-keys"
+            placeholder="case_module"
+            style={{ maxWidth: 130 }}
+            onChange={(e) => updateRow(i, e.target.value, v)}
+          />
+          <span className="muted">→</span>
+          {fields.length > 0 ? (
+            <select value={v} onChange={(e) => updateRow(i, k, e.target.value)} style={{ flex: 1 }}>
+              <option value="">— pick a field —</option>
+              {!fields.some((f) => f.name === v) && v && <option value={v}>{v} (not in org)</option>}
+              {fields.map((f) => (
+                <option key={f.name} value={f.name}>
+                  {f.label} ({f.name}){f.picklist_values.length ? ` — picklist` : ""}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              value={v}
+              placeholder="Module__c"
+              style={{ flex: 1 }}
+              onChange={(e) => updateRow(i, k, e.target.value)}
+            />
+          )}
+          <button onClick={() => removeRow(i)} title="remove">✕</button>
+        </div>
+      ))}
+      <button style={{ marginTop: 4 }} onClick={() => setRows({ ...fieldMap, "": "" })}>
+        + map a field
+      </button>
+      <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
+        value_maps / append are edited in the raw config below — this form
+        covers field_map only for now.
+      </div>
+    </div>
+  );
+}
+
 export function NodeInspector({
   node,
   config,
   onLabel,
   onConfig,
   onDelete,
+  tenantId,
 }: {
   node: RFNode;
   config: Record<string, unknown>;
   onLabel: (v: string) => void;
   onConfig: (v: Record<string, unknown>) => void;
   onDelete: () => void;
+  tenantId: string;
 }) {
   return (
     <div>
@@ -97,11 +264,31 @@ export function NodeInspector({
       )}
 
       {node.data.nodeType === "clarify" && (
-        <ClarifyForm config={config} onConfig={onConfig} />
+        <ClarifyForm config={config} onConfig={onConfig} tenantId={tenantId} />
       )}
 
       {node.data.nodeType === "notify" && (
-        <NotifyForm config={config} onConfig={onConfig} />
+        <NotifyForm config={config} onConfig={onConfig} tenantId={tenantId} />
+      )}
+
+      {node.data.nodeType === "sf_writeback" && (
+        <SfWritebackForm config={config} onConfig={onConfig} tenantId={tenantId} />
+      )}
+
+      {(node.data.nodeType === "ask_human" || node.data.nodeType === "handover") && (
+        <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+          <label>queue</label>
+          <QueuePicker
+            value={typeof config.queue === "string" ? config.queue : ""}
+            onChange={(v) => onConfig({ ...config, queue: v || undefined })}
+            tenantId={tenantId}
+            orgLabel={typeof config.org === "string" ? config.org : undefined}
+          />
+          <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
+            queue_by_team / enterprise_queue overrides are edited in the raw
+            config below.
+          </div>
+        </div>
       )}
 
       {node.data.nodeType === "notify_human" && (
@@ -238,9 +425,11 @@ function ExtractForm({
 function ClarifyForm({
   config,
   onConfig,
+  tenantId,
 }: {
   config: Record<string, unknown>;
   onConfig: (v: Record<string, unknown>) => void;
+  tenantId: string;
 }) {
   const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
   const maxQ = typeof config.max_questions === "number" ? config.max_questions : 3;
@@ -284,6 +473,8 @@ function ClarifyForm({
           value={handoverQueue}
           placeholder="Team_Support"
           onChange={(v) => set({ handover_queue: v || undefined })}
+          tenantId={tenantId}
+          orgLabel={typeof config.org === "string" ? config.org : undefined}
         />
       </div>
       <div className="muted" style={{ fontSize: 11 }}>
@@ -321,11 +512,13 @@ const CASE_TYPES_FALLBACK = [
 function NotifyForm({
   config,
   onConfig,
+  tenantId,
 }: {
   config: Record<string, unknown>;
   onConfig: (v: Record<string, unknown>) => void;
+  tenantId: string;
 }) {
-  const meta = useSfMeta();
+  const meta = useSfMeta(tenantId, typeof config.org === "string" ? config.org : undefined);
   const caseTypes = meta.case_types.length ? meta.case_types : CASE_TYPES_FALLBACK;
   const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
   const byType = (config.target_by_type as Record<string, string>) || {};

@@ -444,23 +444,31 @@ def delete_template_ep(template_id: str, tenant_id: str | None = None,
                 summary=f"deleted template {template_id}")
 
 
-_SF_META_CACHE: dict = {"at": 0.0, "data": None}
+# (tenant_id, org_label) -> (cached_at, data). Was a single global entry
+# until 2026-09-03 -- meant every tenant saw whichever org happened to be
+# cached first, ignoring the multi-org connector entirely.
+_SF_META_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
 
 
 @app.get("/api/salesforce/meta")
-def salesforce_meta(c: Caller = Depends(caller)) -> dict:
-    """Salesforce routing queues + the Case.Type / Module__c picklists, for the
-    flow editor's dropdowns (notify / clarify node forms). Cached 5 min in
-    process. `available:false` + empty lists when the API has no SF creds."""
+def salesforce_meta(tenant_id: str | None = None, org: str = "default",
+                    c: Caller = Depends(caller)) -> dict:
+    """Salesforce routing queues + Case field/picklist data (incl. any
+    custom fields), for the flow editor's dropdowns. Tenant+org aware,
+    cached 5 min per (tenant, org). `available:false` + empty lists when
+    that tenant/org combination can't reach a real Salesforce."""
     import time
 
     from interpreter import salesforce as _sf
 
+    tid = _caller_tenant(c, tenant_id)
+    key = (tid, org or "default")
     now = time.time()
-    if _SF_META_CACHE["data"] is None or now - _SF_META_CACHE["at"] > 300:
-        _SF_META_CACHE["data"] = _sf.org_metadata()
-        _SF_META_CACHE["at"] = now
-    return _SF_META_CACHE["data"]
+    hit = _SF_META_CACHE.get(key)
+    if hit is None or now - hit[0] > 300:
+        data = _sf.org_metadata(tid, org)
+        _SF_META_CACHE[key] = (now, data)
+    return _SF_META_CACHE[key][1]
 
 
 @app.get("/api/flows")

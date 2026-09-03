@@ -635,6 +635,7 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
             <NodeInspector
               node={selectedNode}
               config={configById[selectedNode.id] ?? {}}
+              tenantId={flow?.tenant_id || ""}
               onLabel={(v) => setLabel(selectedNode.id, v)}
               onConfig={(v) => setConfig(selectedNode.id, v)}
               onDelete={() => {
