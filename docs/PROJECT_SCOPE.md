@@ -957,6 +957,41 @@ already covered by what step 2 built; revisit whether it needs anything
 beyond wiring `agent` into a real flow and measuring against
 `qrels_hard.jsonl`.
 
+**Audit log coverage extended (2026-09-03) — closes a real gap in Phase
+28 step 1.** User's request: "improve the logs, who changed what." Step 1
+wired `audit.record()` into 6 endpoints (publish/rollback/delete flow,
+remove member, approval decisions, connections); auditing 20+ other
+mutating endpoints that clearly count as "who changed what" for an
+admin/support-manager trust story. Added: `tenant.created`,
+`invitation.{created,revoked,accepted}`, `flow.created`,
+`flow.sf_entry_{set,unset}`, `trigger.{created,deleted}`,
+`kb_collection.{created,updated,deleted}`,
+`kb_entry.{created,updated,deleted}` (create/upload/Google-Doc-link/
+edit/delete — a Google Doc re-sync counts as `kb_entry.updated`),
+`email_channel.{connected,configured,disconnected}`,
+`policy_rule.{created,updated,deleted}`. **Deliberately not audited:**
+`PUT /api/flows/{flow_id}` (the draft autosave/Save-button path) — every
+explicit save during active editing would flood the log with WIP noise;
+the decision points that matter (publish/rollback/delete) were already
+covered by step 1, matching that step's original scoping choice. Run-
+triggering endpoints (`run`/`enqueue`/`/t/{token}`/the Salesforce hook)
+stay unaudited too — those are executions, already recorded in `runs`,
+not config/content mutations. **Verify:** the full offline suite (499
+tests, zero regression) plus the full **live** integration suite (42/42
+passed, ~9.5 min) — most of the new call sites are exercised by
+pre-existing integration tests (`test_policy_rule_crud`,
+`test_invitation_create_list_revoke`,
+`test_email_channel_configure_status_and_disconnect`,
+`test_kb_entry_roundtrip_embeds_and_scopes`, etc.), so this was a
+genuine live runtime check, not just an offline compile check. Confirmed
+by querying the live `audit_log` table directly after the run: all 16
+new action types that got exercised appear with correct rows (e.g.
+`policy_rule.created/updated/deleted`, `kb_entry.created/updated/deleted`,
+`email_channel.connected/configured/disconnected`). **Not live-fired in
+this pass** (no existing test happens to call them, though they're the
+same pattern as everything that did verify): `tenant.created`,
+`invitation.accepted`, `trigger.created`/`trigger.deleted`.
+
 **Phase 28 — a 6-step ordered feature list (infra-first, each step
 reuses the last): 1. platform activity/audit log ✅ · 2. flow-version
 rollback audit trail + `flow_versions` retention ✅ · 3. billing quota
