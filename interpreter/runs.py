@@ -97,6 +97,15 @@ def record_run(flow: dict, final: dict, *, case: dict, source: str = "api",
         log.warning("record_run failed: %s", e)
         return None
 
+    # Phase 28 step 3 — best-effort: warn (never block) once a tenant crosses
+    # 80%/100% of its plan's monthly quota.
+    try:
+        from interpreter import billing
+
+        billing.check_and_warn(sb, row["tenant_id"])
+    except Exception as e:  # noqa: BLE001
+        log.warning("billing.check_and_warn failed: %s", e)
+
     # Phase 16: a task_dispatch node raised an action_requests row with no
     # run_id (the run didn't exist yet) — link it now. `action_request_id`
     # is a top-level state key so it survives a later terminal node.
@@ -153,6 +162,8 @@ def record_run(flow: dict, final: dict, *, case: dict, source: str = "api",
         except Exception as e:  # noqa: BLE001
             log.warning("could not schedule resolution check for %s: %s", run_id, e)
 
+    return run_id
+
 
 def _int_env(name: str, default: int) -> int:
     try:
@@ -160,5 +171,3 @@ def _int_env(name: str, default: int) -> int:
     except (TypeError, ValueError):
         log.warning("%s=%r is not an int; using %d", name, os.environ.get(name), default)
         return default
-
-    return run_id

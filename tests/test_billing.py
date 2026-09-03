@@ -100,3 +100,123 @@ def test_token_usage_empty_trace_is_zero_not_a_crash():
     total, by_model = _token_usage([])
     assert total == 0
     assert by_model == {}
+
+
+# ── Phase 28 step 3: check_and_warn (warn-only quota enforcement) ──────
+class _Q:
+    def __init__(self, rows, sink, table_name):
+        self._rows = rows
+        self._sink = sink
+        self._table_name = table_name
+
+    def select(self, *a, **k):
+        return self
+
+    def eq(self, *a, **k):
+        return self
+
+    def gte(self, *a, **k):
+        return self
+
+    def lt(self, *a, **k):
+        return self
+
+    def limit(self, *a, **k):
+        return self
+
+    def insert(self, row):
+        self._sink.setdefault(self._table_name, []).append(row)
+        return self
+
+    def execute(self):
+        return type("R", (), {"data": list(self._rows)})
+
+
+class _SB:
+    def __init__(self, tables=None):
+        self.tables = tables or {}
+        self.inserted: dict[str, list[dict]] = {}
+
+    def table(self, name):
+        return _Q(self.tables.get(name, []), self.inserted, name)
+
+
+class _BrokenSB:
+    def table(self, name):
+        raise RuntimeError("db is down")
+
+
+def _period_start():
+    _, start, _ = billing.month_bounds(None)
+    return start
+
+
+def test_check_and_warn_unlimited_plan_is_a_noop():
+    sb = _SB({"tenants": [{"plan": "pro"}]})
+    level = billing.check_and_warn(sb, "t1")
+    assert level is None
+    assert sb.inserted == {}
+
+
+def test_check_and_warn_under_threshold_is_a_noop():
+    sb = _SB({"tenants": [{"plan": "free"}], "runs": []})
+    level = billing.check_and_warn(sb, "t1")
+    assert level is None
+    assert sb.inserted == {}
+
+
+def test_check_and_warn_crosses_warning_threshold():
+    runs = [{"tokens_total": 0, "tokens_by_model": {}, "created_at": _period_start()}
+            for _ in range(160)]  # 160/200 = 80%
+    sb = _SB({"tenants": [{"plan": "free"}], "runs": runs, "audit_log": [],
+              "tenant_integrations": []})
+    level = billing.check_and_warn(sb, "t1")
+    assert level == "warning"
+    assert len(sb.inserted["audit_log"]) == 1
+    row = sb.inserted["audit_log"][0]
+    assert row["action"] == "billing.quota_warning"
+    assert row["tenant_id"] == "t1"
+    assert row["metadata"]["pct"] == 80.0
+
+
+def test_check_and_warn_crosses_exceeded_threshold():
+    runs = [{"tokens_total": 0, "tokens_by_model": {}, "created_at": _period_start()}
+            for _ in range(200)]  # 200/200 = 100%
+    sb = _SB({"tenants": [{"plan": "free"}], "runs": runs, "audit_log": [],
+              "tenant_integrations": []})
+    level = billing.check_and_warn(sb, "t1")
+    assert level == "exceeded"
+    assert sb.inserted["audit_log"][0]["action"] == "billing.quota_exceeded"
+
+
+def test_check_and_warn_dedups_within_the_same_period():
+    period_label, _, _ = billing.month_bounds(None)
+    runs = [{"tokens_total": 0, "tokens_by_model": {}, "created_at": _period_start()}
+            for _ in range(160)]
+    existing = [{"event_id": 1, "metadata": {"period": period_label}}]
+    sb = _SB({"tenants": [{"plan": "free"}], "runs": runs, "audit_log": existing,
+              "tenant_integrations": []})
+    level = billing.check_and_warn(sb, "t1")
+    assert level == "warning"
+    assert sb.inserted == {}   # already warned this period -- no duplicate
+
+
+def test_check_and_warn_posts_to_slack_when_a_digest_channel_is_configured(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "interpreter.slack.post_message",
+        lambda text, **kw: calls.append((text, kw)),
+    )
+    runs = [{"tokens_total": 0, "tokens_by_model": {}, "created_at": _period_start()}
+            for _ in range(200)]
+    sb = _SB({"tenants": [{"plan": "free"}], "runs": runs, "audit_log": [],
+              "tenant_integrations": [{"config": {"digest": {"channel": "#billing"}}}]})
+    billing.check_and_warn(sb, "t1")
+    assert len(calls) == 1
+    text, kw = calls[0]
+    assert "Billing" in text
+    assert kw["channel"] == "#billing" and kw["tenant_id"] == "t1"
+
+
+def test_check_and_warn_never_raises_on_a_broken_client():
+    assert billing.check_and_warn(_BrokenSB(), "t1") is None

@@ -830,8 +830,8 @@ one already has, via the Supabase MCP).
 **Phase 28 — a 6-step ordered feature list (infra-first, each step
 reuses the last): 1. platform activity/audit log ✅ · 2. flow-version
 rollback audit trail + `flow_versions` retention ✅ · 3. billing quota
-enforcement (logs through #1) · 4. per-flow cost breakdown · 5. flow
-templates marketplace (logs through #1) · 6. bulk KB export/import.**
+enforcement ✅ · 4. per-flow cost breakdown · 5. flow templates
+marketplace (logs through #1) · 6. bulk KB export/import.**
 
 **Step 1 — platform activity/audit log (COMPLETE 2026-09-03).**
 Migration `076` `audit_log` (append-only, `case_events`-style
@@ -878,8 +878,49 @@ rank-10 and 160 days old) plus the recent top-ranked ones, and deleted
 only the genuinely old, unpublished, low-ranked rows — then
 `python -m scripts.purge_old` against the real (only ~9-day-old)
 database correctly no-opped (`flow_versions=0`), proving the default
-settings don't touch live data. **Next:** step 3 — billing quota
-enforcement.
+settings don't touch live data.
+
+**Step 3 — billing quota enforcement, warn-only (COMPLETE 2026-09-03).**
+User's explicit call: warn, never block — a hard block risked silently
+dropping a real inbound customer email once the live tenant crosses the
+free plan's 200 runs/month (it was already at ~20-40 from this session's
+own testing). `interpreter/billing.py::check_and_warn(sb, tenant_id)` —
+called from `interpreter/runs.py::record_run` right after every run is
+recorded (so it fires regardless of trigger: manual, webhook, email,
+Salesforce CDC), best-effort. Computes the tenant's current-month
+`usage_summary()` (reusing P9); at ≥80% logs `billing.quota_warning`, at
+≥100% `billing.quota_exceeded` via `audit.record()` (step 1) — **at most
+once per (tenant, period, level)**, deduped against `audit_log` itself
+(no new table). If the tenant already has a Slack digest channel
+configured (`tenant_integrations.config.digest.channel`, reused from
+P8a's KIL digest — no new external setup required), also posts a
+one-line heads-up there; unlimited (`pro`) plans and channel-less
+tenants skip that step silently. Nothing about a run's own execution or
+response is affected — nothing checks the return value to gate anything.
+`tests/test_billing.py` gains 7 offline tests. **Live-verified** against
+an isolated throwaway tenant with synthetic `runs` rows: 160/200 (80%)
+→ `billing.quota_warning` logged once, a second call correctly deduped
+(no duplicate row); pushed to 200/200 (100%) → `billing.quota_exceeded`
+fired. Also **live-verified the real Globex tenant stayed silent** at
+its actual 38/200 (19%) usage — no false positive.
+
+**Found and fixed in passing — a real, pre-existing bug, not
+environment noise:** `interpreter/runs.py::record_run()` had dead code
+— a `return run_id` sitting *after* the unrelated `_int_env()` helper
+function instead of at the end of `record_run`'s own body, so the
+function always implicitly returned `None` regardless of whether the
+run was recorded. This has been silently breaking `POST
+/api/flows/{id}/run`'s `run_id` response field, the worker's job
+result, and the CLI's "recorded run …" message — and was the actual
+cause of `tests/test_api.py::test_run_returns_a_run_id` and
+`test_publish_snapshots_and_run_records_the_version`, two tests
+mischaracterized as "the known live-Supabase seed-flow gap" in every
+verification report across this entire session (P8c through step 2 of
+this phase) without their actual failure text being checked each time.
+Moving the `return` statement fixed both; the other 4 previously-lumped
+failures were re-verified individually and are genuinely the seed-flow
+gap (`FlowNotFound`), unrelated. **Next:** step 4 — per-flow cost
+breakdown.
 
 **Phase 27 — the Case Control Plane (done, 2026-09-01/02).** One
 AI-managed Case queue: classify + route + track `Status` + hand off via

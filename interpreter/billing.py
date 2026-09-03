@@ -19,8 +19,11 @@ the fetch, same split as kil_metrics.py's compute() vs. its caller).
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
+
+log = logging.getLogger("interpreter.billing")
 
 # $ per 1,000,000 tokens, blended prompt+completion for simplicity — an
 # illustrative estimate, not a real invoice. Unlisted / Groq / OpenRouter
@@ -103,3 +106,83 @@ def month_bounds(period: str | None) -> tuple[str, str, str]:
     end = datetime(year + 1, 1, 1, tzinfo=timezone.utc) if month == 12 \
         else datetime(year, month + 1, 1, tzinfo=timezone.utc)
     return f"{year:04d}-{month:02d}", start.isoformat(), end.isoformat()
+
+
+# ── Phase 28 step 3: quota warnings (warn-only — never blocks a run) ────
+_WARN_PCT = 80
+_EXCEEDED_PCT = 100
+
+
+def check_and_warn(sb, tenant_id: str) -> str | None:
+    """Best-effort, fire-and-forget — called right after a run is recorded.
+    Checks whether this tenant just crossed 80%/100% of its plan's monthly
+    quota and, at most once per (tenant, period, level), logs an
+    `audit_log` entry and — if the tenant has a Slack digest channel
+    configured — posts a heads-up there. NEVER blocks the run that
+    triggered it; a failure here must not propagate.
+
+    Dedup is against `audit_log` itself (no new table): if a
+    `billing.quota_<level>` entry already exists for this tenant with
+    `metadata.period == this period`, this is a no-op.
+
+    Returns the level reached ("warning" | "exceeded"), or None — purely
+    informational for callers/tests; nothing acts on it.
+    """
+    try:
+        from interpreter import audit
+
+        period_label, period_start, period_end = month_bounds(None)
+
+        trows = (sb.table("tenants").select("plan").eq("tenant_id", tenant_id)
+                 .execute().data or [])
+        plan = (trows[0].get("plan") if trows else None) or "free"
+        limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])
+        if limits["runs"] is None and limits["tokens"] is None:
+            return None  # unlimited plan — nothing to warn about
+
+        rows = (sb.table("runs").select("tokens_total, tokens_by_model, created_at")
+                .eq("tenant_id", tenant_id)
+                .gte("created_at", period_start).lt("created_at", period_end)
+                .limit(5000).execute().data or [])
+        s = usage_summary(rows, plan, period_start, period_end)
+        pcts = [p for p in (s["pct_runs_used"], s["pct_tokens_used"]) if p is not None]
+        if not pcts:
+            return None
+        pct = max(pcts)
+        level = ("exceeded" if pct >= _EXCEEDED_PCT
+                 else "warning" if pct >= _WARN_PCT else None)
+        if level is None:
+            return None
+
+        action = f"billing.quota_{level}"
+        already = (sb.table("audit_log").select("event_id, metadata")
+                   .eq("tenant_id", tenant_id).eq("action", action)
+                   .gte("created_at", period_start)
+                   .limit(50).execute().data or [])
+        if any((e.get("metadata") or {}).get("period") == period_label for e in already):
+            return level  # already warned this period at this level
+
+        summary = (f"{plan} plan at {pct:.0f}% of quota this period "
+                   f"({s['runs_count']}/{limits['runs']} runs, "
+                   f"{s['tokens_total']}/{limits['tokens']} tokens)")
+        audit.record(sb, tenant_id=tenant_id, action=action,
+                     target_type="tenant", target_id=tenant_id, summary=summary,
+                     metadata={"period": period_label, "pct": pct, "plan": plan})
+
+        try:
+            slack_rows = (sb.table("tenant_integrations").select("config")
+                          .eq("tenant_id", tenant_id).eq("kind", "slack")
+                          .execute().data or [])
+            channel = (((slack_rows[0].get("config") or {}).get("digest") or {}).get("channel")
+                       if slack_rows else None)
+            if channel:
+                from interpreter import slack as slackmod
+                slackmod.post_message(f":warning: *Billing* — {summary}",
+                                      tenant_id=tenant_id, channel=channel, sb=sb)
+        except Exception as e:  # noqa: BLE001
+            log.warning("billing quota Slack notify failed: %s", e)
+
+        return level
+    except Exception as e:  # noqa: BLE001 -- never break the run this fires after
+        log.warning("billing.check_and_warn(%s) failed: %s", tenant_id, e)
+        return None
