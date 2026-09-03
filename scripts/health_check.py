@@ -14,8 +14,19 @@ Unhealthy =
     deterministic LLM stub (every provider down -> generic drafts -> the
     human queues flood), or
   * a `neo4j` heartbeat exists but is stale (graph enrichment silently off), or
+  * a `slackbot` heartbeat exists but is stale > HEALTH_SLACKBOT_STALE_MIN
+    (default 20) -- the Socket-Mode bot dropped, so no approval / reasoning
+    replies land, or
   * >HEALTH_SLA_BREACH_MAX (default 3) Case SLA breaches in the last hour
-    (the sweep is escalating but nobody is picking cases up).
+    (the sweep is escalating but nobody is picking cases up), or
+  * KIL (the knowledge-integrity loop) is off the rails:
+      - flag precision over the last HEALTH_KIL_WINDOW_DAYS (default 7) is
+        below HEALTH_KIL_PRECISION_MIN (default 0.5) with at least
+        HEALTH_KIL_MIN_SAMPLE (default 8) resolved reviews -- the judge is
+        crying wolf, managers will start rubber-stamping, or
+      - more than HEALTH_KIL_OPEN_MAX (default 12) review tasks have been
+        open longer than HEALTH_KIL_OPEN_AGE_H (default 48) -- the queue is
+        not being worked.
 
 Exit 0 = healthy, 1 = unhealthy, 2 = could not check.
 """
@@ -35,7 +46,13 @@ STALE_MIN = float(os.environ.get("HEALTH_STALE_MIN", "15"))
 FAIL_RATE = float(os.environ.get("HEALTH_FAIL_RATE", "0.5"))
 STUB_RATE = float(os.environ.get("HEALTH_STUB_RATE", "0.3"))
 NEO4J_STALE_MIN = float(os.environ.get("HEALTH_NEO4J_STALE_MIN", "1560"))  # ~26h
+SLACKBOT_STALE_MIN = float(os.environ.get("HEALTH_SLACKBOT_STALE_MIN", "20"))
 SLA_BREACH_MAX = int(os.environ.get("HEALTH_SLA_BREACH_MAX", "3"))         # per hour
+KIL_WINDOW_DAYS = int(os.environ.get("HEALTH_KIL_WINDOW_DAYS", "7"))
+KIL_PRECISION_MIN = float(os.environ.get("HEALTH_KIL_PRECISION_MIN", "0.5"))
+KIL_MIN_SAMPLE = int(os.environ.get("HEALTH_KIL_MIN_SAMPLE", "8"))
+KIL_OPEN_MAX = int(os.environ.get("HEALTH_KIL_OPEN_MAX", "12"))
+KIL_OPEN_AGE_H = float(os.environ.get("HEALTH_KIL_OPEN_AGE_H", "48"))
 EXPECT = os.environ.get("HEALTH_COMPONENTS", "worker").split(",")
 
 
@@ -47,6 +64,43 @@ def _is_stub_run(run: dict) -> bool:
         if (d.get("groundedness") or {}).get("backend") == "stub":
             return True
     return bool((run.get("groundedness") or {}).get("backend") == "stub")
+
+
+def _age(ts, now: datetime) -> timedelta | None:
+    try:
+        return now - datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _kil_problems(sb, now: datetime) -> list[str]:
+    """KIL (knowledge-integrity loop) health: is the contradiction judge
+    still trustworthy, and is the review queue being worked? Best-effort —
+    a missing `review_tasks` table (old DB) yields no problems."""
+    out: list[str] = []
+    try:
+        since = (now - timedelta(days=KIL_WINDOW_DAYS)).isoformat()
+        rows = (sb.table("review_tasks").select("status, created_at")
+                .gte("created_at", since).limit(4000).execute().data or [])
+    except Exception:  # noqa: BLE001
+        return out
+
+    n_correct = sum(1 for r in rows if r.get("status") == "correct")
+    n_wrong = sum(1 for r in rows if r.get("status") == "wrong")
+    real = n_correct + n_wrong
+    if real >= KIL_MIN_SAMPLE:
+        prec = n_correct / real
+        if prec < KIL_PRECISION_MIN:
+            out.append(f"kil: flag precision {prec:.0%} over {real} resolved reviews in "
+                       f"{KIL_WINDOW_DAYS}d (< {KIL_PRECISION_MIN:.0%}) — the judge is crying wolf")
+
+    stale_open = sum(1 for r in rows if r.get("status") == "open"
+                     and (_age(r.get("created_at"), now) or timedelta())
+                     > timedelta(hours=KIL_OPEN_AGE_H))
+    if stale_open > KIL_OPEN_MAX:
+        out.append(f"kil: {stale_open} review tasks open > {KIL_OPEN_AGE_H:.0f}h "
+                   f"(> {KIL_OPEN_MAX}) — the queue is not being worked")
+    return out
 
 
 def _check() -> tuple[bool, list[str]]:
@@ -74,12 +128,18 @@ def _check() -> tuple[bool, list[str]]:
     # a `neo4j` heartbeat that has gone stale = graph sync is silently failing
     nr = seen.get("neo4j")
     if nr and nr.get("last_healthy_at"):
-        try:
-            nage = now - datetime.fromisoformat(str(nr["last_healthy_at"]).replace("Z", "+00:00"))
-            if nage > timedelta(minutes=NEO4J_STALE_MIN):
-                problems.append(f"neo4j: last sync {nage.total_seconds() / 3600:.0f}h ago")
-        except Exception:  # noqa: BLE001
-            pass
+        nage = _age(nr["last_healthy_at"], now)
+        if nage and nage > timedelta(minutes=NEO4J_STALE_MIN):
+            problems.append(f"neo4j: last sync {nage.total_seconds() / 3600:.0f}h ago")
+
+    # a `slackbot` heartbeat that has gone stale = the Socket-Mode bot dropped,
+    # so approval / reasoning-thread replies from Slack no longer reach us.
+    sr = seen.get("slackbot")
+    if sr and sr.get("last_healthy_at"):
+        sage = _age(sr["last_healthy_at"], now)
+        if sage and sage > timedelta(minutes=SLACKBOT_STALE_MIN):
+            problems.append(f"slackbot: silent for {sage.total_seconds() / 60:.0f} min "
+                            "— Slack approvals / replies are not landing")
 
     since = (now - timedelta(hours=1)).isoformat()
     jobs = (sb.table("jobs").select("status,kind")
@@ -109,6 +169,8 @@ def _check() -> tuple[bool, list[str]]:
                             f"(> {SLA_BREACH_MAX}) — cases are not being picked up")
     except Exception:  # noqa: BLE001 — case_events may not exist on an old DB
         pass
+
+    problems += _kil_problems(sb, now)
 
     return (not problems), problems
 
