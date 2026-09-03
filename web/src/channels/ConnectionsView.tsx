@@ -175,6 +175,8 @@ function SalesforceOrgsPanel({ tenantId }: { tenantId: string }) {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [testMsg, setTestMsg] = useState<string | null>(null);
+  const [oauthMsg, setOauthMsg] = useState<string | null>(null);
+  const [oauthConfigured, setOauthConfigured] = useState(false);
   const [schemaByOrg, setSchemaByOrg] = useState<Record<string, SalesforceOrgSchema | "loading" | "error">>({});
   const [f, setF] = useState({
     org_label: "default", SF_USERNAME: "", SF_CONSUMER_KEY: "",
@@ -185,6 +187,22 @@ function SalesforceOrgsPanel({ tenantId }: { tenantId: string }) {
     api.salesforceOrgs.list(tenantId).then(setRows).catch((e: ApiError) => setErr(e.message));
   };
   useEffect(load, [tenantId]);
+  useEffect(() => {
+    api.salesforceOrgs.oauthStatus().then((s) => setOauthConfigured(s.configured)).catch(() => {});
+  }, []);
+
+  const connectOAuth = async () => {
+    setOauthMsg(null);
+    try {
+      const { url } = await api.salesforceOrgs.oauthAuthorize({
+        org_label: f.org_label.trim() || "default", domain: f.SF_DOMAIN.trim(), tenant_id: tenantId,
+      });
+      window.open(url, "_blank", "width=520,height=680");
+      setOauthMsg("Finish in the Salesforce window, then refresh.");
+    } catch (e) {
+      setOauthMsg(`✗ ${(e as ApiError).message}`);
+    }
+  };
 
   const creds = () => {
     const c: Record<string, string> = { SF_USERNAME: f.SF_USERNAME.trim() };
@@ -257,8 +275,8 @@ function SalesforceOrgsPanel({ tenantId }: { tenantId: string }) {
             return (
               <tr key={o.org_label}>
                 <td><code>{o.org_label}</code></td>
-                <td>{o.SF_USERNAME}</td>
-                <td>{o.SF_DOMAIN || "login"}</td>
+                <td>{o.SF_USERNAME || (o.SF_OAUTH_INSTANCE_URL ? "(via OAuth)" : "")}</td>
+                <td>{o.SF_OAUTH_INSTANCE_URL || o.SF_DOMAIN || "login"}</td>
                 <td>
                   <button disabled={schema === "loading"} onClick={() => fetchSchema(o.org_label)}>
                     {schema === "loading" ? "fetching…" : "fetch from org"}
@@ -291,17 +309,11 @@ function SalesforceOrgsPanel({ tenantId }: { tenantId: string }) {
       {err && <div className="banner err">{err}</div>}
 
       <div className="col" style={{ gap: 8 }}>
-        <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+        <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           <input
             placeholder="org label (e.g. prod, sandbox)"
             value={f.org_label}
             onChange={(e) => setF({ ...f, org_label: e.target.value })}
-          />
-          <input
-            placeholder="integration user (e.g. bot@acme.com)"
-            value={f.SF_USERNAME}
-            style={{ minWidth: 220 }}
-            onChange={(e) => setF({ ...f, SF_USERNAME: e.target.value })}
           />
           <input
             placeholder="domain (blank = login, or 'test' for a sandbox)"
@@ -309,34 +321,58 @@ function SalesforceOrgsPanel({ tenantId }: { tenantId: string }) {
             style={{ minWidth: 220 }}
             onChange={(e) => setF({ ...f, SF_DOMAIN: e.target.value })}
           />
-        </div>
-        <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
-          <input
-            placeholder="Connected App consumer key"
-            value={f.SF_CONSUMER_KEY}
-            style={{ minWidth: 280 }}
-            onChange={(e) => setF({ ...f, SF_CONSUMER_KEY: e.target.value })}
-          />
-        </div>
-        <textarea
-          placeholder="-----BEGIN PRIVATE KEY-----&#10;the Connected App's uploaded certificate's private key&#10;-----END PRIVATE KEY-----"
-          value={f.SF_PRIVATE_KEY}
-          rows={5}
-          style={{ fontFamily: "monospace", fontSize: 12 }}
-          onChange={(e) => setF({ ...f, SF_PRIVATE_KEY: e.target.value })}
-        />
-        <div className="row" style={{ gap: 8, alignItems: "center" }}>
-          <button disabled={busy || !f.SF_USERNAME.trim()} onClick={test}>Test connection</button>
-          <button
-            className="primary"
-            disabled={busy || !f.org_label.trim() || !f.SF_USERNAME.trim()}
-            onClick={connect}
-          >
-            Connect
-          </button>
-          {testMsg && <span style={{ fontSize: 13 }}>{testMsg}</span>}
+          {oauthConfigured ? (
+            <button className="primary" onClick={connectOAuth}>
+              Connect Salesforce
+            </button>
+          ) : (
+            <span className="muted" style={{ fontSize: 12 }}>
+              (one-click OAuth isn't set up on this server yet — use the JWT form below)
+            </span>
+          )}
+          {oauthMsg && <span style={{ fontSize: 13 }}>{oauthMsg}</span>}
         </div>
       </div>
+
+      <details>
+        <summary className="muted" style={{ cursor: "pointer", fontSize: 13 }}>
+          Advanced: connect with a Connected App's JWT bearer credentials directly
+        </summary>
+        <div className="col" style={{ gap: 8, marginTop: 8 }}>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+            <input
+              placeholder="integration user (e.g. bot@acme.com)"
+              value={f.SF_USERNAME}
+              style={{ minWidth: 220 }}
+              onChange={(e) => setF({ ...f, SF_USERNAME: e.target.value })}
+            />
+            <input
+              placeholder="Connected App consumer key"
+              value={f.SF_CONSUMER_KEY}
+              style={{ minWidth: 280 }}
+              onChange={(e) => setF({ ...f, SF_CONSUMER_KEY: e.target.value })}
+            />
+          </div>
+          <textarea
+            placeholder="-----BEGIN PRIVATE KEY-----&#10;the Connected App's uploaded certificate's private key&#10;-----END PRIVATE KEY-----"
+            value={f.SF_PRIVATE_KEY}
+            rows={5}
+            style={{ fontFamily: "monospace", fontSize: 12 }}
+            onChange={(e) => setF({ ...f, SF_PRIVATE_KEY: e.target.value })}
+          />
+          <div className="row" style={{ gap: 8, alignItems: "center" }}>
+            <button disabled={busy || !f.SF_USERNAME.trim()} onClick={test}>Test connection</button>
+            <button
+              className="primary"
+              disabled={busy || !f.org_label.trim() || !f.SF_USERNAME.trim()}
+              onClick={connect}
+            >
+              Connect
+            </button>
+            {testMsg && <span style={{ fontSize: 13 }}>{testMsg}</span>}
+          </div>
+        </div>
+      </details>
     </div>
   );
 }

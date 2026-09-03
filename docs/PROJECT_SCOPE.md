@@ -1223,6 +1223,66 @@ not a full permission-set/profile analysis (Salesforce's permission
 model is deep enough that this is its own investigation, not a
 by-the-way addition).
 
+### Salesforce OAuth — a real "Connect Salesforce" button (2026-09-03)
+
+Follow-on to the JWT-based connection above, per the user's explicit
+ask to improve toward OAuth. New `interpreter/salesforce_oauth.py`
+(mirrors `gdrive.py`'s OAuth shape exactly): `available()` (gated on
+`SF_OAUTH_CLIENT_ID`/`SF_OAUTH_CLIENT_SECRET` — unset in this
+environment, so the feature degrades to "not configured" everywhere,
+same as Google before its own Connected App existed);
+`authorize_url`/`exchange_code` (Salesforce's OAuth 2.0 web-server
+flow — `_login_base()` resolves `login`/`test`/a My Domain token to
+the right host); `refresh_access_token`/`client_from_oauth` (a
+Salesforce access token is short-lived and `simple_salesforce` has no
+bundled refresh helper unlike Google's `Credentials`, so a fresh access
+token is minted from the stored `refresh_token` on every use — the
+resulting client is still cached process-lifetime by `client_for`,
+exactly as the JWT path already is). `salesforce.py::_build_client`
+gains a 4th auth mode, checked first (`SF_OAUTH_REFRESH_TOKEN` +
+`SF_OAUTH_INSTANCE_URL` — no `SF_USERNAME` at all, so it must be
+detected before the existing modes' unconditional `creds["SF_USERNAME"]`
+access). `redact_org_secret` treats `SF_OAUTH_INSTANCE_URL` as safe
+metadata (like a domain), never the refresh token.
+
+`api/main.py`: `GET /api/integrations/salesforce/oauth/status` (public
+— lets the web UI hide the button when unconfigured, matching
+`gmail_available()`'s pattern), `GET .../oauth/authorize` (owner-gated,
+mints a nonce into a new `_sf_oauth_state` dict — separate from the
+existing Google/Slack `_oauth_state` since this flow carries two extra
+fields, `org_label`+`domain`, through the round trip), `GET
+.../oauth/callback` (public, exchanges the code, calls the existing
+`save_tenant_org` — the same write path the JWT form uses, so both auth
+modes land in the identical place downstream). `web/src/channels/
+ConnectionsView.tsx`'s Salesforce panel now leads with a **"Connect
+Salesforce"** button (hidden with an explanatory note when the server
+has no Connected App configured) and tucks the JWT form into a
+collapsed "Advanced" `<details>` — the easy path is the default, the
+technical one is still there for whoever needs it.
+
+**Verify:** 13 new offline tests (`tests/test_salesforce_oauth.py` —
+`authorize_url`'s login/sandbox/My-Domain host resolution,
+`exchange_code`'s real request shape and missing-refresh_token error,
+`refresh_access_token` posting to the *stored* instance URL not a fixed
+host, `client_from_oauth` building a client from a mocked fresh token,
+`_build_client`'s OAuth-first dispatch never touching `SF_USERNAME`,
+`redact_org_secret`'s safe/unsafe split for the new key) + 1 new
+`test_api.py` 401/public-status check. Full offline suite 525/525, zero
+regression. `tsc -b` / `vitest` 6/6 / `npm run build` clean.
+**Not live-tested against a real Salesforce Connected App** — none is
+registered for this platform yet, so the actual authorize→consent→
+callback round trip is unverified against a real org (the unit tests
+cover every function up to and after the point a real browser
+would visit `login.salesforce.com`, which is the part that needs a
+real Connected App to exercise). The whole Docker stack (`api` +
+`worker`/`poller`/`cdc`/`slackbot`, since `salesforce.py` is shared)
+was rebuilt and restarted so this environment's live containers
+actually run today's code — this was **also** the root cause of an
+earlier confusing moment this session: the Docker images bake the app
+in at build time (only `sf_jwt`/the model cache are live-mounted), so
+every backend change made across several PRs today had been sitting
+unapplied in the running containers until that rebuild.
+
 ### Scoped, not built: per-tenant case-taxonomy config
 
 Move `map_case_fields`'s module/region/case-type mapping from a global

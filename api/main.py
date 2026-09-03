@@ -2275,6 +2275,76 @@ def salesforce_schema(org_label: str, tenant_id: str | None = None,
     return _sf.introspect_org(tid, org_label)
 
 
+# ── self-serve Salesforce OAuth (2026-09-03) ────────────────────────────
+# The "Connect Salesforce" button — one click, no Salesforce-admin setup on
+# the customer's side, unlike the JWT path above. Needs a Connected App
+# registered once for this platform (SF_OAUTH_CLIENT_ID/SECRET) — degrades
+# to "not configured" (503) until then, same as Google before its own
+# Connected App existed.
+SF_OAUTH_REDIRECT_URI = os.environ.get(
+    "SF_OAUTH_REDIRECT_URI", "http://localhost:8000/api/integrations/salesforce/oauth/callback"
+)
+# nonce -> (expires_at, user_id, tenant_id, org_label, domain) — separate from
+# _oauth_state (Google/Slack) since this flow carries two extra fields.
+_sf_oauth_state: dict[str, tuple[float, str, str, str, str]] = {}
+
+
+@app.get("/api/integrations/salesforce/oauth/status")
+def salesforce_oauth_status() -> dict:
+    from interpreter import salesforce_oauth as _sfo
+    return {"configured": _sfo.available()}
+
+
+@app.get("/api/integrations/salesforce/oauth/authorize")
+def salesforce_oauth_authorize(org_label: str = "default", domain: str = "",
+                               tenant_id: str | None = None,
+                               c: Caller = Depends(caller)) -> dict:
+    from interpreter import salesforce_oauth as _sfo
+
+    if not _sfo.available():
+        raise HTTPException(503, "Salesforce OAuth is not configured on this server")
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    nonce = secrets.token_urlsafe(24)
+    _sf_oauth_state[nonce] = (time.time() + 600, c.user_id, tid, org_label.strip() or "default", domain)
+    return {"url": _sfo.authorize_url(SF_OAUTH_REDIRECT_URI, nonce, domain=domain or None)}
+
+
+@app.get("/api/integrations/salesforce/oauth/callback")
+def salesforce_oauth_callback(code: str = "", state: str = "", error: str = "") -> HTMLResponse:
+    def page(msg: str) -> HTMLResponse:
+        return HTMLResponse(
+            f"<!doctype html><meta charset=utf-8><p>{msg}</p>"
+            "<script>setTimeout(()=>window.close(),1500)</script>"
+        )
+
+    if error:
+        return page(f"Salesforce authorisation failed: {error}")
+    hit = _sf_oauth_state.pop(state, None)
+    if not hit or hit[0] < time.time():
+        return page("This authorisation link has expired — try again.")
+    _, user_id, tid, org_label, domain = hit
+
+    from interpreter import salesforce as _sf
+    from interpreter import salesforce_oauth as _sfo
+
+    try:
+        tok = _sfo.exchange_code(code, SF_OAUTH_REDIRECT_URI, domain=domain or None)
+    except Exception as e:  # noqa: BLE001
+        return page(f"Could not complete Salesforce sign-in: {e}")
+
+    _sf.save_tenant_org(tid, org_label, {
+        "SF_OAUTH_REFRESH_TOKEN": tok["refresh_token"],
+        "SF_OAUTH_INSTANCE_URL": tok["instance_url"],
+    }, sb=_service)
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="salesforce_org.connected",
+                 actor_id=user_id, target_type="salesforce_org", target_id=org_label,
+                 summary=f"connected Salesforce org {org_label!r} via OAuth")
+    return page(f"Salesforce org {org_label!r} connected. You can close this window.")
+
+
 # ── Phase 16: policy rules ───────────────────────────────────────────
 class RuleIn(BaseModel):
     team: str

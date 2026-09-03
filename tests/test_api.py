@@ -109,6 +109,12 @@ def test_salesforce_org_endpoints_need_a_token():
     assert client.get("/api/integrations/salesforce/default/schema").status_code == 401
 
 
+def test_salesforce_oauth_status_is_public_and_authorize_needs_a_token():
+    r = client.get("/api/integrations/salesforce/oauth/status")
+    assert r.status_code == 200 and r.json() == {"configured": False}  # no SF_OAUTH_* in CI
+    assert client.get("/api/integrations/salesforce/oauth/authorize").status_code == 401
+
+
 @pytest.mark.integration
 def test_salesforce_connect_introspect_disconnect_roundtrip(auth_headers):
     """The real self-serve loop: connect a real org with real creds ->
