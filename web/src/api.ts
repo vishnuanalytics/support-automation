@@ -25,6 +25,7 @@ import type {
   KilMetrics,
   KilDigest,
   SfMeta,
+  SlackMeta,
   TraceResult,
   RunDetail,
   RunResult,
@@ -219,6 +220,7 @@ export const api = {
     status: () => req<GoogleStatus>("/integrations/slack/status"),
     authorize: (tenant_id: string) =>
       req<{ url: string }>(`/integrations/slack/authorize?tenant_id=${tenant_id}`),
+    meta: (tenantId: string) => req<SlackMeta>(`/slack/meta?tenant_id=${tenantId}`),
   },
 
   email: {

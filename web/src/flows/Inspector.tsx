@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import { api } from "../api";
-import type { KbCollection, SfMeta } from "../types";
+import type { Connection, KbCollection, SfMeta, SlackMeta } from "../types";
 import type { RFEdge, RFNode } from "./graph";
 
 // Salesforce routing metadata (queues + real Case fields/picklists,
@@ -123,6 +124,104 @@ function OrgPicker({
     <select value={value || "default"} onChange={(e) => onChange(e.target.value)}>
       {orgs.map((label) => (
         <option key={label} value={label}>{label}</option>
+      ))}
+    </select>
+  );
+}
+
+// Slack workspace metadata — fetched once per tenant, shared by every
+// channel/@mention picker in this editor session (same cache-per-key
+// shape as useSfMeta).
+const _EMPTY_SLACK: SlackMeta = { available: false, channels: [], users: [], usergroups: [] };
+const _slackCache = new Map<string, SlackMeta>();
+const _slackPromise = new Map<string, Promise<SlackMeta>>();
+
+function useSlackMeta(tenantId: string): SlackMeta {
+  const [meta, setMeta] = useState<SlackMeta>(_slackCache.get(tenantId) ?? _EMPTY_SLACK);
+  useEffect(() => {
+    if (!tenantId) return;
+    if (_slackCache.has(tenantId)) {
+      setMeta(_slackCache.get(tenantId)!);
+      return;
+    }
+    const p = _slackPromise.get(tenantId) ||
+      api.slack.meta(tenantId).catch(() => _EMPTY_SLACK);
+    _slackPromise.set(tenantId, p);
+    p.then((m) => {
+      _slackCache.set(tenantId, m);
+      setMeta(m);
+    });
+  }, [tenantId]);
+  return meta;
+}
+
+/** A real Slack channel (`#name` or `Cxxxxxxxx`), fetched live — or a
+ *  plain text box when Slack isn't connected / has 0 channels. */
+function ChannelPicker({
+  value,
+  onChange,
+  tenantId,
+  placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  tenantId: string;
+  placeholder?: string;
+}) {
+  const meta = useSlackMeta(tenantId);
+  if (!meta.available || meta.channels.length === 0) {
+    return (
+      <input
+        value={value}
+        placeholder={placeholder || "#support-escalations or Cxxxxxxxx"}
+        onChange={(e) => onChange(e.target.value.trim())}
+      />
+    );
+  }
+  const known = value === "" || meta.channels.some((c) => `#${c.name}` === value || c.id === value);
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)}>
+      <option value="">— none —</option>
+      {!known && <option value={value}>{value} (not in workspace)</option>}
+      {meta.channels.map((c) => (
+        <option key={c.id} value={`#${c.name}`}>
+          #{c.name}{c.is_member ? "" : "  (bot not in channel)"}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+/** A real Slack user (`Uxxxxxxxx`), fetched live — or a plain text box
+ *  when Slack isn't connected / has 0 visible human users. */
+function SlackUserPicker({
+  value,
+  onChange,
+  tenantId,
+  placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  tenantId: string;
+  placeholder?: string;
+}) {
+  const meta = useSlackMeta(tenantId);
+  if (!meta.available || meta.users.length === 0) {
+    return (
+      <input
+        value={value}
+        placeholder={placeholder || "Uxxxxxxxx"}
+        onChange={(e) => onChange(e.target.value.trim())}
+      />
+    );
+  }
+  const known = value === "" || meta.users.some((u) => u.id === value);
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)}>
+      <option value="">— none (resolved by agent email) —</option>
+      {!known && <option value={value}>{value} (not in workspace)</option>}
+      {meta.users.map((u) => (
+        <option key={u.id} value={u.id}>{u.name}{u.email ? ` (${u.email})` : ""}</option>
       ))}
     </select>
   );
@@ -284,6 +383,14 @@ export function NodeInspector({
             tenantId={tenantId}
             orgLabel={typeof config.org === "string" ? config.org : undefined}
           />
+          <div className="row" style={{ marginTop: 6 }}>
+            <span className="muted" style={{ width: 90 }}>org</span>
+            <OrgPicker
+              value={typeof config.org === "string" ? config.org : ""}
+              onChange={(v) => onConfig({ ...config, org: v || undefined })}
+              tenantId={tenantId}
+            />
+          </div>
           <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
             queue_by_team / enterprise_queue overrides are edited in the raw
             config below.
@@ -292,7 +399,7 @@ export function NodeInspector({
       )}
 
       {node.data.nodeType === "notify_human" && (
-        <NotifyHumanForm config={config} onConfig={onConfig} />
+        <NotifyHumanForm config={config} onConfig={onConfig} tenantId={tenantId} />
       )}
 
       {node.data.nodeType === "ai_prompt" && (
@@ -300,15 +407,27 @@ export function NodeInspector({
       )}
 
       {node.data.nodeType === "sf_context" && (
-        <SfContextForm config={config} onConfig={onConfig} />
+        <SfContextForm config={config} onConfig={onConfig} tenantId={tenantId} />
+      )}
+
+      {node.data.nodeType === "sf_case" && (
+        <SfCaseForm config={config} onConfig={onConfig} tenantId={tenantId} />
+      )}
+
+      {node.data.nodeType === "retrieve" && (
+        <RetrieveForm config={config} onConfig={onConfig} />
+      )}
+
+      {node.data.nodeType === "http_request" && (
+        <HttpRequestForm config={config} onConfig={onConfig} tenantId={tenantId} />
       )}
 
       {node.data.nodeType === "attachments" && (
-        <AttachmentsForm config={config} onConfig={onConfig} />
+        <AttachmentsForm config={config} onConfig={onConfig} tenantId={tenantId} />
       )}
 
       {node.data.nodeType === "identify" && (
-        <IdentifyForm config={config} onConfig={onConfig} />
+        <IdentifyForm config={config} onConfig={onConfig} tenantId={tenantId} />
       )}
 
       {(node.data.nodeType === "policy_gate" || node.data.nodeType === "task_dispatch") && (
@@ -481,6 +600,14 @@ function ClarifyForm({
         after <code>max rounds</code> of asking the customer, the Case is
         reassigned to this queue (blank = stay put, note only).
       </div>
+      <div className="row" style={{ marginTop: 4 }}>
+        <span className="muted" style={{ width: 110 }}>org</span>
+        <OrgPicker
+          value={typeof config.org === "string" ? config.org : ""}
+          onChange={(v) => set({ org: v || undefined })}
+          tenantId={tenantId}
+        />
+      </div>
       <label className="row" style={{ gap: 6, marginTop: 4 }}>
         <input
           type="checkbox"
@@ -568,6 +695,14 @@ function NotifyForm({
           onChange={(e) => set({ fallback_target: e.target.value.trim() || null })}
         />
       </div>
+      <div className="row" style={{ marginTop: 6 }}>
+        <span className="muted" style={{ width: 110 }}>org</span>
+        <OrgPicker
+          value={typeof config.org === "string" ? config.org : ""}
+          onChange={(v) => set({ org: v || undefined })}
+          tenantId={tenantId}
+        />
+      </div>
     </div>
   );
 }
@@ -651,9 +786,11 @@ function AiPromptForm({
 function SfContextForm({
   config,
   onConfig,
+  tenantId,
 }: {
   config: Record<string, unknown>;
   onConfig: (v: Record<string, unknown>) => void;
+  tenantId: string;
 }) {
   const want = Array.isArray(config.want)
     ? (config.want as string[])
@@ -683,6 +820,213 @@ function SfContextForm({
           {label}
         </label>
       ))}
+      <div className="row" style={{ marginTop: 6 }}>
+        <span className="muted" style={{ width: 90 }}>org</span>
+        <OrgPicker
+          value={typeof config.org === "string" ? config.org : ""}
+          onChange={(v) => onConfig({ ...config, org: v || undefined })}
+          tenantId={tenantId}
+        />
+      </div>
+    </div>
+  );
+}
+
+/** Origin/Status pickers pull real picklist values from `meta.case_fields`
+ *  by field name; a plain text box when the org isn't reachable / the
+ *  field isn't found (e.g. a heavily customized Status picklist). */
+function PicklistPicker({
+  fieldName,
+  value,
+  onChange,
+  meta,
+  placeholder,
+}: {
+  fieldName: string;
+  value: string;
+  onChange: (v: string) => void;
+  meta: SfMeta;
+  placeholder?: string;
+}) {
+  const field = (meta.case_fields || []).find((f) => f.name === fieldName);
+  if (!field || field.picklist_values.length === 0) {
+    return <input value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} />;
+  }
+  const known = value === "" || field.picklist_values.some((v) => v.value === value);
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)}>
+      <option value="">— default —</option>
+      {!known && <option value={value}>{value} (not in org)</option>}
+      {field.picklist_values.map((v) => (
+        <option key={v.value} value={v.value}>{v.label}</option>
+      ))}
+    </select>
+  );
+}
+
+function SfCaseForm({
+  config,
+  onConfig,
+  tenantId,
+}: {
+  config: Record<string, unknown>;
+  onConfig: (v: Record<string, unknown>) => void;
+  tenantId: string;
+}) {
+  const org = typeof config.org === "string" ? config.org : "";
+  const meta = useSfMeta(tenantId, org || undefined);
+  const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
+  return (
+    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+      <div className="muted" style={{ fontSize: 11 }}>
+        Resolves the inbound message to a real Salesforce Case — creating
+        the Contact/Account/Case as needed, or reusing an open Case for a
+        thread reply.
+      </div>
+      <div className="row" style={{ marginTop: 6 }}>
+        <span className="muted" style={{ width: 90 }}>org</span>
+        <OrgPicker value={org} onChange={(v) => set({ org: v || undefined })} tenantId={tenantId} />
+      </div>
+      <div className="row" style={{ marginTop: 4 }}>
+        <span className="muted" style={{ width: 90 }}>origin</span>
+        <PicklistPicker fieldName="Origin" value={typeof config.origin === "string" ? config.origin : "Email"}
+                        onChange={(v) => set({ origin: v || undefined })} meta={meta} placeholder="Email" />
+      </div>
+      <div className="row" style={{ marginTop: 4 }}>
+        <span className="muted" style={{ width: 90 }}>status</span>
+        <PicklistPicker fieldName="Status" value={typeof config.status === "string" ? config.status : "New"}
+                        onChange={(v) => set({ status: v || undefined })} meta={meta} placeholder="New" />
+      </div>
+      <div className="row" style={{ marginTop: 4 }}>
+        <span className="muted" style={{ width: 90 }}>reuse</span>
+        <select value={typeof config.reuse === "string" ? config.reuse : "thread"}
+                onChange={(e) => set({ reuse: e.target.value })}>
+          <option value="thread">reuse an open Case for a thread reply</option>
+          <option value="never">always create a new Case</option>
+        </select>
+      </div>
+      <label className="row" style={{ gap: 6, marginTop: 6 }}>
+        <input type="checkbox" style={{ width: "auto" }}
+               checked={config.create_contact !== false}
+               onChange={(e) => set({ create_contact: e.target.checked })} />
+        create the Contact if missing
+      </label>
+      <label className="row" style={{ gap: 6, marginTop: 4 }}>
+        <input type="checkbox" style={{ width: "auto" }}
+               checked={config.create_account !== false}
+               onChange={(e) => set({ create_account: e.target.checked })} />
+        create the Account if missing (business-domain senders)
+      </label>
+    </div>
+  );
+}
+
+function RetrieveForm({
+  config,
+  onConfig,
+}: {
+  config: Record<string, unknown>;
+  onConfig: (v: Record<string, unknown>) => void;
+}) {
+  const [cols, setCols] = useState<KbCollection[]>([]);
+  const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
+  const selected = (config.kb_sources as string[]) || [];
+
+  useEffect(() => {
+    api.kb.listCollections().then(setCols).catch(() => setCols([]));
+  }, []);
+
+  const toggle = (name: string) =>
+    set({
+      kb_sources: selected.includes(name)
+        ? selected.filter((n) => n !== name)
+        : [...selected, name],
+    });
+
+  return (
+    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+      <label>kb_sources (blank = every collection this tenant can reach)</label>
+      {cols.length === 0 && (
+        <div className="muted" style={{ fontSize: 11 }}>
+          no collections yet — add some in the Knowledge tab
+        </div>
+      )}
+      {cols.map((c) => (
+        <label key={c.source_id} className="row" style={{ gap: 6 }}>
+          <input
+            type="checkbox"
+            style={{ width: "auto" }}
+            checked={selected.includes(c.name)}
+            onChange={() => toggle(c.name)}
+          />
+          {c.name} <span className="muted">({c.entry_count})</span>
+        </label>
+      ))}
+      <div className="row" style={{ marginTop: 6 }}>
+        <span className="muted" style={{ width: 90 }}>top_k</span>
+        <input
+          type="number" min="1" max="10"
+          value={typeof config.top_k === "number" ? config.top_k : 5}
+          onChange={(e) => set({ top_k: parseInt(e.target.value, 10) })}
+        />
+      </div>
+    </div>
+  );
+}
+
+/** `http_request.connection`: a real per-tenant Connection slug (Data tab),
+ *  fetched live — the allow-list this node's base URL/auth actually come
+ *  from. Falls back to text when the tenant has 0 connections. */
+function HttpRequestForm({
+  config,
+  onConfig,
+  tenantId,
+}: {
+  config: Record<string, unknown>;
+  onConfig: (v: Record<string, unknown>) => void;
+  tenantId: string;
+}) {
+  const [conns, setConns] = useState<Connection[]>([]);
+  const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
+
+  useEffect(() => {
+    if (!tenantId) return;
+    api.connections.list(tenantId).then(setConns).catch(() => setConns([]));
+  }, [tenantId]);
+
+  const value = typeof config.connection === "string" ? config.connection : "";
+  const method = typeof config.method === "string" ? config.method : "GET";
+
+  return (
+    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+      <label>connection</label>
+      {conns.length === 0 ? (
+        <input value={value} placeholder="connection slug (Data tab)"
+               onChange={(e) => set({ connection: e.target.value.trim() })} />
+      ) : (
+        <select value={value} onChange={(e) => set({ connection: e.target.value })}>
+          <option value="">— pick a connection —</option>
+          {!conns.some((c) => c.slug === value) && value && <option value={value}>{value} (not found)</option>}
+          {conns.map((c) => (
+            <option key={c.slug} value={c.slug}>{c.slug} — {c.base_url}</option>
+          ))}
+        </select>
+      )}
+      <div className="row" style={{ marginTop: 6 }}>
+        <span className="muted" style={{ width: 90 }}>method</span>
+        <select value={method} onChange={(e) => set({ method: e.target.value })}>
+          {["GET", "POST", "PUT", "PATCH", "DELETE"].map((m) => <option key={m} value={m}>{m}</option>)}
+        </select>
+      </div>
+      <div className="field">
+        <label>path ({"{{ dotted.path }}"} templated)</label>
+        <input value={typeof config.path === "string" ? config.path : ""}
+               placeholder="/v1/things/{{context.id}}"
+               onChange={(e) => set({ path: e.target.value })} />
+      </div>
+      <div className="muted" style={{ fontSize: 11 }}>
+        query / headers / body / out_key are edited in the raw config below.
+      </div>
     </div>
   );
 }
@@ -690,9 +1034,11 @@ function SfContextForm({
 function AttachmentsForm({
   config,
   onConfig,
+  tenantId,
 }: {
   config: Record<string, unknown>;
   onConfig: (v: Record<string, unknown>) => void;
+  tenantId: string;
 }) {
   const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
   return (
@@ -753,6 +1099,16 @@ function AttachmentsForm({
           <em>max secs</em> is processed.
         </div>
       )}
+      {config.source !== "email" && (
+        <div className="row" style={{ marginTop: 6 }}>
+          <span className="muted" style={{ width: 90 }}>org</span>
+          <OrgPicker
+            value={typeof config.org === "string" ? config.org : ""}
+            onChange={(v) => set({ org: v || undefined })}
+            tenantId={tenantId}
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -760,10 +1116,13 @@ function AttachmentsForm({
 function NotifyHumanForm({
   config,
   onConfig,
+  tenantId,
 }: {
   config: Record<string, unknown>;
   onConfig: (v: Record<string, unknown>) => void;
+  tenantId: string;
 }) {
+  const meta = useSlackMeta(tenantId);
   const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
   const mention = (config.mention as Record<string, unknown>) || {};
   const channel = typeof config.channel === "string" ? config.channel : "both";
@@ -788,11 +1147,13 @@ function NotifyHumanForm({
       </select>
 
       <div className="row" style={{ marginTop: 6 }}>
-        <span className="muted" style={{ width: 130 }}>slack channel</span>
-        <input
+        <span className="muted" style={{ width: 130 }}>
+          slack channel {meta.available && <span className="muted">(live)</span>}
+        </span>
+        <ChannelPicker
           value={typeof config.slack_channel === "string" ? config.slack_channel : ""}
-          placeholder="#support-escalations or Cxxxxxxxx"
-          onChange={(e) => set({ slack_channel: e.target.value.trim() })}
+          onChange={(v) => set({ slack_channel: v })}
+          tenantId={tenantId}
         />
       </div>
 
@@ -813,10 +1174,10 @@ function NotifyHumanForm({
 
       <div className="row" style={{ marginTop: 6 }}>
         <span className="muted" style={{ width: 130 }}>@mention (Slack id)</span>
-        <input
+        <SlackUserPicker
           value={typeof mention.slack_user_id === "string" ? mention.slack_user_id : ""}
-          placeholder="Uxxxxxxxx (else resolved by agent email)"
-          onChange={(e) => set({ mention: { ...mention, slack_user_id: e.target.value.trim() } })}
+          onChange={(v) => set({ mention: { ...mention, slack_user_id: v } })}
+          tenantId={tenantId}
         />
       </div>
       <div className="row" style={{ marginTop: 4 }}>
@@ -827,6 +1188,63 @@ function NotifyHumanForm({
           onChange={(e) => set({ mention: { ...mention, mention_id: e.target.value.trim() } })}
         />
       </div>
+
+      <ByTeamOverride
+        label="channel override by routed_team"
+        value={(config.slack_channel_by_team as Record<string, string>) || {}}
+        onChange={(v) => set({ slack_channel_by_team: v })}
+        renderPicker={(v, onV) => <ChannelPicker value={v} onChange={onV} tenantId={tenantId} />}
+      />
+      <ByTeamOverride
+        label="@mention override by routed_team"
+        value={(mention.slack_user_by_team as Record<string, string>) || {}}
+        onChange={(v) => set({ mention: { ...mention, slack_user_by_team: v } })}
+        renderPicker={(v, onV) => <SlackUserPicker value={v} onChange={onV} tenantId={tenantId} />}
+      />
+    </div>
+  );
+}
+
+const ROUTED_TEAMS = ["support", "csm", "sales", "offboarding"];
+
+/** A team -> (something with a real picker) map, e.g. `slack_channel_by_team`.
+ *  Rows for the known `team_route` teams plus any custom key already in the
+ *  config; a select at the bottom adds a team not shown yet. */
+function ByTeamOverride({
+  label,
+  value,
+  onChange,
+  renderPicker,
+}: {
+  label: string;
+  value: Record<string, string>;
+  onChange: (v: Record<string, string>) => void;
+  renderPicker: (v: string, onChange: (v: string) => void) => ReactNode;
+}) {
+  const shown = Object.keys(value).filter((k) => k !== "default");
+  const addable = ROUTED_TEAMS.filter((t) => !shown.includes(t));
+  return (
+    <div style={{ marginTop: 8 }}>
+      <label style={{ display: "block" }}>{label}</label>
+      {shown.map((team) => (
+        <div className="row" key={team} style={{ gap: 4 }}>
+          <span className="muted" style={{ width: 90 }}>{team}</span>
+          {renderPicker(value[team] ?? "", (v) => {
+            const next = { ...value };
+            if (v) next[team] = v; else delete next[team];
+            onChange(next);
+          })}
+          <button onClick={() => { const next = { ...value }; delete next[team]; onChange(next); }}>✕</button>
+        </div>
+      ))}
+      {addable.length > 0 && (
+        <select value="" onChange={(e) => {
+          if (e.target.value) onChange({ ...value, [e.target.value]: "" });
+        }}>
+          <option value="">+ add a team override…</option>
+          {addable.map((t) => <option key={t} value={t}>{t}</option>)}
+        </select>
+      )}
     </div>
   );
 }
@@ -834,9 +1252,11 @@ function NotifyHumanForm({
 function IdentifyForm({
   config,
   onConfig,
+  tenantId,
 }: {
   config: Record<string, unknown>;
   onConfig: (v: Record<string, unknown>) => void;
+  tenantId: string;
 }) {
   const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
   const domainMatch = config.domain_match !== false;
@@ -886,6 +1306,14 @@ function IdentifyForm({
             const arr = e.target.value.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
             set({ free_email_domains: arr.length ? arr : undefined });
           }}
+        />
+      </div>
+      <div className="row" style={{ marginTop: 6 }}>
+        <span className="muted" style={{ width: 90 }}>org</span>
+        <OrgPicker
+          value={typeof config.org === "string" ? config.org : ""}
+          onChange={(v) => set({ org: v || undefined })}
+          tenantId={tenantId}
         />
       </div>
     </div>

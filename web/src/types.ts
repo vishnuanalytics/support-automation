@@ -92,6 +92,17 @@ export interface SfMeta {
   error?: string;
 }
 
+/** Slack workspace metadata for the flow editor's pickers (`notify_human`
+ *  channel / @mention fields). `available:false` when the tenant hasn't
+ *  connected Slack. */
+export interface SlackMeta {
+  available: boolean;
+  channels: { id: string; name: string; is_member: boolean }[];
+  users: { id: string; name: string; email: string | null }[];
+  usergroups: { id: string; handle: string; name: string }[];
+  errors?: string[];
+}
+
 /** Phase 19 — a proposed flow graph (from Mermaid import or AI assist),
  *  loaded onto the editor canvas as unsaved state; never persisted as-is. */
 export interface FlowCandidate {

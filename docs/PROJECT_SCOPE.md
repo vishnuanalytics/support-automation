@@ -710,24 +710,26 @@ Design decisions already settled in that conversation:
 **Current focus (2026-09-03): the self-serve multi-tenant/multi-org
 Salesforce connector, and making the flow editor fetch real data
 instead of hardcoding it** — see "Multi-tenant / multi-Salesforce-org
-scoping" below for the full chunk-by-chunk history. Status: connector
-+ introspection + OAuth + org-label threading through every SF-touching
-node handler are all built and live-verified; the flow editor's
-Inspector now fetches real Case fields/Queues/connected-orgs per
-tenant instead of raw JSON for `sf_writeback`/`ask_human`/`handover`/
-`clarify`/`notify` (see "Flow editor Inspector: real Salesforce data
-instead of hardcoded/raw JSON"). **Next up, not started**: the same
-treatment for Slack — `interpreter/slack.py` needs `list_channels`
-(doesn't exist yet) and a public wrapper for `list_usergroups`, `SCOPES`
-needs `channels:read` added (already-connected tenants need to
-reconnect), a new `GET /api/integrations/slack/meta` endpoint, and
-`ChannelPicker`/`UserPicker` components wired into `notify_human`'s
-`slack_channel`/`mention.slack_user_id` fields (currently free text).
-Also deferred, **explicitly out of scope until asked for again**: Google
-Calendar meeting-scheduling as its own node type (design decided — time
-from BOTH the customer's message AND Google Calendar free/busy; needs
-a new `interpreter/gcalendar.py` + widening `gdrive.py`'s OAuth scopes,
-with a reconnect caveat).
+scoping" below for the full chunk-by-chunk history. Status:
+connector + introspection + OAuth + org-label threading through every
+SF-touching node handler are all built and live-verified; every flow
+editor node whose config is genuinely backed by an external system
+(Salesforce Case fields/Queues/connected-orgs, Slack channels/users/
+usergroups, per-tenant HTTP Connections, internal KB collections) now
+renders a real picker instead of raw JSON — see "Flow editor Inspector:
+real Salesforce data instead of hardcoded/raw JSON" and "Every node
+with a real data source gets a real picker" for the two chunks. **Not
+yet done, noted as the next Salesforce introspection addition if it
+becomes a real pain point**: a `list_active_users` function (no SF User
+picker exists yet — `notify.target_by_type`/`fallback_target` and
+`notify_human.mention.mention_id` stay free text). **Also not yet
+done**: neither editor chunk has been clicked through in a real
+browser — next step before calling this fully shipped. Deferred,
+**explicitly out of scope until asked for again**: Google Calendar
+meeting-scheduling as its own node type (design decided — time from
+BOTH the customer's message AND Google Calendar free/busy; needs a new
+`interpreter/gcalendar.py` + widening `gdrive.py`'s OAuth scopes, with
+a reconnect caveat).
 
 **Phase KIL — Knowledge Integrity Loop (COMPLETE a–f + live-verified,
 2026-09-02; PR #29).** Catch
@@ -1442,6 +1444,87 @@ degrades gracefully for an unknown org label). Full offline suite
 yet live-verified in the browser against the real `acme-dev` connected
 org (still live for the demo tenant from the introspection chunk) —
 next step before shipping.
+
+### Every node with a real data source gets a real picker (2026-09-03)
+
+Per the user's follow-up ("check all the nodes whichever we can give
+picker, give them that") — a full sweep of every `registry.py` node
+handler for config fields backed by an external system, not just the
+`sf_writeback`/queue fields from the previous chunk. Split into two
+halves: Slack introspection (new capability) and closing the remaining
+Salesforce-org gaps (same capability, more nodes).
+
+**Slack — new.** `interpreter/slack.py` gained `list_channels`
+(`conversations.list`, public+private), `list_users` (`users.list`,
+filtered to real humans — bots/deleted/Slackbot dropped), `list_usergroups`
+(a richer public sibling of the existing `_usergroup_index` handle→id
+cache), and `workspace_meta()` combining all three with the same
+degrade-independently shape as `salesforce.introspect_org` —
+`available:false` only when the tenant hasn't connected Slack at all,
+never when one section fails. `SCOPES` widened to add `channels:read,
+groups:read,users:read` (existing already-connected tenants keep
+working with no reconnect needed — checked live against Globex's real
+bot token, which already carried these scopes). New
+`GET /api/slack/meta` endpoint, tenant-scoped 5 min cache (same pattern
+as `salesforce/meta`'s fix from the previous chunk, not the old global
+bug). `notify_human`'s `slack_channel` and `mention.slack_user_id` are
+now `ChannelPicker`/`SlackUserPicker` dropdowns instead of free text,
+plus a new `ByTeamOverride` control (rows keyed by the `team_route`
+team names) for `slack_channel_by_team` and `mention.slack_user_by_team`.
+`mention.mention_id` (the Chatter/SF id fallback) stays free text — no
+SF User-listing function exists yet, noted below.
+
+**Salesforce — closing gaps.** Several node forms already read
+`config.org` (from the org-threading chunk two back) but had no UI to
+*set* it — `ClarifyForm`, `NotifyForm`, and the `ask_human`/`handover`
+block all silently fell back to the raw JSON editor for org selection.
+All four now render `OrgPicker`. New `SfCaseForm` for the `sf_case`
+node (previously raw JSON only, despite being the node that actually
+creates the Case): `OrgPicker` + `Origin`/`Status` dropdowns sourced
+live from `meta.case_fields` picklists (verified live against
+`acme-dev`: `Status` = New/Triaged/In Progress/Working/Escalated/
+Waiting on Customer/Resolved/Closed, `Origin` = Phone/Email/Web), plus
+`reuse`/`create_contact`/`create_account` controls. New `RetrieveForm`
+for the `retrieve` node's `kb_sources` (same collection-checkbox pattern
+as the existing `KbLookupForm`, previously not reused here despite
+`retrieve` being the more commonly-wired node). New `HttpRequestForm`
+for `http_request.connection` — a real per-tenant `Connection` slug
+dropdown (Data tab), reusing the already-existing `api.connections.list`
+that nothing in the editor consumed yet. `IdentifyForm`/`SfContextForm`/
+`AttachmentsForm` gained the same `OrgPicker` the org-threading chunk
+made possible but never wired into their forms.
+
+**Deliberately not touched** — surveyed and ruled out, not missed:
+`team_route`'s `rules`/`default` route to platform-internal team-name
+strings, not fetched data (same call from the previous chunk, held).
+`classify`/`extract`/`transform`/`trigger`/`case_lookup`/`auto_reply`
+have no config field backed by an external system — thresholds, dotted
+paths, and LLM-defined field names, not something to fetch a picklist
+for. `ai_prompt.model` is a free-text model id; it's a *fixed* roster
+(`interpreter/llm.py::MODELS`), not something fetched live from a
+connector, so left as text rather than stretching this chunk's scope to
+static-constant dropdowns. `agent`'s nested `retrieve`/`draft` sub-configs
+would reuse `RetrieveForm`/`AiPromptForm` reasonably cleanly but weren't
+done in this pass — small enough to fold into the next editor chunk
+rather than block this one on it. `notify.target_by_type`/
+`fallback_target` and `notify_human.mention.mention_id` stay free text —
+picking a specific Salesforce User needs a new `list_active_users`
+introspection function that doesn't exist yet (same class of gap as
+Slack's user list did before this chunk); noted as the next Salesforce
+introspection addition if this becomes a real pain point.
+
+**Verify:** 6 new offline tests (`tests/test_slack_introspection.py` —
+channel/user/usergroup filtering, degrade-to-empty on any Slack error,
+`workspace_meta`'s combine-three-sections shape) + 2 new
+`tests/test_api.py` tests (401 without a token; a live
+`@pytest.mark.integration` test against the real Globex Slack workspace
+— 200 with the right key shape). Live-verified directly against Globex's
+real Slack workspace before wiring the endpoint: 12 real channels
+(`cx-l1`, `cx-billing`, `cx-tier2`, …), 1 real human user
+(bots/Slackbot filtered out correctly), 7 real usergroups. Full offline
+suite 548/548. Frontend: `tsc -b` clean, `vitest run` 6/6, `vite build`
+clean (739 kB bundle, same pre-existing size warning). Not yet clicked
+through in a real browser.
 
 ### Scoped, not built: per-tenant case-taxonomy config
 

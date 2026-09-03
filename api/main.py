@@ -471,6 +471,28 @@ def salesforce_meta(tenant_id: str | None = None, org: str = "default",
     return _SF_META_CACHE[key][1]
 
 
+# tenant_id -> (cached_at, data). Same pattern as _SF_META_CACHE.
+_SLACK_META_CACHE: dict[str, tuple[float, dict]] = {}
+
+
+@app.get("/api/slack/meta")
+def slack_meta(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    """Slack channels + users + usergroups for the flow editor's pickers
+    (`notify_human`). Tenant-scoped, cached 5 min. `available:false` +
+    empty lists when the tenant hasn't connected Slack."""
+    import time
+
+    from interpreter import slack as _slack
+
+    tid = _caller_tenant(c, tenant_id)
+    now = time.time()
+    hit = _SLACK_META_CACHE.get(tid)
+    if hit is None or now - hit[0] > 300:
+        data = _slack.workspace_meta(tid, sb=c.sb)
+        _SLACK_META_CACHE[tid] = (now, data)
+    return _SLACK_META_CACHE[tid][1]
+
+
 @app.get("/api/flows")
 def list_flows(c: Caller = Depends(caller)) -> list[dict]:
     rows = (
