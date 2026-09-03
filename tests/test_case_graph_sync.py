@@ -115,7 +115,12 @@ def test_sync_case_lifecycle_builds_the_expected_cypher_params(monkeypatch):
     assert p["module"] == "API & Webhooks" and p["account_id"] == "001XX000003DfgAAA"
     assert len(p["messages"]) == 4
     assert {m["role"] for m in p["messages"]} == {"inbound", "agent_note", "agent_reply"}
-    assert "MERGE (mm:Message {id: msg.id})" in captured["cypher"]
+    # security fix (2026-09-03) -- Case/Account/Message MERGE keys include
+    # tenant_id, not just the Salesforce-org-scoped id, so two tenants can
+    # never collide into the same node (SF record ids aren't globally unique).
+    assert "MERGE (c:Case {sf_id: $sf_id, tenant_id: $tenant_id})" in captured["cypher"]
+    assert "MERGE (a:Account {sf_id: $account_id, tenant_id: $tenant_id})" in captured["cypher"]
+    assert "MERGE (mm:Message {id: msg.id, tenant_id: $tenant_id})" in captured["cypher"]
     assert "MERGE (c)-[:HAS_MESSAGE]->(mm)" in captured["cypher"]
 
 

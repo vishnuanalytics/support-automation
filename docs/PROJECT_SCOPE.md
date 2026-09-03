@@ -1001,6 +1001,110 @@ all session, could plausibly take 20-30+ minutes and mostly exercise the
 weak fallback model rather than a clean signal). Flagged for the user
 rather than silently spent.
 
+## Multi-tenant / multi-Salesforce-org scoping (2026-09-03)
+
+User asked for a scope of what's needed for real multi-tenant + multi-
+Salesforce-org support, plus whether org-structure changes (team/module/
+workflow) and Supabase+Neo4j together actually isolate two tenants
+safely. Answered from an evidence-based audit (file:line citations, not
+assumption) rather than assumed. Findings:
+
+- **Postgres/Supabase: solid.** RLS-enforced, re-verified via a
+  dedicated security-review fork this session (zero cross-tenant
+  findings) on top of the original Phase 4 `rls_check.sql` verification.
+- **Neo4j: had a real, unenforced gap — fixed below.** One shared Aura
+  instance for all tenants (no Fabric/per-tenant database); the
+  Case/Account/Message/Reply graph MERGEd on a Salesforce record id
+  alone (`sf_id`/`case_sf_id`/`id`), with `tenant_id` stamped via a
+  post-merge `SET`, not part of the merge key. Salesforce record ids are
+  per-org, not globally unique — two tenants on different orgs sharing
+  an id would silently MERGE into the *same* node, cross-contaminating
+  case history. The public-docs graph (`:Doc`/`:Section`, shared
+  `zapier-public` corpus) and the KB-article graph (`:KBArticle`, keyed
+  on a Postgres UUID) were never at risk — this was specific to the
+  Case-history graph.
+- **Salesforce connector: isolated correctly, but hard-capped at one org
+  per tenant.** `client_for(tenant_id)` never bleeds credentials across
+  tenants. `tenant_integrations` has `primary key (tenant_id, kind)` — a
+  tenant can have at most one `kind='salesforce'` row, full stop.
+  Multi-org (sandbox+prod, or several business units each on their own
+  org) isn't unbuilt, it's schema-blocked. **Not built this session** —
+  scoped as its own feature below.
+- **Org-structure-change resilience: routing is safe, taxonomy is
+  brittle.** `policy_rules`/`notify_targets` are genuine per-tenant
+  tables — a customer renaming/adding a team needs zero code changes.
+  `salesforce.py::map_case_fields` (topic → `Module__c`/`SubModule__c`/
+  `Region__c`) is one hardcoded Python dict shared by *every* tenant, not
+  per-tenant data — this is the same bug class migration 079 already hit
+  once live (an unmapped topic rejected by a restricted SF picklist).
+  `scripts/sf_support_setup.py`'s picklist values and this runtime
+  mapping are two separate hardcoded sources of truth with nothing
+  keeping them in sync. **Not built this session** — scoped below.
+
+### Fixed this session: the Neo4j merge-key gap
+
+`interpreter/case_memory.py` — both `_MERGE_CYPHER` (Phase 21 resolved-
+case sync) and `_LIFECYCLE_CYPHER` (KIL-a Case-lifecycle sync) now key
+every MERGE on `(sf_id, tenant_id)` (`Case`/`Reply`/`Account`) or
+`(id, tenant_id)` (`Message`), not the Salesforce id alone; the
+`SIMILAR_TO` cross-match (`UNWIND $similar … MATCH (o:Case {sf_id: …})`)
+now also pins `tenant_id`, so a similarity edge can never link two
+different tenants' cases. `ingestion/neo4j_sync.py::ensure_constraints`
+drops the old single-property uniqueness constraints
+(`case_sf_id`/`reply_case_sf_id`/`message_id`/`account_sf_id`) and
+replaces them with composite `(id, tenant_id)` ones — without this, the
+Cypher fix alone would make two tenants sharing an id start throwing
+constraint-violation errors on every sync (fail-loud, better than silent
+corruption, but still broken) instead of correctly creating two separate
+nodes. Confirmed **Neo4j Aura (this project's instance) supports
+composite uniqueness constraints** — applied live, old constraints gone,
+new ones present (`SHOW CONSTRAINTS` checked directly). `Module`/
+`CaseType`/`Agent` taxonomy nodes were deliberately left global/shared
+(not part of the flagged risk — no case *content* crosses tenants
+through a shared `:Module {name:"Billing"}` node the way it would
+through a miskeyed `:Case` node; nothing in the codebase traverses
+taxonomy nodes to reach another tenant's cases).
+
+**Verify:** `tests/test_case_graph_sync.py`'s Cypher-string assertion
+updated to match the new keys (1 test); full offline suite 499/499.
+**Live-verified directly against the collision scenario** (not just code
+review): synced two `sync_case_lifecycle()` calls with the *same*
+`sf_id` under two different `tenant_id`s — confirmed via a live `MATCH`
+query that this now produces **two separate, correctly-attributed
+nodes** (previously would have silently produced one merged node under
+whichever tenant synced first). Cleaned up the synthetic test nodes
+afterward.
+
+**Not retroactive.** This fixes the merge key going forward; it does not
+scan existing graph data for already-collided nodes from before the fix
+(no evidence any real collision has happened — Acme/Globex test data
+doesn't share Salesforce ids — but a full audit/cleanup script for a
+customer environment with real overlap risk is out of scope of this fix
+and would be its own chunk if ever needed).
+
+### Scoped, not built: multi-Salesforce-org support
+
+Drop the `(tenant_id, kind)` uniqueness on `tenant_integrations`, add an
+org label/identifier column, thread it through `client_for()` (resolve
+by `(tenant_id, org_label)` instead of `(tenant_id, kind)` alone), flow
+node config (`sf_case`/`sf_writeback`/`sf_context` need to say *which*
+org connection to use), and the web Connections-style UI (today's
+Connections tab is for generic `http_request` targets, not Salesforce —
+would need its own picker). Medium-sized: schema + connector + every
+SF-touching node's config shape + UI.
+
+### Scoped, not built: per-tenant case-taxonomy config
+
+Move `map_case_fields`'s module/region/case-type mapping from a global
+hardcoded dict into a per-tenant table (same shape as `policy_rules` —
+RLS-scoped, editable via the web), with `scripts/sf_support_setup.py`
+reading from that same table instead of carrying its own separate
+hardcoded picklist list. Removes the two-sources-of-truth bug class
+migration 079 already hit once. Medium-sized: new table + rewritten
+mapping function (with a fallback default for tenants that never
+configure it, so existing behavior doesn't regress) + setup-script
+rework + a web admin surface to edit it.
+
 **Audit log coverage extended (2026-09-03) — closes a real gap in Phase
 28 step 1.** User's request: "improve the logs, who changed what." Step 1
 wired `audit.record()` into 6 endpoints (publish/rollback/delete flow,
