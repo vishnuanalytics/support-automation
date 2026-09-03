@@ -80,7 +80,15 @@ def available() -> bool:
 
 
 def _build_client(creds: dict[str, str]):
-    """creds keys mirror the env var names (SF_USERNAME, SF_CONSUMER_KEY, ...)."""
+    """creds keys mirror the env var names (SF_USERNAME, SF_CONSUMER_KEY, ...).
+    D: OAuth (self-serve "Connect Salesforce") — `SF_OAUTH_REFRESH_TOKEN` +
+    `SF_OAUTH_INSTANCE_URL`, checked first since this shape has no
+    SF_USERNAME at all (see `interpreter/salesforce_oauth.py`)."""
+    if creds.get("SF_OAUTH_REFRESH_TOKEN") and creds.get("SF_OAUTH_INSTANCE_URL"):
+        from . import salesforce_oauth
+        return salesforce_oauth.client_from_oauth(
+            creds["SF_OAUTH_REFRESH_TOKEN"], creds["SF_OAUTH_INSTANCE_URL"])
+
     from simple_salesforce import Salesforce
 
     g = creds.get
@@ -214,7 +222,7 @@ def delete_tenant_org(tenant_id: str, org_label: str, sb=None) -> None:
     _tenant_clients.pop((str(tenant_id), org_label or "default"), None)
 
 
-_SAFE_ORG_KEYS = ("SF_USERNAME", "SF_DOMAIN")   # everything else in a creds dict is secret
+_SAFE_ORG_KEYS = ("SF_USERNAME", "SF_DOMAIN", "SF_OAUTH_INSTANCE_URL")   # everything else is secret
 
 
 def redact_org_secret(creds: dict[str, str]) -> dict[str, Any]:

@@ -136,6 +136,13 @@ export const api = {
     schema: (orgLabel: string, tenantId?: string) =>
       req<SalesforceOrgSchema>(`/integrations/salesforce/${encodeURIComponent(orgLabel)}/schema` +
                                `${tenantId ? `?tenant_id=${tenantId}` : ""}`),
+    oauthStatus: () => req<{ configured: boolean }>("/integrations/salesforce/oauth/status"),
+    oauthAuthorize: (b: { org_label: string; domain?: string; tenant_id?: string }) => {
+      const p = new URLSearchParams({ org_label: b.org_label });
+      if (b.domain) p.set("domain", b.domain);
+      if (b.tenant_id) p.set("tenant_id", b.tenant_id);
+      return req<{ url: string }>(`/integrations/salesforce/oauth/authorize?${p.toString()}`);
+    },
   },
   rollbackFlow: (id: string, version: number) =>
     req<{ published_version: number }>(`/flows/${id}/rollback`, {

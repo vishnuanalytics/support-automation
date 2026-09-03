@@ -388,6 +388,7 @@ export interface SalesforceOrg {
   org_label: string;
   SF_USERNAME?: string;
   SF_DOMAIN?: string;
+  SF_OAUTH_INSTANCE_URL?: string;
   has_credentials: boolean;
   updated_at: string;
 }
