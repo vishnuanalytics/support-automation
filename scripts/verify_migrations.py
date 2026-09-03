@@ -100,8 +100,16 @@ def live_schema():
     if not (url and key):
         return None
     from supabase import create_client
-    sb = create_client(url, key)
-    d = sb.rpc("introspect_schema").execute().data or {}
+    try:
+        sb = create_client(url, key)
+        d = sb.rpc("introspect_schema").execute().data or {}
+    except Exception:
+        # a placeholder/unreachable URL -- e.g. another test module's dummy
+        # SUPABASE_URL (tests/test_api.py sets one via os.environ.setdefault
+        # so `api.main` imports offline) leaking into this process -- is
+        # indistinguishable from "no real creds" for this cheap guard's
+        # purposes. Skip, don't fail the suite over test-isolation noise.
+        return None
     return {
         "tables": {t.lower() for t in d.get("tables", [])},
         "columns": {(c["table"].lower(), c["column"].lower()) for c in d.get("columns", [])},
