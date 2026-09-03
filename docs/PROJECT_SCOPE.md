@@ -992,6 +992,63 @@ this pass** (no existing test happens to call them, though they're the
 same pattern as everything that did verify): `tenant.created`,
 `invitation.accepted`, `trigger.created`/`trigger.deleted`.
 
+**Web workspace switcher (2026-09-03) — found live, from the user's own
+account.** User reported seeing `tenant_id required (you belong to
+several tenants)` in the UI. Root cause, confirmed by querying the live
+DB directly: the account genuinely owns 2 workspaces (the seeded Acme
+tenant + a self-created one), and `web/src/App.tsx` **never had a
+workspace switcher at all** — it only ever checked "0 memberships"
+(show the create-workspace screen) vs. "1+" (silently use... nothing
+explicit; every API call just omitted `tenant_id` and relied on
+`api/main.py::_caller_tenant()`'s "if exactly 1 membership, infer it"
+shortcut). The moment an account has 2+ memberships, every tenant-scoped
+listing/creation endpoint (Team, Channels, Connections, Rules, Billing,
+Activity, creating a flow or a KB collection) 400s — this was never
+caught before because every account used in testing this whole session
+happened to belong to exactly one tenant.
+
+**Fix:** `App.tsx` now tracks a real `tenantId` (from `listTenants()`),
+persisted per-user in `localStorage` (`workspace:<user_id>`). With 2+
+memberships and no valid stored choice, a **"Choose a workspace"**
+picker screen (same visual style as the existing "Set up your
+workspace" screen) lists each workspace + the caller's role in it; once
+chosen, a `<select>` switcher appears in the header (only when 2+
+memberships — no clutter for the common single-tenant case) to change
+it later. Every tenant-scoped view (`FlowList`, `BillingView`,
+`ConnectionsView`, `TeamView`, `ChannelsView`, `RulesView`,
+`KnowledgeView`, `ActivityView`) now takes an explicit `tenantId` prop
+and is remounted (`key={tenantId}`) on switch so it refetches cleanly,
+instead of relying on the backend's single-membership inference. Along
+the way, fixed a second latent bug the switcher surfaced: `role`/
+`canEdit`/`isOwner` were previously derived as the **best role across
+ALL memberships** — an owner-in-A-but-viewer-in-B account would see
+owner-only tabs while actually working in B. Now derived from the
+*current* tenant's own role.
+
+Backend: `GET /api/rules` gains an optional `tenant_id` filter (it
+previously mixed every visible tenant's rules into one unlabeled list —
+`RulesView` had been inferring the "current" tenant from `rules[0]`,
+fragile and simply wrong once rules from 2 tenants were mixed together).
+Every other touched endpoint (`connections`, `members`/`invitations`,
+`email` channel, `kb.createCollection`, `createFlow`, `rules.create`)
+already accepted an optional `tenant_id` server-side — only the
+frontend had never been sending it.
+
+**Not fixed, a smaller residual noted, not chased further:** `GET
+/api/invitations` (RLS-scoped, no tenant filter) can show pending
+invites from more than one owned tenant mixed together, unlabeled, for
+an account that owns 2+ workspaces — a display nit, not an error path,
+lower priority than the switcher itself.
+
+**Verify:** `tsc -b` clean, `vitest run` 6/6, `npm run build` clean,
+full Python offline suite 499/499 (touched `list_rules` only). **Not
+live-browser-verified in this pass** — no working headless-browser
+screenshot tool in this sandbox (playwright's chromium needs system
+libs requiring `sudo`, unavailable here) and no way to sign in
+programmatically as the real reporting account without its password;
+Vite HMR picked up every file change cleanly with no console errors.
+Needs the user's own browser refresh to close the loop.
+
 **Phase 28 — a 6-step ordered feature list (infra-first, each step
 reuses the last): 1. platform activity/audit log ✅ · 2. flow-version
 rollback audit trail + `flow_versions` retention ✅ · 3. billing quota

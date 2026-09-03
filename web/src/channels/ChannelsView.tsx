@@ -43,7 +43,7 @@ function fromChannel(ch: EmailChannel): Form {
   };
 }
 
-export function ChannelsView() {
+export function ChannelsView({ tenantId }: { tenantId: string }) {
   const [ch, setCh] = useState<EmailChannel | null>(null);
   const [f, setF] = useState<Form>(BLANK);
   const [err, setErr] = useState<string | null>(null);
@@ -52,20 +52,20 @@ export function ChannelsView() {
 
   function load() {
     api.email
-      .status()
+      .status(tenantId)
       .then((s) => {
         setCh(s);
         if (s.configured) setF(fromChannel(s));
       })
       .catch((e: ApiError) => setErr(e.message));
   }
-  useEffect(load, []);
+  useEffect(load, [tenantId]);
 
   const set = <K extends keyof Form>(k: K, v: Form[K]) => setF((p) => ({ ...p, [k]: v }));
 
   const payload = useMemo<EmailChannelSave>(() => {
     const b: EmailChannelSave = {
-      provider: f.provider, team: f.team.trim() || "support",
+      provider: f.provider, tenant_id: tenantId, team: f.team.trim() || "support",
       from_name: f.from_name.trim() || undefined,
       no_reply_addr: f.no_reply_addr.trim() || undefined,
       auto_send_enabled: f.auto_send_enabled, active: f.active,
@@ -79,7 +79,7 @@ export function ChannelsView() {
       });
     }
     return b;
-  }, [f]);
+  }, [f, tenantId]);
 
   async function run<T>(fn: () => Promise<T>, ok: string) {
     setBusy(true); setErr(null); setMsg(null);
@@ -97,7 +97,7 @@ export function ChannelsView() {
   async function connectGmail() {
     setErr(null);
     try {
-      const { url } = await api.email.googleAuthorize();
+      const { url } = await api.email.googleAuthorize(tenantId);
       window.open(url, "_blank", "width=520,height=640");
       setMsg("Finish in the Google window, then refresh.");
     } catch (e) {
@@ -245,7 +245,7 @@ export function ChannelsView() {
         {ch?.configured && (
           <button className="err" disabled={busy}
             onClick={() => confirm("Disconnect this mailbox?") &&
-              run(() => api.email.remove(), "disconnected")}>
+              run(() => api.email.remove(tenantId), "disconnected")}>
             Disconnect
           </button>
         )}

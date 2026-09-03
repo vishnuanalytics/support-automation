@@ -31,10 +31,16 @@ type View =
   | "billing"
   | "activity";
 
+type TenantMembership = { tenant_id: string; role: string; name?: string | null };
+
+function tenantLabel(t: TenantMembership): string {
+  return t.name || `workspace ${t.tenant_id.slice(0, 8)}`;
+}
+
 export function App() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
-  const [role, setRole] = useState<string | null>(null);
-  const [memberships, setMemberships] = useState<number | null>(null);
+  const [tenants, setTenants] = useState<TenantMembership[] | null>(null);
+  const [tenantId, setTenantId] = useState<string | null>(null);
   const [flowId, setFlowId] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [view, setView] = useState<View>("editor");
@@ -45,48 +51,56 @@ export function App() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  useEffect(() => {
-    if (!session) return;
-    const rank: Record<string, number> = { owner: 3, editor: 2, viewer: 1 };
+  const storageKey = session?.user.id ? `workspace:${session.user.id}` : null;
+
+  function applyTenants(rows: TenantMembership[]) {
+    setTenants(rows);
+    if (rows.length === 0) {
+      setTenantId(null);
+      return;
+    }
+    if (rows.length === 1) {
+      setTenantId(rows[0].tenant_id);
+      return;
+    }
+    // 2+ workspaces — a stored choice wins if it's still one you're a member
+    // of; otherwise show the picker (tenantId stays null).
+    const stored = storageKey ? localStorage.getItem(storageKey) : null;
+    setTenantId(stored && rows.some((r) => r.tenant_id === stored) ? stored : null);
+  }
+
+  const load = () => {
+    setTenants(null);
     // claim any pending invites for this email first, then read memberships
     api.acceptInvitations().catch(() => {}).finally(() => {
-      api
-        .listTenants()
-        .then((rows) => {
-          setMemberships(rows.length);
-          const best = rows
-            .map((r) => r.role)
-            .sort((a, b) => (rank[b] ?? 0) - (rank[a] ?? 0))[0];
-          setRole(best ?? null);
-        })
-        .catch(() => {
-          setMemberships(0);
-          setRole(null);
-        });
+      api.listTenants().then(applyTenants).catch(() => setTenants([]));
     });
+  };
+
+  useEffect(() => {
+    if (session) load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
 
+  function chooseTenant(id: string) {
+    setTenantId(id);
+    if (storageKey) localStorage.setItem(storageKey, id);
+    setFlowId(null);
+    setReloadKey((k) => k + 1);
+  }
+
+  const current = tenants?.find((t) => t.tenant_id === tenantId) ?? null;
+  const role = current?.role ?? null;
   const canEdit = role === "owner" || role === "editor";
   const isOwner = role === "owner";
-
-  const reload = () => {
-    setMemberships(null);
-    setReloadKey((k) => k + 1);
-    api
-      .listTenants()
-      .then((rows) => {
-        setMemberships(rows.length);
-        setRole(rows.length ? "owner" : null);
-      })
-      .catch(() => setMemberships(0));
-  };
 
   async function createWorkspace() {
     const name = prompt("Workspace name (e.g. your company)")?.trim();
     if (!name) return;
     try {
-      await api.createTenant(name);
-      reload();
+      const created = await api.createTenant(name);
+      if (storageKey) localStorage.setItem(storageKey, created.tenant_id);
+      load();
     } catch (e) {
       alert(String(e));
     }
@@ -94,8 +108,9 @@ export function App() {
 
   if (session === undefined) return <div style={{ padding: 20 }}>…</div>;
   if (session === null) return <Login />;
+  if (tenants === null) return <div style={{ padding: 20 }}>…</div>;
 
-  if (memberships === 0) {
+  if (tenants.length === 0) {
     return (
       <div className="login col">
         <h1>Set up your workspace</h1>
@@ -107,6 +122,27 @@ export function App() {
         <button className="primary" onClick={createWorkspace}>
           Create a workspace
         </button>
+        <button onClick={() => supabase.auth.signOut()}>sign out</button>
+      </div>
+    );
+  }
+
+  if (!tenantId) {
+    return (
+      <div className="login col">
+        <h1>Choose a workspace</h1>
+        <p className="muted">
+          You're signed in as <strong>{session.user.email}</strong>, a member of
+          {" "}{tenants.length} workspaces. Pick one to continue — you can switch
+          later from the header.
+        </p>
+        <div className="col" style={{ gap: 8 }}>
+          {tenants.map((t) => (
+            <button key={t.tenant_id} onClick={() => chooseTenant(t.tenant_id)}>
+              {tenantLabel(t)} <span className="muted">— {t.role}</span>
+            </button>
+          ))}
+        </div>
         <button onClick={() => supabase.auth.signOut()}>sign out</button>
       </div>
     );
@@ -163,6 +199,19 @@ export function App() {
             )}
           </div>
           <div className="row" style={{ gap: 6 }}>
+            {tenants.length > 1 && (
+              <select
+                value={tenantId}
+                onChange={(e) => chooseTenant(e.target.value)}
+                title="switch workspace"
+              >
+                {tenants.map((t) => (
+                  <option key={t.tenant_id} value={t.tenant_id}>
+                    {tenantLabel(t)}
+                  </option>
+                ))}
+              </select>
+            )}
             {role && !canEdit && (
               <span className="pill" title="your access is view-only">view-only</span>
             )}
@@ -174,6 +223,7 @@ export function App() {
         {view === "editor" && (
           <FlowList
             key={reloadKey}
+            tenantId={tenantId}
             activeId={flowId}
             canEdit={canEdit}
             onSelect={setFlowId}
@@ -213,23 +263,23 @@ export function App() {
       </div>
       <div className={view === "editor" && flowId ? "editor" : "pane"}>
         {view === "billing" ? (
-          <BillingView />
+          <BillingView key={tenantId} tenantId={tenantId} />
         ) : view === "connections" ? (
-          <ConnectionsView />
+          <ConnectionsView key={tenantId} tenantId={tenantId} />
         ) : view === "team" ? (
-          <TeamView />
+          <TeamView key={tenantId} tenantId={tenantId} />
         ) : view === "channels" ? (
-          <ChannelsView />
+          <ChannelsView key={tenantId} tenantId={tenantId} />
         ) : view === "guide" ? (
           <FlowGuideView />
         ) : view === "rules" ? (
-          <RulesView />
+          <RulesView key={tenantId} tenantId={tenantId} />
         ) : view === "knowledge" ? (
-          <KnowledgeView />
+          <KnowledgeView key={tenantId} tenantId={tenantId} />
         ) : view === "runs" ? (
           <RunsView />
         ) : view === "activity" ? (
-          <ActivityView />
+          <ActivityView key={tenantId} tenantId={tenantId} />
         ) : view === "review" ? (
           <ReviewView />
         ) : view === "trace" ? (

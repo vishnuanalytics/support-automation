@@ -5,7 +5,7 @@ import type { Connection } from "../types";
 const AUTH_TYPES = ["none", "bearer", "header", "basic"] as const;
 
 /** P6c — per-tenant HTTP connections for the `http_request` flow node. */
-export function ConnectionsView() {
+export function ConnectionsView({ tenantId }: { tenantId: string }) {
   const [rows, setRows] = useState<Connection[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -21,9 +21,9 @@ export function ConnectionsView() {
   });
 
   const load = () => {
-    api.connections.list().then(setRows).catch((e: ApiError) => setErr(e.message));
+    api.connections.list(tenantId).then(setRows).catch((e: ApiError) => setErr(e.message));
   };
-  useEffect(load, []);
+  useEffect(load, [tenantId]);
 
   const add = async () => {
     setBusy(true);
@@ -33,7 +33,7 @@ export function ConnectionsView() {
       if (f.type === "bearer") auth.token = f.token;
       if (f.type === "header") { auth.header_name = f.header_name; auth.value = f.value; }
       if (f.type === "basic") { auth.username = f.username; auth.password = f.password; }
-      await api.connections.create({ slug: f.slug.trim(), base_url: f.base_url.trim(), auth });
+      await api.connections.create({ slug: f.slug.trim(), base_url: f.base_url.trim(), auth, tenant_id: tenantId });
       setF({ ...f, slug: "", base_url: "", token: "", value: "", password: "" });
       load();
     } catch (e) {
@@ -76,7 +76,7 @@ export function ConnectionsView() {
               <td>
                 <button
                   className="err"
-                  onClick={() => api.connections.remove(c.slug).then(load).catch(() => {})}
+                  onClick={() => api.connections.remove(c.slug, tenantId).then(load).catch(() => {})}
                 >
                   delete
                 </button>
