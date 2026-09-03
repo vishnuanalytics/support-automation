@@ -89,6 +89,7 @@ export interface SfMeta {
   case_types: string[];
   modules: string[];
   case_fields?: SalesforceCaseField[];
+  users?: { id: string; name: string; email: string | null }[];
   error?: string;
 }
 
