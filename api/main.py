@@ -61,9 +61,9 @@ import hashlib  # noqa: E402
 # request; larger ones are handed to the worker (`embed_kb_entry` job).
 KB_INLINE_EMBED_MAX = 8192
 
-SUPABASE_URL = os.environ["SUPABASE_URL"]
-ANON_KEY = os.environ.get("SUPABASE_ANON_KEY") or os.environ["SUPABASE_SERVICE_KEY"]
-SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
+SUPABASE_URL = os.environ["SUPABASE_URL"].strip()
+ANON_KEY = (os.environ.get("SUPABASE_ANON_KEY") or os.environ["SUPABASE_SERVICE_KEY"]).strip()
+SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"].strip()
 WEB_ORIGINS = os.environ.get("WEB_ORIGINS", "http://localhost:5173").split(",")
 
 app = FastAPI(title="support-automation editor api")
