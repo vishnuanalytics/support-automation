@@ -1082,16 +1082,57 @@ doesn't share Salesforce ids — but a full audit/cleanup script for a
 customer environment with real overlap risk is out of scope of this fix
 and would be its own chunk if ever needed).
 
-### Scoped, not built: multi-Salesforce-org support
+### Multi-Salesforce-org support — connector layer BUILT (2026-09-03), node/UI wiring not yet
 
-Drop the `(tenant_id, kind)` uniqueness on `tenant_integrations`, add an
-org label/identifier column, thread it through `client_for()` (resolve
-by `(tenant_id, org_label)` instead of `(tenant_id, kind)` alone), flow
-node config (`sf_case`/`sf_writeback`/`sf_context` need to say *which*
-org connection to use), and the web Connections-style UI (today's
-Connections tab is for generic `http_request` targets, not Salesforce —
-would need its own picker). Medium-sized: schema + connector + every
-SF-touching node's config shape + UI.
+User's call: build the connector/schema foundation first (same
+infra-first pattern as Phase 29's tool-calling plumbing before the
+`agent` node consumed it), not the whole stack in one pass — there's
+also no live use case yet to wire against (checked the live project:
+zero `kind='salesforce'` rows exist at all; both Acme and Globex
+currently fall back to the single shared env-configured org).
+
+Migration `082`: `tenant_integrations` gains `org_label text not null
+default 'default'`; the primary key widens from `(tenant_id, kind)` to
+`(tenant_id, kind, org_label)`. Backward compatible in both directions —
+every existing row backfills to `org_label='default'`, and every
+existing `client_for(tenant_id)` call site (20+ of them across
+`salesforce.py`, `routing.py`, `sf_context.py`, `attachments.py`,
+`api/worker.py`, `sweeps.py`, `handoff_watch.py`, …) keeps resolving
+exactly the same thing since none of them pass a third argument.
+`email`/`google`/`slack` rows keep behaving as one-per-tenant by
+convention (nothing varies `org_label` for those kinds) — not
+schema-enforced, matching the table's existing loose `kind text` typing.
+
+`interpreter/salesforce.py`: `client_for(tenant_id, org_label=None, sb=)`
+resolves per `(tenant_id, org_label)`, caches per that pair, falls back
+to the shared env client exactly as before when no row exists for that
+tenant+org. New `save_tenant_org` / `list_tenant_orgs` / `delete_tenant_org`
+— the write side (nothing existed before this; SF creds were always
+env-only or a single ad-hoc row, never a self-serve flow, unlike
+`email`/`google`/`slack` which already have one).
+
+**Verify:** 6 new offline tests (`tests/test_salesforce_multi_org.py` —
+different orgs resolve to different cached clients, unaffected by each
+other, deleting one doesn't disturb another, no-tenant/no-org-label
+always hits the env client, a stale cache is invalidated on re-save).
+Full offline suite 505/505, zero regression to any of the 20+ existing
+`client_for()` callers. `python -m scripts.check_migrations` clean (no
+drift). **Live-verified against the real Supabase project** — saved two
+distinct org connections (`prod`/`sandbox`) under a throwaway tenant,
+confirmed both persisted with the right distinct secrets via a raw row
+query, confirmed Acme's own `tenant_integrations` rows were untouched,
+cleaned up after.
+
+**Deliberately not built in this pass** (the "infra-first, wire up
+later" half): no flow node (`sf_case`/`sf_writeback`/`sf_context`/
+`identify`) has an `org` config field yet to actually pick a non-default
+org at run time — they'd all need `org_label` threaded from node config
+through every Salesforce function they call down to `client_for`, which
+touches most of `salesforce.py`'s 1150+ lines and is real, separate work
+better done once there's an actual second org to route a real flow to,
+not speculatively. No web UI either — unlike email's full Channels tab,
+there was no existing Salesforce connection UI to extend; building one
+from scratch is its own chunk.
 
 ### Scoped, not built: per-tenant case-taxonomy config
 
