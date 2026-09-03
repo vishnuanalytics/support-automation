@@ -237,6 +237,7 @@ export interface EmailChannel {
 
 export interface EmailChannelSave {
   provider: "imap" | "gmail";
+  tenant_id?: string;
   team?: string;
   imap_host?: string;
   imap_port?: number;

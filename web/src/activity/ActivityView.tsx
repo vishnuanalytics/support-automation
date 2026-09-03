@@ -2,17 +2,17 @@ import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
 import type { AuditEvent } from "../types";
 
-export function ActivityView() {
+export function ActivityView({ tenantId }: { tenantId: string }) {
   const [rows, setRows] = useState<AuditEvent[]>([]);
   const [filter, setFilter] = useState("");
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     api
-      .listAudit({ action: filter || undefined, limit: 200 })
+      .listAudit({ action: filter || undefined, limit: 200, tenantId })
       .then(setRows)
       .catch((e: ApiError) => setErr(e.message));
-  }, [filter]);
+  }, [filter, tenantId]);
 
   const actions = useMemo(
     () => Array.from(new Set(rows.map((r) => r.action))).sort(),

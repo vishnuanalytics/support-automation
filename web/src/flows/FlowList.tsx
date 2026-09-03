@@ -3,11 +3,13 @@ import { api, ApiError } from "../api";
 import type { FlowCandidate, FlowMeta, TemplateMeta } from "../types";
 
 export function FlowList({
+  tenantId,
   activeId,
   canEdit,
   onSelect,
   onCreated,
 }: {
+  tenantId: string;
   activeId: string | null;
   canEdit: boolean;
   onSelect: (id: string) => void;
@@ -61,12 +63,11 @@ export function FlowList({
   }, []);
 
   async function newFlow() {
-    // tenant is inferred from the caller's membership — no id to type
     const team = prompt("team (support / csm / offboarding / …)", "support");
     if (!team?.trim()) return;
     const name = (prompt("flow name", "Untitled flow") || "Untitled flow").trim();
     try {
-      const { flow_id } = await api.createFlow({ team: team.trim(), name });
+      const { flow_id } = await api.createFlow({ team: team.trim(), name, tenant_id: tenantId });
       onCreated(flow_id);
     } catch (e) {
       alert((e as ApiError).message);
@@ -83,7 +84,7 @@ export function FlowList({
     if (!team?.trim()) return;
     const name = (prompt("flow name", defaultName) || defaultName).trim();
     try {
-      const { flow_id } = await api.createFlow({ team: team.trim(), name });
+      const { flow_id } = await api.createFlow({ team: team.trim(), name, tenant_id: tenantId });
       if (handoff.candidate) {
         sessionStorage.setItem(
           `pendingCandidate:${flow_id}`,

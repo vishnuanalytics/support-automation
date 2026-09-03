@@ -10,7 +10,7 @@ import type { ActionRequest, FlowMeta, PolicyRule } from "../types";
  * form builder is a follow-on. `then.type='task'` posts a Slack
  * Approve/Reject; approved tasks open a GitHub issue.
  */
-export function RulesView() {
+export function RulesView({ tenantId }: { tenantId: string }) {
   const [teams, setTeams] = useState<string[]>([]);
   const [team, setTeam] = useState<string>("");
   const [rules, setRules] = useState<PolicyRule[]>([]);
@@ -23,33 +23,31 @@ export function RulesView() {
 
   useEffect(() => {
     api.listFlows().then((fs: FlowMeta[]) => {
-      const ts = [...new Set(fs.map((f) => f.team))].sort();
+      const ts = [...new Set(fs.filter((f) => f.tenant_id === tenantId).map((f) => f.team))].sort();
       setTeams(ts);
-      setTeam((t) => t || ts[0] || "");
+      setTeam((t) => (ts.includes(t) ? t : ts[0] || ""));
     });
     api.slack.status().then(setSlack).catch(() => {});
-  }, []);
+  }, [tenantId]);
 
   const refresh = useCallback(async () => {
     if (!team) return;
     try {
-      setRules(await api.rules.list(team));
+      setRules(await api.rules.list(team, tenantId));
       setReqs(await api.actionRequests(30));
       setErr(null);
     } catch (e) {
       setErr(e instanceof ApiError ? String(e.detail) : String(e));
     }
-  }, [team]);
+  }, [team, tenantId]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
 
-  const tenantId = rules[0]?.tenant_id;
-  const slackConnected = tenantId ? slack.connected[tenantId] : false;
+  const slackConnected = slack.connected[tenantId] ?? false;
 
   async function connectSlack() {
-    if (!tenantId) return;
     const { url } = await api.slack.authorize(tenantId);
     const w = window.open(url, "slack-oauth", "width=520,height=720");
     const t = setInterval(() => {
@@ -67,6 +65,7 @@ export function RulesView() {
       await api.rules.create({
         team,
         name,
+        tenant_id: tenantId,
         priority: 100,
         when: { field: "tier", op: "eq", value: "premium" },
         then: { type: "route", action: "ask_human" },
@@ -94,7 +93,7 @@ export function RulesView() {
             (slackConnected ? (
               <span className="muted" style={{ fontSize: 12 }}>Slack ✓</span>
             ) : (
-              <button onClick={connectSlack} disabled={!tenantId}>Connect Slack</button>
+              <button onClick={connectSlack}>Connect Slack</button>
             ))}
         </div>
       </div>

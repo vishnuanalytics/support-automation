@@ -7,7 +7,7 @@ import type { KbCollection, KbEntry, KbEntryRow } from "../types";
  * markdown SOPs; a `kb_lookup` node in a flow consults chosen collections
  * at a checkpoint. Editors here = anyone in the tenant.
  */
-export function KnowledgeView() {
+export function KnowledgeView({ tenantId }: { tenantId: string }) {
   const [cols, setCols] = useState<KbCollection[]>([]);
   const [sel, setSel] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -30,7 +30,7 @@ export function KnowledgeView() {
     const name = prompt("collection name (e.g. billing-runbook)")?.trim();
     if (!name) return;
     try {
-      const { source_id } = await api.kb.createCollection({ name });
+      const { source_id } = await api.kb.createCollection({ name, tenant_id: tenantId });
       await refresh();
       setSel(source_id);
     } catch (e) {

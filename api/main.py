@@ -2210,10 +2210,13 @@ class RulePatch(BaseModel):
 
 
 @app.get("/api/rules")
-def list_rules(team: str | None = None, c: Caller = Depends(caller)) -> list[dict]:
+def list_rules(team: str | None = None, tenant_id: str | None = None,
+               c: Caller = Depends(caller)) -> list[dict]:
     q = c.sb.table("policy_rules").select("*")
     if team:
         q = q.eq("team", team)
+    if tenant_id:
+        q = q.eq("tenant_id", tenant_id)
     return q.order("priority").execute().data or []
 
 

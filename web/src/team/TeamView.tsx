@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
 import type { Invitation, Member } from "../types";
 
-export function TeamView() {
+export function TeamView({ tenantId }: { tenantId: string }) {
   const [members, setMembers] = useState<Member[]>([]);
   const [invites, setInvites] = useState<Invitation[]>([]);
   const [email, setEmail] = useState("");
@@ -11,17 +11,17 @@ export function TeamView() {
   const [busy, setBusy] = useState(false);
 
   function load() {
-    api.team.members().then(setMembers).catch((e: ApiError) => setErr(e.message));
+    api.team.members(tenantId).then(setMembers).catch((e: ApiError) => setErr(e.message));
     api.team.invitations().then(setInvites).catch(() => {});
   }
-  useEffect(load, []);
+  useEffect(load, [tenantId]);
 
   async function invite(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
     setErr(null);
     try {
-      await api.team.invite({ email: email.trim().toLowerCase(), role });
+      await api.team.invite({ email: email.trim().toLowerCase(), role, tenant_id: tenantId });
       setEmail("");
       load();
     } catch (e) {
@@ -69,7 +69,7 @@ export function TeamView() {
               <td style={{ textAlign: "right" }}>
                 {!m.is_you && m.role !== "owner" && (
                   <button className="err" onClick={() =>
-                    api.team.removeMember(m.user_id).then(load).catch((e) => setErr(String(e)))}>
+                    api.team.removeMember(m.user_id, tenantId).then(load).catch((e) => setErr(String(e)))}>
                     remove
                   </button>
                 )}

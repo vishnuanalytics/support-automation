@@ -8,7 +8,7 @@ function shiftPeriod(period: string, delta: number): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
-export function BillingView() {
+export function BillingView({ tenantId }: { tenantId: string }) {
   const currentPeriod = useMemo(() => {
     const now = new Date();
     return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
@@ -20,10 +20,10 @@ export function BillingView() {
   useEffect(() => {
     setErr(null);
     api
-      .billingUsage({ period })
+      .billingUsage({ period, tenantId })
       .then(setUsage)
       .catch((e: ApiError) => setErr(e.message));
-  }, [period]);
+  }, [period, tenantId]);
 
   const maxDailyTokens = Math.max(1, ...(usage?.daily.map((d) => d.tokens) ?? [0]));
 

@@ -111,10 +111,13 @@ export const api = {
   },
 
   connections: {
-    list: () => req<Connection[]>("/connections"),
-    create: (b: { slug: string; base_url: string; auth: Record<string, unknown> }) =>
+    list: (tenantId?: string) =>
+      req<Connection[]>(`/connections${tenantId ? `?tenant_id=${tenantId}` : ""}`),
+    create: (b: { slug: string; base_url: string; auth: Record<string, unknown>; tenant_id?: string }) =>
       req<Connection>("/connections", { method: "POST", body: JSON.stringify(b) }),
-    remove: (slug: string) => req<void>(`/connections/${encodeURIComponent(slug)}`, { method: "DELETE" }),
+    remove: (slug: string, tenantId?: string) =>
+      req<void>(`/connections/${encodeURIComponent(slug)}${tenantId ? `?tenant_id=${tenantId}` : ""}`,
+        { method: "DELETE" }),
   },
   rollbackFlow: (id: string, version: number) =>
     req<{ published_version: number }>(`/flows/${id}/rollback`, {
@@ -194,16 +197,19 @@ export const api = {
   },
 
   email: {
-    status: () => req<EmailChannel>("/integrations/email"),
+    status: (tenantId?: string) =>
+      req<EmailChannel>(`/integrations/email${tenantId ? `?tenant_id=${tenantId}` : ""}`),
     save: (b: EmailChannelSave) =>
       req<EmailChannel>("/integrations/email", { method: "PUT", body: JSON.stringify(b) }),
-    remove: () => req<void>("/integrations/email", { method: "DELETE" }),
+    remove: (tenantId?: string) =>
+      req<void>(`/integrations/email${tenantId ? `?tenant_id=${tenantId}` : ""}`, { method: "DELETE" }),
     test: (b: EmailChannelSave) =>
       req<{ ok: boolean; imap?: boolean; smtp?: boolean; error: string | null }>(
         "/integrations/email/test",
         { method: "POST", body: JSON.stringify(b) },
       ),
-    googleAuthorize: () => req<{ url: string }>("/integrations/email/google/authorize"),
+    googleAuthorize: (tenantId?: string) =>
+      req<{ url: string }>(`/integrations/email/google/authorize${tenantId ? `?tenant_id=${tenantId}` : ""}`),
   },
 
   salesforce: {
@@ -221,19 +227,25 @@ export const api = {
   acceptInvitations: () =>
     req<{ accepted: number }>("/invitations/accept", { method: "POST" }),
   team: {
-    members: () => req<Member[]>("/members"),
-    removeMember: (userId: string) =>
-      req<void>(`/members/${userId}`, { method: "DELETE" }),
+    members: (tenantId?: string) =>
+      req<Member[]>(`/members${tenantId ? `?tenant_id=${tenantId}` : ""}`),
+    removeMember: (userId: string, tenantId?: string) =>
+      req<void>(`/members/${userId}${tenantId ? `?tenant_id=${tenantId}` : ""}`, { method: "DELETE" }),
     invitations: () => req<Invitation[]>("/invitations"),
-    invite: (b: { email: string; role: "editor" | "viewer" }) =>
+    invite: (b: { email: string; role: "editor" | "viewer"; tenant_id?: string }) =>
       req<Invitation>("/invitations", { method: "POST", body: JSON.stringify(b) }),
     revoke: (id: string) => req<void>(`/invitations/${id}`, { method: "DELETE" }),
   },
 
   rules: {
-    list: (team?: string) =>
-      req<PolicyRule[]>(`/rules${team ? `?team=${encodeURIComponent(team)}` : ""}`),
-    create: (b: Partial<PolicyRule> & { team: string; name: string }) =>
+    list: (team?: string, tenantId?: string) => {
+      const p = new URLSearchParams();
+      if (team) p.set("team", team);
+      if (tenantId) p.set("tenant_id", tenantId);
+      const qs = p.toString();
+      return req<PolicyRule[]>(`/rules${qs ? `?${qs}` : ""}`);
+    },
+    create: (b: Partial<PolicyRule> & { team: string; name: string; tenant_id?: string }) =>
       req<PolicyRule>("/rules", { method: "POST", body: JSON.stringify(b) }),
     update: (id: string, b: Partial<PolicyRule>) =>
       req<PolicyRule>(`/rules/${id}`, { method: "PATCH", body: JSON.stringify(b) }),
