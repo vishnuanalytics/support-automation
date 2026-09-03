@@ -195,6 +195,45 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
     }
   }
 
+  async function exportCollection() {
+    try {
+      const bundle = await api.kb.export(col.source_id);
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${col.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}-backup.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert(e instanceof ApiError ? String(e.detail) : String(e));
+    }
+  }
+
+  async function importBackup(file: File) {
+    let bundle: { entries?: { title: string; body_md: string }[] };
+    try {
+      bundle = JSON.parse(await file.text());
+    } catch {
+      alert("not valid JSON");
+      return;
+    }
+    const entries = bundle.entries;
+    if (!Array.isArray(entries) || entries.length === 0) {
+      alert("no entries found in this file — expected an export-shaped JSON ({ entries: [...] })");
+      return;
+    }
+    try {
+      const res = await api.kb.import(col.source_id, entries);
+      let msg = `importing ${res.accepted} entries in the background — they'll appear here as they're embedded.`;
+      if (res.warnings.length > 0) msg += `\n\nskipped:\n` + res.warnings.join("\n");
+      alert(msg);
+      void load();
+    } catch (e) {
+      alert(e instanceof ApiError ? String(e.detail) : String(e));
+    }
+  }
+
   const retiredCount = entries.filter((e) => e.status === "superseded").length;
   const visible = entries.filter((e) => showRetired || e.status !== "superseded");
   const heldCount = entries.filter((e) => e.status === "provisional").length;
@@ -234,6 +273,22 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
             ) : (
               <button onClick={connectGoogle}>Connect Google</button>
             ))}
+          <button onClick={exportCollection} title="download a JSON backup of this collection">
+            ⬇ export
+          </button>
+          <label className="button" style={{ cursor: "pointer" }} title="restore entries from a backup">
+            ⬆ import backup
+            <input
+              type="file"
+              accept=".json"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                e.currentTarget.value = "";
+                if (f) void importBackup(f);
+              }}
+            />
+          </label>
           <button className="err" onClick={removeCollection}>archive collection</button>
         </div>
       </div>

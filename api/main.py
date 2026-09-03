@@ -1683,6 +1683,50 @@ def kb_crawl_site(sid: str, body: KbCrawlIn, c: Caller = Depends(caller)) -> dic
     return {"job_id": job_id, "deduped": job_id is None}
 
 
+# ── Phase 28 step 6: bulk KB export/import ──────────────────────────────
+@app.get("/api/kb/collections/{sid}/export")
+def kb_export_collection(sid: str, c: Caller = Depends(caller)) -> dict:
+    """A downloadable JSON backup of this collection's current entries
+    (active + provisional -- not archived/superseded). Re-importable as-is."""
+    from interpreter import kb_backup
+
+    col = _kb_collection(c, sid)
+    rows = (c.sb.table("kb_entries").select("title, body_md, status")
+            .eq("source_id", sid).in_("status", ["active", "provisional"])
+            .order("title").execute().data or [])
+    return kb_backup.export_bundle(col, rows)
+
+
+class KbImportIn(BaseModel):
+    entries: list[dict[str, Any]]
+
+
+@app.post("/api/kb/collections/{sid}/import", status_code=202)
+def kb_import_bundle(sid: str, body: KbImportIn, c: Caller = Depends(caller)) -> dict:
+    """Bulk-restore entries from an export bundle (or any {title, body_md}[]
+    JSON). Async — the worker creates + embeds each entry, matching /crawl's
+    pattern. An entry whose title already exists in this collection (from a
+    prior import) is updated in place, not duplicated."""
+    from interpreter import audit, kb_backup
+
+    col = _kb_collection(c, sid)
+    _require_editor(c, col["tenant_id"])
+    rate_limit(c.user_id, "kb_write", 60)
+    clean, warnings = kb_backup.normalize_import_entries(body.entries)
+    if not clean:
+        raise HTTPException(422, {"error": "no valid entries", "warnings": warnings})
+    job_id = jobs.enqueue("import_kb_bundle", {
+        "source_id": sid, "tenant_id": col["tenant_id"], "collection_name": col["name"],
+        "entries": clean, "created_by": c.user_id,
+    }, dedupe_key=f"import:{sid}:{uuid.uuid4()}", sb=_service)
+    audit.record(_service, tenant_id=col["tenant_id"], action="kb.import_started",
+                actor_id=c.user_id, actor_email=c.email,
+                target_type="kb_collection", target_id=sid,
+                summary=f"importing {len(clean)} entries into {col['name']}",
+                metadata={"count": len(clean), "warnings": warnings})
+    return {"job_id": job_id, "accepted": len(clean), "warnings": warnings}
+
+
 @app.get("/api/kb/entries/{eid}")
 def kb_get_entry(eid: str, c: Caller = Depends(caller)) -> dict:
     return _kb_entry(c, eid)

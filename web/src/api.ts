@@ -17,6 +17,7 @@ import type {
   KbCollection,
   KbEntry,
   KbEntryRow,
+  KbExportBundle,
   Member,
   PolicyRule,
   NodeTypesResp,
@@ -172,6 +173,12 @@ export const api = {
       req<KbEntry>(`/kb/collections/${id}/gdoc`, { method: "POST", body: JSON.stringify({ doc_url }) }),
     resyncGdoc: (entryId: string) =>
       req<KbEntry>(`/kb/entries/${entryId}/resync`, { method: "POST" }),
+    export: (id: string) => req<KbExportBundle>(`/kb/collections/${id}/export`),
+    import: (id: string, entries: { title: string; body_md: string }[]) =>
+      req<{ job_id: string; accepted: number; warnings: string[] }>(
+        `/kb/collections/${id}/import`,
+        { method: "POST", body: JSON.stringify({ entries }) },
+      ),
   },
 
   google: {

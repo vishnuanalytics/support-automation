@@ -317,6 +317,36 @@ def _crawl_site(payload: dict, sb) -> dict:
     return {"url": payload["url"], "pages": len(pages), "entries": made}
 
 
+def _import_kb_bundle(payload: dict, sb) -> dict:
+    """Phase 28 step 6 — bulk-restore entries from an export bundle. Same
+    shape as _crawl_site: upsert-by-title, embed off this job (fastembed x N
+    entries would blow JOB_TIMEOUT)."""
+    sid, tid = payload["source_id"], payload["tenant_id"]
+    col_name = payload.get("collection_name", "")
+    made = 0
+    for entry_in in payload.get("entries", []):
+        try:
+            existing = (sb.table("kb_entries").select("entry_id")
+                        .eq("source_id", sid).eq("title", entry_in["title"])
+                        .eq("origin", "import").limit(1).execute().data or [])
+            row = {"source_id": sid, "tenant_id": tid, "title": entry_in["title"],
+                   "body_md": entry_in["body_md"], "origin": "import",
+                   "created_by": payload.get("created_by"), "updated_by": payload.get("created_by")}
+            if existing:
+                entry = (sb.table("kb_entries").update(row)
+                         .eq("entry_id", existing[0]["entry_id"]).execute().data[0])
+            else:
+                entry = sb.table("kb_entries").insert(row).execute().data[0]
+            jobs.enqueue("embed_kb_entry",
+                         {"entry_id": entry["entry_id"], "source_id": sid,
+                          "collection_name": col_name},
+                         dedupe_key=f"embed:{entry['entry_id']}", sb=sb)
+            made += 1
+        except Exception as e:  # noqa: BLE001
+            log.warning("import_kb_bundle entry %r: %s", entry_in.get("title"), e)
+    return {"source_id": sid, "requested": len(payload.get("entries", [])), "entries": made}
+
+
 def _create_github_issue(payload: dict, sb) -> dict:
     """Phase 16 — a human approved a task_dispatch action in Slack."""
     ar_id = payload["action_request_id"]
@@ -411,6 +441,7 @@ def _sweep_handler(fn):
 HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
             "embed_kb_entry": _embed_kb_entry, "create_github_issue": _create_github_issue,
             "apply_kb_change": _apply_kb_change, "crawl_site": _crawl_site,
+            "import_kb_bundle": _import_kb_bundle,
             "queue_sweep": _sweep_handler("queue_sweep"),
             "cdc_reconcile": _sweep_handler("cdc_reconcile"),
             "reasoning_ttl": _sweep_handler("reasoning_ttl"),
