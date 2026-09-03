@@ -29,6 +29,7 @@ import type {
   RunResult,
   RunRow,
   RunStats,
+  TemplateMeta,
 } from "./types";
 
 const BASE = (import.meta.env.VITE_API_BASE as string) || ""; // "" -> vite proxy
@@ -97,9 +98,15 @@ export const api = {
   },
 
   templates: {
-    list: () =>
-      req<{ id: string; name: string; category: string; description: string }[]>("/templates"),
+    list: () => req<TemplateMeta[]>("/templates"),
     graph: (id: string) => req<FlowCandidate>(`/templates/${encodeURIComponent(id)}`),
+    save: (flowId: string, body: { name: string; category?: string; description?: string }) =>
+      req<{ id: string; name: string }>(`/flows/${flowId}/save-as-template`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    remove: (id: string) =>
+      req<void>(`/templates/${encodeURIComponent(id)}`, { method: "DELETE" }),
   },
 
   connections: {

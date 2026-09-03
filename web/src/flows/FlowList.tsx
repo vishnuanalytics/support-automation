@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
-import type { FlowCandidate, FlowMeta } from "../types";
+import type { FlowCandidate, FlowMeta, TemplateMeta } from "../types";
 
 export function FlowList({
   activeId,
@@ -15,19 +15,39 @@ export function FlowList({
 }) {
   const [flows, setFlows] = useState<FlowMeta[]>([]);
   const [err, setErr] = useState<string | null>(null);
-  const [templates, setTemplates] = useState<
-    { id: string; name: string; description: string }[]
-  >([]);
+  const [templates, setTemplates] = useState<TemplateMeta[]>([]);
 
-  useEffect(() => {
+  function reloadTemplates() {
     api.templates.list().then(setTemplates).catch(() => {});
-  }, []);
+  }
+  useEffect(reloadTemplates, []);
 
   async function fromTemplate(id: string) {
     if (!id) return;
     try {
       const cand = await api.templates.graph(id);
       await createWithHandoff(cand.name || "New flow", { candidate: cand });
+    } catch (e) {
+      alert((e as ApiError).message);
+    }
+  }
+
+  async function deleteCustomTemplate() {
+    const custom = templates.filter((t) => t.source === "custom");
+    if (custom.length === 0) return;
+    const which = prompt(
+      "Delete which custom template? (type its name)\n\n" + custom.map((t) => `- ${t.name}`).join("\n"),
+    );
+    if (!which?.trim()) return;
+    const match = custom.find((t) => t.name.toLowerCase() === which.trim().toLowerCase());
+    if (!match) {
+      alert(`no custom template named "${which.trim()}"`);
+      return;
+    }
+    if (!confirm(`Delete template "${match.name}"? This can't be undone.`)) return;
+    try {
+      await api.templates.remove(match.id);
+      reloadTemplates();
     } catch (e) {
       alert((e as ApiError).message);
     }
@@ -123,10 +143,15 @@ export function FlowList({
               <option value="">📋 From template…</option>
               {templates.map((t) => (
                 <option key={t.id} value={t.id} title={t.description}>
-                  {t.name}
+                  {t.name}{t.source === "custom" ? " (custom)" : ""}
                 </option>
               ))}
             </select>
+          )}
+          {templates.some((t) => t.source === "custom") && (
+            <button onClick={deleteCustomTemplate} title="delete one of your saved templates">
+              🗑 delete a custom template
+            </button>
           )}
         </div>
       )}

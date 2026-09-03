@@ -356,6 +356,23 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
     setBusy(false);
   }
 
+  async function doSaveAsTemplate() {
+    if (!flow) return;
+    if (dirty && !confirm("Save the draft first, then save it as a template?")) return;
+    const name = prompt("template name", flow.name)?.trim();
+    if (!name) return;
+    const description = prompt("description (optional)", "")?.trim() || undefined;
+    setBusy(true);
+    try {
+      if (dirty) await api.saveFlow(flowId, payload());
+      await api.templates.save(flowId, { name, description });
+      setBanner({ kind: "ok", text: `saved as template "${name}"` });
+    } catch (e) {
+      setBanner({ kind: "err", text: (e as ApiError).message });
+    }
+    setBusy(false);
+  }
+
   async function doSetSfEntry(on: boolean) {
     setBusy(true);
     try {
@@ -481,6 +498,9 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
             </button>
             <button className="primary" onClick={doSave} disabled={busy || !dirty}>Save draft</button>
             <button onClick={doPublish} disabled={busy}>Publish</button>
+            <button onClick={doSaveAsTemplate} disabled={busy} title="save this flow as a reusable template">
+              💾 Save as template
+            </button>
             <button className="err" onClick={doDelete}>Delete</button>
           </>
         )}

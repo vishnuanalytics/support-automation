@@ -831,7 +831,7 @@ one already has, via the Supabase MCP).
 reuses the last): 1. platform activity/audit log ✅ · 2. flow-version
 rollback audit trail + `flow_versions` retention ✅ · 3. billing quota
 enforcement ✅ · 4. per-flow cost breakdown ✅ · 5. flow templates
-marketplace (logs through #1) · 6. bulk KB export/import.**
+marketplace ✅ · 6. bulk KB export/import.**
 
 **Step 1 — platform activity/audit log (COMPLETE 2026-09-03).**
 Migration `076` `audit_log` (append-only, `case_events`-style
@@ -939,8 +939,50 @@ tokens-by-model breakdown. `tests/test_billing.py` gains 2 tests
 attributed all 41 runs / 26,983 tokens to "Globex Support —
 human-review-first" with the real name resolved via the `flows` join
 (single-flow tenant, so multi-flow grouping/sorting was proven by the
-offline unit test instead). **Next:** step 5 — flow templates
-marketplace.
+offline unit test instead).
+
+**Step 5 — flow templates marketplace / save-as-template (COMPLETE
+2026-09-03).** `interpreter/templates.py` (P7a) only ever served 4
+built-in, file-shipped templates — no way for a user to save one of
+*their own* flows as a reusable template. **Scope decision (narrower
+than "marketplace" implies):** save-as-template is scoped **within the
+tenant that saves it** — private to that workspace. True cross-tenant
+sharing (a flow's structure becoming visible to other customers) is a
+materially bigger, security-sensitive decision this codebase has never
+made elsewhere (multi-tenancy is RLS-enforced everywhere, "no
+cross-tenant leak" explicitly verified in Phase 12) — deferred, not
+built, per "don't build ahead."
+
+Migration `078` `flow_templates` — same RLS split `flows` itself uses
+(migration `032`: `is_tenant_member` read / `is_tenant_editor` write,
+via the caller's own RLS-scoped client, not `_service` — this table
+isn't secret-bearing). `interpreter/templates.py` gains
+`list_custom`/`custom_graph`/`save_as_template`/`delete_custom`
+alongside the untouched built-in `list_templates`/`graph`. API:
+`POST /api/flows/{id}/save-as-template` (snapshots the flow's current
+*draft*, same pattern as `publish_flow`'s `load_flow(status="draft")`);
+`GET /api/templates` now merges built-in + the caller's custom ones
+(best-effort — a tenant-resolution failure silently falls back to
+built-in-only, never breaks the base gallery); `GET
+/api/templates/{id}` falls back to a custom lookup when the id isn't
+built-in; `DELETE /api/templates/{id}` (custom only — 404 for a
+built-in id, which isn't a database row). Both save and delete log
+through Phase 28 step 1 (`template.saved` / `template.deleted`). Web:
+FlowEditor gains a **💾 Save as template** button next to Publish
+(prompts for name/description, same no-modal UX as the rest of the
+app); FlowList's existing "📋 From template…" picker shows custom
+entries tagged "(custom)", plus a **🗑 delete a custom template**
+button (prompts for a name match + confirms) that appears once at
+least one exists. `tests/test_templates.py` (existing file from P7a)
+gains 6 new offline tests for the custom-template functions; the
+existing built-in-gallery test's exact-shape assertion was updated for
+the new `source` field. **Live-verified end-to-end** through the real
+FastAPI app: saved a template from the live Globex flow → appeared in
+the merged list tagged `custom` → its graph fetched cleanly (9 nodes,
+0 errors) → `audit_log` gained `template.saved` → deleted it → gone
+from the list → `audit_log` gained `template.deleted` → confirmed the
+built-in gallery (`support-autoreply`) still works unaffected. **Next:**
+step 6 — bulk KB export/import.
 
 **Phase 27 — the Case Control Plane (done, 2026-09-01/02).** One
 AI-managed Case queue: classify + route + track `Status` + hand off via

@@ -358,20 +358,82 @@ def node_types() -> dict:
 
 
 @app.get("/api/templates")
-def list_templates_ep(c: Caller = Depends(caller)) -> list[dict]:
+def list_templates_ep(tenant_id: str | None = None, c: Caller = Depends(caller)) -> list[dict]:
     from interpreter import templates
-    return templates.list_templates()
+    rows = templates.list_templates()
+    # Phase 28 step 5 — best-effort: the built-in gallery must always show
+    # even if tenant resolution fails (no workspace yet, or several without
+    # an explicit tenant_id) — never let the custom half break the base list.
+    try:
+        tid = _caller_tenant(c, tenant_id)
+        rows = rows + templates.list_custom(c.sb, tid)
+    except HTTPException:
+        pass
+    return rows
 
 
 @app.get("/api/templates/{template_id}")
-def get_template_ep(template_id: str, c: Caller = Depends(caller)) -> dict:
+def get_template_ep(template_id: str, tenant_id: str | None = None,
+                    c: Caller = Depends(caller)) -> dict:
     """P7a — a ready-made flow graph as a candidate the editor loads unsaved
-    (same shape as the AI-generate / Mermaid-import paths)."""
+    (same shape as the AI-generate / Mermaid-import paths). Phase 28 step 5:
+    falls back to the caller's own saved templates if the id isn't built-in."""
     from interpreter import templates
     g = templates.graph(template_id, defaults=NODE_DEFAULTS)
     if g is None:
+        tid = _caller_tenant(c, tenant_id)
+        g = templates.custom_graph(c.sb, tid, template_id, defaults=NODE_DEFAULTS)
+    if g is None:
         raise HTTPException(404, "unknown template")
     return g
+
+
+class SaveAsTemplateIn(BaseModel):
+    name: str
+    category: str = "Custom"
+    description: str | None = None
+
+
+@app.post("/api/flows/{flow_id}/save-as-template", status_code=201)
+def save_flow_as_template(flow_id: str, body: SaveAsTemplateIn,
+                          c: Caller = Depends(caller)) -> dict:
+    """Phase 28 step 5 — snapshot this flow's current draft as a reusable
+    template, private to this tenant."""
+    from interpreter import audit, templates
+
+    meta = _require_visible(c, flow_id)
+    _require_editor(c, meta["tenant_id"])
+    if not body.name.strip():
+        raise HTTPException(422, "name is required")
+    draft = load_flow(flow_id=flow_id, sb=c.sb, status="draft", validate=False)
+    row = templates.save_as_template(
+        c.sb, meta["tenant_id"], draft["nodes"], draft["edges"],
+        name=body.name.strip(), category=body.category.strip() or "Custom",
+        description=(body.description or "").strip() or None, created_by=c.user_id,
+    )
+    audit.record(_service, tenant_id=meta["tenant_id"], action="template.saved",
+                actor_id=c.user_id, actor_email=c.email,
+                target_type="flow_template", target_id=row.get("template_id"),
+                summary=f"saved '{body.name.strip()}' from {meta.get('name') or flow_id}")
+    return {"id": row.get("template_id"), "name": row.get("name")}
+
+
+@app.delete("/api/templates/{template_id}", status_code=204)
+def delete_template_ep(template_id: str, tenant_id: str | None = None,
+                       c: Caller = Depends(caller)) -> None:
+    """Phase 28 step 5 — only a custom (user-saved) template can be deleted;
+    the built-in gallery is file-shipped, not a database row."""
+    from interpreter import audit, templates
+
+    tid = _caller_tenant(c, tenant_id)
+    _require_editor(c, tid)
+    deleted = templates.delete_custom(c.sb, tid, template_id)
+    if not deleted:
+        raise HTTPException(404, "unknown custom template")
+    audit.record(_service, tenant_id=tid, action="template.deleted",
+                actor_id=c.user_id, actor_email=c.email,
+                target_type="flow_template", target_id=template_id,
+                summary=f"deleted template {template_id}")
 
 
 _SF_META_CACHE: dict = {"at": 0.0, "data": None}
