@@ -500,6 +500,11 @@ def create_tenant(body: TenantIn, c: Caller = Depends(caller)) -> dict:
         {"tenant_id": tid, "name": name, "created_by": c.user_id}).execute()
     _service.table("tenant_members").insert(
         {"tenant_id": tid, "user_id": c.user_id, "role": "owner"}).execute()
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="tenant.created",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="tenant", target_id=tid, summary=f"created workspace {name!r}")
     return {"tenant_id": tid, "name": name, "role": "owner"}
 
 
@@ -572,21 +577,35 @@ def create_invitation(body: InviteIn, c: Caller = Depends(caller)) -> dict:
     if "@" not in email:
         raise HTTPException(400, "a real email is required")
     try:
-        return c.sb.table("tenant_invitations").insert({
+        row = c.sb.table("tenant_invitations").insert({
             "tenant_id": tid, "email": email, "role": role, "invited_by": c.user_id,
         }).execute().data[0]
     except Exception as e:  # noqa: BLE001  — dup pending invite, etc.
         raise HTTPException(409, f"could not invite {email}: {e}")
 
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="invitation.created",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="invitation", target_id=row["invite_id"],
+                 summary=f"invited {email} as {role}")
+    return row
+
 
 @app.delete("/api/invitations/{invite_id}", status_code=204)
 def revoke_invitation(invite_id: str, c: Caller = Depends(caller)) -> None:
-    cur = (c.sb.table("tenant_invitations").select("tenant_id")
+    cur = (c.sb.table("tenant_invitations").select("tenant_id, email")
            .eq("invite_id", invite_id).execute().data)
     if cur:
         _require_owner(c, cur[0]["tenant_id"])
     c.sb.table("tenant_invitations").update({"status": "revoked"}) \
         .eq("invite_id", invite_id).execute()
+
+    if cur:
+        from interpreter import audit
+        audit.record(_service, tenant_id=cur[0]["tenant_id"], action="invitation.revoked",
+                     actor_id=c.user_id, actor_email=c.email,
+                     target_type="invitation", target_id=invite_id,
+                     summary=f"revoked invite to {cur[0].get('email', '?')}")
 
 
 @app.post("/api/invitations/accept")
@@ -607,6 +626,11 @@ def accept_invitations(c: Caller = Depends(caller)) -> dict:
                 "tenant_id": inv["tenant_id"], "user_id": c.user_id, "role": inv["role"],
             }).execute()
             n += 1
+            from interpreter import audit
+            audit.record(_service, tenant_id=inv["tenant_id"], action="invitation.accepted",
+                         actor_id=c.user_id, actor_email=c.email,
+                         target_type="member", target_id=c.user_id,
+                         summary=f"{c.email or c.user_id} joined as {inv['role']}")
         _service.table("tenant_invitations").update({
             "status": "accepted", "accepted_at": _now_iso(),
         }).eq("invite_id", inv["invite_id"]).execute()
@@ -625,6 +649,12 @@ def create_flow(body: FlowCreate, c: Caller = Depends(caller)) -> dict:
         }).execute()
     except Exception as e:  # noqa: BLE001  -- RLS / unique-published violation
         raise HTTPException(400, str(e))
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tenant_id, action="flow.created",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="flow", target_id=fid,
+                 summary=f"created flow {body.name!r} ({body.team})")
     return {"flow_id": fid}
 
 
@@ -844,6 +874,13 @@ def set_sf_entry(flow_id: str, body: SfEntryIn, c: Caller = Depends(caller)) -> 
         c.sb.table("flows").update({"sf_entry": False}) \
             .eq("tenant_id", meta["tenant_id"]).neq("flow_id", flow_id).execute()
     c.sb.table("flows").update({"sf_entry": body.sf_entry}).eq("flow_id", flow_id).execute()
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=meta["tenant_id"],
+                 action="flow.sf_entry_set" if body.sf_entry else "flow.sf_entry_unset",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="flow", target_id=flow_id,
+                 summary=f"{'marked' if body.sf_entry else 'unmarked'} as the Salesforce entry flow")
     return {"sf_entry": body.sf_entry}
 
 
@@ -980,6 +1017,12 @@ def create_trigger(flow_id: str, body: TriggerIn, c: Caller = Depends(caller)) -
     if body.kind == "webhook":
         row["token"] = secrets.token_urlsafe(24)
     created = _service.table("flow_triggers").insert(row).execute().data[0]
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=flow["tenant_id"], action="trigger.created",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="trigger", target_id=created["trigger_id"],
+                 summary=f"added a {body.kind} trigger" + (f" ({body.label})" if body.label else ""))
     return _trigger_view(created)
 
 
@@ -989,6 +1032,11 @@ def delete_trigger(flow_id: str, trigger_id: str, c: Caller = Depends(caller)) -
     _require_editor(c, flow["tenant_id"])
     _service.table("flow_triggers").delete().eq("trigger_id", trigger_id) \
         .eq("flow_id", flow_id).execute()
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=flow["tenant_id"], action="trigger.deleted",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="trigger", target_id=trigger_id, summary="removed a trigger")
 
 
 @app.post("/t/{token}", status_code=202)
@@ -1584,6 +1632,12 @@ def kb_create_collection(body: KbCollectionIn, c: Caller = Depends(caller)) -> d
         created = c.sb.table("sources").insert(row).execute().data[0]
     except Exception as e:  # noqa: BLE001  (unique (tenant_id, name) etc.)
         raise HTTPException(409, f"could not create collection: {e}")
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tenant_id, action="kb_collection.created",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="kb_collection", target_id=created["source_id"],
+                 summary=f"created KB collection {body.name!r}")
     return created
 
 
@@ -1599,19 +1653,33 @@ def kb_update_collection(sid: str, body: KbCollectionPatch, c: Caller = Depends(
         patch["config"] = {**(col.get("config") or {}), "description": body.description}
     if not patch:
         return col
-    return c.sb.table("sources").update(patch).eq("source_id", sid).execute().data[0]
+    updated = c.sb.table("sources").update(patch).eq("source_id", sid).execute().data[0]
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=col["tenant_id"], action="kb_collection.updated",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="kb_collection", target_id=sid,
+                 summary=f"updated KB collection {updated.get('name', sid)!r}")
+    return updated
 
 
 @app.delete("/api/kb/collections/{sid}", status_code=204)
 def kb_delete_collection(sid: str, c: Caller = Depends(caller)) -> None:
     rate_limit(c.user_id, "kb_write", 60)
-    _require_editor(c, _kb_collection(c, sid)["tenant_id"])   # RLS + role gate
+    col = _kb_collection(c, sid)
+    _require_editor(c, col["tenant_id"])   # RLS + role gate
     c.sb.table("sources").update({"status": "archived"}).eq("source_id", sid).execute()
     entries = (c.sb.table("kb_entries").select("entry_id")
                .eq("source_id", sid).eq("status", "active").execute().data or [])
     for e in entries:
         c.sb.table("kb_entries").update({"status": "archived"}).eq("entry_id", e["entry_id"]).execute()
         _kb_delete(_service, url=_kb_url(sid, e["entry_id"]))
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=col["tenant_id"], action="kb_collection.deleted",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="kb_collection", target_id=sid,
+                 summary=f"deleted KB collection {col.get('name', sid)!r} ({len(entries)} entries archived)")
 
 
 @app.get("/api/kb/collections/{sid}/entries")
@@ -1636,6 +1704,12 @@ def kb_create_entry(sid: str, body: KbEntryIn, c: Caller = Depends(caller)) -> d
         "body_md": body.body_md, "created_by": c.user_id, "updated_by": c.user_id,
     }
     entry = c.sb.table("kb_entries").insert(row).execute().data[0]
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=col["tenant_id"], action="kb_entry.created",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="kb_entry", target_id=entry["entry_id"],
+                 summary=f"created KB entry {body.title!r} in {col.get('name', sid)!r}")
     return _kb_after_write(entry, col, c)
 
 
@@ -1668,6 +1742,12 @@ def kb_upload_file(sid: str, body: KbUploadIn, c: Caller = Depends(caller)) -> d
         "body_md": text, "origin": "file",
         "created_by": c.user_id, "updated_by": c.user_id,
     }).execute().data[0]
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=col["tenant_id"], action="kb_entry.created",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="kb_entry", target_id=entry["entry_id"],
+                 summary=f"uploaded {body.filename!r} as a KB entry in {col.get('name', sid)!r}")
     return _kb_after_write(entry, col, c)
 
 
@@ -1759,6 +1839,12 @@ def kb_update_entry(eid: str, body: KbEntryPatch, c: Caller = Depends(caller)) -
     body_changed = body.body_md is not None and (
         hashlib.md5((body.body_md or "").encode()).hexdigest() != (entry.get("embed_hash") or "")
     )
+    from interpreter import audit
+    audit.record(_service, tenant_id=col["tenant_id"], action="kb_entry.updated",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="kb_entry", target_id=eid,
+                 summary=f"updated KB entry {updated.get('title', eid)!r}",
+                 metadata={"body_changed": body_changed})
     return _kb_after_write(updated, col, c, force=body_changed, title_only=not body_changed)
 
 
@@ -1770,6 +1856,12 @@ def kb_delete_entry(eid: str, c: Caller = Depends(caller)) -> None:
     c.sb.table("kb_entries").update({"status": "archived", "updated_by": c.user_id}) \
         .eq("entry_id", eid).execute()
     _kb_delete(_service, url=_kb_url(entry["source_id"], eid))
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=entry["tenant_id"], action="kb_entry.deleted",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="kb_entry", target_id=eid,
+                 summary=f"deleted KB entry {entry.get('title', eid)!r}")
 
 
 def _kb_after_write(entry: dict, col: dict, c: Caller, *, force: bool = True,
@@ -1877,8 +1969,16 @@ def kb_link_gdoc(sid: str, body: GdocLinkIn, c: Caller = Depends(caller)) -> dic
     if existing:
         eid = existing[0]["entry_id"]
         entry = c.sb.table("kb_entries").update(row).eq("entry_id", eid).execute().data[0]
+        action, verb = "kb_entry.updated", "re-synced"
     else:
         entry = c.sb.table("kb_entries").insert(row).execute().data[0]
+        action, verb = "kb_entry.created", "linked"
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=col["tenant_id"], action=action,
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="kb_entry", target_id=entry["entry_id"],
+                 summary=f"{verb} Google Doc {fetched['title']!r} into {col.get('name', sid)!r}")
     return _kb_after_write(entry, col, c)
 
 
@@ -1996,6 +2096,13 @@ def email_configure(body: EmailChannelIn, c: Caller = Depends(caller)) -> dict:
     if body.provider == "imap" and body.password:
         plaintext = json.dumps({"kind": "imap", "password": body.password})
     save_channel(tid, _service, cfg, plaintext_secret=plaintext, updated_by=c.user_id)
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid,
+                 action="email_channel.configured" if existing else "email_channel.connected",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="email_channel", target_id=tid,
+                 summary=f"{'updated' if existing else 'connected'} the {body.provider} mailbox")
     return email_status(tenant_id=tid, c=c)
 
 
@@ -2003,9 +2110,13 @@ def email_configure(body: EmailChannelIn, c: Caller = Depends(caller)) -> dict:
 def email_disconnect(tenant_id: str | None = None, c: Caller = Depends(caller)) -> None:
     tid = _caller_tenant(c, tenant_id)
     _require_owner(c, tid)
+    from interpreter import audit
     from interpreter.mailbox import delete_channel
 
     delete_channel(tid, _service)
+    audit.record(_service, tenant_id=tid, action="email_channel.disconnected",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="email_channel", target_id=tid, summary="disconnected the mailbox")
 
 
 @app.post("/api/integrations/email/test")
@@ -2117,32 +2228,54 @@ def create_rule(body: RuleIn, c: Caller = Depends(caller)) -> dict:
         "status": body.status, "created_by": c.user_id, "updated_by": c.user_id,
     }
     try:
-        return c.sb.table("policy_rules").insert(row).execute().data[0]
+        created = c.sb.table("policy_rules").insert(row).execute().data[0]
     except Exception as e:  # noqa: BLE001
         raise HTTPException(409, f"could not create rule: {e}")
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tenant_id, action="policy_rule.created",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="policy_rule", target_id=created["rule_id"],
+                 summary=f"created rule {body.name!r} ({body.team})")
+    return created
 
 
 @app.patch("/api/rules/{rule_id}")
 def update_rule(rule_id: str, body: RulePatch, c: Caller = Depends(caller)) -> dict:
     rate_limit(c.user_id, "rules_write", 60)
-    cur = (c.sb.table("policy_rules").select("rule_id, tenant_id")
+    cur = (c.sb.table("policy_rules").select("rule_id, tenant_id, name")
            .eq("rule_id", rule_id).execute().data)
     if not cur:
         raise HTTPException(404, "rule not found or not visible to you")
     _require_editor(c, cur[0]["tenant_id"])
     patch = {k: v for k, v in body.model_dump(exclude_none=True).items()}
     patch["updated_by"] = c.user_id
-    return c.sb.table("policy_rules").update(patch).eq("rule_id", rule_id).execute().data[0]
+    updated = c.sb.table("policy_rules").update(patch).eq("rule_id", rule_id).execute().data[0]
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=cur[0]["tenant_id"], action="policy_rule.updated",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="policy_rule", target_id=rule_id,
+                 summary=f"updated rule {updated.get('name', cur[0].get('name', rule_id))!r}",
+                 metadata={"changed_fields": sorted(patch.keys() - {"updated_by"})})
+    return updated
 
 
 @app.delete("/api/rules/{rule_id}", status_code=204)
 def delete_rule(rule_id: str, c: Caller = Depends(caller)) -> None:
     rate_limit(c.user_id, "rules_write", 60)
-    cur = (c.sb.table("policy_rules").select("tenant_id")
+    cur = (c.sb.table("policy_rules").select("tenant_id, name")
            .eq("rule_id", rule_id).execute().data)
     if cur:
         _require_editor(c, cur[0]["tenant_id"])
     c.sb.table("policy_rules").delete().eq("rule_id", rule_id).execute()
+
+    if cur:
+        from interpreter import audit
+        audit.record(_service, tenant_id=cur[0]["tenant_id"], action="policy_rule.deleted",
+                     actor_id=c.user_id, actor_email=c.email,
+                     target_type="policy_rule", target_id=rule_id,
+                     summary=f"deleted rule {cur[0].get('name', rule_id)!r}")
 
 
 @app.get("/api/action-requests")
