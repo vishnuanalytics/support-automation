@@ -180,21 +180,25 @@ export interface KbCollection {
   description: string | null;
   tenant_id: string;
   entry_count: number;
+  provisional_count?: number;
   created_at?: string;
 }
 
 export interface KbEntryRow {
   entry_id: string;
   title: string;
-  status: string;
+  status: string; // active | provisional | superseded | archived
   chunk_count: number;
   embedded_at: string | null;
   updated_at: string;
   updated_by: string | null;
-  origin?: "manual" | "gdoc";
+  origin?: "manual" | "gdoc" | "file" | "crawl" | "review_writeback";
   gdoc_url?: string | null;
   synced_at?: string | null;
   sync_error?: string | null;
+  provisional_until?: string | null;
+  supersedes_entry_id?: string | null;
+  source_review_task?: string | null;
 }
 
 export interface KbEntry extends KbEntryRow {
