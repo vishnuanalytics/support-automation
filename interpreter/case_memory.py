@@ -129,11 +129,11 @@ def _driver_or_none():
 
 
 _MERGE_CYPHER = """
-MERGE (c:Case {sf_id: $sf_id})
+MERGE (c:Case {sf_id: $sf_id, tenant_id: $tenant_id})
   SET c.case_number = $case_number, c.subject = $subject,
       c.resolution_kind = $resolution_kind, c.generalizable = $generalizable,
-      c.resolved_at = $resolved_at, c.tenant_id = $tenant_id, c.status = 'active'
-MERGE (r:Reply {case_sf_id: $sf_id})
+      c.resolved_at = $resolved_at, c.status = 'active'
+MERGE (r:Reply {case_sf_id: $sf_id, tenant_id: $tenant_id})
   SET r.text = $resolution_text, r.accepted = $accepted, r.source = $source
 MERGE (c)-[:RESOLVED_BY]->(r)
 FOREACH (_ IN CASE WHEN $module   IS NULL THEN [] ELSE [1] END |
@@ -144,7 +144,7 @@ FOREACH (_ IN CASE WHEN $agent    IS NULL THEN [] ELSE [1] END |
   MERGE (a:Agent {sf_user_id: $agent}) MERGE (c)-[:HANDLED_BY]->(a))
 WITH c
 UNWIND $similar AS sim
-  MATCH (o:Case {sf_id: sim.sf_id})
+  MATCH (o:Case {sf_id: sim.sf_id, tenant_id: $tenant_id})
   MERGE (c)-[s:SIMILAR_TO]->(o) SET s.score = sim.score
   MERGE (o)-[s2:SIMILAR_TO]->(c) SET s2.score = sim.score
   // audit NEO-3 — a near-identical case on the same account is a duplicate;
@@ -197,8 +197,8 @@ def sync_graph(row: dict[str, Any], similar: list[dict] | None = None) -> bool:
 
 
 _LIFECYCLE_CYPHER = """
-MERGE (c:Case {sf_id: $sf_id})
-  SET c.case_number = $case_number, c.subject = $subject, c.tenant_id = $tenant_id,
+MERGE (c:Case {sf_id: $sf_id, tenant_id: $tenant_id})
+  SET c.case_number = $case_number, c.subject = $subject,
       c.status = $status, c.is_closed = $is_closed, c.tier = $tier,
       c.routed_team = $routed_team, c.origin = $origin,
       c.opened_at = $opened_at, c.closed_at = $closed_at, c.synced_at = $synced_at
@@ -207,12 +207,12 @@ FOREACH (_ IN CASE WHEN $module    IS NULL THEN [] ELSE [1] END |
 FOREACH (_ IN CASE WHEN $case_type  IS NULL THEN [] ELSE [1] END |
   MERGE (t:CaseType {name: $case_type})  MERGE (c)-[:OF_TYPE]->(t))
 FOREACH (_ IN CASE WHEN $account_id IS NULL THEN [] ELSE [1] END |
-  MERGE (a:Account {sf_id: $account_id}) SET a.tenant_id = $tenant_id
+  MERGE (a:Account {sf_id: $account_id, tenant_id: $tenant_id})
   MERGE (c)-[:FOR_ACCOUNT]->(a))
 WITH c
 UNWIND $messages AS msg
-  MERGE (mm:Message {id: msg.id})
-    SET mm.case_sf_id = $sf_id, mm.tenant_id = $tenant_id, mm.role = msg.role,
+  MERGE (mm:Message {id: msg.id, tenant_id: $tenant_id})
+    SET mm.case_sf_id = $sf_id, mm.role = msg.role,
         mm.author_kind = msg.author_kind, mm.author_id = msg.author_id,
         mm.ts = msg.ts, mm.text = msg.text
   MERGE (c)-[:HAS_MESSAGE]->(mm)

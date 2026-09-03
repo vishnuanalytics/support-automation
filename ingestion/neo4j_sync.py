@@ -112,13 +112,31 @@ def ensure_constraints(driver):
     for cypher in (
         "CREATE CONSTRAINT doc_url IF NOT EXISTS FOR (d:Doc) REQUIRE d.url IS UNIQUE",
         "CREATE CONSTRAINT section_path IF NOT EXISTS FOR (s:Section) REQUIRE s.path IS UNIQUE",
-        # audit NEO-4 — the case-memory graph MERGEs these every resolution.
-        "CREATE CONSTRAINT case_sf_id IF NOT EXISTS FOR (c:Case) REQUIRE c.sf_id IS UNIQUE",
-        "CREATE CONSTRAINT reply_case_sf_id IF NOT EXISTS FOR (r:Reply) REQUIRE r.case_sf_id IS UNIQUE",
         "CREATE CONSTRAINT module_name IF NOT EXISTS FOR (m:Module) REQUIRE m.name IS UNIQUE",
-        # KIL-a — the Case-lifecycle graph MERGEs one (:Message) per turn.
-        "CREATE CONSTRAINT message_id IF NOT EXISTS FOR (mm:Message) REQUIRE mm.id IS UNIQUE",
-        "CREATE CONSTRAINT account_sf_id IF NOT EXISTS FOR (a:Account) REQUIRE a.sf_id IS UNIQUE",
+        # audit NEO-5 (2026-09-03) -- these were single-property (sf_id /
+        # case_sf_id / id) uniqueness constraints. Salesforce record ids are
+        # per-org, not globally unique, and case_memory.py's MERGEs used to
+        # key on sf_id alone (tenant_id only stamped via SET afterward) --
+        # two tenants on different orgs sharing an id would silently MERGE
+        # into the SAME node, cross-contaminating case history. Both the
+        # Cypher (case_memory.py's _MERGE_CYPHER / _LIFECYCLE_CYPHER, now
+        # keyed on (sf_id, tenant_id)) and these constraints need to agree,
+        # or a real collision would throw a constraint violation instead of
+        # silently merging -- fail-loud is strictly better than the old
+        # behavior, but the composite constraint is what makes two tenants
+        # sharing an id actually WORK instead of erroring on every sync.
+        "DROP CONSTRAINT case_sf_id IF EXISTS",
+        "CREATE CONSTRAINT case_sf_id_tenant IF NOT EXISTS "
+        "FOR (c:Case) REQUIRE (c.sf_id, c.tenant_id) IS UNIQUE",
+        "DROP CONSTRAINT reply_case_sf_id IF EXISTS",
+        "CREATE CONSTRAINT reply_case_sf_id_tenant IF NOT EXISTS "
+        "FOR (r:Reply) REQUIRE (r.case_sf_id, r.tenant_id) IS UNIQUE",
+        "DROP CONSTRAINT message_id IF EXISTS",
+        "CREATE CONSTRAINT message_id_tenant IF NOT EXISTS "
+        "FOR (mm:Message) REQUIRE (mm.id, mm.tenant_id) IS UNIQUE",
+        "DROP CONSTRAINT account_sf_id IF EXISTS",
+        "CREATE CONSTRAINT account_sf_id_tenant IF NOT EXISTS "
+        "FOR (a:Account) REQUIRE (a.sf_id, a.tenant_id) IS UNIQUE",
     ):
         try:
             driver.execute_query(cypher, database_=NEO4J_DATABASE)
