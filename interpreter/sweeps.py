@@ -15,6 +15,14 @@ They are the backstop for everything the pipeline + Omni-Channel can't catch.
                                (covers CDC's 72h retention cliff / cdc downtime).
   reasoning_ttl  every 5 min — reasoning_sessions stuck open past a ceiling:
                                nudge the Slack thread, then escalate + abandon.
+  failed_jobs    every 10 min — jobs.py's `fail()` marks a job 'failed' once
+                               it runs out of attempts; nothing else in the
+                               codebase watched for that (found in a
+                               2026-09-03 robustness pass), so a job could
+                               rot there forever with no one notified. Pages
+                               once per job, windowed by `updated_at` so a
+                               job that failed once doesn't get re-paged
+                               every sweep tick.
 
 SWEEP_DRY_RUN=1 -> log intended actions, change nothing.
 """
@@ -32,6 +40,7 @@ ACK_MIN = int(os.environ.get("SWEEP_ACK_MIN", "30"))             # escalated, un
 RECONCILE_HOURS = int(os.environ.get("SWEEP_RECONCILE_HOURS", "6"))
 SESSION_MAX_MIN = int(os.environ.get("SWEEP_SESSION_MAX_MIN", "120"))
 ALERT_CHANNEL = os.environ.get("SWEEP_ALERT_CHANNEL", "#cx-unrouted")
+FAILED_JOBS_WINDOW_MIN = int(os.environ.get("SWEEP_FAILED_JOBS_WINDOW_MIN", "15"))
 TEAM_QUEUE = {                                                    # routed_team -> SF queue
     "support": "Team_Support", "tier2": "Support_Tier2", "csm": "Team_CSM",
     "sales": "Team_Sales", "offboarding": "Team_Offboarding", "billing": "Billing_Escalations",
@@ -491,3 +500,31 @@ def fire_schedules(sb, *, dry_run: bool | None = None) -> dict:
         except Exception as e:  # noqa: BLE001
             log.warning("fire_schedules update %s: %s", t["trigger_id"], e)
     return {"schedules": len(rows), "fired": fired, "dry_run": dry}
+
+
+# ── failed_jobs (robustness pass, 2026-09-03) ────────────────────────────
+def failed_jobs_sweep(sb, *, dry_run: bool | None = None) -> dict:
+    """Page once for each job that ran out of retries (`jobs.status =
+    'failed'`) in the last `FAILED_JOBS_WINDOW_MIN` minutes. A job only
+    ever transitions into 'failed' once (fail() never moves it back to
+    'queued' after that), so windowing on `updated_at` is enough to avoid
+    re-paging the same job on every sweep tick without needing a separate
+    "already alerted" column."""
+    dry = _dry() if dry_run is None else dry_run
+    since = (_now() - timedelta(minutes=FAILED_JOBS_WINDOW_MIN)).isoformat()
+    try:
+        rows = (sb.table("jobs").select("job_id, kind, error, attempts, updated_at")
+                .eq("status", "failed").gte("updated_at", since)
+                .order("updated_at").limit(50).execute().data or [])
+    except Exception as e:  # noqa: BLE001
+        log.warning("failed_jobs_sweep query: %s", e)
+        return {"error": str(e)[:200]}
+
+    for j in rows:
+        text = (f":x: *Job permanently failed* — `{j['kind']}` (`{j['job_id']}`) "
+                f"after {j['attempts']} attempt(s): {(j.get('error') or '')[:300]}")
+        if dry:
+            log.info("[sweep dry-run] %s", text)
+        else:
+            _page(text, sb=sb)
+    return {"failed": len(rows), "dry_run": dry}

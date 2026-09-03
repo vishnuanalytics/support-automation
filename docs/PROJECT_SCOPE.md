@@ -1793,7 +1793,48 @@ tests (`test_email_channel_configure_status_and_disconnect`,
 now pass live. The other 2 CI failures on this run
 (`test_seeded_flow_routes_as_designed` / `test_same_case_diverges_
 across_tenants`) are the already-documented shared-LLM-quota flakiness
-below, not a regression.
+below, not a regression. A re-run also showed
+`test_kb_entry_roundtrip_embeds_and_scopes` failing (`hybrid_retrieve`
+not finding the expected chunk) — passed cleanly in isolation locally
+right after, so timing/embedding-variance flake, not a regression from
+this chunk either (nothing here touches retrieval).
+
+### Robustness pass, part 2 — job retry had zero backoff, and a permanently-failed job was invisible (2026-09-03)
+
+The fork's original survey (part 1, above) flagged this as its #2
+finding, alongside the `available()` bug that turned out to be the
+bigger story. Two separate gaps in `interpreter/jobs.py`/`api/worker.py`:
+
+**No backoff on retry.** `jobs.fail()` set a retried job straight back
+to `status="queued"` without ever touching `run_after`, so it kept
+whatever (already-past) value it had — `claim_job()` could pick it
+right back up on the very next poll. A transient outage (a rate limit,
+a brief Salesforce blip — exactly what part 1 just made `update_case_
+fields` degrade from instead of crashing) got hit 2-3 times back to
+back with zero delay, worsening the very failure it was retrying from.
+Fixed: `fail()` now sets `run_after` to `now() + min(30s * 2^(attempts-1),
+15min)` on every retry that isn't the last one.
+
+**A `status='failed'` job was invisible.** Once `attempts >=
+max_attempts`, a job flips to `'failed'` and nothing anywhere —  no
+sweep, no health check, no Slack alert — ever looks at that status
+again. A real case that failed 3x (plausibly *because* of the
+`available()` bug in part 1) would rot in the `jobs` table forever with
+no one notified. Fixed: new `sweeps.failed_jobs_sweep` (every 10 min,
+following the exact `queue_sweep`/`_page()`/`SWEEP_DRY_RUN` pattern
+already established) pages once per newly-failed job, windowed by
+`updated_at` so the same job isn't re-paged every tick without needing
+a new "already alerted" column. Registered in `api/worker.py`'s
+`_SWEEP_EVERY_MIN`/`HANDLERS` alongside the other periodic sweeps —
+no new pattern invented.
+
+**Verify:** new `tests/test_jobs.py` (5 tests — backoff grows with
+attempts, is capped, is skipped once attempts are exhausted) +
+3 new tests in `tests/test_sweeps.py` (pages once per failed job,
+dry-run pages nothing, a query failure degrades cleanly). Full offline
+suite 569/569. Live-verified `failed_jobs_sweep` against the real
+`jobs` table (dry-run, 0 failed jobs currently — clean query, no
+schema mismatch).
 
 ### Scoped, not built: per-tenant case-taxonomy config
 

@@ -9,9 +9,20 @@ Thin helpers over the `jobs` table (migration 013). Service-role only.
 
 from __future__ import annotations
 
+import os
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ingestion.scraper import get_supabase
+
+# Exponential backoff before a failed job's next retry -- min(base * 2^(n-1),
+# cap) seconds. Robustness-pass fix (2026-09-03): fail() used to leave
+# run_after untouched, so a re-queued job's old (already past) run_after
+# made it immediately re-claimable -- a transient outage (rate limit, a
+# brief Salesforce blip) got hit 2-3x back to back with zero delay instead
+# of backing off.
+_BACKOFF_BASE_SECONDS = int(os.environ.get("JOB_RETRY_BASE_SECONDS", "30"))
+_BACKOFF_CAP_SECONDS = int(os.environ.get("JOB_RETRY_CAP_SECONDS", "900"))
 
 
 def enqueue(kind: str, payload: dict[str, Any], *, dedupe_key: str | None = None,
@@ -59,7 +70,8 @@ def complete(job_id: str, result: dict[str, Any] | None = None, sb=None) -> None
 
 
 def fail(job_id: str, error: str, *, sb=None) -> None:
-    """Back to 'queued' for another attempt, or 'failed' once attempts run out."""
+    """Back to 'queued' (after an exponential backoff delay) for another
+    attempt, or 'failed' once attempts run out."""
     if not job_id:
         return
     sb = sb or get_supabase()
@@ -67,9 +79,13 @@ def fail(job_id: str, error: str, *, sb=None) -> None:
     attempts = row[0]["attempts"] if row else 99
     max_attempts = row[0]["max_attempts"] if row else 3
     done = attempts >= max_attempts
-    sb.table("jobs").update({
+    patch: dict[str, Any] = {
         "status": "failed" if done else "queued",
         "error": error[:2000],
         "locked_at": None,
         "updated_at": "now()",
-    }).eq("job_id", job_id).execute()
+    }
+    if not done:
+        delay = min(_BACKOFF_BASE_SECONDS * (2 ** max(attempts - 1, 0)), _BACKOFF_CAP_SECONDS)
+        patch["run_after"] = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
+    sb.table("jobs").update(patch).eq("job_id", job_id).execute()
