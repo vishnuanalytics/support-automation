@@ -716,16 +716,16 @@ SF-touching node handler are all built and live-verified; every flow
 editor node whose config is genuinely backed by an external system
 (Salesforce Case fields/Queues/connected-orgs, Slack channels/users/
 usergroups, per-tenant HTTP Connections, internal KB collections) now
-renders a real picker instead of raw JSON — see "Flow editor Inspector:
-real Salesforce data instead of hardcoded/raw JSON" and "Every node
-with a real data source gets a real picker" for the two chunks. **Not
-yet done, noted as the next Salesforce introspection addition if it
-becomes a real pain point**: a `list_active_users` function (no SF User
-picker exists yet — `notify.target_by_type`/`fallback_target` and
-`notify_human.mention.mention_id` stay free text). **Also not yet
-done**: neither editor chunk has been clicked through in a real
-browser — next step before calling this fully shipped. Deferred,
-**explicitly out of scope until asked for again**: Google Calendar
+renders a real picker instead of raw JSON, including edge conditions
+(`classification.case_type` / `routed_team` quick-insert dropdowns) and
+Salesforce User/Queue @mention targets (`notify`/`notify_human`) — see
+"Flow editor Inspector: real Salesforce data instead of hardcoded/raw
+JSON", "Every node with a real data source gets a real picker", and
+"Closing the last gaps: SF User picker + edge conditions" for the three
+chunks. **Only open item now**: none of the three editor chunks has
+been clicked through in a real browser — next step before calling this
+fully shipped. Deferred, **explicitly out of scope until asked for
+again**: Google Calendar
 meeting-scheduling as its own node type (design decided — time from
 BOTH the customer's message AND Google Calendar free/busy; needs a new
 `interpreter/gcalendar.py` + widening `gdrive.py`'s OAuth scopes, with
@@ -1525,6 +1525,59 @@ real Slack workspace before wiring the endpoint: 12 real channels
 suite 548/548. Frontend: `tsc -b` clean, `vitest run` 6/6, `vite build`
 clean (739 kB bundle, same pre-existing size warning). Not yet clicked
 through in a real browser.
+
+### Closing the last gaps: SF User picker + edge conditions (2026-09-03)
+
+The user pushed back after the previous chunk ("still there are few
+nodes & edges need to be addressed from salesforce & slack") — two real
+gaps remained, one explicitly noted as deferred and one not surveyed at
+all.
+
+**Salesforce User picker — the noted gap.** New
+`salesforce.list_active_users(tenant_id, org_label)`: `SELECT Id, Name,
+Email FROM User WHERE IsActive = true AND UserType = 'Standard'`
+(filters out Salesforce's own system/integration/automation user types;
+best-effort like `list_queues`' sharing-rule caveat — it can't tell a
+*named* Standard-type integration user from a real agent). Folded into
+`introspect_org`/`org_metadata` as a third `users` section, degrading
+independently like `case_fields`/`queues` already did. New
+`SfMentionPicker` (users + queues in one `<select>` with `<optgroup>`s,
+since a Chatter mention accepts either) replaces free text for
+`notify.target_by_type`/`fallback_target` and
+`notify_human.mention.mention_id`; `NotifyHumanForm` also gained the
+`OrgPicker` it was missing for resolving that mention against the right
+org. Live-verified against `acme-dev`: 6 real active Standard-type
+users returned, `org_metadata`'s `users` key populated end to end.
+
+**Edge conditions — not surveyed in the last two chunks at all.**
+`EdgeInspector`'s `if` expression was a plain textarea with a static
+hint string ever since it was built — never touched by "give it a
+picker" because it isn't a *node*. But `_context()`
+(`interpreter/builder.py`) exposes real fields a condition can branch
+on that ARE Salesforce-backed: `classification.case_type` (the real
+Case `Type` picklist value) and `routed_team` (the `team_route` node's
+output). `EdgeInspector` now takes a `tenantId` prop and offers two
+quick-insert dropdowns — real Case Type values (from the tenant's
+default-org schema) and the `team_route` team names — that splice a
+comparison clause into the expression at the cursor position (a
+`textarea` ref tracks `selectionStart`/`selectionEnd`), plus `&&`/`||`
+buttons. Deliberately did **not** add a Slack-backed quick-insert:
+`_context()` exposes nothing from Slack, so there is no genuine value
+to pick from there — inventing one would have repeated the exact
+mistake being fixed (a `sf_context.case.Module__c` snippet was drafted
+and then removed before shipping, once grepping `sf_context.py::load`'s
+actual return shape confirmed no `case`/`Module__c` key exists there —
+caught before merge, not after).
+
+**Verify:** `tests/test_salesforce_multi_org.py` gained
+`test_list_active_users_shapes_the_real_org_users` plus updated
+assertions on `introspect_org`/`org_metadata`'s three-section shape
+(`_FakeSFClient.query` now dispatches on `FROM User` vs `FROM Group`).
+Full offline suite 549/549. Frontend: `tsc -b` clean, `vitest run` 6/6,
+`vite build` clean. Live-verified `list_active_users` and the
+end-to-end `org_metadata` `users` field against the real `acme-dev`
+org. Not yet clicked through in a real browser — three editor chunks
+in a row now share that same open item.
 
 ### Scoped, not built: per-tenant case-taxonomy config
 

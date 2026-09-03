@@ -289,12 +289,28 @@ def list_queues(tenant_id: str | None, org_label: str | None = None) -> list[dic
     return [{"id": r["Id"], "name": r["Name"], "developer_name": r.get("DeveloperName")} for r in rows]
 
 
+def list_active_users(tenant_id: str | None, org_label: str | None = None) -> list[dict[str, Any]]:
+    """Real, active human agents in the org — for a `notify`/`notify_human`
+    @mention picker (a Case/Chatter mention needs a real User or Group id,
+    not a typed-in name). `UserType = 'Standard'` filters out Salesforce's
+    own system/integration/automation users (AutomatedProcess,
+    CloudIntegrationUser, CsnOnly, …); it can't filter out a *named*
+    integration user someone created as a Standard user, so this is
+    best-effort, same as `list_queues`'s sharing-rule caveat."""
+    sf = client_for(tenant_id, org_label)
+    rows = sf.query(
+        "SELECT Id, Name, Email FROM User "
+        "WHERE IsActive = true AND UserType = 'Standard' ORDER BY Name LIMIT 500"
+    ).get("records", [])
+    return [{"id": r["Id"], "name": r["Name"], "email": r.get("Email")} for r in rows]
+
+
 def introspect_org(tenant_id: str | None, org_label: str | None = None) -> dict[str, Any]:
     """Everything a flow-editor dropdown needs in one call: the org's real
-    Case fields (+ picklist values) and its Queues. Best-effort per
-    section — a Case-describe failure shouldn't hide Queues the caller CAN
-    see, and vice versa."""
-    out: dict[str, Any] = {"case_fields": [], "queues": [], "errors": []}
+    Case fields (+ picklist values), its Queues, and its active Users.
+    Best-effort per section — a Case-describe failure shouldn't hide
+    Queues/Users the caller CAN see, and vice versa."""
+    out: dict[str, Any] = {"case_fields": [], "queues": [], "users": [], "errors": []}
     try:
         out["case_fields"] = describe_case_fields(tenant_id, org_label)
     except Exception as e:  # noqa: BLE001
@@ -303,6 +319,10 @@ def introspect_org(tenant_id: str | None, org_label: str | None = None) -> dict[
         out["queues"] = list_queues(tenant_id, org_label)
     except Exception as e:  # noqa: BLE001
         out["errors"].append(f"queues: {type(e).__name__}: {e}"[:300])
+    try:
+        out["users"] = list_active_users(tenant_id, org_label)
+    except Exception as e:  # noqa: BLE001
+        out["errors"].append(f"users: {type(e).__name__}: {e}"[:300])
     return out
 
 
@@ -1027,13 +1047,14 @@ def org_metadata(tenant_id: str | None = None, org_label: str | None = None) -> 
         return [v["value"] for v in by_name.get(name, {}).get("picklist_values", [])]
 
     return {
-        "available": bool(schema["case_fields"] or schema["queues"]),
+        "available": bool(schema["case_fields"] or schema["queues"] or schema["users"]),
         "queues": schema["queues"],
         "case_types": _picklist("Type"),
         "modules": _picklist("Module__c"),
         "case_fields": schema["case_fields"],
+        "users": schema["users"],
         **({"error": "; ".join(schema["errors"])} if schema["errors"] and not schema["case_fields"]
-           and not schema["queues"] else {}),
+           and not schema["queues"] and not schema["users"] else {}),
     }
 
 

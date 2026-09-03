@@ -649,6 +649,7 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
           ) : selectedEdge ? (
             <EdgeInspector
               edge={selectedEdge}
+              tenantId={flow?.tenant_id || ""}
               onCondition={(c) => setEdgeCond(selectedEdge.id, c)}
               onDelete={() => {
                 setEdges((es) => es.filter((e) => e.id !== selectedEdge.id));

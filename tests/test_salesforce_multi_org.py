@@ -229,6 +229,11 @@ class _FakeSFClient:
     Case = _FakeCaseDescribe()
 
     def query(self, soql):
+        if "FROM User" in soql:
+            return {"records": [
+                {"Id": "005A", "Name": "Casey Lin", "Email": "casey@example.com"},
+                {"Id": "005B", "Name": "Sam Rivera", "Email": "sam@example.com"},
+            ]}
         assert "Group" in soql and "Queue" in soql
         return {"records": [
             {"Id": "00G1", "Name": "Billing Queue", "DeveloperName": "Billing_Queue"},
@@ -256,10 +261,20 @@ def test_list_queues_shapes_the_real_org_queues(monkeypatch):
     ]
 
 
+def test_list_active_users_shapes_the_real_org_users(monkeypatch):
+    monkeypatch.setattr(salesforce, "client_for", lambda *a, **k: _FakeSFClient())
+    us = salesforce.list_active_users("t1")
+    assert us == [
+        {"id": "005A", "name": "Casey Lin", "email": "casey@example.com"},
+        {"id": "005B", "name": "Sam Rivera", "email": "sam@example.com"},
+    ]
+
+
 def test_introspect_org_combines_both_and_degrades_per_section(monkeypatch):
     monkeypatch.setattr(salesforce, "client_for", lambda *a, **k: _FakeSFClient())
     out = salesforce.introspect_org("t1")
-    assert len(out["case_fields"]) == 3 and len(out["queues"]) == 2 and out["errors"] == []
+    assert (len(out["case_fields"]) == 3 and len(out["queues"]) == 2
+            and len(out["users"]) == 2 and out["errors"] == [])
 
     def _broken_client(*a, **k):
         class _C:
@@ -270,8 +285,8 @@ def test_introspect_org_combines_both_and_degrades_per_section(monkeypatch):
 
     monkeypatch.setattr(salesforce, "client_for", _broken_client)
     out = salesforce.introspect_org("t1")
-    assert out["case_fields"] == [] and out["queues"] == []
-    assert len(out["errors"]) == 2  # both sections failed independently, neither raised
+    assert out["case_fields"] == [] and out["queues"] == [] and out["users"] == []
+    assert len(out["errors"]) == 3  # all three sections failed independently, none raised
 
 
 # --------------------------------------------------------------------------
@@ -290,6 +305,10 @@ def test_org_metadata_derives_legacy_fields_from_introspect_org(monkeypatch):
     ]
     assert meta["case_types"] == []          # _FakeSFClient's Case has no "Type" field
     assert meta["case_fields"][0]["name"] == "Module__c"
+    assert meta["users"] == [
+        {"id": "005A", "name": "Casey Lin", "email": "casey@example.com"},
+        {"id": "005B", "name": "Sam Rivera", "email": "sam@example.com"},
+    ]
 
 
 def test_org_metadata_available_even_with_no_env_creds_if_the_tenant_org_resolves(monkeypatch):

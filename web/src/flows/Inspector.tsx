@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { api } from "../api";
 import type { Connection, KbCollection, SfMeta, SlackMeta } from "../types";
@@ -9,7 +9,7 @@ import type { RFEdge, RFNode } from "./graph";
 // editor session; a node's own `config.org` picks which connected org
 // (empty -> 'default'), so switching a node's org refetches that org's
 // real schema instead of showing another org's fields.
-const _EMPTY_META: SfMeta = { available: false, queues: [], case_types: [], modules: [], case_fields: [] };
+const _EMPTY_META: SfMeta = { available: false, queues: [], case_types: [], modules: [], case_fields: [], users: [] };
 const _metaCache = new Map<string, SfMeta>();
 const _metaPromise = new Map<string, Promise<SfMeta>>();
 
@@ -70,6 +70,54 @@ function QueuePicker({
           {q.name}
         </option>
       ))}
+    </select>
+  );
+}
+
+/** A real Salesforce User OR Queue/Group id — for an @mention / assignment
+ *  target (`notify.target_by_type`/`fallback_target`,
+ *  `notify_human.mention.mention_id`). Grouped `<optgroup>`s since either
+ *  kind is valid for a Chatter mention. Plain text when the org can't be
+ *  reached / has neither. */
+function SfMentionPicker({
+  value,
+  onChange,
+  tenantId,
+  orgLabel,
+  placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  tenantId: string;
+  orgLabel?: string;
+  placeholder?: string;
+}) {
+  const meta = useSfMeta(tenantId, orgLabel);
+  const users = meta.users || [];
+  if (!meta.available || (users.length === 0 && meta.queues.length === 0)) {
+    return (
+      <input
+        value={value}
+        placeholder={placeholder || "005xxxxxxxxxxxx or 00Gxxxxxxxxxxxx"}
+        onChange={(e) => onChange(e.target.value.trim())}
+      />
+    );
+  }
+  const known = value === "" || users.some((u) => u.id === value) || meta.queues.some((q) => q.id === value);
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)}>
+      <option value="">— none —</option>
+      {!known && <option value={value}>{value} (not in org)</option>}
+      {users.length > 0 && (
+        <optgroup label="Users">
+          {users.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+        </optgroup>
+      )}
+      {meta.queues.length > 0 && (
+        <optgroup label="Queues">
+          {meta.queues.map((q) => <option key={q.id} value={q.id}>{q.name}</option>)}
+        </optgroup>
+      )}
     </select>
   );
 }
@@ -680,19 +728,23 @@ function NotifyForm({
       {caseTypes.map((t) => (
         <div className="row" key={t} style={{ gap: 4 }}>
           <span className="muted" style={{ width: 110 }}>{t}</span>
-          <input
+          <SfMentionPicker
             value={byType[t] ?? ""}
+            onChange={(v) => setTarget(t, v)}
+            tenantId={tenantId}
+            orgLabel={typeof config.org === "string" ? config.org : undefined}
             placeholder="User/Group id or name"
-            onChange={(e) => setTarget(t, e.target.value.trim())}
           />
         </div>
       ))}
       <div className="row" style={{ marginTop: 6 }}>
         <span className="muted" style={{ width: 110 }}>fallback target</span>
-        <input
+        <SfMentionPicker
           value={typeof config.fallback_target === "string" ? config.fallback_target : ""}
+          onChange={(v) => set({ fallback_target: v || null })}
+          tenantId={tenantId}
+          orgLabel={typeof config.org === "string" ? config.org : undefined}
           placeholder="(optional)"
-          onChange={(e) => set({ fallback_target: e.target.value.trim() || null })}
         />
       </div>
       <div className="row" style={{ marginTop: 6 }}>
@@ -1182,10 +1234,20 @@ function NotifyHumanForm({
       </div>
       <div className="row" style={{ marginTop: 4 }}>
         <span className="muted" style={{ width: 130 }}>@mention (SF id)</span>
-        <input
+        <SfMentionPicker
           value={typeof mention.mention_id === "string" ? mention.mention_id : ""}
+          onChange={(v) => set({ mention: { ...mention, mention_id: v } })}
+          tenantId={tenantId}
+          orgLabel={typeof config.org === "string" ? config.org : undefined}
           placeholder="005xxxxxxxxxxxx (Chatter @mention)"
-          onChange={(e) => set({ mention: { ...mention, mention_id: e.target.value.trim() } })}
+        />
+      </div>
+      <div className="row" style={{ marginTop: 4 }}>
+        <span className="muted" style={{ width: 130 }}>SF org (for the mention lookup)</span>
+        <OrgPicker
+          value={typeof config.org === "string" ? config.org : ""}
+          onChange={(v) => set({ org: v || undefined })}
+          tenantId={tenantId}
         />
       </div>
 
@@ -1390,13 +1452,38 @@ export function EdgeInspector({
   edge,
   onCondition,
   onDelete,
+  tenantId,
 }: {
   edge: RFEdge;
   onCondition: (c: Record<string, unknown>) => void;
   onDelete: () => void;
+  tenantId: string;
 }) {
   const ifExpr = (edge.data?.condition as { if?: string })?.if ?? "";
   const conditional = ifExpr !== "";
+  // Default org's schema -- an edge isn't scoped to one node's `config.org`,
+  // so this offers real values from whichever org this tenant treats as
+  // primary. Good enough for "insert a real picklist value"; a multi-org
+  // tenant branching on a non-default org's Type values still has the
+  // plain expression box. (No Slack-backed condition exists -- edge
+  // conditions only ever see `_context()`'s state fields, which don't
+  // include anything from Slack, so there's nothing genuine to pick from
+  // there.)
+  const sfMeta = useSfMeta(tenantId);
+  const taRef = useRef<HTMLTextAreaElement>(null);
+
+  const insert = (snippet: string) => {
+    const ta = taRef.current;
+    const start = ta?.selectionStart ?? ifExpr.length;
+    const end = ta?.selectionEnd ?? ifExpr.length;
+    const next = ifExpr.slice(0, start) + snippet + ifExpr.slice(end);
+    onCondition({ if: next });
+    if (ta) {
+      const pos = start + snippet.length;
+      requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(pos, pos); });
+    }
+  };
+
   return (
     <div>
       <h4>edge</h4>
@@ -1417,14 +1504,36 @@ export function EdgeInspector({
         <div className="field">
           <label>if (expression)</label>
           <textarea
+            ref={taRef}
             rows={2}
             value={ifExpr}
             onChange={(e) => onCondition({ if: e.target.value })}
           />
           <div className="muted" style={{ fontSize: 11 }}>
             names: tier, region, confidence, retrieval_score, draft_confidence,
-            confidence_gate.pass, classification.urgency
+            confidence_gate.pass, classification.urgency, classification.case_type,
+            routed_team, sf_context.*
           </div>
+          {sfMeta.case_types.length > 0 && (
+            <div className="row" style={{ marginTop: 6, gap: 4, flexWrap: "wrap" }}>
+              {sfMeta.case_types.length > 0 && (
+                <select value="" onChange={(e) => {
+                  if (e.target.value) insert(`classification.case_type == '${e.target.value}'`);
+                }}>
+                  <option value="">+ Case Type…</option>
+                  {sfMeta.case_types.map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
+              )}
+              <select value="" onChange={(e) => {
+                if (e.target.value) insert(`routed_team == '${e.target.value}'`);
+              }}>
+                <option value="">+ routed_team…</option>
+                {ROUTED_TEAMS.map((t) => <option key={t} value={t}>{t}</option>)}
+              </select>
+              <button type="button" onClick={() => insert(" && ")}>&&</button>
+              <button type="button" onClick={() => insert(" || ")}>||</button>
+            </div>
+          )}
         </div>
       )}
       <button className="err" onClick={onDelete}>
