@@ -1147,14 +1147,19 @@ def billing_usage(tenant_id: str | None = None, period: str | None = None,
     plan = (trows[0].get("plan") if trows else None) or "free"
 
     rows = (
-        c.sb.table("runs").select("tokens_total, tokens_by_model, created_at")
+        c.sb.table("runs").select("flow_id, tokens_total, tokens_by_model, created_at")
         .eq("tenant_id", tid)
         .gte("created_at", period_start).lt("created_at", period_end)
         .limit(5000).execute().data
         or []
     )
+    flow_names = {
+        f["flow_id"]: f["name"]
+        for f in (c.sb.table("flows").select("flow_id, name")
+                  .eq("tenant_id", tid).execute().data or [])
+    }
     return {"period_label": period_label,
-            **billing.usage_summary(rows, plan, period_start, period_end)}
+            **billing.usage_summary(rows, plan, period_start, period_end, flow_names)}
 
 
 # ── KIL-f: the Knowledge Integrity Loop review queue + metrics ─────────

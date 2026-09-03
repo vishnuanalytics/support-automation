@@ -391,6 +391,7 @@ export interface BillingUsage {
   runs_count: number;
   tokens_total: number;
   tokens_by_model: Record<string, number>;
+  by_flow: { flow_id: string; name: string; runs: number; tokens: number; estimated_cost_usd: number }[];
   estimated_cost_usd: number;
   daily: { date: string; runs: number; tokens: number }[];
   pct_runs_used: number | null;
