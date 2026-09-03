@@ -54,11 +54,27 @@ export function KnowledgeView() {
             <button
               key={c.source_id}
               className={c.source_id === sel ? "primary" : ""}
-              style={{ justifyContent: "space-between", display: "flex" }}
+              style={{ justifyContent: "space-between", display: "flex", gap: 6 }}
               onClick={() => setSel(c.source_id)}
             >
               <span>{c.name}</span>
-              <span className="muted">{c.entry_count}</span>
+              <span className="row" style={{ gap: 4 }}>
+                {!!c.provisional_count && (
+                  <span
+                    title={`${c.provisional_count} entr${c.provisional_count === 1 ? "y" : "ies"} held pending review`}
+                    style={{
+                      fontSize: 11,
+                      padding: "0 5px",
+                      borderRadius: 8,
+                      background: "#8a5a00",
+                      color: "#fff",
+                    }}
+                  >
+                    {c.provisional_count} held
+                  </span>
+                )}
+                <span className="muted">{c.entry_count}</span>
+              </span>
             </button>
           ))}
           {cols.length === 0 && !err && (
@@ -88,6 +104,7 @@ export function KnowledgeView() {
 function Collection({ col, onChange }: { col: KbCollection; onChange: () => void }) {
   const [entries, setEntries] = useState<KbEntryRow[]>([]);
   const [openId, setOpenId] = useState<string | "new" | null>(null);
+  const [showRetired, setShowRetired] = useState(false);
 
   const [gApi, setGApi] = useState<{ configured: boolean; connected: boolean }>({
     configured: false,
@@ -178,12 +195,22 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
     }
   }
 
+  const retiredCount = entries.filter((e) => e.status === "superseded").length;
+  const visible = entries.filter((e) => showRetired || e.status !== "superseded");
+  const heldCount = entries.filter((e) => e.status === "provisional").length;
+
   return (
     <div className="col" style={{ padding: 16, gap: 12, overflow: "auto" }}>
       <div className="row" style={{ justifyContent: "space-between" }}>
         <div className="col" style={{ gap: 2 }}>
           <h3 style={{ margin: 0 }}>{col.name}</h3>
           {col.description && <span className="muted">{col.description}</span>}
+          {heldCount > 0 && (
+            <span className="muted" style={{ fontSize: 12 }}>
+              {heldCount} entr{heldCount === 1 ? "y is" : "ies are"} <strong>held: disputed</strong> —
+              a review-drafted change, retrievable but flagged until it clears review.
+            </span>
+          )}
         </div>
         <div className="row">
           <button onClick={() => setOpenId("new")}>＋ entry</button>
@@ -223,6 +250,17 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
         />
       )}
 
+      {retiredCount > 0 && (
+        <label className="row muted" style={{ gap: 6, fontSize: 12 }}>
+          <input
+            type="checkbox"
+            checked={showRetired}
+            onChange={(e) => setShowRetired(e.target.checked)}
+          />
+          show {retiredCount} retired (superseded) entr{retiredCount === 1 ? "y" : "ies"}
+        </label>
+      )}
+
       <table className="runs-table">
         <thead>
           <tr>
@@ -233,12 +271,13 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
           </tr>
         </thead>
         <tbody>
-          {entries.map((e) => (
+          {visible.map((e) => (
             <Fragment key={e.entry_id}>
-              <tr>
+              <tr style={e.status === "superseded" ? { opacity: 0.55 } : undefined}>
                 <td>
                   {e.origin === "gdoc" && <span title={e.gdoc_url ?? "Google Doc"}>🔗 </span>}
                   {e.title}
+                  <KbStatusBadge entry={e} />
                   {e.sync_error && (
                     <span className="err" style={{ fontSize: 11 }}> · sync error</span>
                   )}
@@ -280,7 +319,7 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
               )}
             </Fragment>
           ))}
-          {entries.length === 0 && (
+          {visible.length === 0 && (
             <tr>
               <td colSpan={4} className="muted">
                 no entries — add a runbook / workflow / config note
@@ -291,6 +330,37 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
       </table>
     </div>
   );
+}
+
+function KbStatusBadge({ entry }: { entry: KbEntryRow }) {
+  const pill = (bg: string, text: string, title?: string) => (
+    <span
+      title={title}
+      style={{
+        fontSize: 11,
+        marginLeft: 6,
+        padding: "1px 6px",
+        borderRadius: 8,
+        background: bg,
+        color: "#fff",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {text}
+    </span>
+  );
+
+  if (entry.status === "provisional") {
+    const until = entry.provisional_until
+      ? `auto-promotes ${new Date(entry.provisional_until).toLocaleDateString()} if no new contradiction`
+      : "held pending review";
+    return pill("#8a5a00", "held: disputed", until);
+  }
+  if (entry.status === "superseded")
+    return pill("#555", "superseded", "replaced by a newer entry — not retrieved");
+  if (entry.origin === "review_writeback")
+    return pill("#33608a", "from a review", "created by the knowledge-integrity loop");
+  return null;
 }
 
 function EntryEditor({
