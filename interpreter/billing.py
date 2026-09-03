@@ -60,17 +60,22 @@ def _pct(used: int, limit: int | None) -> float | None:
 
 
 def usage_summary(rows: list[dict[str, Any]], plan: str,
-                   period_start: str, period_end: str) -> dict:
+                   period_start: str, period_end: str,
+                   flow_names: dict[str, str] | None = None) -> dict:
     limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])
+    flow_names = flow_names or {}
 
     runs_count = len(rows)
     tokens_total = 0
     tokens_by_model: dict[str, int] = {}
     daily: dict[str, dict[str, int]] = {}
+    by_flow: dict[str, dict[str, Any]] = {}
 
     for r in rows:
-        tokens_total += int(r.get("tokens_total") or 0)
-        for model, n in (r.get("tokens_by_model") or {}).items():
+        row_tokens = int(r.get("tokens_total") or 0)
+        tokens_total += row_tokens
+        row_by_model = r.get("tokens_by_model") or {}
+        for model, n in row_by_model.items():
             tokens_by_model[model] = tokens_by_model.get(model, 0) + int(n)
 
         created = r.get("created_at")
@@ -78,7 +83,25 @@ def usage_summary(rows: list[dict[str, Any]], plan: str,
         if day:
             bucket = daily.setdefault(day, {"runs": 0, "tokens": 0})
             bucket["runs"] += 1
-            bucket["tokens"] += int(r.get("tokens_total") or 0)
+            bucket["tokens"] += row_tokens
+
+        flow_id = r.get("flow_id")
+        if flow_id:
+            fb = by_flow.setdefault(flow_id, {
+                "flow_id": flow_id, "name": flow_names.get(flow_id, flow_id),
+                "runs": 0, "tokens": 0, "tokens_by_model": {},
+            })
+            fb["runs"] += 1
+            fb["tokens"] += row_tokens
+            for model, n in row_by_model.items():
+                fb["tokens_by_model"][model] = fb["tokens_by_model"].get(model, 0) + int(n)
+
+    by_flow_list = [
+        {"flow_id": fb["flow_id"], "name": fb["name"], "runs": fb["runs"],
+         "tokens": fb["tokens"], "estimated_cost_usd": estimate_cost_usd(fb["tokens_by_model"])}
+        for fb in by_flow.values()
+    ]
+    by_flow_list.sort(key=lambda f: f["tokens"], reverse=True)
 
     return {
         "period": {"start": period_start, "end": period_end},
@@ -87,6 +110,7 @@ def usage_summary(rows: list[dict[str, Any]], plan: str,
         "runs_count": runs_count,
         "tokens_total": tokens_total,
         "tokens_by_model": tokens_by_model,
+        "by_flow": by_flow_list,
         "estimated_cost_usd": estimate_cost_usd(tokens_by_model),
         "daily": [{"date": d, **daily[d]} for d in sorted(daily)],
         "pct_runs_used": _pct(runs_count, limits["runs"]),

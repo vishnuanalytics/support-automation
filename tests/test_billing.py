@@ -53,6 +53,32 @@ def test_usage_summary_aggregates_runs_tokens_and_daily_buckets():
     assert s["pct_runs_used"] == round(3 / 200 * 100, 1)
     assert s["pct_tokens_used"] == round(350 / 500_000 * 100, 1)
     assert s["estimated_cost_usd"] > 0   # sonnet + haiku tokens aren't free
+    assert s["by_flow"] == []   # none of these rows carry a flow_id
+
+
+def test_usage_summary_by_flow_groups_sorts_and_names_flows():
+    rows = [
+        {"flow_id": "f1", "tokens_total": 100, "tokens_by_model": {"openai/gpt-oss-120b": 100},
+         "created_at": "2026-09-01T10:00:00+00:00"},
+        {"flow_id": "f1", "tokens_total": 50, "tokens_by_model": {"claude-sonnet-5": 50},
+         "created_at": "2026-09-01T11:00:00+00:00"},
+        {"flow_id": "f2", "tokens_total": 400, "tokens_by_model": {"claude-sonnet-5": 400},
+         "created_at": "2026-09-02T09:00:00+00:00"},
+        {"flow_id": None, "tokens_total": 10, "tokens_by_model": {}, "created_at": None},
+    ]
+    s = billing.usage_summary(rows, "free", "2026-09-01T00:00:00+00:00",
+                              "2026-10-01T00:00:00+00:00", flow_names={"f1": "Support Autoreply"})
+
+    assert s["runs_count"] == 4          # the flow_id=None row still counts toward the total
+    # sorted by tokens desc: f2 (400) before f1 (150)
+    assert [f["flow_id"] for f in s["by_flow"]] == ["f2", "f1"]
+    f2, f1 = s["by_flow"]
+    assert f2 == {"flow_id": "f2", "name": "f2", "runs": 1, "tokens": 400,
+                  "estimated_cost_usd": billing.estimate_cost_usd({"claude-sonnet-5": 400})}
+    assert f1["name"] == "Support Autoreply"   # named via flow_names, unlike f2 (falls back to id)
+    assert f1["runs"] == 2 and f1["tokens"] == 150
+    # a run with no flow_id is dropped from by_flow, not crashed on
+    assert sum(f["runs"] for f in s["by_flow"]) == 3
 
 
 def test_usage_summary_pro_plan_has_no_pct_limits():

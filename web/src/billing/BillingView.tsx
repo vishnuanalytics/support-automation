@@ -87,6 +87,32 @@ export function BillingView() {
             ))}
           </div>
 
+          {usage.by_flow.length > 0 && (
+            <>
+              <h5>by flow</h5>
+              <table className="runs-table">
+                <thead>
+                  <tr>
+                    <th>flow</th>
+                    <th>runs</th>
+                    <th>tokens</th>
+                    <th>est. cost</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {usage.by_flow.map((f) => (
+                    <tr key={f.flow_id}>
+                      <td>{f.name}</td>
+                      <td className="muted">{f.runs.toLocaleString()}</td>
+                      <td className="muted">{f.tokens.toLocaleString()}</td>
+                      <td className="muted">${f.estimated_cost_usd.toFixed(2)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          )}
+
           {Object.keys(usage.tokens_by_model).length > 0 && (
             <>
               <h5>tokens by model</h5>

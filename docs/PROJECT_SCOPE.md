@@ -830,7 +830,7 @@ one already has, via the Supabase MCP).
 **Phase 28 — a 6-step ordered feature list (infra-first, each step
 reuses the last): 1. platform activity/audit log ✅ · 2. flow-version
 rollback audit trail + `flow_versions` retention ✅ · 3. billing quota
-enforcement ✅ · 4. per-flow cost breakdown · 5. flow templates
+enforcement ✅ · 4. per-flow cost breakdown ✅ · 5. flow templates
 marketplace (logs through #1) · 6. bulk KB export/import.**
 
 **Step 1 — platform activity/audit log (COMPLETE 2026-09-03).**
@@ -919,8 +919,28 @@ verification report across this entire session (P8c through step 2 of
 this phase) without their actual failure text being checked each time.
 Moving the `return` statement fixed both; the other 4 previously-lumped
 failures were re-verified individually and are genuinely the seed-flow
-gap (`FlowNotFound`), unrelated. **Next:** step 4 — per-flow cost
-breakdown.
+gap (`FlowNotFound`), unrelated.
+
+**Step 4 — per-flow cost breakdown (COMPLETE 2026-09-03).** The
+Billing tab (P9) only ever showed tenant-wide totals — no way to see
+*which flow* is spending the tokens. `interpreter/billing.py::usage_summary()`
+gains an optional `flow_names` param and groups every run's
+`tokens_total`/`tokens_by_model` by `flow_id` into a new `by_flow` list
+(`{flow_id, name, runs, tokens, estimated_cost_usd}`, sorted by tokens
+descending; a run with no `flow_id` — shouldn't normally happen, but
+handled — is still counted in `runs_count`/`tokens_total`, just dropped
+from the per-flow rows rather than crashing). `GET /api/billing/usage`
+now also selects `flow_id` on the `runs` query and joins tenant's
+`flows.name` for display. Web Billing tab gains a **by flow** table
+(flow / runs / tokens / est. cost) between the daily chart and the
+tokens-by-model breakdown. `tests/test_billing.py` gains 2 tests
+(grouping/sorting/naming, and the no-flow-id-drops-cleanly case).
+**Live-verified** against the real Globex tenant: `by_flow` correctly
+attributed all 41 runs / 26,983 tokens to "Globex Support —
+human-review-first" with the real name resolved via the `flows` join
+(single-flow tenant, so multi-flow grouping/sorting was proven by the
+offline unit test instead). **Next:** step 5 — flow templates
+marketplace.
 
 **Phase 27 — the Case Control Plane (done, 2026-09-01/02).** One
 AI-managed Case queue: classify + route + track `Status` + hand off via
