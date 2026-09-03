@@ -1283,6 +1283,69 @@ in at build time (only `sf_jwt`/the model cache are live-mounted), so
 every backend change made across several PRs today had been sitting
 unapplied in the running containers until that rebuild.
 
+### Multi-org selection reaches every SF-touching flow node (2026-09-03)
+
+Closes the "node/UI wiring not yet" gap the connector chunk explicitly
+deferred. Per the user's direction after a brief calendar-scheduling
+detour ("keep it scoped... let's move back to our multi-tenant
+workflows and build them end to end without deviation"): every node
+handler that can touch Salesforce now reads an optional `config.org`
+and threads it all the way down to `client_for(tenant_id, org_label)` —
+connecting multiple orgs (prior chunk) was previously unusable from any
+actual flow, since nothing ever passed anything but the implicit
+`'default'`.
+
+**Mechanical, not a redesign** — `interpreter/salesforce.py`'s 13
+public functions that take `tenant_id` (`identify_sender`,
+`update_case_fields`, `post_chatter`, `add_case_comment`,
+`log_email_message`, `assign_case`, `ensure_case`, `send_case_reply`,
+`user_email`, `find_case_by_thread`, `agent_response_since`,
+`latest_inbound_email`, `org_metadata`) gained a matching optional
+`org_label` parameter, purely additive; `sf_context.py::load`,
+`routing.py`'s `queue_member`/`_sf_queue_id`/`_sf_team_member`/
+`resolve_notify_target`, and `attachments.py`'s `extract`/
+`_sf_case_files` got the same treatment (`routing`'s cache keys also
+gained the org label, so the same queue ref doesn't return a stale hit
+across two different orgs). Every `registry.py` node handler that calls
+any of these (`sf_writeback`, `sf_case`, `identify`, `ask_human`,
+`notify`, `notify_human` via `alert.py::alert_human`, `handover`,
+`clarify`, `sf_context`, `attachments`) now passes `config.get("org")`
+through. `config.org` unset (every existing flow, including the one
+just adopted onto the `agent` node) resolves exactly what it always
+did — this is additive surface, not a behavior change to anything that
+doesn't opt in.
+
+**Bug found and fixed along the way**: `describe_case_fields`/
+`list_queues` (the introspection functions from two chunks ago)
+already *accepted* `org_label` in their signature but never actually
+passed it into their own `client_for()` call — introspection always
+silently looked at the *default* org's schema regardless of which org
+was asked for. Caught by a blanket verification script (every call site
+of every org_label-taking function, checked for the argument actually
+being passed) rather than by inspection — worth remembering as a
+technique for this class of "the parameter exists but nothing threads
+into it" bug.
+
+**Verify:** 12 new offline tests (`tests/test_salesforce_org_threading.py`
+— one per node handler, monkeypatching the specific function each one
+calls and asserting `org_label`/the positional org arg received matches
+`config["org"]`, plus the "org unset stays `None`" case). Found and
+fixed one real regression while wiring this in:
+`tests/test_case_control_plane.py`'s `capture` fixture's fake
+`update_case_fields` had a strict keyword-only signature that didn't
+accept the new `org_label` kwarg — every node routing through
+`_cp_write` was silently failing (caught + logged, not raised) and
+never actually recording its Case field write in the test, masked as a
+downstream `KeyError` on the assertion rather than the real cause.
+Fixed the fixture; not a real product bug, since the actual
+`update_case_fields` function's real signature was always correct —
+only the test's fake was stale. Full offline suite 537/537, zero other
+regressions. Not re-run against a real second live org in this pass —
+`client_for`'s own org-resolution mechanism was already live-verified
+in the connector chunk; this chunk only proves (via the new tests) that
+every handler's `config.org` genuinely reaches that already-proven
+mechanism, which is what was actually in question.
+
 ### Scoped, not built: per-tenant case-taxonomy config
 
 Move `map_case_fields`'s module/region/case-type mapping from a global
@@ -1294,6 +1357,27 @@ migration 079 already hit once. Medium-sized: new table + rewritten
 mapping function (with a fallback default for tenants that never
 configure it, so existing behavior doesn't regress) + setup-script
 rework + a web admin surface to edit it.
+
+### Scoped, not built: Google Calendar meeting scheduling
+
+User's ask: a flow node that schedules a meeting with a customer.
+Design decided, deliberately not built yet (explicitly deferred to stay
+focused on finishing the multi-tenant/Salesforce thread end to end
+first): **its own node type** (not folded into an existing one); the
+meeting time is decided by **both** — an LLM step (like the existing
+`extract` node) pulls a proposed date/time out of what the customer
+actually wrote, **and** the node checks the connected Google Calendar's
+free/busy for an actually-open slot around that proposal, rather than
+either (a) blindly picking a fixed offset from now, or (b) trusting the
+extracted time without checking the rep's real calendar. Needs: a new
+`interpreter/gcalendar.py` (mirroring `gdrive.py`'s OAuth-credential
+shape, likely widening `gdrive.py`'s Google OAuth `SCOPES` to include
+Calendar — note this means **already-connected tenants would need to
+reconnect** to grant the new scope, since Google doesn't retroactively
+expand an issued refresh token's scope), a free/busy API call, slot-
+picking logic, and event creation with the customer as an attendee
+(optionally a Google Meet link via `conferenceData`). Not scoped in
+detail beyond this design — do that as its own pass when picked back up.
 
 **Audit log coverage extended (2026-09-03) — closes a real gap in Phase
 28 step 1.** User's request: "improve the logs, who changed what." Step 1

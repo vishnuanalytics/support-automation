@@ -65,7 +65,8 @@ def _fetch_rows(tenant_id: str | None, sb) -> list[dict[str, Any]]:
         return []
 
 
-def _sf_team_member(team: str | None, tenant_id: str | None) -> tuple[str | None, str | None]:
+def _sf_team_member(team: str | None, tenant_id: str | None,
+                    org_label: str | None = None) -> tuple[str | None, str | None]:
     """The active User in the `Team_<team>` queue (the roster manager).
 
     Two hops — SOQL forbids a nested semi-join sub-select, so resolve the
@@ -74,7 +75,7 @@ def _sf_team_member(team: str | None, tenant_id: str | None) -> tuple[str | None
     if not (team and salesforce.available()):
         return None, None
     try:
-        sf = salesforce.client_for(tenant_id)
+        sf = salesforce.client_for(tenant_id, org_label)
         dev = salesforce._soql_lit(f"Team_{team}")
         grp = sf.query(
             f"SELECT Id FROM Group WHERE Type = 'Queue' AND DeveloperName = '{dev}' LIMIT 1"
@@ -93,18 +94,19 @@ def _sf_team_member(team: str | None, tenant_id: str | None) -> tuple[str | None
     return None, None
 
 
-def queue_member(queue_ref: str | None, tenant_id: str | None = None) -> tuple[str | None, str | None]:
+def queue_member(queue_ref: str | None, tenant_id: str | None = None,
+                 org_label: str | None = None) -> tuple[str | None, str | None]:
     """(user_id, name) of an active member of the queue — Chatter can't
     @mention a Queue group, so `notify` / `clarify` mention a person in it.
     `queue_ref` = a Queue DeveloperName / Name / Id. Cached; best-effort."""
     if not queue_ref or not salesforce.available():
         return None, None
-    ck = f"qm:{queue_ref}"
+    ck = f"qm:{queue_ref}:{org_label or 'default'}"
     hit = _cache_get(ck)
     if hit is not None:
         return hit
     try:
-        sf = salesforce.client_for(tenant_id)
+        sf = salesforce.client_for(tenant_id, org_label)
         gid = queue_ref
         if not (len(queue_ref) in (15, 18) and queue_ref[:3] in ("00G",)):
             q = salesforce._soql_lit(queue_ref)
@@ -127,11 +129,12 @@ def queue_member(queue_ref: str | None, tenant_id: str | None = None) -> tuple[s
     return None, None
 
 
-def _sf_queue_id(name: str | None, tenant_id: str | None) -> str | None:
+def _sf_queue_id(name: str | None, tenant_id: str | None,
+                 org_label: str | None = None) -> str | None:
     if not (name and salesforce.available()):
         return None
     try:
-        sf = salesforce.client_for(tenant_id)
+        sf = salesforce.client_for(tenant_id, org_label)
         q = salesforce._soql_lit(name)
         rows = sf.query(
             "SELECT Id FROM Group WHERE Type = 'Queue' AND "
@@ -150,6 +153,7 @@ def resolve_notify_target(
     module: str | None = None,
     *,
     sb=None,
+    org_label: str | None = None,
 ) -> dict[str, Any] | None:
     """`Case.Type` (then `Module__c`) -> the internal party to ping.
 
@@ -158,7 +162,7 @@ def resolve_notify_target(
     row matches / the table is unavailable. Result is cached `NOTIFY_ROUTE_TTL_S`
     (default 300 s) so an escalation storm doesn't hammer the SF API.
     """
-    ck = f"resolve:{tenant_id}:{case_type}:{module}"
+    ck = f"resolve:{tenant_id}:{case_type}:{module}:{org_label or 'default'}"
     cached = _cache_get(ck)
     if cached is not None:
         return None if cached == "__none__" else cached
@@ -185,10 +189,10 @@ def resolve_notify_target(
         out["id"] = row.get("sf_target_id") or None
         out["type"] = row.get("sf_target_type") or ("user" if out["id"] else None)
     elif resolver == "sf_queue":
-        qid = _sf_queue_id(row.get("sf_queue"), tenant_id)
+        qid = _sf_queue_id(row.get("sf_queue"), tenant_id, org_label)
         out["id"], out["type"] = qid, ("queue" if qid else None)
     elif resolver == "sf_team_role":
-        uid, name = _sf_team_member(row.get("sf_team"), tenant_id)
+        uid, name = _sf_team_member(row.get("sf_team"), tenant_id, org_label)
         out["id"], out["type"] = uid, ("user" if uid else None)
         if name and not row.get("label"):
             role = row.get("sf_role") or "Manager"

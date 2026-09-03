@@ -51,18 +51,20 @@ def alert_human(state: dict, config: dict) -> dict[str, Any]:
     cn = (state.get("sf_case") or {}).get("case_number") or case.get("case_number") or sf_id or "?"
 
     tenant_id = state.get("tenant_id")
+    org_label = config.get("org")
     mention = config.get("mention") or {}
     slack_uid = mention.get("slack_user_id") or _pick(mention.get("slack_user_by_team"), team, "default")
     sf_uid = mention.get("sf_user_id")
     if not sf_uid and (mention.get("sf_team") or team):
         from interpreter import routing
         qref = mention.get("sf_queue") or f"Team_{(mention.get('sf_team') or team).capitalize()}"
-        sf_uid = routing.queue_member(qref, tenant_id)[0]
+        sf_uid = routing.queue_member(qref, tenant_id, org_label)[0]
     sf_uid = sf_uid or mention.get("mention_id")
     # map the SF agent -> their Slack account by email, so the bot can DM/@them
     if not slack_uid and sf_uid and _looks_id(sf_uid):
         slack_uid = slack.lookup_user_by_email(
-            salesforce.user_email(sf_uid, tenant_id=tenant_id) or "", tenant_id=tenant_id)
+            salesforce.user_email(sf_uid, tenant_id=tenant_id, org_label=org_label) or "",
+            tenant_id=tenant_id)
 
     want = config.get("channel") or "both"
     # Phase 27e — category -> #cx-* channel + @cx-*-oncall usergroup from
@@ -73,8 +75,9 @@ def alert_human(state: dict, config: dict) -> dict[str, Any]:
         from interpreter import routing
         route = routing.resolve_slack_route(
             tenant_id, routed_team=team or None,
-            case_type=cls.get("case_type"), module=(state.get("sf_writeback") or {}).get("written", {}).get("Module__c"),
-        )
+            case_type=cls.get("case_type"),
+            module=(state.get("sf_writeback") or {}).get("written", {}).get("Module__c"),
+        )   # Slack routing is Postgres-only, no Salesforce client -- no org_label needed
     except Exception as e:  # noqa: BLE001
         log.warning("slack route lookup failed: %s", e)
     slack_ch = (_pick(config.get("slack_channel_by_team"), team, "default")
@@ -129,7 +132,8 @@ def alert_human(state: dict, config: dict) -> dict[str, Any]:
                 f"{' in Slack' if out.get('reasoning_session') else ''}. "
                 f"It has **not** replied to the customer — we'll reason through "
                 f"the response together before anything is sent.")
-        out["chatter"] = salesforce.post_chatter(sf_id, body, mention_id=mid, tenant_id=tenant_id)
+        out["chatter"] = salesforce.post_chatter(sf_id, body, mention_id=mid, tenant_id=tenant_id,
+                                                 org_label=org_label)
 
     return out
 

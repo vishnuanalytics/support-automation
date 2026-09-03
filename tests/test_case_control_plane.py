@@ -22,7 +22,7 @@ def capture(monkeypatch):
     """Record every Case field write; return a live list of (sf_id, fields)."""
     calls: list[tuple] = []
 
-    def fake(sf_id, fields, *, append=None, tenant_id=None):
+    def fake(sf_id, fields, *, append=None, tenant_id=None, org_label=None):
         calls.append((sf_id, dict(fields)))
         return {"dry_run": True, "written": {}, "skipped": {}, "planned": fields, "target": sf_id}
 

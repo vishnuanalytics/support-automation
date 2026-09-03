@@ -209,12 +209,12 @@ def process_video(data: bytes, name: str, *, n_frames: int = VIDEO_FRAMES,
 
 # ── Salesforce fetch ─────────────────────────────────────────────
 def _sf_case_files(case_id: str, tenant_id: str | None, *, want_video: bool,
-                   img_limit: int) -> list[dict]:
+                   img_limit: int, org_label: str | None = None) -> list[dict]:
     from interpreter import salesforce
 
     if not case_id or not salesforce.available():
         return []
-    sf = salesforce.client_for(tenant_id)
+    sf = salesforce.client_for(tenant_id, org_label)
     try:
         links = sf.query(
             "SELECT ContentDocumentId FROM ContentDocumentLink "
@@ -323,7 +323,7 @@ def extract(case: dict, *, tenant_id: str | None = None, limit: int | None = Non
             do_ocr: bool = True, do_video: bool = False,
             video_frames_n: int | None = None, video_max_seconds: int | None = None,
             skip_signatures: bool = True, sb=None,
-            source: str = "salesforce") -> dict[str, Any]:
+            source: str = "salesforce", org_label: str | None = None) -> dict[str, Any]:
     """Media attachments for `case` + extracted text. See module docstring."""
     limit = limit or MAX_IMAGES
     nfr = video_frames_n or VIDEO_FRAMES
@@ -332,7 +332,7 @@ def extract(case: dict, *, tenant_id: str | None = None, limit: int | None = Non
 
     raw: list[dict] = []
     if source in ("salesforce", "auto"):
-        raw = _sf_case_files(case_id, tenant_id, want_video=do_video, img_limit=limit)
+        raw = _sf_case_files(case_id, tenant_id, want_video=do_video, img_limit=limit, org_label=org_label)
     for a in (case.get("_inbound_attachments") or []) if source in ("email", "auto") else []:
         mime = a.get("mime") or ""
         if not a.get("data"):

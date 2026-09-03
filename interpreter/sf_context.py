@@ -41,7 +41,7 @@ def _lit(v: str) -> str:
 
 
 def load(sender: dict | None, *, want: "set[str] | list[str] | None" = None,
-         tenant_id: str | None = None) -> dict[str, Any]:
+         tenant_id: str | None = None, org_label: str | None = None) -> dict[str, Any]:
     from interpreter import salesforce
 
     sender = sender or {}
@@ -49,7 +49,7 @@ def load(sender: dict | None, *, want: "set[str] | list[str] | None" = None,
     out: dict[str, Any] = {}
     if not salesforce.available():
         return out
-    sf = salesforce.client_for(tenant_id)
+    sf = salesforce.client_for(tenant_id, org_label)
     aid = sender.get("account_id")
     cid = sender.get("contact_id")
     lid = sender.get("lead_id")
