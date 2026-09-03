@@ -136,6 +136,14 @@ NODE_DEFAULTS: dict[str, dict[str, Any]] = {
         "max_rounds": 3,
         "mention": {},
     },
+    # Phase 29 step 2 — a drop-in retrieve+draft pair with a bounded
+    # reformulate-and-retry loop, gated on the draft's own groundedness score.
+    "agent": {
+        "retrieve": {"source": ["supabase", "neo4j"], "top_k": 5},
+        "draft": {"model": "openai/gpt-oss-120b", "max_tokens": 900},
+        "max_iterations": 3,
+        "groundedness_threshold": 0.6,
+    },
 }
 
 

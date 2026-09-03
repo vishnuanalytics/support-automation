@@ -829,7 +829,7 @@ one already has, via the Supabase MCP).
 
 **Phase 29 — Agentic AI, a 5-step ordered list (infra-first, same
 discipline as Phase 28): 1. tool-calling plumbing in `interpreter/llm.py`
-✅ · 2. a new `agent` node type (a bounded ReAct loop consuming #1) · 3.
+✅ · 2. a new `agent` node type (a bounded ReAct loop consuming #1) ✅ · 3.
 multi-hop research/retrieval (piggybacks on #2) · 4. self-critique on
 KIL's `draft_change` · 5. autonomous reasoning-session continuation.**
 Before starting, an Explore agent confirmed nothing like this existed:
@@ -872,6 +872,90 @@ pre-existing gap, same as `complete()`'s Anthropic path per CLAUDE.md)
 — the Anthropic wire-format translation is covered by mocked offline
 tests instead, same rigor already accepted for `_anthropic_complete`.
 **Next:** step 2 — the `agent` node type.
+
+**Step 2 — the `agent` node type (COMPLETE 2026-09-03).** Scoped
+narrowly, not a general-purpose agent: a "first identify where a bounded
+loop earns its cost" pass (before building anything) found the ROI case
+in the code itself — `h_retrieve` builds exactly one query, does exactly
+one `hybrid_retrieve` call, no reformulation; when phrasing doesn't
+lexically/semantically match the docs, `retrieval_score` is low →
+`groundedness` is low → `confidence_gate` escalates. `eval/qrels_hard.jsonl`
+already existed as a hand-built "multi-hop / keyword-heavy" eval set for
+exactly this weakness and was sitting unused (`PROJECT_SCOPE.md` had
+already flagged it: "the run isn't wired into a regression floor yet").
+Design principle: **selective, not "always agentic"** — the loop only
+spends extra tokens on cases that would otherwise be escalated anyway;
+the first pass costs exactly what separate `retrieve`+`draft` nodes would.
+
+New `@register("agent")` `h_agent` in `interpreter/registry.py`: a
+drop-in for a `retrieve`+`draft` pair (config nests `retrieve`/`draft`
+sub-configs). Composes the *existing* `h_retrieve`/`h_draft` handlers
+directly (no reimplemented context-building/prompt logic — `h_draft`
+already computes `groundedness` internally, so no separate judge call
+needed) rather than duplicating their logic. Loop: run retrieve+draft →
+if `groundedness.score >= groundedness_threshold` (default 0.6) or
+`max_iterations` (default 3) reached, stop; else ask the model, via
+`complete_with_tools` (step 1) with two tools (`search_kb(query)` /
+`give_up()`), whether a different query would help — a genuine ReAct
+decision, not a fixed retry heuristic — and loop with the reformulated
+query if so. Tracks the best-scoring attempt across iterations (not just
+the last — a reformulation could in principle score worse). Every field
+a `confidence_gate` reads (`retrieval_score`/`draft_confidence`/
+`groundedness`) is still produced, so nothing downstream changes.
+`h_retrieve` gains one additive hook, `config.query_override` (every
+existing caller leaves it unset, so behavior/cost is byte-for-byte
+unchanged for every flow that doesn't opt into `agent`). Token spend
+across all internal attempts + the reformulation calls is summed into
+one collapsed trace entry (`type: "agent"`, matching the "each handler
+appends exactly one trace entry" convention) so P9's billing pipeline
+picks it up with no new plumbing. `_TYPE_DOC["agent"]` (`assist.py`) and
+`NODE_DEFAULTS["agent"]` (`api/main.py`) added so the AI Flow Copilot and
+palette both know its shape — the 19e/19f/19g lesson (an undocumented
+node type gets hallucinated) applied proactively this time instead of
+discovered the hard way.
+
+**Bug found via live verification, fixed before calling this done:**
+unlike `complete()`, `complete_with_tools` has no cross-provider fallback
+and raises visibly on a transient error (by design, per step 1) — the
+first live smoke run hit a real Groq 429 *inside the reformulation call*
+and it crashed the whole node, which would have turned "an optional
+retry on a hard case" into "a rate limit on the optional step kills a
+flow run that already had a perfectly good first-pass draft in hand."
+Fixed: `_agent_reformulate` now catches any exception and degrades to
+"give up, keep the best attempt so far" — matching the codebase's
+established best-effort convention elsewhere (`audit.record()`, KIL's
+Slack posting, email delivery). A regression test
+(`test_agent_survives_a_reformulation_call_error`) simulates exactly
+this. **Verify:** 6 new offline tests in `tests/test_interpreter.py`
+(first-pass-clears-threshold costs exactly one retrieve+one draft and
+never calls the reformulation tool at all; a low-groundedness first pass
+reformulates and the better second attempt wins; `max_iterations` is a
+hard cap even if the model never gives up; the reformulation-error
+regression above; the offline stub never reformulates, deterministic;
+`h_retrieve`'s `query_override` hook in isolation) — 490 offline tests
+green overall, zero regression. **Live-verified against real Groq**
+(during a period of heavy shared-quota rate-limiting — see the Known
+issues entry on that — which made this an unusually strong real-world
+test): a case deliberately phrased to avoid the KB's own wording started
+at `retrieval_score=0.039`/`groundedness=0.0` (a genuine first-pass
+miss); the model's real reformulation produced *"Zapier webhook catch
+hook URL documentation"*, jumping retrieval to `0.997`; a second
+reformulation brought groundedness to `0.66` (clears the default 0.6
+threshold); the loop correctly stopped at exactly 3 attempts
+(`max_iterations`); no crash despite sustained `RateLimitError`s
+throughout, confirming the resilience fix holds under real conditions,
+not just the mocked regression test. **Not yet done, deliberately not
+built now:** no seed flow has been switched to use `agent` in place of
+its `retrieve`+`draft` pair (CLAUDE.md: "don't change the seed flows'
+models... without a reason" — adopting this in Acme/Globex's live flows
+is a separate, explicit decision, not a side effect of building the node
+type) and `eval/qrels_hard.jsonl` hasn't been run through `agent` yet to
+get a real before/after number (worth doing before deciding whether to
+adopt it anywhere, per the original "identify ROI before committing"
+framing). **Next:** step 3 — multi-hop research/retrieval — largely
+already covered by what step 2 built; revisit whether it needs anything
+beyond wiring `agent` into a real flow and measuring against
+`qrels_hard.jsonl`.
 
 **Phase 28 — a 6-step ordered feature list (infra-first, each step
 reuses the last): 1. platform activity/audit log ✅ · 2. flow-version
@@ -2462,7 +2546,19 @@ From the 2026-08-29 self-review. Each is intentional MVP scope, not a bug:
   public); per-source *incremental* ingestion isn't built (markdown source
   is full-replace); `tenant_integrations.secret` is plain jsonb, not
   Supabase Vault / pgsodium encrypted.
-- `api`'s `caller` **decodes the JWT without verifying its signature** (RLS
-  is the only real gate). No rate limiting on `/run`, which has real
-  external side effects. No security review of the Phase 5/6 surface.
-  `sop_conflicts.py` finds nothing on the current seed data. **→ Phase 13.**
+- ~~`api`'s `caller` decodes the JWT without verifying its signature. No
+  rate limiting on `/run`.~~ **Stale — both already fixed, found while
+  grounding a 2026-09-03 feature-gap review** (no PR reference; predates
+  this session's audit-log discipline). `api/main.py::_verify_token()`
+  (line ~150) authoritatively checks every bearer token against Supabase
+  Auth's `/auth/v1/user` (signature + expiry + revocation, 60s cache) —
+  `Caller.__init__` calls it before anything else. A process-local
+  token-bucket `rate_limit(user_id, bucket, limit, window)` (line ~199)
+  is applied to `run` (20/min), `assist` (30 or 12/min per endpoint),
+  `enqueue` (120/min), and public webhooks (300/min, keyed by trigger
+  token). **Still genuinely open:** no `/security-review` has been run
+  over the accumulated `api/`+`web/` diff (Phase 5 through Phase 29 —
+  a lot of surface since Phase 13 was written); `sop_conflicts.py`
+  exists but isn't wired into CI as a non-blocking report (needs Phase
+  12's divergent per-team retrieval to have something to actually find
+  first — check whether that's true yet before wiring it).

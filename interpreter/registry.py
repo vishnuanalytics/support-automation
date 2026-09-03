@@ -234,7 +234,11 @@ def _cp_write(state: CaseState, config: dict, *, action: str, actor: str = "ai",
 @register("retrieve")
 def h_retrieve(state: CaseState, config: dict) -> dict:
     _subj, _body = _run_text(state)          # P5c — Case fields or `context.*`
-    query = " ".join(p for p in (_subj, _body) if p).strip() or _subj or ""
+    # Phase 29 step 2 — the `agent` node re-invokes this with a reformulated
+    # query on a later iteration; every existing caller leaves this unset,
+    # so behavior/cost is unchanged for every flow that doesn't opt into `agent`.
+    query = config.get("query_override") or (
+        " ".join(p for p in (_subj, _body) if p).strip() or _subj or "")
     sources = config.get("source", ["supabase"])
     results, score = hybrid_retrieve(
         query,
@@ -1022,6 +1026,162 @@ def h_draft(state: CaseState, config: dict) -> dict:
              "used_internal_kb": bool(internal_matches),
              "prior_cases": [p.get("case_number") for p in prior[:3]],
              "answer_mode": mode},
+        ),
+    }
+
+
+# --------------------------------------------------------------------------
+# Phase 29 step 2 — a bounded ReAct loop over retrieve+draft, gated on the
+# case identified as the highest-ROI target: retrieval that missed on the
+# first try. See docs/PROJECT_SCOPE.md's Phase 29 entry for the analysis
+# (qrels_hard.jsonl already exists to score multi-hop retrieval against and
+# was never wired to anything).
+# --------------------------------------------------------------------------
+_AGENT_TOOLS = [
+    {
+        "name": "search_kb",
+        "description": ("Search the knowledge base again with a different, more "
+                         "specific query, to find documentation that better "
+                         "supports the reply."),
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "the new search query"}},
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "give_up",
+        "description": "Stop — a different query is unlikely to find better-supporting docs.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+]
+
+
+def _agent_reformulate(question: str, tried: list[str], top_titles: list[str],
+                        unsupported: list[str], model: str) -> str | None:
+    """One ReAct decision: propose a better search query, or give up. Returns
+    the new query, or None to stop looping. The stub path (no API key) never
+    proposes a tool call — deterministic, matching every other handler's
+    offline behavior — so the loop always exits after one attempt in tests.
+    Best-effort: this is the OPTIONAL "try harder" step, on top of an
+    already-usable first-pass draft the caller has in hand — unlike
+    `complete()`, `complete_with_tools` has no cross-provider fallback and
+    raises visibly on a transient error (rate limit, timeout), so any
+    exception here must not crash the node; it just means give up and keep
+    the best attempt seen so far (same as a live-verified real crash found
+    via a Groq 429 during this node's own development)."""
+    user = (
+        f"Customer's question:\n{question}\n\n"
+        f"Search quer{'y' if len(tried) == 1 else 'ies'} already tried: {tried}\n\n"
+        f"Top docs found: {top_titles or '(none)'}\n\n"
+        f"Reply claims NOT supported by any doc found: {unsupported[:5] or '(none)'}\n\n"
+        "Call search_kb with a genuinely different query likely to surface "
+        "better-supporting documentation, or give_up if nothing else is "
+        "likely to help."
+    )
+    try:
+        result = llm.complete_with_tools(
+            messages=[{"role": "user", "content": user}],
+            system=("You refine a support-case knowledge-base search that didn't "
+                     "find well-supported documentation."),
+            tools=_AGENT_TOOLS,
+            model=model,
+            max_tokens=200,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("agent: reformulation call failed (%s) — keeping best attempt so far", e)
+        return None
+    for tc in result.tool_calls:
+        if tc.name == "search_kb":
+            q = str(tc.arguments.get("query") or "").strip()
+            if q and q not in tried:
+                return q
+    return None
+
+
+@register("agent")
+def h_agent(state: CaseState, config: dict) -> dict:
+    """A bounded ReAct loop wrapping retrieve+draft: reformulate the search
+    query and retry when the draft's own groundedness score says the first
+    pass wasn't well supported, up to `max_iterations`.
+
+    Selective by design, not "always agentic": iteration 1 is exactly
+    h_retrieve + h_draft, same calls, same tokens as wiring those two nodes
+    separately. It only spends more when that first pass's groundedness is
+    below `groundedness_threshold` — i.e. only on cases a downstream
+    confidence_gate would otherwise escalate anyway. Drop-in for a
+    retrieve+draft pair: every field a confidence_gate reads
+    (retrieval_score / draft_confidence / groundedness) is still produced,
+    so nothing downstream needs to change.
+
+    config: retrieve (the retrieve node's own config, e.g. top_k/kb_sources),
+    draft (the draft node's own config), max_iterations (default 3),
+    groundedness_threshold (default 0.6 — a proxy for "would clear the
+    gate", not the gate's own blended score), model (for the reformulation
+    decision only, default llm.FAST_MODEL).
+    """
+    max_iter = max(1, int(config.get("max_iterations", 3)))
+    threshold = float(config.get("groundedness_threshold", 0.6))
+    retrieve_cfg = dict(config.get("retrieve") or {})
+    draft_cfg = dict(config.get("draft") or {})
+    _model = config.get("model", llm.FAST_MODEL)
+
+    _subj, _body = _run_text(state)
+    question = " ".join(p for p in (_subj, _body) if p).strip() or _subj or ""
+
+    working = dict(state)
+    tried: list[str] = []
+    query_override: str | None = None
+    best: dict[str, Any] | None = None
+    best_score = -1.0
+    attempts: list[dict[str, Any]] = []
+    tokens_total = 0
+
+    for i in range(max_iter):
+        r_cfg = {**retrieve_cfg, "_node_id": config["_node_id"]}
+        if query_override:
+            r_cfg["query_override"] = query_override
+        r_out = h_retrieve(working, r_cfg)
+        working = {**working, **{k: v for k, v in r_out.items() if k != "trace"}}
+        tried.append(r_out.get("query") or question)
+
+        d_cfg = {**draft_cfg, "_node_id": config["_node_id"]}
+        d_out = h_draft(working, d_cfg)
+        working = {**working, **{k: v for k, v in d_out.items() if k != "trace"}}
+        d_tok = ((d_out.get("trace") or [{}])[0].get("data") or {}).get("tokens") or {}
+        tokens_total += int(d_tok.get("total") or 0)
+
+        score = float((d_out.get("groundedness") or {}).get("score", 0.0))
+        attempts.append({"iteration": i, "query": tried[-1],
+                          "retrieval_score": r_out.get("retrieval_score"), "groundedness": score})
+        if score > best_score:
+            best_score, best = score, dict(working)
+
+        if score >= threshold or i == max_iter - 1:
+            break
+
+        top_titles = [c.get("doc_url") for c in (r_out.get("retrieval") or [])[:3] if c.get("doc_url")]
+        unsupported = (d_out.get("groundedness") or {}).get("unsupported") or []
+        query_override = _agent_reformulate(question, tried, top_titles, unsupported, _model)
+        tokens_total += int((llm.last_usage or {}).get("total") or 0)
+        if not query_override:
+            break
+
+    best = best if best is not None else working
+    result_keys = ("retrieval", "retrieval_score", "query", "draft", "draft_confidence",
+                   "groundedness", "integrity")
+    out = {k: best[k] for k in result_keys if k in best}
+    return {
+        **out,
+        "agent_iterations": len(attempts),
+        "agent_attempts": attempts,
+        **_trace(
+            config["_node_id"], "agent",
+            f"{len(attempts)} attempt(s), best groundedness={best_score:.2f} "
+            f"(threshold {threshold:.2f})",
+            {"attempts": attempts, "threshold": threshold,
+             "tokens": {"total": tokens_total} if tokens_total else None,
+             "model": draft_cfg.get("model", llm.DEFAULT_MODEL)},
         ),
     }
 
