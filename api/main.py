@@ -1119,6 +1119,19 @@ def kil_metrics_ep(days: int = 30, tenant_id: str | None = None,
     return kil_metrics.compute(c.sb, tid, days=min(max(days, 1), 180))
 
 
+@app.get("/api/kil/digest")
+def kil_digest_ep(weeks: int = 4, tenant_id: str | None = None,
+                  format: str = "json", c: Caller = Depends(caller)) -> Any:
+    """P8a — the weekly learning report (this week vs last, recurring
+    contradictions, KB changes). `?format=md` for the Slack-flavoured text."""
+    from interpreter import kil_metrics
+    tid = _caller_tenant(c, tenant_id)
+    d = kil_metrics.digest(c.sb, tid, weeks=min(max(weeks, 1), 12))
+    if format == "md":
+        return PlainTextResponse(kil_metrics.render_digest(d))
+    return {**d, "markdown": kil_metrics.render_digest(d)}
+
+
 # ── P4 (FR-44): one approvals inbox — review tasks + action requests ──
 class ActionDecisionIn(BaseModel):
     decision: str  # 'approve' | 'reject'

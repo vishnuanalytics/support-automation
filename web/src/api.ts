@@ -20,6 +20,7 @@ import type {
   NodeTypesResp,
   ReviewTask,
   KilMetrics,
+  KilDigest,
   SfMeta,
   TraceResult,
   RunDetail,
@@ -234,6 +235,8 @@ export const api = {
         body: JSON.stringify({ status }),
       }),
     metrics: (days = 30) => req<KilMetrics>(`/kil/metrics?days=${days}`),
+    digest: (weeks = 4) =>
+      req<KilDigest>(`/kil/digest?weeks=${weeks}`),
   },
 
   approvals: {

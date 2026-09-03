@@ -396,6 +396,57 @@ def case_memory_sync(sb, *, dry_run: bool | None = None) -> dict:
     return {"ok": True, "dry_run": dry}
 
 
+def kil_digest(sb, *, dry_run: bool | None = None) -> dict:
+    """P8a (FR-49) — the weekly Knowledge-Integrity learning report. Once a
+    week, for each tenant that has connected Slack and set
+    `config.digest.channel`, post `kil_metrics.render_digest` (this week vs
+    last, recurring contradictions, latest KB changes). Deduped on the ISO
+    week held in the Slack integration row's `cursor.kil_digest_week`, so the
+    30-min sweep only delivers once per tenant per week."""
+    from interpreter import kil_metrics, slack
+
+    dry = _dry() if dry_run is None else dry_run
+    try:
+        rows = (sb.table("tenant_integrations").select("tenant_id, config, cursor")
+                .eq("kind", "slack").execute().data or [])
+    except Exception as e:  # noqa: BLE001
+        log.warning("kil_digest query: %s", e)
+        return {"error": str(e)[:200]}
+
+    now = _now()
+    iso = now.isocalendar()
+    week = f"{iso[0]}-W{iso[1]:02d}"
+    sent: list[str] = []
+    for r in rows:
+        cfg = (r.get("config") or {}).get("digest") or {}
+        channel = cfg.get("channel")
+        if not channel or cfg.get("enabled") is False:
+            continue
+        if now.weekday() != int(cfg.get("weekday", 0)) or now.hour < int(cfg.get("hour", 14)):
+            continue
+        if (r.get("cursor") or {}).get("kil_digest_week") == week:
+            continue
+        tid = r["tenant_id"]
+        try:
+            d = kil_metrics.digest(sb, tid, weeks=int(cfg.get("weeks", 4)))
+            text = kil_metrics.render_digest(d)
+        except Exception as e:  # noqa: BLE001
+            log.warning("kil_digest compute %s: %s", tid, e)
+            continue
+        sent.append(tid)
+        if dry:
+            continue
+        slack.post_message(text, tenant_id=tid, channel=channel, sb=sb)
+        try:
+            cur = dict(r.get("cursor") or {})
+            cur["kil_digest_week"] = week
+            (sb.table("tenant_integrations").update({"cursor": cur})
+             .eq("tenant_id", tid).eq("kind", "slack").execute())
+        except Exception as e:  # noqa: BLE001
+            log.warning("kil_digest cursor %s: %s", tid, e)
+    return {"tenants": len(rows), "sent": sent, "week": week, "dry_run": dry}
+
+
 def fire_schedules(sb, *, dry_run: bool | None = None) -> dict:
     """P6b — enqueue a run for each `flow_triggers` schedule trigger that is
     due (`interpreter.cron.due`). Deduped per (trigger, minute) so two worker
