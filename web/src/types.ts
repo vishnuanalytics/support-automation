@@ -192,7 +192,7 @@ export interface KbEntryRow {
   embedded_at: string | null;
   updated_at: string;
   updated_by: string | null;
-  origin?: "manual" | "gdoc" | "file" | "crawl" | "review_writeback";
+  origin?: "manual" | "gdoc" | "file" | "crawl" | "import" | "review_writeback";
   gdoc_url?: string | null;
   synced_at?: string | null;
   sync_error?: string | null;
@@ -417,4 +417,9 @@ export interface TemplateMeta {
   category: string;
   description: string;
   source: "built-in" | "custom";
+}
+
+export interface KbExportBundle {
+  collection: { name: string | null; description: string | null };
+  entries: { title: string; body_md: string; status: string }[];
 }

@@ -831,7 +831,8 @@ one already has, via the Supabase MCP).
 reuses the last): 1. platform activity/audit log ✅ · 2. flow-version
 rollback audit trail + `flow_versions` retention ✅ · 3. billing quota
 enforcement ✅ · 4. per-flow cost breakdown ✅ · 5. flow templates
-marketplace ✅ · 6. bulk KB export/import.**
+marketplace ✅ · 6. bulk KB export/import ✅. PHASE 28 COMPLETE
+(2026-09-03) — all 6 steps done, no open phase.**
 
 **Step 1 — platform activity/audit log (COMPLETE 2026-09-03).**
 Migration `076` `audit_log` (append-only, `case_events`-style
@@ -981,8 +982,45 @@ FastAPI app: saved a template from the live Globex flow → appeared in
 the merged list tagged `custom` → its graph fetched cleanly (9 nodes,
 0 errors) → `audit_log` gained `template.saved` → deleted it → gone
 from the list → `audit_log` gained `template.deleted` → confirmed the
-built-in gallery (`support-autoreply`) still works unaffected. **Next:**
-step 6 — bulk KB export/import.
+built-in gallery (`support-autoreply`) still works unaffected.
+
+**Step 6 — bulk KB export/import (COMPLETE 2026-09-03, PHASE 28
+COMPLETE).** No backup/restore path existed for a KB collection — losing
+one meant re-authoring every entry by hand. `interpreter/kb_backup.py`
+(new, pure — no Supabase calls, same split as `billing.py`/
+`kil_metrics.py`): `export_bundle()` shapes a downloadable JSON
+(`{collection: {name, description}, entries: [{title, body_md,
+status}]}`, active + provisional only — not archived/superseded, matching
+what a "restore this collection" workflow wants: the current KB, not its
+retired history); `normalize_import_entries()` validates/dedupes an
+untrusted uploaded bundle (missing title/body → dropped with a warning,
+duplicate title within the bundle → dropped, capped at
+`MAX_IMPORT_ENTRIES`=500) — never raises, degrades to warnings, matching
+`flow_candidate.assemble_candidate`'s style for untrusted JSON. `GET
+/api/kb/collections/{sid}/export` (synchronous — reads are cheap). `POST
+/api/kb/collections/{sid}/import` — async, mirrors P7c's `/crawl`
+exactly: enqueues a new `import_kb_bundle` worker job
+(`api/worker.py::_import_kb_bundle`, upsert-by-title within
+`origin='import'` so re-importing the same backup updates existing
+entries rather than duplicating, embeds each entry via the existing
+`embed_kb_entry` job off-thread) and logs `kb.import_started` through
+Phase 28 step 1. No migration — `kb_entries.origin` is already a
+free-text column (024), `"import"` is just a new value, same convention
+as `manual`/`gdoc`/`file`/`crawl`. Web KnowledgeView gains **⬇ export**
+(downloads a `<collection>-backup.json` via a Blob URL) and **⬆ import
+backup** (file picker → POST, alerts with the accepted count + any
+warnings) next to the existing crawl/upload buttons.
+`tests/test_kb_backup.py` (new, 7 offline tests for the pure module).
+**Live-verified end-to-end through the real (rebuilt) Docker stack** —
+not just the API layer: exported the real `globex-billing-runbook`
+collection (1 entry) → imported it into a throwaway collection → the
+**live worker container** picked up the job and logged `job … done` →
+confirmed in the DB the entry landed `status=active`, `origin=import`,
+genuinely chunked + embedded (`chunk_count=2`, a real `embedded_at`) →
+a second import with a missing-body entry and a duplicate title
+correctly accepted 1 and reported 2 warnings, also verified embedded →
+cleaned up the throwaway collection. **PHASE 28 COMPLETE** — all 6
+steps of the ordered feature list are done; no open phase.
 
 **Phase 27 — the Case Control Plane (done, 2026-09-01/02).** One
 AI-managed Case queue: classify + route + track `Status` + hand off via
