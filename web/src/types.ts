@@ -384,6 +384,34 @@ export interface Connection {
   created_at: string;
 }
 
+export interface SalesforceOrg {
+  org_label: string;
+  SF_USERNAME?: string;
+  SF_DOMAIN?: string;
+  has_credentials: boolean;
+  updated_at: string;
+}
+
+export interface SalesforceCaseField {
+  name: string;
+  label: string;
+  type: string;
+  custom: boolean;
+  picklist_values: { value: string; label: string }[];
+}
+
+export interface SalesforceQueue {
+  id: string;
+  name: string;
+  developer_name: string | null;
+}
+
+export interface SalesforceOrgSchema {
+  case_fields: SalesforceCaseField[];
+  queues: SalesforceQueue[];
+  errors: string[];
+}
+
 export interface BillingUsage {
   period_label: string;                 // "2026-09"
   period: { start: string; end: string };

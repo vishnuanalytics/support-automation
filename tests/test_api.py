@@ -99,6 +99,53 @@ def test_templates_need_a_token():
     assert client.get("/api/templates/support-autoreply").status_code == 401
 
 
+def test_salesforce_org_endpoints_need_a_token():
+    assert client.get("/api/integrations/salesforce").status_code == 401
+    assert client.put("/api/integrations/salesforce",
+                       json={"creds": {"SF_USERNAME": "x"}}).status_code == 401
+    assert client.delete("/api/integrations/salesforce/default").status_code == 401
+    assert client.post("/api/integrations/salesforce/test",
+                        json={"creds": {"SF_USERNAME": "x"}}).status_code == 401
+    assert client.get("/api/integrations/salesforce/default/schema").status_code == 401
+
+
+@pytest.mark.integration
+def test_salesforce_connect_introspect_disconnect_roundtrip(auth_headers):
+    """The real self-serve loop: connect a real org with real creds ->
+    the schema endpoint returns real Case fields/Queues from that org ->
+    disconnect. org_label is unique per run so it can't collide with a
+    real connection; deleted at the end either way."""
+    from interpreter import salesforce as _sf
+
+    if not _sf.available():
+        pytest.skip("no real SF_* creds in this environment")
+    creds = {k: v for k, v in os.environ.items() if k.startswith("SF_")}
+    org_label = f"pytest-{uuid.uuid4().hex[:8]}"
+
+    try:
+        r = client.put("/api/integrations/salesforce", headers=auth_headers,
+                       json={"org_label": org_label, "creds": creds})
+        assert r.status_code == 201
+        body = r.json()
+        assert body["org_label"] == org_label
+        assert body["has_credentials"] is True
+        assert "SF_CONSUMER_KEY" not in body and "SF_PRIVATE_KEY" not in body  # never echoed back
+
+        listed = client.get("/api/integrations/salesforce", headers=auth_headers).json()
+        assert any(o["org_label"] == org_label for o in listed)
+
+        schema = client.get(f"/api/integrations/salesforce/{org_label}/schema",
+                            headers=auth_headers).json()
+        assert schema["errors"] == []
+        assert any(f["name"] == "Priority" for f in schema["case_fields"])  # a real standard field
+        assert isinstance(schema["queues"], list)  # real org query succeeded, even if empty
+    finally:
+        d = client.delete(f"/api/integrations/salesforce/{org_label}", headers=auth_headers)
+        assert d.status_code == 204
+        still = client.get("/api/integrations/salesforce", headers=auth_headers).json()
+        assert not any(o["org_label"] == org_label for o in still)
+
+
 def test_create_workspace_needs_a_token():
     assert client.post("/api/tenants", json={"name": "Acme"}).status_code == 401
 

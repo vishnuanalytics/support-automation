@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
-import type { Connection } from "../types";
+import type { Connection, SalesforceOrg, SalesforceOrgSchema } from "../types";
 
 const AUTH_TYPES = ["none", "bearer", "header", "basic"] as const;
 
@@ -156,6 +156,185 @@ export function ConnectionsView({ tenantId }: { tenantId: string }) {
           >
             Add connection
           </button>
+        </div>
+      </div>
+
+      <SalesforceOrgsPanel tenantId={tenantId} />
+    </div>
+  );
+}
+
+/** Self-serve Salesforce connection (2026-09-03) — a tenant can hold
+ * several named orgs (e.g. "prod" + "sandbox"); each is JWT-bearer creds
+ * saved server-side and never shown again. "Fetch from org" pulls the
+ * org's real Case fields/picklist-values and Queues, so a future
+ * field-mapping / dropdown UI has real data instead of hardcoded names —
+ * not built yet, this panel is the connect + introspect foundation. */
+function SalesforceOrgsPanel({ tenantId }: { tenantId: string }) {
+  const [rows, setRows] = useState<SalesforceOrg[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [testMsg, setTestMsg] = useState<string | null>(null);
+  const [schemaByOrg, setSchemaByOrg] = useState<Record<string, SalesforceOrgSchema | "loading" | "error">>({});
+  const [f, setF] = useState({
+    org_label: "default", SF_USERNAME: "", SF_CONSUMER_KEY: "",
+    SF_PRIVATE_KEY: "", SF_DOMAIN: "",
+  });
+
+  const load = () => {
+    api.salesforceOrgs.list(tenantId).then(setRows).catch((e: ApiError) => setErr(e.message));
+  };
+  useEffect(load, [tenantId]);
+
+  const creds = () => {
+    const c: Record<string, string> = { SF_USERNAME: f.SF_USERNAME.trim() };
+    if (f.SF_CONSUMER_KEY.trim()) c.SF_CONSUMER_KEY = f.SF_CONSUMER_KEY.trim();
+    if (f.SF_PRIVATE_KEY.trim()) c.SF_PRIVATE_KEY = f.SF_PRIVATE_KEY.trim();
+    if (f.SF_DOMAIN.trim()) c.SF_DOMAIN = f.SF_DOMAIN.trim();
+    return c;
+  };
+
+  const test = async () => {
+    setBusy(true);
+    setTestMsg(null);
+    try {
+      const r = await api.salesforceOrgs.test({ org_label: f.org_label.trim(), creds: creds(), tenant_id: tenantId });
+      setTestMsg(r.ok ? "✓ connected" : `✗ ${r.error}`);
+    } catch (e) {
+      setTestMsg(`✗ ${(e as ApiError).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const connect = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.salesforceOrgs.connect({ org_label: f.org_label.trim(), creds: creds(), tenant_id: tenantId });
+      setF({ ...f, SF_CONSUMER_KEY: "", SF_PRIVATE_KEY: "" });
+      setTestMsg(null);
+      load();
+    } catch (e) {
+      setErr((e as ApiError).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const fetchSchema = async (orgLabel: string) => {
+    setSchemaByOrg((s) => ({ ...s, [orgLabel]: "loading" }));
+    try {
+      const schema = await api.salesforceOrgs.schema(orgLabel, tenantId);
+      setSchemaByOrg((s) => ({ ...s, [orgLabel]: schema }));
+    } catch {
+      setSchemaByOrg((s) => ({ ...s, [orgLabel]: "error" }));
+    }
+  };
+
+  return (
+    <div className="col" style={{ gap: 12, borderTop: "1px solid var(--hair,#ddd)", paddingTop: 16 }}>
+      <h3 style={{ margin: 0 }}>Salesforce</h3>
+      <p style={{ margin: 0, color: "var(--muted, #667)" }}>
+        Connect one or more Salesforce orgs (e.g. a production org + a sandbox) using a Connected
+        App's JWT bearer credentials. "Fetch from org" pulls your real Case fields, picklist values,
+        and Queues — nothing about your org's setup is assumed or hardcoded.
+      </p>
+
+      <table className="runs-table">
+        <thead>
+          <tr>
+            <th>org</th>
+            <th>username</th>
+            <th>domain</th>
+            <th />
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {rows?.map((o) => {
+            const schema = schemaByOrg[o.org_label];
+            return (
+              <tr key={o.org_label}>
+                <td><code>{o.org_label}</code></td>
+                <td>{o.SF_USERNAME}</td>
+                <td>{o.SF_DOMAIN || "login"}</td>
+                <td>
+                  <button disabled={schema === "loading"} onClick={() => fetchSchema(o.org_label)}>
+                    {schema === "loading" ? "fetching…" : "fetch from org"}
+                  </button>
+                  {schema && schema !== "loading" && schema !== "error" && (
+                    <span className="muted" style={{ marginLeft: 8, fontSize: 12 }}>
+                      {schema.case_fields.length} Case fields · {schema.queues.length} queues
+                      {schema.errors.length > 0 && ` (${schema.errors.join("; ")})`}
+                    </span>
+                  )}
+                  {schema === "error" && <span className="muted" style={{ marginLeft: 8, fontSize: 12 }}>failed</span>}
+                </td>
+                <td>
+                  <button
+                    className="err"
+                    onClick={() => api.salesforceOrgs.remove(o.org_label, tenantId).then(load).catch(() => {})}
+                  >
+                    disconnect
+                  </button>
+                </td>
+              </tr>
+            );
+          })}
+          {rows && rows.length === 0 && (
+            <tr><td colSpan={5} className="muted">no Salesforce org connected yet</td></tr>
+          )}
+        </tbody>
+      </table>
+
+      {err && <div className="banner err">{err}</div>}
+
+      <div className="col" style={{ gap: 8 }}>
+        <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+          <input
+            placeholder="org label (e.g. prod, sandbox)"
+            value={f.org_label}
+            onChange={(e) => setF({ ...f, org_label: e.target.value })}
+          />
+          <input
+            placeholder="integration user (e.g. bot@acme.com)"
+            value={f.SF_USERNAME}
+            style={{ minWidth: 220 }}
+            onChange={(e) => setF({ ...f, SF_USERNAME: e.target.value })}
+          />
+          <input
+            placeholder="domain (blank = login, or 'test' for a sandbox)"
+            value={f.SF_DOMAIN}
+            style={{ minWidth: 220 }}
+            onChange={(e) => setF({ ...f, SF_DOMAIN: e.target.value })}
+          />
+        </div>
+        <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+          <input
+            placeholder="Connected App consumer key"
+            value={f.SF_CONSUMER_KEY}
+            style={{ minWidth: 280 }}
+            onChange={(e) => setF({ ...f, SF_CONSUMER_KEY: e.target.value })}
+          />
+        </div>
+        <textarea
+          placeholder="-----BEGIN PRIVATE KEY-----&#10;the Connected App's uploaded certificate's private key&#10;-----END PRIVATE KEY-----"
+          value={f.SF_PRIVATE_KEY}
+          rows={5}
+          style={{ fontFamily: "monospace", fontSize: 12 }}
+          onChange={(e) => setF({ ...f, SF_PRIVATE_KEY: e.target.value })}
+        />
+        <div className="row" style={{ gap: 8, alignItems: "center" }}>
+          <button disabled={busy || !f.SF_USERNAME.trim()} onClick={test}>Test connection</button>
+          <button
+            className="primary"
+            disabled={busy || !f.org_label.trim() || !f.SF_USERNAME.trim()}
+            onClick={connect}
+          >
+            Connect
+          </button>
+          {testMsg && <span style={{ fontSize: 13 }}>{testMsg}</span>}
         </div>
       </div>
     </div>

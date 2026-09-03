@@ -1134,6 +1134,95 @@ not speculatively. No web UI either — unlike email's full Channels tab,
 there was no existing Salesforce connection UI to extend; building one
 from scratch is its own chunk.
 
+### Self-serve Salesforce connection + org introspection (2026-09-03)
+
+User's framing: "if we can do this we can sell this product" — self-serve
+onboarding (collect SF/Slack/Gmail creds when a workspace is created) +
+auto-discovery of the customer's real Modules/Groups/permissions, so the
+flow editor's dropdowns are fetched from their org, never hardcoded.
+That's three substantial systems, not one feature; this chunk builds the
+first two — the self-serve **connection UI** and the **introspection
+API** the third (dynamic editor dropdowns) will consume. Slack/Gmail
+already had this exact shape (`ChannelsView`, OAuth authorize/callback);
+Salesforce had none of it — env-var-only.
+
+**A real, resolved question along the way**: does the platform need its
+own Salesforce Connected App (OAuth) to build this, or is the existing
+JWT bearer path enough? Answered directly — JWT is functionally
+sufficient for introspection (once authenticated, `describe()`/SOQL work
+identically regardless of how the session was obtained); the actual
+difference is *who* does Salesforce-admin setup work: OAuth needs it
+once from the platform operator (a Connected App), JWT needs it from
+*every customer* (their own Connected App + certificate + integration
+user). No Connected App was available this session, so this chunk built
+the JWT-based path — real and shippable today — with OAuth as a future
+drop-in swap (the connector just stores whatever creds dict
+`_build_client` needs; it doesn't care how they were obtained).
+
+**Field-mapping strategy, decided**: customers map platform concepts
+("module", "region") onto whichever of *their own* Case fields already
+serve that purpose — the platform does not create custom fields in a
+customer's org on connect (unlike this project's own dev-org setup via
+`scripts/sf_create_fields.py`). Less invasive, more sellable to a
+company with an existing SF setup. The mapping *UI* itself isn't built
+yet (that's part of the dynamic-editor work below) — this chunk builds
+the introspection data it would consume.
+
+**Built:**
+- `interpreter/salesforce.py` — `test_connection(creds)` (log in, back
+  out, `{ok, error}}`, mirrors `mailbox.test_connection`);
+  `describe_case_fields(tenant_id, org_label)` (the org's real Case
+  fields — picklist/multipicklist/reference/string/textarea/boolean
+  types, i.e. anything a customer might reasonably use for
+  module/region/priority-style categorization — with real active
+  picklist values, not the platform's assumed field names);
+  `list_queues(tenant_id, org_label)` (real Queues the connected user can
+  see); `introspect_org()` (both, degrading independently — a
+  Case-describe failure doesn't hide Queues the caller can see, and vice
+  versa); `redact_org_secret()` (only `SF_USERNAME`/`SF_DOMAIN` are safe
+  to echo back, matching `connections.redact()`'s split).
+- `api/main.py` — `GET/PUT/DELETE /api/integrations/salesforce[/{org_label}]`
+  (owner-gated, built on the multi-org connector from the prior chunk)
+  and `GET /api/integrations/salesforce/{org_label}/schema` (editor-gated
+  — editors build flows, not just owners) + `POST .../test`. Every write
+  logs through the audit system (`salesforce_org.connected`/
+  `.disconnected`).
+- `web/src/channels/ConnectionsView.tsx` gains a **Salesforce** section —
+  connect/test/disconnect one or more named orgs (JWT fields: username,
+  Connected App consumer key, private key, domain), plus a **"fetch from
+  org"** button per connected org showing real field/queue counts —
+  proof the introspection actually returns real org data, not yet wired
+  into node-config dropdowns (that's the explicitly-deferred third
+  system).
+
+**Verify:** 12 new offline tests (`tests/test_salesforce_multi_org.py` —
+`redact_org_secret`'s safe/unsafe split, `test_connection` success and
+failure, `describe_case_fields` filters to mappable types and drops
+inactive picklist values, `list_queues` shapes real rows,
+`introspect_org` degrades each section independently on error) + 2 new
+`test_api.py` tests (a 401 check on all 5 endpoints; **a live
+end-to-end round-trip test using this environment's real `.env` SF
+creds** — connects a throwaway-labelled org through the real API,
+confirms the response never echoes back `SF_CONSUMER_KEY`/
+`SF_PRIVATE_KEY`, fetches the real schema and asserts a genuine standard
+field (`Priority`) comes back, disconnects, confirms it's gone). Full
+offline suite 512/512, zero regression. `tsc -b` / `vitest` (6/6) /
+`npm run build` clean. `scripts.check_migrations` clean.
+
+**Deliberately not built in this pass** (the third system, and the
+biggest one): no dropdown/search-suggestion UI in the FlowEditor's
+Inspector consumes this data yet — `sf_writeback`'s field_map,
+`team_route`'s team list, `notify`'s target groups are all still raw
+JSON editing. That's real, spread-out frontend work across every
+SF-aware node type, and needs the org-config-field threading from the
+prior chunk's residual too (a node has to know *which* connected org to
+introspect). Also not built: fine-grained "can this integration user
+actually assign to this Queue" permission modeling — `list_queues`
+returns what's visible to the connected user via normal sharing rules,
+not a full permission-set/profile analysis (Salesforce's permission
+model is deep enough that this is its own investigation, not a
+by-the-way addition).
+
 ### Scoped, not built: per-tenant case-taxonomy config
 
 Move `map_case_fields`'s module/region/case-type mapping from a global

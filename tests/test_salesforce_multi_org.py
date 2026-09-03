@@ -178,3 +178,97 @@ def test_list_tenant_orgs_and_delete(monkeypatch):
 def test_client_for_no_tenant_id_is_always_the_env_client():
     assert salesforce.client_for(None) is _ENV_SENTINEL
     assert salesforce.client_for(None, "prod") is _ENV_SENTINEL
+
+
+# --------------------------------------------------------------------------
+# org introspection -- the field-mapping / dropdown foundation
+# --------------------------------------------------------------------------
+def test_redact_org_secret_keeps_only_the_safe_fields():
+    creds = {"SF_USERNAME": "bot@acme.com", "SF_DOMAIN": "login",
+             "SF_CONSUMER_KEY": "ck", "SF_PRIVATE_KEY": "-----BEGIN...-----"}
+    r = salesforce.redact_org_secret(creds)
+    assert r == {"SF_USERNAME": "bot@acme.com", "SF_DOMAIN": "login", "has_credentials": True}
+    assert "SF_CONSUMER_KEY" not in r and "SF_PRIVATE_KEY" not in r
+
+
+def test_redact_org_secret_no_secret_fields_present():
+    assert salesforce.redact_org_secret({"SF_USERNAME": "x"})["has_credentials"] is False
+
+
+def test_test_connection_reports_ok_and_failure(monkeypatch):
+    class _OkClient:
+        def query(self, soql):
+            return {"records": [{"Id": "00D..."}]}
+
+    monkeypatch.setattr(salesforce, "_build_client", lambda creds: _OkClient())
+    assert salesforce.test_connection({"SF_USERNAME": "x"}) == {"ok": True, "error": None}
+
+    def _boom(creds):
+        raise RuntimeError("invalid session")
+
+    monkeypatch.setattr(salesforce, "_build_client", _boom)
+    r = salesforce.test_connection({"SF_USERNAME": "x"})
+    assert r["ok"] is False and "invalid session" in r["error"]
+
+
+class _FakeCaseDescribe:
+    def describe(self):
+        return {"fields": [
+            {"name": "Module__c", "label": "Module", "type": "picklist", "custom": True,
+             "picklistValues": [{"value": "Billing", "label": "Billing", "active": True},
+                                {"value": "Retired", "label": "Retired", "active": False}]},
+            {"name": "Priority", "label": "Priority", "type": "picklist", "custom": False,
+             "picklistValues": [{"value": "High", "label": "High", "active": True}]},
+            {"name": "Description", "label": "Description", "type": "textarea", "custom": False,
+             "picklistValues": []},
+            {"name": "Id", "label": "Case ID", "type": "id", "custom": False},  # not mappable
+        ]}
+
+
+class _FakeSFClient:
+    Case = _FakeCaseDescribe()
+
+    def query(self, soql):
+        assert "Group" in soql and "Queue" in soql
+        return {"records": [
+            {"Id": "00G1", "Name": "Billing Queue", "DeveloperName": "Billing_Queue"},
+            {"Id": "00G2", "Name": "Support Queue", "DeveloperName": "Support_Queue"},
+        ]}
+
+
+def test_describe_case_fields_only_mappable_types_and_active_values(monkeypatch):
+    monkeypatch.setattr(salesforce, "client_for", lambda *a, **k: _FakeSFClient())
+    fields = salesforce.describe_case_fields("t1")
+    names = {f["name"] for f in fields}
+    assert names == {"Module__c", "Priority", "Description"}  # Id (type 'id') excluded
+    module = next(f for f in fields if f["name"] == "Module__c")
+    assert module["picklist_values"] == [{"value": "Billing", "label": "Billing"}]  # inactive dropped
+    desc = next(f for f in fields if f["name"] == "Description")
+    assert desc["picklist_values"] == []  # non-picklist type, still offered as a mapping target
+
+
+def test_list_queues_shapes_the_real_org_queues(monkeypatch):
+    monkeypatch.setattr(salesforce, "client_for", lambda *a, **k: _FakeSFClient())
+    qs = salesforce.list_queues("t1")
+    assert qs == [
+        {"id": "00G1", "name": "Billing Queue", "developer_name": "Billing_Queue"},
+        {"id": "00G2", "name": "Support Queue", "developer_name": "Support_Queue"},
+    ]
+
+
+def test_introspect_org_combines_both_and_degrades_per_section(monkeypatch):
+    monkeypatch.setattr(salesforce, "client_for", lambda *a, **k: _FakeSFClient())
+    out = salesforce.introspect_org("t1")
+    assert len(out["case_fields"]) == 3 and len(out["queues"]) == 2 and out["errors"] == []
+
+    def _broken_client(*a, **k):
+        class _C:
+            Case = type("D", (), {"describe": lambda self: (_ for _ in ()).throw(RuntimeError("boom"))})()
+            def query(self, soql):
+                raise RuntimeError("also boom")
+        return _C()
+
+    monkeypatch.setattr(salesforce, "client_for", _broken_client)
+    out = salesforce.introspect_org("t1")
+    assert out["case_fields"] == [] and out["queues"] == []
+    assert len(out["errors"]) == 2  # both sections failed independently, neither raised
