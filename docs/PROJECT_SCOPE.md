@@ -2282,11 +2282,47 @@ Default to Groq for any LLM calls (classification, draft generation).
   by editing `008` — migrations aren't amended) by a new migration,
   `079_fix_acme_sf_writeback_field_map.sql`. **Verified: all 7
   previously-"known-gap" tests now genuinely pass** (`test_multiflow.py`
-  ×4, `test_queue.py` ×2, `test_feedback.py` ×1). **Still open, needs a
-  GitHub repo secret, not a code fix:** the `integration` CI job's
-  `test_api.py` cascade (`supabase_key is required`) is `SUPABASE_ANON_KEY`
-  not being configured as a repo secret for that job — only the account
-  owner can add it (Settings → Secrets and variables → Actions).
+  ×4, `test_queue.py` ×2, `test_feedback.py` ×1).
+- **Fixed (2026-09-03):** `SUPABASE_ANON_KEY` was added as a repo secret
+  but the `integration` job still failed `test_api.py` wholesale with
+  `httpx.InvalidURL: ... '\n' at position 40` — the `SUPABASE_URL` secret
+  itself carries a trailing newline (a common artifact of how secrets get
+  pasted/piped in), landing right where `api/main.py` appends
+  `/auth/v1/user`. `.strip()`ed every `SUPABASE_URL`/`SUPABASE_SERVICE_KEY`/
+  `SUPABASE_ANON_KEY` read at the point it comes out of `os.environ`
+  (`api/main.py`, `ingestion/scraper.py`, `ingestion/neo4j_sync.py`,
+  `scripts/set_editor_password.py`, `scripts/verify_migrations.py`,
+  `interpreter/config.py`).
+- **Fixed (2026-09-03):** with the above cleared, `test_queue.py::
+  test_worker_runs_the_job_and_records_the_run` still failed
+  intermittently in CI (`process_one(sb) is True` → `False`) — traced to
+  a real race against this project's **own live infra**: the
+  docker-compose `worker` container polls this exact Supabase project's
+  `jobs` table continuously, and `jobs.claim()`/`claim_job()` is a global
+  FIFO claim with no way to target one specific row, so the deployed
+  worker can (and did) claim a test's own job before the test's
+  `process_one()` call got to it. Fixed with migration `080` — a
+  `claim_job(p_job_id uuid)` overload (Postgres dispatches by arg list,
+  so the original zero-arg `claim_job()` used by every real poll loop is
+  untouched) — plus `interpreter/jobs.py::claim()` and
+  `api/worker.py::process_one()` gain an optional `job_id` kwarg;
+  `test_queue.py`'s two job-claiming tests now target their own
+  `job_id` (already returned by `jobs.enqueue()`), immune to the live
+  worker. **Verified: `test_queue.py` 3/3 pass repeatedly.**
+- **Known, accepted, not chased further (2026-09-03):**
+  `test_multiflow.py::test_seeded_flow_routes_as_designed[ACME-support]`
+  and `test_same_case_diverges_across_tenants` can still intermittently
+  fail in CI (`ask_human` instead of `auto_reply`) even though they pass
+  reliably run locally — Acme's confidence-gate `basic`-tier threshold is
+  `0.5`, right at the edge of the live weighted classify/draft/groundedness
+  score, and this project's always-on Docker stack (worker/poller/cdc/
+  slackbot) shares the same Groq quota as CI, plausibly pushing CI runs
+  into the rate-limit fallback chain (a different underlying model, with
+  different confidence output) more often than an isolated local run.
+  This is inherent to testing a live, non-deterministic LLM call at a
+  razor-thin threshold against shared infra/quota, not a code defect —
+  changing the threshold would be a product decision, not a bug fix, and
+  wasn't made here.
 - ~~`tenant_members` RLS enabled with no policy~~ — **fixed** in `006`
   (`self_membership_read`) and **verified in Phase 4** (`scripts/rls_check.sql`):
   simulated JWTs see only their tenant's flows. The interpreter itself still
