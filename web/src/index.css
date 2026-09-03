@@ -129,6 +129,17 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .runs-table tbody tr { cursor: pointer; }
 .runs-table tbody tr:hover { background: var(--panel-2); }
 .runs-table tbody tr.active { background: var(--panel-2); outline: 1px solid var(--accent); }
+/* billing view */
+.billing-view { padding: 12px; overflow: auto; max-width: 640px; }
+.quota-row { display: flex; flex-direction: column; gap: 3px; }
+.quota-bar { height: 8px; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--border); overflow: hidden; }
+.quota-bar-fill { height: 100%; background: var(--accent); }
+.quota-bar-fill.ok { background: var(--ok); }
+.quota-bar-fill.warn { background: var(--warn); }
+.quota-bar-fill.err { background: var(--err); }
+.usage-bars { display: flex; align-items: flex-end; gap: 2px; height: 80px; padding: 4px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; }
+.usage-bar { flex: 1; min-width: 2px; background: var(--accent); border-radius: 2px 2px 0 0; }
+
 .pill.auto_reply { color: var(--ok); border-color: var(--ok); }
 .pill.ask_human { color: var(--warn); border-color: var(--warn); }
 .pill.need_info { color: var(--accent); border-color: var(--accent); }

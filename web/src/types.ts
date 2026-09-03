@@ -382,3 +382,17 @@ export interface Connection {
   has_secret: boolean;
   created_at: string;
 }
+
+export interface BillingUsage {
+  period_label: string;                 // "2026-09"
+  period: { start: string; end: string };
+  plan: string;                         // "free" | "pro"
+  limits: { runs: number | null; tokens: number | null };
+  runs_count: number;
+  tokens_total: number;
+  tokens_by_model: Record<string, number>;
+  estimated_cost_usd: number;
+  daily: { date: string; runs: number; tokens: number }[];
+  pct_runs_used: number | null;
+  pct_tokens_used: number | null;
+}

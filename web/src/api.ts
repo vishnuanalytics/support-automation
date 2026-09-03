@@ -1,6 +1,7 @@
 import { supabase } from "./supabase";
 import type {
   AssistResult,
+  BillingUsage,
   EmailChannel,
   EmailChannelSave,
   Flow,
@@ -259,4 +260,12 @@ export const api = {
     return req<RunRow[]>(`/runs${qs ? `?${qs}` : ""}`);
   },
   getRun: (id: string) => req<RunDetail>(`/runs/${id}`),
+
+  billingUsage: (q: { tenantId?: string; period?: string } = {}) => {
+    const p = new URLSearchParams();
+    if (q.tenantId) p.set("tenant_id", q.tenantId);
+    if (q.period) p.set("period", q.period);
+    const qs = p.toString();
+    return req<BillingUsage>(`/billing/usage${qs ? `?${qs}` : ""}`);
+  },
 };

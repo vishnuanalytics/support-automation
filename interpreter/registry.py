@@ -277,6 +277,7 @@ def h_classify(state: CaseState, config: dict) -> dict:
 
     _subj, _cbody = _run_text(state)          # P5c
     body = _with_ocr(state, f"{_subj}\n\n{_cbody}".strip())
+    _model = config.get("model", llm.FAST_MODEL)
     raw = llm.complete(
         system=(
             "You triage inbound support cases. Return a JSON object with keys: "
@@ -294,7 +295,7 @@ def h_classify(state: CaseState, config: dict) -> dict:
             "summary (<=200 chars)."
         ),
         user=body or "(empty case)",
-        model=config.get("model", llm.FAST_MODEL),
+        model=_model,
         json_object=True,
         max_tokens=320,
         cache=True,   # same case text -> same triage; kills retry/re-run cost
@@ -325,7 +326,7 @@ def h_classify(state: CaseState, config: dict) -> dict:
             config["_node_id"], "classify",
             f"tier={tier} region={region} urgency={classification['urgency']} "
             f"topic={topic} type={case_type or '-'} mode={answer_mode}",
-            {**classification, "tokens": llm.last_usage},
+            {**classification, "tokens": llm.last_usage, "model": _model},
         ),
     }
 
@@ -962,6 +963,7 @@ def h_draft(state: CaseState, config: dict) -> dict:
             "that a specialist will follow up with findings — never guess. "
         )
 
+    _model = config.get("model", llm.DEFAULT_MODEL)
     raw = llm.complete(
         system=(
             "You are a support agent. " + grounding_rule +
@@ -971,7 +973,7 @@ def h_draft(state: CaseState, config: dict) -> dict:
             "where confidence reflects how well the context actually answers the case."
         ),
         user=user,
-        model=config.get("model", llm.DEFAULT_MODEL),
+        model=_model,
         json_object=True,
         max_tokens=int(config.get("max_tokens", 500)),
     )
@@ -1016,6 +1018,7 @@ def h_draft(state: CaseState, config: dict) -> dict:
             f"+{len(prior_as_src)} prior-case",
             {"draft_confidence": model_conf, "chars": len(reply),
              "groundedness": grounded, "integrity": integ, "tokens": tokens,
+             "model": _model,
              "used_internal_kb": bool(internal_matches),
              "prior_cases": [p.get("case_number") for p in prior[:3]],
              "answer_mode": mode},
@@ -1928,10 +1931,11 @@ def h_ai_prompt(state: CaseState, config: dict) -> dict:
             imgs.append((data, mime))
         imgs = imgs[:4]
 
+    _model = config.get("model") or llm.DEFAULT_MODEL
     try:
         raw = llm.complete(
             system=system or "You are a helpful support assistant.",
-            user=user, model=config.get("model") or llm.DEFAULT_MODEL,
+            user=user, model=_model,
             temperature=float(config.get("temperature", 0.2)),
             max_tokens=int(config.get("max_tokens", 600)),
             json_object=want_json,
@@ -1956,7 +1960,7 @@ def h_ai_prompt(state: CaseState, config: dict) -> dict:
                  + (f", {len(imgs)} image(s)" if imgs else "")
                  + (f", {usage.get('total')} tok" if usage.get("total") else ""),
                  {"output_key": out_key, "value": value, "images": len(imgs),
-                  "json": want_json, "tokens": usage or None}),
+                  "json": want_json, "tokens": usage or None, "model": _model}),
     }
 
 

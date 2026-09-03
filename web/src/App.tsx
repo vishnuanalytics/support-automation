@@ -14,6 +14,7 @@ import { TeamView } from "./team/TeamView";
 import { ChannelsView } from "./channels/ChannelsView";
 import { ConnectionsView } from "./channels/ConnectionsView";
 import { FlowGuideView } from "./guide/FlowGuideView";
+import { BillingView } from "./billing/BillingView";
 
 type View =
   | "editor"
@@ -25,7 +26,8 @@ type View =
   | "guide"
   | "team"
   | "channels"
-  | "connections";
+  | "connections"
+  | "billing";
 
 export function App() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
@@ -149,6 +151,11 @@ export function App() {
                 Connections
               </button>
             )}
+            {isOwner && (
+              <button className={view === "billing" ? "primary" : ""} onClick={() => setView("billing")}>
+                Billing
+              </button>
+            )}
           </div>
           <div className="row" style={{ gap: 6 }}>
             {role && !canEdit && (
@@ -191,9 +198,17 @@ export function App() {
             flow, end to end
           </div>
         )}
+        {view === "billing" && (
+          <div className="muted">
+            usage &amp; a notional cost estimate for this workspace, against its
+            plan quota — no payment processing is wired up yet
+          </div>
+        )}
       </div>
       <div className={view === "editor" && flowId ? "editor" : "pane"}>
-        {view === "connections" ? (
+        {view === "billing" ? (
+          <BillingView />
+        ) : view === "connections" ? (
           <ConnectionsView />
         ) : view === "team" ? (
           <TeamView />
