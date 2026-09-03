@@ -707,29 +707,51 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**Current focus (2026-09-03): the self-serve multi-tenant/multi-org
-Salesforce connector, and making the flow editor fetch real data
-instead of hardcoding it** — see "Multi-tenant / multi-Salesforce-org
-scoping" below for the full chunk-by-chunk history. Status:
-connector + introspection + OAuth + org-label threading through every
-SF-touching node handler are all built and live-verified; every flow
-editor node whose config is genuinely backed by an external system
-(Salesforce Case fields/Queues/connected-orgs, Slack channels/users/
-usergroups, per-tenant HTTP Connections, internal KB collections) now
-renders a real picker instead of raw JSON, including edge conditions
-(`classification.case_type` / `routed_team` quick-insert dropdowns) and
-Salesforce User/Queue @mention targets (`notify`/`notify_human`) — see
-"Flow editor Inspector: real Salesforce data instead of hardcoded/raw
-JSON", "Every node with a real data source gets a real picker", and
-"Closing the last gaps: SF User picker + edge conditions" for the three
-chunks. **Only open item now**: none of the three editor chunks has
-been clicked through in a real browser — next step before calling this
-fully shipped. Deferred, **explicitly out of scope until asked for
-again**: Google Calendar
-meeting-scheduling as its own node type (design decided — time from
-BOTH the customer's message AND Google Calendar free/busy; needs a new
-`interpreter/gcalendar.py` + widening `gdrive.py`'s OAuth scopes, with
-a reconnect caveat).
+**Self-serve multi-tenant/multi-org Salesforce + Slack connector, and a
+flow editor that fetches real data instead of hardcoding it — DONE and
+browser-verified (2026-09-03).** See "Multi-tenant / multi-Salesforce-org
+scoping" below for the full chunk-by-chunk history. Connector +
+introspection + OAuth + org-label threading through every SF-touching
+node handler; every flow editor node whose config is genuinely backed
+by an external system (Salesforce Case fields/Queues/Users/connected-orgs,
+Slack channels/users/usergroups, per-tenant HTTP Connections, internal
+KB collections) renders a real picker instead of raw JSON, including
+edge conditions and Salesforce User/Queue @mention targets. **Actually
+clicked through in a real browser** (headless Chromium set up from
+scratch in this sandbox — see "First real browser click-through" below
+for how, since there's no browser here by default) — found and fixed 4
+real bugs in the process (a Slack-meta endpoint that always reported
+"not connected" for every tenant due to an RLS-vs-service-role client
+mismatch; an edge-condition quick-insert that mashed text together with
+no separator; `sf_writeback`'s form going blank on a real published
+flow whose config relies on the interpreter's own defaults; a `notify`
+node's `target_by_module`/`mention_id` fields that had real saved data
+but no picker at all). This whole thread is closed.
+
+**Current focus (2026-09-03): "complete the multi-tenant project
+end-to-end, very robust, flexible and easy"** — the user's own framing,
+deliberately broad; scoped down via `AskUserQuestion` into three
+tracks, of which the browser click-through above was the first.
+**Not yet started, still open**:
+- **A systematic robustness pass** — error-handling/retry audit across
+  the node handlers + external connectors, and a real multi-tenant
+  concurrency stress test (two tenants hitting the platform at once).
+  The one security review done so far (SSRF/authZ, see Known issues)
+  isn't the same thing as a robustness/reliability audit.
+- **An onboarding UX walkthrough** — actually drive the new-tenant path
+  (create workspace → connect Salesforce/Slack → auto-detect modules/
+  teams → build first flow) as a brand-new user would, and fix
+  friction. Nothing has walked this path end-to-end as a user
+  experience question rather than a feature-completeness checklist.
+
+Deferred, **explicitly out of scope until asked for again**: Google
+Calendar meeting-scheduling as its own node type (design decided — time
+from BOTH the customer's message AND Google Calendar free/busy; needs a
+new `interpreter/gcalendar.py` + widening `gdrive.py`'s OAuth scopes,
+with a reconnect caveat). Also not started: Phase 16's rule form
+builder (policy rules still edited as raw JSON) and Phase 14's file
+upload (`.pdf`/`.docx`) for the KB — raised as options in the same
+`AskUserQuestion` round but not picked this time.
 
 **Phase KIL — Knowledge Integrity Loop (COMPLETE a–f + live-verified,
 2026-09-02; PR #29).** Catch
@@ -1578,6 +1600,111 @@ Full offline suite 549/549. Frontend: `tsc -b` clean, `vitest run` 6/6,
 end-to-end `org_metadata` `users` field against the real `acme-dev`
 org. Not yet clicked through in a real browser — three editor chunks
 in a row now share that same open item.
+
+### First real browser click-through of the picker work — 4 bugs found, all fixed (2026-09-03)
+
+Per the user's direction ("complete full multi tenant project end to
+end & with very robust... flexible and easy") the session split into
+three tracks; this is the first: an actual browser session driving the
+flow editor, closing the "not yet clicked through" item every picker
+chunk this session had carried. No headless browser was available in
+this sandbox by default — set one up from scratch: `playwright` (npm,
+already vendored in scratchpad from an earlier attempt) + Chromium
+binary (already cached), but `chrome-headless-shell` was missing
+`libnspr4.so`/`libnss3.so`/`libasound.so.2` and `apt-get install`
+needs root (no passwordless sudo here). Worked around it with
+`apt-get download` (no root needed, just fetches `.deb`s) +
+`dpkg-deb -x` to extract the `.so` files into a scratch directory, then
+`LD_LIBRARY_PATH` pointed at it for the Chromium launch — no system
+changes, nothing installed outside the scratchpad. Logged in as a real
+account (`scripts/set_editor_password.py` to set a password on the
+existing Supabase Auth user) and drove the actual live `email` flow
+(the most fully-built real flow: `identify`, `sf_case`, `retrieve`,
+`sf_writeback`, `handover`, `team_route`, `clarify`, `notify`,
+`ask_human`, `notify_human`, plus an edge) exactly as a user would —
+clicking every node, reading the rendered Inspector, checking the
+browser console.
+
+**Bug 1 — real, significant: `GET /api/slack/meta` always reported
+`available:false`, for every tenant, regardless of a real connection.**
+The endpoint passed the caller's RLS-scoped client (`c.sb`) into
+`workspace_meta`; `tenant_integrations` has RLS enabled with **no
+policy at all** (service-role only, by design — it holds secrets), so
+that client silently saw zero rows for every tenant. Every
+`notify_human` channel/@mention picker built this session had been
+silently falling back to plain text this whole time in the one place
+that would have shown it: a real browser. `salesforce_meta` never had
+this bug because `org_metadata` doesn't take an `sb` argument at all
+(defaults to its own service-role client internally) — `slack_meta`
+should have matched that pattern from the start. Fixed: stopped
+passing `sb=c.sb`; tenant scoping is already enforced by
+`_caller_tenant`'s RLS-backed membership check before this line runs,
+same security model `salesforce_meta` already uses. **Root cause of
+why no test caught it**: the one integration test for this endpoint
+used `if body["available"]:` instead of asserting it — and its own
+premise was wrong too (copied "Globex has connected Slack live" from
+the `salesforce_meta` test's comment without checking; only Acme has
+ever connected Slack). Fixed both: added an offline regression test
+(`test_slack_meta_does_not_leak_the_rls_scoped_client_into_workspace_meta`,
+overrides the `caller` dependency with a fake whose `.sb` is a
+sentinel and asserts `workspace_meta` is called without it — so this
+class of bug can't silently reappear) and corrected the integration
+test to assert Globex's real (correct) state instead of a guessed one.
+Live-verified in the browser after the fix: `notify_human`'s channel
+picker now shows real dropdowns.
+
+**Bug 2 — real: edge-condition quick-insert mashed text together with
+no separator when the textarea hadn't been focused first.**
+`EdgeInspector`'s new quick-insert dropdowns (previous chunk) used
+`textarea.selectionStart`, which is `0` — not `null` — on an unfocused
+textarea, so `?? ifExpr.length` never triggered and every insert landed
+at position 0: picking "Case Type → Question" against the existing
+`tier == 'enterprise'` produced `classification.case_type ==
+'Question'tier == 'enterprise'`, a syntax error, with zero clicks
+required to hit it (this is the *point* of a quick-insert — clicking it
+without first clicking into the box). Fixed: only trust
+`selectionStart`/`End` when `document.activeElement === textarea`;
+otherwise treat it as "append", auto-joined with `&& ` when there's
+already non-empty content. Verified live: the same repro now produces
+`tier == 'enterprise' && classification.case_type == 'Question'`.
+
+**Bug 3 — a real UX gap, not a wire-format bug:** `sf_writeback`'s
+`field_map` form went completely blank (zero rows) on the live email
+flow's actual `sf_writeback` node, which has `config: {}` — the
+interpreter's own `field_map = config.get("field_map") or {defaults}`
+fallback means this node genuinely writes 6 fields on every run
+(`Priority`, `Type`, `Topic__c`, `Module__c`, `SubModule__c`,
+`Region__c`), but the *editor* showed nothing, reading as "this node
+does nothing." Fixed: when `config.field_map` is `undefined` (never
+configured — distinct from an explicit `{}`, which a user could set by
+deliberately clearing every row), the form now shows the interpreter's
+own default map, labeled "showing the platform default — not yet saved
+on this node," and editing any row seeds the full explicit map into
+config on that first edit. Live-verified: the form now shows all 6 rows
+with their real Salesforce field already matched.
+
+**Bug 4 — a real coverage gap, found by comparing the rendered form
+against the actual saved config:** the live `notify` node's raw config
+had `target_by_module` and a top-level `mention_id` — two real fields
+`h_notify` (`interpreter/registry.py`) has always read, neither of
+which `NotifyForm` exposed (only `target_by_type`/`fallback_target`
+had pickers). `target_by_module` is exactly the same shape as the
+already-built `target_by_type` section, just keyed by `Module__c`
+instead of `Case.Type` (real values already sitting in
+`meta.modules`), and `mention_id` is the same kind of SF User/Queue id
+as everything else `SfMentionPicker` already covers. Added both — live
+data confirmed the module override renders all 7 real `Module__c`
+values, and the Chatter @mention correctly resolved the live flow's
+saved `mention_id` to "Gundam Vishnu."
+
+**Verify:** every node type in the live flow clicked (10 types + an
+edge), zero browser console errors across the full walkthrough, before
+and after all four fixes. Full offline suite 550/550 (the new offline
+regression test). Both live `@pytest.mark.integration` Slack/Salesforce
+meta tests pass. Frontend `tsc -b` / `vitest run` (6/6) / `vite build`
+all clean. Docker `api` rebuilt and re-verified live after the fix
+(the fix lives in `api/main.py`, served by the Docker container, not
+the Vite dev server used for the click-through itself).
 
 ### Scoped, not built: per-tenant case-taxonomy config
 

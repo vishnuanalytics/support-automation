@@ -283,6 +283,20 @@ const SF_WRITEBACK_SRC_KEYS = [
   "case_type", "case_topic", "case_module", "case_submodule", "case_region",
 ];
 
+// interpreter/registry.py::h_sf_writeback's own fallback when config has no
+// field_map at all -- kept in sync by hand (small, rarely-changed list).
+// A published flow with an empty {} config (the seed flows all ship this
+// way -- config-driven means "the interpreter's default", not "nothing
+// happens") was showing a blank form with zero rows, which reads as
+// "this node writes nothing" even though it's actively writing 6 fields
+// on every run. Found by an actual browser click-through against the
+// live email flow (2026-09-03).
+const SF_WRITEBACK_DEFAULT_FIELD_MAP: Record<string, string> = {
+  urgency: "Priority", case_type: "Type", case_topic: "Topic__c",
+  case_module: "Module__c", case_submodule: "SubModule__c",
+  case_region: "Region__c",
+};
+
 /** `sf_writeback`'s field_map: platform concept -> a REAL field on this
  *  tenant's connected Salesforce org, fetched live — not a hardcoded
  *  platform field name. Falls back to free text when the org isn't
@@ -300,7 +314,14 @@ function SfWritebackForm({
   const org = typeof config.org === "string" ? config.org : "";
   const meta = useSfMeta(tenantId, org || undefined);
   const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
-  const fieldMap = (config.field_map as Record<string, string>) || {};
+  // undefined (never configured) shows -- and edits from -- the
+  // interpreter's own default map, so the form reflects what's actually
+  // running. An explicit {} (the user cleared every row on purpose) stays
+  // genuinely empty rather than snapping back to the defaults.
+  const usingDefaults = config.field_map === undefined;
+  const fieldMap = usingDefaults
+    ? SF_WRITEBACK_DEFAULT_FIELD_MAP
+    : (config.field_map as Record<string, string>) || {};
   const rows = Object.entries(fieldMap);
   const fields = meta.case_fields || [];
 
@@ -327,7 +348,14 @@ function SfWritebackForm({
         <span className="muted" style={{ width: 90 }}>org</span>
         <OrgPicker value={org} onChange={(v) => set({ org: v || undefined })} tenantId={tenantId} />
       </div>
-      <label style={{ marginTop: 6, display: "block" }}>field_map</label>
+      <label style={{ marginTop: 6, display: "block" }}>
+        field_map{" "}
+        {usingDefaults && (
+          <span className="muted" style={{ fontWeight: "normal" }}>
+            (showing the platform default — not yet saved on this node; edit a row to make it explicit)
+          </span>
+        )}
+      </label>
       <datalist id="sfwb-src-keys">
         {SF_WRITEBACK_SRC_KEYS.map((k) => <option key={k} value={k} />)}
       </datalist>
@@ -703,6 +731,13 @@ function NotifyForm({
     else delete next[t];
     set({ target_by_type: next });
   };
+  const byModule = (config.target_by_module as Record<string, string>) || {};
+  const setModuleTarget = (m: string, v: string) => {
+    const next = { ...byModule };
+    if (v) next[m] = v;
+    else delete next[m];
+    set({ target_by_module: next });
+  };
 
   return (
     <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
@@ -737,6 +772,31 @@ function NotifyForm({
           />
         </div>
       ))}
+
+      {meta.modules.length > 0 && (
+        <>
+          <label style={{ marginTop: 10, display: "block" }}>
+            override target by Module__c{" "}
+            <span className="muted">(picklist from Salesforce)</span>
+          </label>
+          {meta.modules.map((m) => (
+            <div className="row" key={m} style={{ gap: 4 }}>
+              <span className="muted" style={{ width: 110 }}>{m}</span>
+              <SfMentionPicker
+                value={byModule[m] ?? ""}
+                onChange={(v) => setModuleTarget(m, v)}
+                tenantId={tenantId}
+                orgLabel={typeof config.org === "string" ? config.org : undefined}
+                placeholder="User/Group id or name"
+              />
+            </div>
+          ))}
+          <div className="muted" style={{ fontSize: 11 }}>
+            only consulted when the Case.Type override above doesn't match.
+          </div>
+        </>
+      )}
+
       <div className="row" style={{ marginTop: 6 }}>
         <span className="muted" style={{ width: 110 }}>fallback target</span>
         <SfMentionPicker
@@ -746,6 +806,20 @@ function NotifyForm({
           orgLabel={typeof config.org === "string" ? config.org : undefined}
           placeholder="(optional)"
         />
+      </div>
+      <div className="row" style={{ marginTop: 6 }}>
+        <span className="muted" style={{ width: 110 }}>Chatter @mention</span>
+        <SfMentionPicker
+          value={typeof config.mention_id === "string" ? config.mention_id : ""}
+          onChange={(v) => set({ mention_id: v || undefined })}
+          tenantId={tenantId}
+          orgLabel={typeof config.org === "string" ? config.org : undefined}
+          placeholder="005xxxxxxxxxxxx (last-resort mention)"
+        />
+      </div>
+      <div className="muted" style={{ fontSize: 11 }}>
+        used to @mention someone when the resolved target is a Queue (not
+        directly mentionable) and none of its members can be found.
       </div>
       <div className="row" style={{ marginTop: 6 }}>
         <span className="muted" style={{ width: 110 }}>org</span>
@@ -1474,12 +1548,23 @@ export function EdgeInspector({
 
   const insert = (snippet: string) => {
     const ta = taRef.current;
-    const start = ta?.selectionStart ?? ifExpr.length;
-    const end = ta?.selectionEnd ?? ifExpr.length;
-    const next = ifExpr.slice(0, start) + snippet + ifExpr.slice(end);
+    // A textarea's selectionStart is 0 (not null) when it has never been
+    // focused -- picking a quick-insert option without clicking into the
+    // box first (the whole point of the feature) would otherwise splice
+    // the snippet in at position 0 with no separator, mashing it directly
+    // onto existing text (e.g. "classification.case_type == 'Question'tier
+    // == 'enterprise'", no space, no &&). Only trust selectionStart/End
+    // when the textarea is actually the focused element; otherwise treat
+    // this as "append", joined with " && " when there's already content.
+    const focused = !!ta && document.activeElement === ta;
+    const start = focused ? ta!.selectionStart ?? ifExpr.length : ifExpr.length;
+    const end = focused ? ta!.selectionEnd ?? ifExpr.length : ifExpr.length;
+    const needsJoin = !focused && ifExpr.slice(0, start).trim() !== "" && !/[\s(]$/.test(ifExpr.slice(0, start));
+    const joined = (needsJoin ? " && " : "") + snippet;
+    const next = ifExpr.slice(0, start) + joined + ifExpr.slice(end);
     onCondition({ if: next });
     if (ta) {
-      const pos = start + snippet.length;
+      const pos = start + joined.length;
       requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(pos, pos); });
     }
   };

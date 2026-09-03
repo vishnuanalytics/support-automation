@@ -484,11 +484,18 @@ def slack_meta(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dic
 
     from interpreter import slack as _slack
 
-    tid = _caller_tenant(c, tenant_id)
+    tid = _caller_tenant(c, tenant_id)   # membership already verified via c.sb (RLS)
     now = time.time()
     hit = _SLACK_META_CACHE.get(tid)
     if hit is None or now - hit[0] > 300:
-        data = _slack.workspace_meta(tid, sb=c.sb)
+        # tenant_integrations has RLS enabled with NO policy (service-role
+        # only, by design -- it holds secrets). Passing c.sb here silently
+        # returned zero rows for every tenant, so workspace_meta always saw
+        # "not connected" regardless of a real connection. Let it fall back
+        # to its own service-role client, same as salesforce_meta already
+        # does for org_metadata -- the tenant scoping is enforced above by
+        # _caller_tenant, not by RLS on this table.
+        data = _slack.workspace_meta(tid)
         _SLACK_META_CACHE[tid] = (now, data)
     return _SLACK_META_CACHE[tid][1]
 

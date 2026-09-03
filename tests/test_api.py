@@ -122,17 +122,75 @@ def test_slack_meta_needs_a_token():
     assert client.get("/api/slack/meta").status_code == 401
 
 
+def test_slack_meta_does_not_leak_the_rls_scoped_client_into_workspace_meta(monkeypatch):
+    """Regression test for a real bug (2026-09-03, found by an actual
+    browser click-through, not by any existing test): the endpoint passed
+    the caller's RLS-scoped client (`c.sb`) into `workspace_meta`. But
+    `tenant_integrations` has RLS enabled with NO policy at all --
+    service-role only, by design, since it holds secrets -- so that client
+    silently saw zero rows for every tenant, no matter how the request was
+    authenticated. Every tenant's `notify_human` channel/@mention pickers
+    always fell back to plain text, permanently, and every prior test
+    passed anyway because the live integration test only ever ran against
+    Globex, which genuinely has no Slack connection (so `available=False`
+    was correct there for the wrong reason -- masking the bug instead of
+    catching it). Offline + deterministic: overrides the `caller`
+    dependency with a fake whose `.sb` is a sentinel object, and asserts
+    `workspace_meta` is called WITHOUT that sentinel."""
+    import api.main as main
+    from interpreter import slack as _slack
+
+    _rls_sentinel = object()
+
+    class _FakeSb:
+        def table(self, name):
+            return self
+
+        def select(self, *a, **k):
+            return self
+
+        def eq(self, *a, **k):
+            return self
+
+        def execute(self):
+            return type("R", (), {"data": [{"tenant_id": "fake-tenant"}]})()
+
+    class _FakeCaller:
+        user_id = "u1"
+        email = "u1@example.test"
+        sb = _FakeSb()
+
+    calls: list[object] = []
+
+    def fake_workspace_meta(tenant_id, *, sb=None):
+        calls.append(sb)
+        return {"available": True, "channels": [], "users": [], "usergroups": [], "errors": []}
+
+    monkeypatch.setattr(_slack, "workspace_meta", fake_workspace_meta)
+    main.app.dependency_overrides[main.caller] = lambda: _FakeCaller()
+    try:
+        r = client.get("/api/slack/meta?tenant_id=fake-tenant")
+    finally:
+        main.app.dependency_overrides.pop(main.caller, None)
+
+    assert r.status_code == 200
+    assert calls == [None], "workspace_meta must NOT receive the RLS-scoped caller client"
+
+
 @pytest.mark.integration
-def test_slack_meta_is_tenant_scoped_and_returns_real_workspace_data(auth_headers):
+def test_slack_meta_is_tenant_scoped_not_globally_cached(auth_headers):
     """Same class of fix as salesforce/meta -- cached per tenant_id, not
-    globally. Globex has connected Slack live, so this also proves the
-    channels/users/usergroups endpoint reaches the real workspace."""
+    globally. Globex itself has no live Slack connection, so this only
+    proves the endpoint is reachable/tenant-scoped and degrades cleanly;
+    the "does it actually see a connected workspace" behavior is covered
+    by the offline regression test above plus manual live verification
+    against the Acme tenant, which does have Slack connected."""
     r = client.get("/api/slack/meta", headers=auth_headers)
     assert r.status_code == 200
     body = r.json()
     assert set(body) >= {"available", "channels", "users", "usergroups", "errors"}
-    if body["available"]:
-        assert isinstance(body["channels"], list) and isinstance(body["users"], list)
+    assert body["available"] is False
+    assert body["channels"] == [] and body["users"] == []
 
 
 def test_salesforce_org_endpoints_need_a_token():
