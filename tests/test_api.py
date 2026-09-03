@@ -21,6 +21,11 @@ load_dotenv()  # real creds locally -> integration tests run; absent in CI -> th
 os.environ.setdefault("SUPABASE_URL", "https://example.supabase.co")
 os.environ.setdefault("SUPABASE_SERVICE_KEY", "test-service-key")
 os.environ.setdefault("SUPABASE_ANON_KEY", "test-anon-key")
+# these placeholders are process-wide (os.environ, not monkeypatch) and so
+# leak into every other test module collected in the same run. Anything
+# that treats "SUPABASE_URL is set" as "real creds are present" (e.g.
+# scripts.verify_migrations.live_schema) must tolerate a connection failure
+# to this fake host as equivalent to "no creds" -- see that function.
 
 from fastapi.testclient import TestClient  # noqa: E402
 
