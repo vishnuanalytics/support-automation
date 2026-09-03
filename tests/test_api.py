@@ -118,6 +118,23 @@ def test_salesforce_meta_is_tenant_scoped_not_globally_cached(auth_headers):
     assert r2.status_code == 200
 
 
+def test_slack_meta_needs_a_token():
+    assert client.get("/api/slack/meta").status_code == 401
+
+
+@pytest.mark.integration
+def test_slack_meta_is_tenant_scoped_and_returns_real_workspace_data(auth_headers):
+    """Same class of fix as salesforce/meta -- cached per tenant_id, not
+    globally. Globex has connected Slack live, so this also proves the
+    channels/users/usergroups endpoint reaches the real workspace."""
+    r = client.get("/api/slack/meta", headers=auth_headers)
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) >= {"available", "channels", "users", "usergroups", "errors"}
+    if body["available"]:
+        assert isinstance(body["channels"], list) and isinstance(body["users"], list)
+
+
 def test_salesforce_org_endpoints_need_a_token():
     assert client.get("/api/integrations/salesforce").status_code == 401
     assert client.put("/api/integrations/salesforce",

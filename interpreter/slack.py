@@ -20,7 +20,7 @@ import time
 log = logging.getLogger("interpreter.slack")
 from typing import Any
 
-SCOPES = "chat:write,chat:write.public,usergroups:read"
+SCOPES = "chat:write,chat:write.public,usergroups:read,channels:read,groups:read,users:read"
 _AUTH = "https://slack.com/oauth/v2/authorize"
 _TOKEN = "https://slack.com/api/oauth.v2.access"
 _API = "https://slack.com/api"
@@ -235,3 +235,69 @@ def _sb():
     from ingestion.scraper import get_supabase
 
     return get_supabase()
+
+
+# ── workspace introspection (flow editor pickers) ───────────────────
+def list_channels(tenant_id: str | None, *, sb=None, limit: int = 200) -> list[dict[str, Any]]:
+    """Public + private channels the bot can see (`conversations.list`), for
+    the flow editor's channel picker (`notify_human.slack_channel`). []
+    on any error (not connected / missing scope / Slack down) — never
+    raises, same degrade-gracefully rule as `salesforce.list_queues`."""
+    try:
+        sb = sb or _sb()
+        r = _call("conversations.list", _bot_token(tenant_id, sb),
+                  {"types": "public_channel,private_channel", "limit": limit})
+        return [{"id": c["id"], "name": c["name"], "is_member": bool(c.get("is_member"))}
+                for c in r.get("channels", [])]
+    except Exception as e:  # noqa: BLE001
+        log.debug("list_channels failed: %s", e)
+        return []
+
+
+def list_users(tenant_id: str | None, *, sb=None, limit: int = 200) -> list[dict[str, Any]]:
+    """Real human members of the workspace (bots, Slackbot and deleted users
+    filtered out), for the flow editor's @mention picker. [] on any error."""
+    try:
+        sb = sb or _sb()
+        r = _call("users.list", _bot_token(tenant_id, sb), {"limit": limit})
+        return [
+            {"id": u["id"], "name": u.get("real_name") or u.get("name") or u["id"],
+             "email": (u.get("profile") or {}).get("email")}
+            for u in r.get("members", [])
+            if not u.get("is_bot") and not u.get("deleted") and u.get("id") != "USLACKBOT"
+        ]
+    except Exception as e:  # noqa: BLE001
+        log.debug("list_users failed: %s", e)
+        return []
+
+
+def list_usergroups(tenant_id: str | None, *, sb=None) -> list[dict[str, Any]]:
+    """Usergroups (@on-call handles) with display metadata — a public,
+    richer sibling of `_usergroup_index`'s handle->id cache, for the flow
+    editor's picker. [] on failure."""
+    try:
+        sb = sb or _sb()
+        r = _call("usergroups.list", _bot_token(tenant_id, sb), {})
+        return [{"id": g["id"], "handle": g.get("handle"), "name": g.get("name")}
+                for g in r.get("usergroups", []) if g.get("handle")]
+    except Exception as e:  # noqa: BLE001
+        log.debug("list_usergroups failed: %s", e)
+        return []
+
+
+def workspace_meta(tenant_id: str | None, *, sb=None) -> dict[str, Any]:
+    """Channels + users + usergroups for the flow editor's Slack pickers —
+    degrades independently per section, same shape as
+    `salesforce.introspect_org`. `available=False` when the tenant hasn't
+    connected Slack at all."""
+    sb = sb or _sb()
+    if not connected(tenant_id, sb):
+        return {"available": False, "channels": [], "users": [], "usergroups": [],
+                "errors": ["Slack not connected for this tenant"]}
+    return {
+        "available": True,
+        "channels": list_channels(tenant_id, sb=sb),
+        "users": list_users(tenant_id, sb=sb),
+        "usergroups": list_usergroups(tenant_id, sb=sb),
+        "errors": [],
+    }
