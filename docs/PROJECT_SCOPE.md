@@ -2309,20 +2309,33 @@ Default to Groq for any LLM calls (classification, draft generation).
   `test_queue.py`'s two job-claiming tests now target their own
   `job_id` (already returned by `jobs.enqueue()`), immune to the live
   worker. **Verified: `test_queue.py` 3/3 pass repeatedly.**
-- **Known, accepted, not chased further (2026-09-03):**
-  `test_multiflow.py::test_seeded_flow_routes_as_designed[ACME-support]`
-  and `test_same_case_diverges_across_tenants` can still intermittently
-  fail in CI (`ask_human` instead of `auto_reply`) even though they pass
-  reliably run locally — Acme's confidence-gate `basic`-tier threshold is
-  `0.5`, right at the edge of the live weighted classify/draft/groundedness
-  score, and this project's always-on Docker stack (worker/poller/cdc/
-  slackbot) shares the same Groq quota as CI, plausibly pushing CI runs
-  into the rate-limit fallback chain (a different underlying model, with
-  different confidence output) more often than an isolated local run.
-  This is inherent to testing a live, non-deterministic LLM call at a
-  razor-thin threshold against shared infra/quota, not a code defect —
-  changing the threshold would be a product decision, not a bug fix, and
-  wasn't made here.
+- **Known, accepted, not chased further — root cause confirmed
+  (2026-09-03):** `test_multiflow.py::test_seeded_flow_routes_as_designed
+  [ACME-support]` and `test_same_case_diverges_across_tenants` can
+  intermittently fail (`ask_human` instead of `auto_reply`) — failed
+  identically 3 CI runs in a row. Initially suspected a CI-vs-local
+  environment difference (e.g. GH Actions' shared IPs getting rate-limited
+  more than local); **investigated and ruled that out** — a local
+  diagnostic run (`interpreter.llm._cache` cleared between calls, so each
+  is a genuinely fresh LLM call, same as a cold CI process) showed the
+  *exact same* fallback-chain exhaustion happening locally, right now:
+  every provider (`llama-3.3-70b-versatile`, `openai/gpt-oss-20b`,
+  both `google/gemma-4-*:free`) rate-limited/erroring in sequence, every
+  single call landing on the last-resort fallback,
+  `nvidia/nemotron-3-ultra-550b-a55b:free`. **Real cause: shared quota,
+  not environment.** One Groq/OpenRouter key serves CI, local dev, *and*
+  this project's always-on Docker stack (`worker`/`poller`/`cdc`/
+  `slackbot`, all continuously making live LLM calls) — heavy testing
+  compounds with the always-on stack's draw and exhausts it, so *any*
+  caller (CI or local) gets routed to the weakest fallback model at that
+  moment, whose classify/draft/groundedness output is different enough to
+  flip Acme's `0.5` `basic`-tier confidence-gate threshold. Not per-request
+  randomness — it's whichever model actually answers, decided by
+  real-time shared-quota state. **Deliberately not fixed**: a capacity/
+  billing concern (a separate CI-scoped API key, a paid tier, or pausing
+  the local stack during test runs), not a code defect — changing the
+  gate threshold to paper over it would be a product decision, not a bug
+  fix.
 - ~~`tenant_members` RLS enabled with no policy~~ — **fixed** in `006`
   (`self_membership_read`) and **verified in Phase 4** (`scripts/rls_check.sql`):
   simulated JWTs see only their tenant's flows. The interpreter itself still
