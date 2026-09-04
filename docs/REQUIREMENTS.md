@@ -4,7 +4,10 @@ The **what and why**. `PROJECT_SCOPE.md` is the build log (what's done, what's
 next); this file is the spec every phase is measured against. When a new
 requirement surfaces, add it here first, then build.
 
-Last updated 2026-08-31 (Phase 21).
+Last updated 2026-09-04 — content runs through FR-50 (usage/billing,
+Phase P9) and the Phase 29 agentic-AI track; the "Phase 21" byline above
+was stale (this file, like `PROJECT_SCOPE.md`, is edited in place rather
+than strictly appended to — check for the newest dates when in doubt).
 
 ---
 
