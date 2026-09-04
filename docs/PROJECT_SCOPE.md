@@ -707,9 +707,29 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-04 — test-coverage chunk: the three "live-verified once" spots
-(Slack approval buttons, GitHub issue creation, KIL approval flow) now
-have real offline test coverage. This is the most recent work in this
+**2026-09-04 — Phase 29 step 3 closed: the agent-vs-baseline eval, real
+number in hand. This is the most recent work in this file (see the
+top-of-file note: this doc is edited in place, not strictly appended to —
+check dates, not physical position).** New `eval/agent/run_agent_eval.py`
+compares Acme's real live `agent` node against a single `h_retrieve()`
+call on the 10-question hard qrels set, reusing `run_eval.py`'s own
+`score()` rather than reimplementing it. **Real result:** baseline and
+agent scored identically (hit@1 0.200, MRR@10 0.240) — only 1/10 questions
+reformulated, and that one didn't change the outcome. This ran during the
+same sustained Groq/OpenRouter rate-limiting seen all session (weak
+fallback model doing most of the groundedness scoring that decides
+whether to reformulate) — a genuine caveat, not a reason to dismiss the
+result. Net: **step 3 is answered (a null result under real conditions),
+not "proven agent helps"** — see the full writeup under "Phase 29 —
+Agentic AI" below for the two caveats and what would be needed for a
+cleaner signal. Phase 29: steps 1-3 done, 4-5 not started. No production
+code changed — purely a new eval script, 646 offline tests still green
+(unaffected).
+
+**Old test-coverage note, superseded by the above as "most recent," kept
+for its own history:** the three "live-verified once" spots (Slack
+approval buttons, GitHub issue creation, KIL approval flow) now have real
+offline test coverage. This is the most recent work in this
 file (see the top-of-file note: this doc is edited in place, not strictly
 appended to — check dates, not physical position).** Third of the three
 tracks scoped earlier in the day (connector generality → production
@@ -1101,8 +1121,9 @@ one already has, via the Supabase MCP).
 **Phase 29 — Agentic AI, a 5-step ordered list (infra-first, same
 discipline as Phase 28): 1. tool-calling plumbing in `interpreter/llm.py`
 ✅ · 2. a new `agent` node type (a bounded ReAct loop consuming #1) ✅ · 3.
-multi-hop research/retrieval (piggybacks on #2) · 4. self-critique on
-KIL's `draft_change` · 5. autonomous reasoning-session continuation.**
+multi-hop research/retrieval (piggybacks on #2) ✅ (closed 2026-09-04 with
+a real, honest null result — see below) · 4. self-critique on KIL's
+`draft_change` · 5. autonomous reasoning-session continuation.**
 Before starting, an Explore agent confirmed nothing like this existed:
 every one of the (then) 26 `interpreter/registry.py` node handlers made
 exactly one fixed `llm.complete()` call; `interpreter/reasoning.py`'s
@@ -1271,6 +1292,56 @@ questions × up to 3 agent iterations each, under the fallback chain seen
 all session, could plausibly take 20-30+ minutes and mostly exercise the
 weak fallback model rather than a clean signal). Flagged for the user
 rather than silently spent.
+
+**Step 3 — CLOSED (2026-09-04) — the purpose-built comparison, built and
+run for a real number.** New `eval/agent/run_agent_eval.py`: pulls Acme's
+*real, live* `agent` node config from the published flow (not a guess),
+runs each of the 10 hard questions through one direct `h_retrieve()` call
+(baseline, zero LLM cost) and one `h_agent()` call (up to 3 rounds), scores
+both through `ingestion/eval/run_eval.py`'s existing `score()` — reused,
+not reimplemented, so the numbers are directly comparable to that file's
+own dense/sparse/hybrid/hybrid_rerank blocks.
+
+**Real result, run live against Supabase/Neo4j/Groq (2026-09-04):**
+baseline and agent scored **identically** — hit@1 0.200, hit@5 0.400,
+MRR@10 0.240, same 6/10 questions missed, same top-1 doc on every single
+question. Only **1 of 10** questions triggered a reformulation at all
+(`h06`, the throttling question), and even that reformulation didn't
+change the top-ranked result. 21,958 tokens spent on the agent side for
+zero measured retrieval gain.
+
+**Two honest caveats, not swept under the rug:**
+1. **This run landed during the same sustained Groq/OpenRouter
+   rate-limiting seen all session** — the log shows repeated 429s
+   forcing the fallback chain down to `nvidia/nemotron-3-ultra-550b-a55b:
+   free` for most calls, and the one reformulation attempt that did fire
+   hit a tool-call JSON-parsing error on that fallback model (`Failed to
+   parse tool call arguments as JSON`) — caught cleanly by the exact
+   `_agent_reformulate` resilience fix from step 2 ("keeping best attempt
+   so far"), a second live confirmation that fix holds, but it also means
+   a weak model's groundedness scoring drove the "should I reformulate"
+   decision most of the time, not a clean-quota run of the intended model
+   (`llama-3.3-70b-versatile`, itself a retired Groq name routed through
+   the roster).
+2. **n=1 reformulation event is not enough to conclude the loop never
+   helps** — it's enough to conclude it *did not help on this specific
+   10-question hard set today*. The original ROI framing (step 2) was
+   "only spend extra on cases a confidence_gate would otherwise escalate
+   anyway" — a pure-retrieval eval with no `confidence_gate` in the loop
+   doesn't test that framing directly; it tests whether reformulation
+   improves *raw retrieval rank*, which turned out to be rare-to-trigger
+   and, when triggered, unhelpful in this sample.
+
+**Net: step 3 is answered, not "proven agent helps."** The honest number
+is a null result under real conditions, which is a legitimate answer to
+"does the multi-hop loop earn its cost" — not a reason to revert Acme's
+live adoption (the step-2 live `test_multiflow.py` run already showed it
+producing a correct outcome, just slower/more expensive), but also not
+evidence to expand `agent` to more flows without a cleaner-quota rerun or
+a version of this eval that goes through the full `confidence_gate`
+decision rather than raw retrieval rank alone. **Phase 29 status: steps
+1-3 done, 4 (self-critique on KIL's `draft_change`) and 5 (autonomous
+reasoning-session continuation) not started.**
 
 ## Multi-tenant / multi-Salesforce-org scoping (2026-09-03)
 
