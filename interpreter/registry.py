@@ -2163,8 +2163,6 @@ def h_http_request(state: CaseState, config: dict) -> dict:
     absolute URL in `path` is rejected. No LLM. Best-effort — a failure lands
     `{error}` in `out_key` (unless `on_error="fail"`).
     """
-    import requests  # noqa: PLC0415
-
     from . import connections
 
     nid = config["_node_id"]
@@ -2179,11 +2177,8 @@ def h_http_request(state: CaseState, config: dict) -> dict:
                 **_trace(nid, "http_request", msg, {"connection": slug})}
 
     path = _render_template(str(config.get("path", "")), state)
-    if "://" in path:
-        raise ValueError("http_request `path` must be relative to the connection base_url")
-    url = conn["base_url"].rstrip("/") + "/" + path.lstrip("/")
     method = str(config.get("method", "GET")).upper()
-    headers = {**connections.auth_headers(conn.get("auth")), **(config.get("headers") or {})}
+    headers = config.get("headers") or {}
     query = {k: _render_template(str(v), state) for k, v in (config.get("query") or {}).items()}
     raw_body = config.get("body")
     json_body = None
@@ -2193,13 +2188,13 @@ def h_http_request(state: CaseState, config: dict) -> dict:
         rendered = _render_template(raw_body, state)
         json_body = _safe_json(rendered) or {"_raw": rendered}
 
+    url = conn["base_url"].rstrip("/") + "/" + path.lstrip("/")  # for the trace only; execute() rebuilds it
     try:
-        r = requests.request(method, url, headers=headers or None, params=query or None,
-                             json=json_body, timeout=float(config.get("timeout", 15)))
-        ct = (r.headers.get("content-type") or "").lower()
-        payload = r.json() if "json" in ct else None
-        res = {"status": r.status_code, "ok": 200 <= r.status_code < 300,
-               "json": payload, "text": None if payload is not None else r.text[:8000]}
+        res = connections.execute(conn, method=method, path=path, query=query,
+                                  headers=headers, body=json_body,
+                                  timeout=float(config.get("timeout", 15)))
+    except ValueError:
+        raise  # absolute path -- always a hard error, regardless of on_error
     except Exception as e:  # noqa: BLE001
         if config.get("on_error") == "fail":
             raise
@@ -2212,6 +2207,62 @@ def h_http_request(state: CaseState, config: dict) -> dict:
                  + (str(res.get("status")) if "status" in res else res.get("error", "?")),
                  {"connection": slug, "method": method, "url": url,
                   "status": res.get("status"), "ok": res.get("ok")}),
+    }
+
+
+@register("connector_action")
+def h_connector_action(state: CaseState, config: dict) -> dict:
+    """FR-47 — call a declared action on any connector: a `salesforce` /
+    `slack` builtin, or one of the tenant's own named HTTP connections (each
+    carrying its own saved `connection_actions`, see `connections.py`).
+    Genuinely data-driven — adding a new connector or action for a tenant's
+    own REST API never touches this file; `GET /api/connectors` is the
+    catalog the web editor's pickers read from.
+
+    config: {
+      connector: "salesforce" | "slack" | "<tenant connection slug>",
+      action: "post_note" | "update_fields" | "post_message" | "<saved action name>",
+      params: {...},          # values, or "{{ dotted.path }}" templates over
+                               # state — see the action's declared param list
+      org: "<org label>",     # Salesforce actions only; ignored otherwise
+      out_key: "connector_result",
+      on_error: "passthrough" | "fail",
+    }
+    """
+    from . import connectors
+
+    nid = config["_node_id"]
+    out_key = config.get("out_key", "connector_result")
+    connector_slug = config.get("connector")
+    action_name = config.get("action")
+    tenant_id = state.get("tenant_id")
+
+    try:
+        _spec, action = connectors.get_action(tenant_id, connector_slug, action_name)
+    except KeyError as e:
+        msg = str(e)
+        if config.get("on_error") == "fail":
+            raise
+        return {"context": {out_key: {"error": msg}},
+                **_trace(nid, "connector_action", msg,
+                         {"connector": connector_slug, "action": action_name})}
+
+    rendered = {k: (_render_template(v, state) if isinstance(v, str) else v)
+                for k, v in (config.get("params") or {}).items()}
+
+    try:
+        result = action.impl(tenant_id, config.get("org"), rendered)
+    except Exception as e:  # noqa: BLE001
+        if config.get("on_error") == "fail":
+            raise
+        result = {"error": f"{type(e).__name__}: {e}"[:300]}
+
+    outcome = (str(result.get("status")) if "status" in result
+               else result.get("error") or ("ok" if result else "?"))
+    return {
+        "context": {out_key: result},
+        **_trace(nid, "connector_action", f"{connector_slug}.{action_name} -> {outcome}",
+                 {"connector": connector_slug, "action": action_name, "params": sorted(rendered)}),
     }
 
 

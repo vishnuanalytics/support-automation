@@ -397,6 +397,37 @@ export interface Connection {
   created_at: string;
 }
 
+export interface ConnectionAction {
+  action_id?: string;
+  name: string;
+  method: string;
+  path: string;
+  params: ConnectorParam[];
+  body_template?: unknown;
+}
+
+// FR-47 — one param on a connector action's declared shape (GET /api/connectors).
+export interface ConnectorParam {
+  key: string;
+  label: string;
+  type: "string" | "template" | "json" | "select";
+  required?: boolean;
+  options?: string[];
+}
+
+export interface ConnectorAction {
+  name: string;
+  description: string;
+  params: ConnectorParam[];
+}
+
+export interface Connector {
+  slug: string;
+  label: string;
+  auth: "builtin" | "apikey" | "oauth2" | "none";
+  actions: ConnectorAction[];
+}
+
 export interface LlmKeyStatus {
   tenant_id: string;
   tenant: { groq: boolean; anthropic: boolean; openrouter: boolean };

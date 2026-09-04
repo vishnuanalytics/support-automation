@@ -11,6 +11,8 @@ import type {
   FlowVersion,
   FlowTrigger,
   Connection,
+  ConnectionAction,
+  Connector,
   ActionRequest,
   GoogleStatus,
   Invitation,
@@ -123,6 +125,27 @@ export const api = {
     remove: (slug: string, tenantId?: string) =>
       req<void>(`/connections/${encodeURIComponent(slug)}${tenantId ? `?tenant_id=${tenantId}` : ""}`,
         { method: "DELETE" }),
+    actions: {
+      // FR-47 — named, reusable actions on a connection (a tenant's own
+      // "connector"); see interpreter/connectors.py + GET /api/connectors.
+      list: (slug: string, tenantId?: string) =>
+        req<ConnectionAction[]>(
+          `/connections/${encodeURIComponent(slug)}/actions${tenantId ? `?tenant_id=${tenantId}` : ""}`),
+      save: (slug: string, b: ConnectionAction, tenantId?: string) =>
+        req<ConnectionAction>(
+          `/connections/${encodeURIComponent(slug)}/actions${tenantId ? `?tenant_id=${tenantId}` : ""}`,
+          { method: "POST", body: JSON.stringify(b) }),
+      remove: (slug: string, name: string, tenantId?: string) =>
+        req<void>(
+          `/connections/${encodeURIComponent(slug)}/actions/${encodeURIComponent(name)}`
+          + (tenantId ? `?tenant_id=${tenantId}` : ""),
+          { method: "DELETE" }),
+    },
+  },
+
+  connectors: {
+    list: (tenantId?: string) =>
+      req<Connector[]>(`/connectors${tenantId ? `?tenant_id=${tenantId}` : ""}`),
   },
 
   llmKeys: {

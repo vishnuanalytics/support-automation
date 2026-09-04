@@ -707,6 +707,42 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-04 — connector-generality chunk, done; this is the most recent
+work in this file (see the top-of-file note: this doc is edited in place,
+not strictly appended to — check dates, not physical position).** A gap
+audit found `docs/REQUIREMENTS.md`'s FR-47 ("connectors are data, not a
+hardcoded node handler") had been marked "built" without actually being
+true — no `ConnectorSpec`/registry existed anywhere, and 9 of 26
+`registry.py` node types were (and still are) hardwired straight to
+Salesforce. Built the real thing: `interpreter/connectors.py`
+(`ConnectorSpec`/`ActionSpec` registry) + a generic `connector_action`
+node, with `salesforce`/`slack` builtins (thin wrappers, `salesforce.py`/
+`slack.py` unmodified) and, more importantly, **user-definable named
+actions on a tenant's own HTTP connection** (migration `083`,
+`connection_actions`) — so a brand-new third-party API (Zendesk, Jira,
+anything REST) is addable as a first-class connector from the web UI with
+**zero Python changes**. `http_request`'s request logic was extracted
+into `connections.execute()`, shared by both paths — its existing 8 tests
+pass unmodified, no behavior change. Web: one generic `ConnectorActionForm`
+(connector → action → dynamically-rendered params) plus a "manage
+actions" panel on the Connections tab, instead of a new bespoke Inspector
+form per vendor. 600 offline tests green (13 new in `tests/test_connectors.py`),
+`scripts/verify_migrations.py` clean, `web`'s `tsc -b && vite build` clean.
+See FR-47 in `docs/REQUIREMENTS.md` for the full detail.
+
+**Explicitly not done — real follow-on work, don't assume it's finished:**
+the 9 Salesforce-hardwired node types (`sf_writeback`, `sf_case`, `notify`,
+`notify_human`, `ask_human`, `handover`, `identify`, `clarify`,
+`sf_context`) still call `interpreter/salesforce.py` directly, not through
+the new connector framework — they're live, production-seeded flows
+(Acme/Globex/email/router), so migrating them is deliberately out of
+scope for this chunk (would need real regression testing against every
+seeded flow, not a quick follow-on). Next real step, if this thread
+continues: pick 1-2 of those handlers and migrate them onto
+`connector_action` as a proof that the *existing* Salesforce behavior can
+be expressed the same way a brand-new connector now can, without changing
+any flow's actual behavior.
+
 **Self-serve multi-tenant/multi-org Salesforce + Slack connector, and a
 flow editor that fetches real data instead of hardcoding it — DONE and
 browser-verified (2026-09-03).** See "Multi-tenant / multi-Salesforce-org

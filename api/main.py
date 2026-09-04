@@ -106,6 +106,10 @@ NODE_DEFAULTS: dict[str, dict[str, Any]] = {
     "trigger": {"map": {}, "required": [], "defaults": {}},
     "http_request": {"connection": "", "method": "GET", "path": "", "query": {},
                      "out_key": "http", "timeout": 15, "on_error": "passthrough"},
+    # FR-47 — any connector (salesforce/slack builtins, or a tenant's own
+    # named HTTP connection + saved connection_actions); see GET /api/connectors.
+    "connector_action": {"connector": "", "action": "", "params": {},
+                         "out_key": "connector_result", "on_error": "passthrough"},
     "transform": {"map": {}, "set": {}, "drop": [], "into": "context"},
     "case_lookup": {"k": 3, "pool": 10, "min_similarity": 0.35},
     # Phase 25 — image attachments, Salesforce context, generic AI prompt
@@ -1157,6 +1161,80 @@ def delete_connection(slug: str, tenant_id: str | None = None,
                  actor_id=c.user_id, actor_email=c.email,
                  target_type="connection", target_id=slug,
                  summary=f"removed connection {slug}")
+
+
+class ConnectionActionIn(BaseModel):
+    name: str
+    method: str = "GET"
+    path: str
+    params: list[dict[str, Any]] = []
+    body_template: Any = None
+
+
+@app.get("/api/connections/{slug}/actions")
+def list_connection_actions(slug: str, tenant_id: str | None = None,
+                            c: Caller = Depends(caller)) -> list[dict]:
+    from interpreter import connections
+    tid = _caller_tenant(c, tenant_id)
+    conn = connections.resolve(tid, slug, sb=_service)
+    if not conn:
+        raise HTTPException(404, "connection not found")
+    return connections.list_actions(conn["connection_id"], sb=_service)
+
+
+@app.post("/api/connections/{slug}/actions", status_code=201)
+def save_connection_action(slug: str, body: ConnectionActionIn, tenant_id: str | None = None,
+                           c: Caller = Depends(caller)) -> dict:
+    from interpreter import connections
+    tid = _caller_tenant(c, tenant_id)
+    _require_editor(c, tid)
+    conn = connections.resolve(tid, slug, sb=_service)
+    if not conn:
+        raise HTTPException(404, "connection not found")
+    row = connections.save_action(conn["connection_id"], body.name, method=body.method,
+                                  path=body.path, params=body.params,
+                                  body_template=body.body_template, sb=_service)
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="connection_action.added",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="connection", target_id=f"{slug}/{body.name}",
+                 summary=f"saved action {body.name} on connection {slug}")
+    return row
+
+
+@app.delete("/api/connections/{slug}/actions/{name}", status_code=204)
+def delete_connection_action(slug: str, name: str, tenant_id: str | None = None,
+                             c: Caller = Depends(caller)) -> None:
+    from interpreter import connections
+    tid = _caller_tenant(c, tenant_id)
+    _require_editor(c, tid)
+    conn = connections.resolve(tid, slug, sb=_service)
+    if not conn:
+        raise HTTPException(404, "connection not found")
+    connections.delete_action(conn["connection_id"], name, sb=_service)
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="connection_action.removed",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="connection", target_id=f"{slug}/{name}",
+                 summary=f"removed action {name} on connection {slug}")
+
+
+@app.get("/api/connectors")
+def list_connectors_ep(tenant_id: str | None = None, c: Caller = Depends(caller)) -> list[dict]:
+    """FR-47 — the full connector catalog (the salesforce/slack builtins plus
+    this tenant's own HTTP connections-as-connectors) for the flow editor's
+    connector/action pickers. `impl` is a Python callable, never serialized."""
+    from interpreter import connectors
+    tid = _caller_tenant(c, tenant_id)
+    specs = connectors.list_connectors(tid, sb=_service)
+    return [
+        {"slug": s.slug, "label": s.label, "auth": s.auth,
+         "actions": [{"name": a.name, "description": a.description, "params": a.params}
+                     for a in s.actions.values()]}
+        for s in specs
+    ]
 
 
 class SFCaseHookIn(BaseModel):

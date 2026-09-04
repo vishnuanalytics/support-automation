@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { api } from "../api";
-import type { Connection, KbCollection, ModelInfo, SfMeta, SlackMeta } from "../types";
+import type { Connection, Connector, KbCollection, ModelInfo, SfMeta, SlackMeta } from "../types";
 import type { RFEdge, RFNode } from "./graph";
 
 // Salesforce routing metadata (queues + real Case fields/picklists,
@@ -35,6 +35,7 @@ const NODE_HELP: Record<string, string> = {
   agent: "A bounded retrieve+draft loop: if the first draft isn't well grounded, reformulates the search query and retries. Drop-in replacement for a plain retrieve+draft pair.",
   ai_prompt: "A free-form AI call for anything the built-in nodes don't cover — write your own prompt (with attachments as vision input, optionally); the structured output feeds an edge condition.",
   http_request: "Calls an external HTTP API through a saved Connection (Admin tab) — for integrations this platform has no dedicated node for.",
+  connector_action: "Calls a declared action on any connector — Salesforce/Slack, or one of your own saved Connections + its actions (Admin tab). Adding a new connector never needs code, just a Connection + its actions.",
   transform: "Reshapes state between nodes with no LLM — copy a value by dotted path, render a template, or drop a scratch key.",
   confidence_gate: "Blends retrieval/draft/groundedness scores against a tier-specific threshold to decide: auto-reply, ask a human, or hand over.",
   policy_gate: "Evaluates this team's structured rules (Rules tab) against the run so far; route on policy.action == 'ask_human', etc.",
@@ -612,6 +613,10 @@ export function NodeInspector({
 
       {node.data.nodeType === "http_request" && (
         <HttpRequestForm config={config} onConfig={onConfig} tenantId={tenantId} />
+      )}
+
+      {node.data.nodeType === "connector_action" && (
+        <ConnectorActionForm config={config} onConfig={onConfig} tenantId={tenantId} />
       )}
 
       {node.data.nodeType === "attachments" && (
@@ -1265,6 +1270,101 @@ function HttpRequestForm({
       </div>
       <div className="muted" style={{ fontSize: 11 }}>
         query / headers / body / out_key are edited in the raw config below.
+      </div>
+    </div>
+  );
+}
+
+// FR-47 — one generic form for ANY connector (the salesforce/slack builtins,
+// or one of the tenant's own saved Connections + actions), driven entirely by
+// GET /api/connectors' declared param lists. Adding a brand-new connector
+// never needs a new *Form component here — only Connections (Admin tab).
+function ConnectorActionForm({
+  config,
+  onConfig,
+  tenantId,
+}: {
+  config: Record<string, unknown>;
+  onConfig: (v: Record<string, unknown>) => void;
+  tenantId: string;
+}) {
+  const [connectors, setConnectors] = useState<Connector[]>([]);
+  const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
+
+  useEffect(() => {
+    if (!tenantId) return;
+    api.connectors.list(tenantId).then(setConnectors).catch(() => setConnectors([]));
+  }, [tenantId]);
+
+  const connectorSlug = typeof config.connector === "string" ? config.connector : "";
+  const actionName = typeof config.action === "string" ? config.action : "";
+  const params = (config.params && typeof config.params === "object")
+    ? (config.params as Record<string, unknown>) : {};
+
+  const connector = connectors.find((c) => c.slug === connectorSlug);
+  const action = connector?.actions.find((a) => a.name === actionName);
+  const setParam = (key: string, v: unknown) => set({ params: { ...params, [key]: v } });
+
+  return (
+    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+      <label>connector</label>
+      <select value={connectorSlug}
+              onChange={(e) => set({ connector: e.target.value, action: "", params: {} })}>
+        <option value="">— pick a connector —</option>
+        {!connectors.some((c) => c.slug === connectorSlug) && connectorSlug && (
+          <option value={connectorSlug}>{connectorSlug} (not found)</option>
+        )}
+        {connectors.map((c) => (
+          <option key={c.slug} value={c.slug}>{c.label}</option>
+        ))}
+      </select>
+
+      {connector && (
+        <div className="row" style={{ marginTop: 6 }}>
+          <span className="muted" style={{ width: 90 }}>action</span>
+          <select value={actionName} onChange={(e) => set({ action: e.target.value, params: {} })}>
+            <option value="">— pick an action —</option>
+            {connector.actions.map((a) => (
+              <option key={a.name} value={a.name}>{a.name}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {action?.description && (
+        <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>{action.description}</div>
+      )}
+
+      {action?.params.map((p) => (
+        <div className="field" key={p.key} style={{ marginTop: 6 }}>
+          <label>{p.label}{p.required ? " *" : ""}</label>
+          {p.type === "select" ? (
+            <select value={typeof params[p.key] === "string" ? (params[p.key] as string) : ""}
+                    onChange={(e) => setParam(p.key, e.target.value)}>
+              <option value="">—</option>
+              {(p.options || []).map((o) => <option key={o} value={o}>{o}</option>)}
+            </select>
+          ) : p.type === "json" ? (
+            <textarea rows={3}
+              defaultValue={params[p.key] !== undefined ? JSON.stringify(params[p.key], null, 2) : ""}
+              onBlur={(e) => {
+                try {
+                  setParam(p.key, e.target.value.trim() ? JSON.parse(e.target.value) : undefined);
+                } catch {
+                  // leave the last-valid value; a JSON error surfaces in the raw config below
+                }
+              }}
+            />
+          ) : (
+            <input value={typeof params[p.key] === "string" ? (params[p.key] as string) : ""}
+                   placeholder={p.type === "template" ? "supports {{ dotted.path }}" : undefined}
+                   onChange={(e) => setParam(p.key, e.target.value)} />
+          )}
+        </div>
+      ))}
+
+      <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
+        out_key / on_error are edited in the raw config below.
       </div>
     </div>
   );
