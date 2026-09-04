@@ -51,7 +51,7 @@ def _is_approval(note: str) -> bool:
 
 
 def polish(guidance: str, case: dict, *, draft: str | None = None,
-           model: str | None = None) -> str:
+           model: str | None = None, tenant_id: str | None = None) -> str:
     body = f"Subject: {case.get('subject', '')}\n\n{case.get('body', '')}".strip()
     if draft and draft.strip():
         if _is_approval(guidance):
@@ -62,6 +62,7 @@ def polish(guidance: str, case: dict, *, draft: str | None = None,
                   f"\n\n# Agent's note\n{guidance}"),
             model=model or llm.DEFAULT_MODEL,
             max_tokens=700,
+            tenant_id=tenant_id,
         )
         return (out or draft).strip()
     out = llm.complete(
@@ -69,6 +70,7 @@ def polish(guidance: str, case: dict, *, draft: str | None = None,
         user=f"# Customer's case\n{body}\n\n# Agent's answer (authoritative)\n{guidance}",
         model=model or llm.DEFAULT_MODEL,
         max_tokens=600,
+        tenant_id=tenant_id,
     )
     return (out or guidance).strip()
 
@@ -80,7 +82,7 @@ def resume_from_guidance(case: dict, guidance: str, *, cfg=None,
     *on top of* it — a bare "send it" just sends the draft.
     Returns {sent, via, auto_sent, reply}. Never raises."""
     try:
-        reply = polish(guidance, case, draft=draft)
+        reply = polish(guidance, case, draft=draft, tenant_id=tenant_id)
     except Exception as e:  # noqa: BLE001
         log.warning("polish failed (%s); falling back", e)
         reply = (draft or guidance).strip()

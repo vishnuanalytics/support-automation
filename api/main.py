@@ -2227,6 +2227,107 @@ def email_google_callback(code: str = "", state: str = "", error: str = "") -> H
     return page("Gmail connected. You can close this window.")
 
 
+# ── BYOK: self-serve LLM provider keys + model roster (chunk 3 of the
+#    2026-09-04 onboarding/robustness work) ─────────────────────────────
+_LLM_PROVIDERS = ("groq", "anthropic", "openrouter")
+
+
+class LlmKeyIn(BaseModel):
+    provider: str
+    api_key: str
+    tenant_id: str | None = None
+
+
+@app.get("/api/integrations/llm")
+def llm_key_status(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    """Which providers this tenant has their own key for, and which the
+    platform itself has a fallback key for (so the UI can say "Groq already
+    works, nothing to do" instead of implying every provider needs setup).
+    Never returns a key — only booleans."""
+    tid = _caller_tenant(c, tenant_id)
+    rows = (_service.table("tenant_integrations").select("secret")
+            .eq("tenant_id", tid).eq("kind", "llm").execute().data or [])
+    secret = (rows[0]["secret"] if rows else {}) or {}
+    from interpreter import llm as llmmod
+
+    return {
+        "tenant_id": tid,
+        "tenant": {p: bool(secret.get(f"{p}_api_key")) for p in _LLM_PROVIDERS},
+        "platform": {p: bool(os.environ.get(llmmod._PROVIDER_KEY[p])) for p in _LLM_PROVIDERS},
+    }
+
+
+@app.put("/api/integrations/llm")
+def llm_key_save(body: LlmKeyIn, c: Caller = Depends(caller)) -> dict:
+    if body.provider not in _LLM_PROVIDERS:
+        raise HTTPException(422, f"provider must be one of {_LLM_PROVIDERS}")
+    if not body.api_key.strip():
+        raise HTTPException(422, "api_key is required")
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    rate_limit(c.user_id, "integration", 30)
+
+    rows = (_service.table("tenant_integrations").select("secret")
+            .eq("tenant_id", tid).eq("kind", "llm").execute().data or [])
+    secret = dict((rows[0]["secret"] if rows else {}) or {})
+    secret[f"{body.provider}_api_key"] = body.api_key.strip()
+    _service.table("tenant_integrations").upsert(
+        {"tenant_id": tid, "kind": "llm", "secret": secret}).execute()
+
+    # llm.py caches tenant keys for 5 min (one lookup per complete() call
+    # would otherwise be a DB round trip on every LLM call) -- drop the
+    # stale entry so a key just saved is picked up on the very next run.
+    from interpreter import llm as llmmod
+    llmmod._tenant_keys_cache.pop(tid, None)
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="llm_key.saved",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="llm_key", target_id=body.provider,
+                 summary=f"set a {body.provider} API key for this workspace")
+    return llm_key_status(tenant_id=tid, c=c)
+
+
+@app.delete("/api/integrations/llm/{provider}", status_code=204)
+def llm_key_remove(provider: str, tenant_id: str | None = None, c: Caller = Depends(caller)) -> None:
+    if provider not in _LLM_PROVIDERS:
+        raise HTTPException(422, f"provider must be one of {_LLM_PROVIDERS}")
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+
+    rows = (_service.table("tenant_integrations").select("secret")
+            .eq("tenant_id", tid).eq("kind", "llm").execute().data or [])
+    if rows:
+        secret = dict(rows[0]["secret"] or {})
+        secret.pop(f"{provider}_api_key", None)
+        _service.table("tenant_integrations").upsert(
+            {"tenant_id": tid, "kind": "llm", "secret": secret}).execute()
+
+    from interpreter import llm as llmmod
+    llmmod._tenant_keys_cache.pop(tid, None)
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="llm_key.removed",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="llm_key", target_id=provider,
+                 summary=f"removed the {provider} API key for this workspace")
+
+
+@app.get("/api/models")
+def list_models(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    """The model roster for the Inspector's model picker, grouped by
+    provider, each flagged with whether a real call would actually work
+    right now (this tenant's own key, or the platform's)."""
+    tid = _caller_tenant(c, tenant_id) if tenant_id else None
+    from interpreter import llm as llmmod
+
+    models = [
+        {"id": m, "provider": p, "available": llmmod.available(m, tenant_id=tid)}
+        for m, p in sorted(llmmod.MODELS.items())
+    ]
+    return {"models": models, "default_model": llmmod.DEFAULT_MODEL, "fast_model": llmmod.FAST_MODEL}
+
+
 # ── self-serve Salesforce connection + org introspection (2026-09-03) ──
 class SalesforceOrgIn(BaseModel):
     org_label: str = "default"

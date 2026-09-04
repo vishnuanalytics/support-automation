@@ -303,6 +303,7 @@ def h_classify(state: CaseState, config: dict) -> dict:
         model=_model,
         json_object=True,
         max_tokens=320,
+        tenant_id=state.get("tenant_id"),
         cache=True,   # same case text -> same triage; kills retry/re-run cost
     )
     parsed = _safe_json(raw)
@@ -797,6 +798,7 @@ def h_extract(state: CaseState, config: dict) -> dict:
         model=config.get("model", llm.FAST_MODEL),
         json_object=True,
         max_tokens=int(config.get("max_tokens", 300)),
+        tenant_id=state.get("tenant_id"),
     )
     parsed = _safe_json(raw)
     entities = {k: parsed.get(k) for k in fields}
@@ -981,6 +983,7 @@ def h_draft(state: CaseState, config: dict) -> dict:
         model=_model,
         json_object=True,
         max_tokens=int(config.get("max_tokens", 500)),
+        tenant_id=state.get("tenant_id"),
     )
     tokens = llm.last_usage
     parsed = _safe_json(raw)
@@ -996,15 +999,17 @@ def h_draft(state: CaseState, config: dict) -> dict:
     # P1b (FR-41) — grounding is measured against CONFIRMED context only, so a
     # reply that only parrots an unverified correction does not score as
     # grounded (which could otherwise push the gate to auto-send).
-    grounded = groundedness.check(reply, (internal_matches[:5] + prior_as_src + confirmed[:5]))
+    grounded = groundedness.check(reply, (internal_matches[:5] + prior_as_src + confirmed[:5]),
+                                  tenant_id=state.get("tenant_id"))
 
     # KIL-b — does the reply, or the customer's own claim, CONTRADICT the KB or
     # a past resolution? A contradicting draft forces the gate to escalate.
     icontexts = integrity.contexts_from_state(
         {"prior_resolutions": prior, "internal_kb": internal, "retrieval": retrieval})
     integ = {
-        "draft": integrity.check(reply, icontexts, kind="draft"),
-        "inbound": integrity.check(case.get("body") or "", icontexts, kind="inbound"),
+        "draft": integrity.check(reply, icontexts, kind="draft", tenant_id=state.get("tenant_id")),
+        "inbound": integrity.check(case.get("body") or "", icontexts, kind="inbound",
+                                   tenant_id=state.get("tenant_id")),
     }
     idraft = integ["draft"]
 
@@ -1059,7 +1064,8 @@ _AGENT_TOOLS = [
 
 
 def _agent_reformulate(question: str, tried: list[str], top_titles: list[str],
-                        unsupported: list[str], model: str) -> str | None:
+                        unsupported: list[str], model: str,
+                        tenant_id: str | None = None) -> str | None:
     """One ReAct decision: propose a better search query, or give up. Returns
     the new query, or None to stop looping. The stub path (no API key) never
     proposes a tool call — deterministic, matching every other handler's
@@ -1088,6 +1094,7 @@ def _agent_reformulate(question: str, tried: list[str], top_titles: list[str],
             tools=_AGENT_TOOLS,
             model=model,
             max_tokens=200,
+            tenant_id=tenant_id,
         )
     except Exception as e:  # noqa: BLE001
         log.warning("agent: reformulation call failed (%s) — keeping best attempt so far", e)
@@ -1163,7 +1170,8 @@ def h_agent(state: CaseState, config: dict) -> dict:
 
         top_titles = [c.get("doc_url") for c in (r_out.get("retrieval") or [])[:3] if c.get("doc_url")]
         unsupported = (d_out.get("groundedness") or {}).get("unsupported") or []
-        query_override = _agent_reformulate(question, tried, top_titles, unsupported, _model)
+        query_override = _agent_reformulate(question, tried, top_titles, unsupported, _model,
+                                            tenant_id=state.get("tenant_id"))
         tokens_total += int((llm.last_usage or {}).get("total") or 0)
         if not query_override:
             break
@@ -1771,6 +1779,7 @@ def h_clarify(state: CaseState, config: dict) -> dict:
         model=config.get("model", llm.FAST_MODEL),
         json_object=True,
         max_tokens=int(config.get("max_tokens", 350)),
+        tenant_id=state.get("tenant_id"),
     )
     parsed = _safe_json(raw)
     questions = [
@@ -2110,6 +2119,7 @@ def h_ai_prompt(state: CaseState, config: dict) -> dict:
             json_object=want_json,
             cache=bool(config.get("cache", True)) and not imgs,
             images=imgs or None,
+            tenant_id=state.get("tenant_id"),
         )
     except Exception as e:  # noqa: BLE001
         if config.get("on_error") == "fail":

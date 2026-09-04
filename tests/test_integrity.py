@@ -20,7 +20,7 @@ from interpreter.registry import h_confidence_gate
 
 @pytest.fixture(autouse=True)
 def _no_llm(monkeypatch):
-    monkeypatch.setattr(llm, "available", lambda: False)
+    monkeypatch.setattr(llm, "available", lambda *a, **k: False)
 
 
 # ── check() / heuristic backend ──────────────────────────────────────────

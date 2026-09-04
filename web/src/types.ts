@@ -397,6 +397,24 @@ export interface Connection {
   created_at: string;
 }
 
+export interface LlmKeyStatus {
+  tenant_id: string;
+  tenant: { groq: boolean; anthropic: boolean; openrouter: boolean };
+  platform: { groq: boolean; anthropic: boolean; openrouter: boolean };
+}
+
+export interface ModelInfo {
+  id: string;
+  provider: "groq" | "anthropic" | "openrouter";
+  available: boolean;
+}
+
+export interface ModelsResp {
+  models: ModelInfo[];
+  default_model: string;
+  fast_model: string;
+}
+
 export interface SalesforceOrg {
   org_label: string;
   SF_USERNAME?: string;

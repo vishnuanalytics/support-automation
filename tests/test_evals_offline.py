@@ -17,7 +17,7 @@ from interpreter import llm
 
 
 def test_review_eval_runs_and_reports(monkeypatch):
-    monkeypatch.setattr(llm, "available", lambda: False)
+    monkeypatch.setattr(llm, "available", lambda *a, **k: False)
     mod = importlib.import_module("eval.review.run_review_eval")
     r = mod.evaluate()
     assert r["n"] >= 12 and r["backend"] == "heuristic"
@@ -28,7 +28,7 @@ def test_review_eval_runs_and_reports(monkeypatch):
 
 
 def test_writeback_eval_runs_and_reports(monkeypatch):
-    monkeypatch.setattr(llm, "available", lambda: False)
+    monkeypatch.setattr(llm, "available", lambda *a, **k: False)
     mod = importlib.import_module("eval.writeback.run_writeback_eval")
     r = mod.evaluate()
     assert r["n"] >= 10 and r["backend"] == "heuristic"

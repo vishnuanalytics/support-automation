@@ -19,7 +19,7 @@ from interpreter import kb_writeback, llm
 
 @pytest.fixture(autouse=True)
 def _no_llm(monkeypatch):
-    monkeypatch.setattr(llm, "available", lambda: False)
+    monkeypatch.setattr(llm, "available", lambda *a, **k: False)
     monkeypatch.setattr(kb_writeback, "_graph_supersede", lambda *a, **k: None)
 
 

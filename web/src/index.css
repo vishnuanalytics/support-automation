@@ -61,6 +61,32 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .flow-item:hover { background: var(--panel-2); }
 .flow-item.active { background: var(--panel-2); outline: 1px solid var(--accent); }
 
+.nav-list { gap: 6px; margin: 4px 0 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.nav-group { display: flex; flex-direction: column; gap: 1px; }
+.nav-group-header {
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--muted);
+}
+.nav-group-header:hover:not(:disabled) { background: var(--panel-2); color: var(--text); }
+.nav-caret { display: inline-block; width: 10px; }
+.nav-group-items { gap: 1px; padding-left: 12px; }
+.nav-item {
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+.nav-item:hover:not(:disabled) { background: var(--panel-2); border-color: transparent; }
+.nav-item.active { background: var(--panel-2); color: var(--accent); font-weight: 600; }
+
 .editor { display: grid; grid-template-rows: 44px 1fr; height: 100%; min-width: 0; }
 /* right pane for the non-editor views (Runs / Knowledge / Rules) — they
    manage their own internal scroll, so this must NOT be the 44px/1fr grid */

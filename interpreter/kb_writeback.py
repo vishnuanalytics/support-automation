@@ -72,8 +72,9 @@ def draft_change(task_row: dict, *, model: str | None = None) -> dict:
     statement = task_row.get("statement") or ""
     contexts = task_row.get("contexts") or []
     verdict = task_row.get("verdict") or {}
+    tenant_id = task_row.get("tenant_id")
     target_entry_id, _sid = _kb_ref(contexts)
-    if not llm.available():
+    if not llm.available(tenant_id=tenant_id):
         return _fallback_change(statement, target_entry_id)
 
     ctx_txt = "\n\n".join(f"[{c.get('ref')}] {c.get('text', '')}" for c in contexts[:4]) or "(none)"
@@ -94,6 +95,7 @@ def draft_change(task_row: dict, *, model: str | None = None) -> dict:
         model=model or llm.FAST_MODEL,
         json_object=True,
         max_tokens=600,
+        tenant_id=tenant_id,
     )
     try:
         p = json.loads(raw)

@@ -97,8 +97,9 @@ _POINTER_SYS = (
 )
 
 
-def _missed_pointers(sb, case_type: str | None, thread_text: str) -> list[str]:
-    if not (llm.available() and thread_text.strip()):
+def _missed_pointers(sb, case_type: str | None, thread_text: str,
+                     tenant_id: str | None = None) -> list[str]:
+    if not (llm.available(tenant_id=tenant_id) and thread_text.strip()):
         return []
     try:
         rows = (sb.table("pointer_bank").select("pointers")
@@ -120,6 +121,7 @@ def _missed_pointers(sb, case_type: str | None, thread_text: str) -> list[str]:
         user="# CRITICAL QUESTIONS\n- " + "\n- ".join(crit)
              + f"\n\n# THREAD\n{thread_text[:6000]}",
         model=llm.FAST_MODEL, json_object=True, max_tokens=250,
+        tenant_id=tenant_id,
     )
     try:
         arr = json.loads(raw)
@@ -218,7 +220,7 @@ def watch_case(sb, case: dict, *, tenant_id: str | None = None, sf=None,
         if not _room():
             break
         kind = "human_reply" if m["author_kind"] == "agent" else "inbound"
-        res = integrity.check(m["text"], contexts, kind=kind)
+        res = integrity.check(m["text"], contexts, kind=kind, tenant_id=tenant_id)
         if not (res.get("flagged") or res.get("novel")):
             continue
         sig = _sig("contra", (res.get("salient") or [m["text"]])[0])
@@ -234,7 +236,7 @@ def watch_case(sb, case: dict, *, tenant_id: str | None = None, sf=None,
     # 2. still-unanswered critical questions (LLM-gated)
     if _room():
         thread_text = "\n".join(f"[{m['role']}] {m['text']}" for m in msgs)
-        for q in _missed_pointers(sb, case.get("Type"), thread_text):
+        for q in _missed_pointers(sb, case.get("Type"), thread_text, tenant_id=tenant_id):
             if not _room():
                 break
             sig = _sig("point", q)

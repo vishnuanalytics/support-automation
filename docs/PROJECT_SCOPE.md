@@ -756,12 +756,86 @@ multi-tenant concurrency stress test. Three parts, all on branch
   needed to surface. `pytest tests/test_multitenant_concurrency.py -m
   integration`: 2 passed against live Salesforce/Supabase.
 
+**Third track — guided onboarding + self-explanatory editor + LLM BYOK,
+DONE (2026-09-04).** The user restated the same broad goal even more
+concretely ("easy onboarding with Salesforce, Slack, OpenRouter, Claude
+— given token choose model — easy editor design, make the platform
+understandable"); scoped via `AskUserQuestion` into three ordered
+chunks, built in that order:
+
+- **Guided setup wizard** — `web/src/onboarding/OnboardingWizard.tsx`,
+  a new always-visible "⚙ Setup" nav item. Four skippable steps
+  (Connect Salesforce / Connect Slack / choose an AI model / create a
+  first flow from a template) that reuse the existing OAuth-connect
+  logic rather than duplicating it; auto-shows once for a brand-new
+  tenant (localStorage-tracked per tenant, not per-session) since
+  previously "Connect Salesforce" and Slack connect each lived in a
+  separate tab (Connections, buried under Admin; Slack connect was
+  oddly inside the Rules tab) with nothing walking a new user through
+  either.
+- **Self-explanatory editor** — every one of the 26 registered node
+  types (`interpreter/registry.py`) now gets a one/two-sentence purpose
+  blurb in the Inspector (`NODE_HELP` map, `web/src/flows/Inspector.tsx`),
+  sourced from the actual handler docstrings, not guessed. Particularly
+  closes the confusion between the four similar-sounding "get a human
+  involved" nodes (`notify` doesn't reassign the Case; `ask_human`
+  escalates + pauses for a reply; `handover` is terminal; `notify_human`
+  is the actual Slack/Chatter delivery mechanism for the other three).
+- **LLM BYOK** — a tenant can now paste their own Groq/Anthropic/
+  OpenRouter key (Admin → Connections → "AI models" panel) instead of
+  sharing this deployment's own; the `ai_prompt` node's `model` field is
+  a real dropdown (grouped by provider, `GET /api/models`) instead of
+  free text. Backend: `interpreter/llm.py`'s `complete()` /
+  `complete_with_tools()` and every internal dispatch/chain function now
+  take an optional `tenant_id`, resolving that tenant's own key with a
+  fallback to this process's env key — per-key client caching (not
+  per-tenant; the common case is many tenants sharing the platform's one
+  key) mirrors `salesforce.py`'s `client_for` safety pattern from the
+  robustness pass. Reuses the existing `tenant_integrations` table
+  (kind='llm') — no migration. Threaded `tenant_id` through all 12 real
+  `llm.complete*` call sites across `registry.py` + 5 other files;
+  `reasoning.py`'s pluggable `LLMFn` interface was deliberately left on
+  the platform default (a disclosed, narrow gap — that one node type
+  doesn't honor a tenant's own key yet — rather than risk breaking its
+  test-double contract for a lower-traffic path).
+
+Live-verified, not just offline-tested: `tests/test_llm_byok.py` (new,
+`-m integration`) round-trips a real key through the real
+`tenant_integrations` row against the live Globex tenant via the actual
+FastAPI app — 3/3 passed. Full offline suite 574/574 after fixing the
+19 test doubles the new `tenant_id`/`api_key` kwargs broke (narrower
+monkeypatched signatures needed `**kw`). `tests/test_multiflow.py`
+re-run live after the refactor: 4/4 (one transient failure on the first
+pass was pre-existing live-LLM-call flakiness — Groq's retired
+`llama-3.3-70b-versatile` 404'd, OpenRouter's free tier also errored
+that attempt, landing on a fallback model whose confidence just missed
+the auto-reply threshold that one run — confirmed by an isolated re-run
+passing cleanly, not a regression from this change). `web/`: `tsc -b`,
+`vite build`, `vitest run` all clean.
+
+Also fixed along the way, from live user feedback on the running app:
+the Triggers panel's webhook URL wasn't actually ellipsizing (`<code>`
+is inline; `text-overflow: ellipsis` needs `display: block/inline-block`
+to do anything) so a real URL spanned half the page — fixed, plus made
+the panel collapsible with a purpose blurb; the sidebar nav's 12 items
+were jammed into one unwrapped horizontal row inside the 240px sidebar —
+regrouped into collapsible categories (Build / Knowledge / Admin). A
+user-reported "I can see another account's Slack connection" turned out
+not to be a cross-tenant leak — traced live against the DB (RLS policy,
+`_caller_tenant`, and the Slack-status/meta endpoints all independently
+verified correctly scoped) to the same real account owning a second,
+unnamed leftover demo tenant from earlier test sessions that already had
+a real Slack connection from 2026-08-29 — fixed by giving that tenant a
+real name ("Acme (demo)") instead of the confusing `workspace 00000000`
+label, not by touching any access-control code.
+
 **Not yet started, still open**:
 - **An onboarding UX walkthrough** — actually drive the new-tenant path
   (create workspace → connect Salesforce/Slack → auto-detect modules/
   teams → build first flow) as a brand-new user would, and fix
-  friction. Nothing has walked this path end-to-end as a user
-  experience question rather than a feature-completeness checklist.
+  friction. The wizard above makes this materially easier but hasn't
+  itself been driven end-to-end by a fresh browser session — still the
+  next real-world test of it.
 
 Deferred, **explicitly out of scope until asked for again**: Google
 Calendar meeting-scheduling as its own node type (design decided — time
