@@ -116,7 +116,11 @@ def _email_post_run(final: dict, case: dict, flow: dict, sb) -> dict:
             # Best-effort: mirror the sent reply onto the Case as an outbound
             # EmailMessage so agents see the full thread in Salesforce.
             # Never let this fail (or retry) the delivery.
-            if r.get("sent") and sf_id and salesforce.available():
+            # log_email_message() resolves this tenant's own creds itself
+            # (client_for, not the env-only available()) -- gating on
+            # available() here used to skip it for a self-serve tenant with
+            # no env creds even though the call underneath would work.
+            if r.get("sent") and sf_id:
                 try:
                     em = salesforce.log_email_message(
                         sf_id, incoming=False, status=salesforce._EM_SENT,
@@ -182,7 +186,7 @@ def _check_resolution(payload: dict, sb) -> dict:
     since = row.get("created_at")
 
     resp = {"guidance": None, "guidance_at": None, "outbound_email": None}
-    if case_id and salesforce.available():
+    if case_id:
         resp = salesforce.agent_response_since(case_id, since, tenant_id=tenant_id)
 
     # a human left a note -> record it as context on the run; never send.
@@ -252,10 +256,13 @@ def _check_resolution(payload: dict, sb) -> dict:
 
 def _case_owned_by_user(case_id: str | None, tenant_id: str | None) -> bool:
     """True when a person (not a queue) owns the Case — they've taken it."""
-    if not case_id or not salesforce.available():
+    if not case_id:
+        return False
+    sf = salesforce._try_client(tenant_id)
+    if sf is None:
         return False
     try:
-        owner = salesforce.client_for(tenant_id).Case.get(case_id).get("OwnerId") or ""
+        owner = sf.Case.get(case_id).get("OwnerId") or ""
         return owner.startswith("005")   # 005 = User, 00G = Queue/Group
     except Exception as e:  # noqa: BLE001
         log.warning("owner check failed for %s: %s", case_id, e)
@@ -412,7 +419,7 @@ def _apply_kb_change(payload: dict, sb) -> dict:
 _SWEEP_EVERY_MIN = {"queue_sweep": 5, "cdc_reconcile": 60, "reasoning_ttl": 5,
                     "handoff_watch": 5, "kb_promote": 360,
                     "case_graph_sync": 60, "case_memory_sync": 60,
-                    "fire_schedules": 1, "kil_digest": 30}
+                    "fire_schedules": 1, "kil_digest": 30, "failed_jobs_sweep": 10}
 
 
 def _reschedule(kind: str, sb) -> None:
@@ -450,7 +457,8 @@ HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
             "case_graph_sync": _sweep_handler("case_graph_sync"),
             "case_memory_sync": _sweep_handler("case_memory_sync"),
             "fire_schedules": _sweep_handler("fire_schedules"),
-            "kil_digest": _sweep_handler("kil_digest")}
+            "kil_digest": _sweep_handler("kil_digest"),
+            "failed_jobs_sweep": _sweep_handler("failed_jobs_sweep")}
 
 JOB_TIMEOUT = int(os.environ.get("WORKER_JOB_TIMEOUT", "120"))
 

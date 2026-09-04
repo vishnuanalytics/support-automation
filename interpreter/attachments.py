@@ -212,9 +212,11 @@ def _sf_case_files(case_id: str, tenant_id: str | None, *, want_video: bool,
                    img_limit: int, org_label: str | None = None) -> list[dict]:
     from interpreter import salesforce
 
-    if not case_id or not salesforce.available():
+    if not case_id:
         return []
-    sf = salesforce.client_for(tenant_id, org_label)
+    sf = salesforce._try_client(tenant_id, org_label)
+    if sf is None:
+        return []
     try:
         links = sf.query(
             "SELECT ContentDocumentId FROM ContentDocumentLink "

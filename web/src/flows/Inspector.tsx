@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { api } from "../api";
-import type { Connection, KbCollection, SfMeta, SlackMeta } from "../types";
+import type { Connection, KbCollection, ModelInfo, SfMeta, SlackMeta } from "../types";
 import type { RFEdge, RFNode } from "./graph";
 
 // Salesforce routing metadata (queues + real Case fields/picklists,
@@ -11,6 +11,42 @@ import type { RFEdge, RFNode } from "./graph";
 // real schema instead of showing another org's fields.
 const _EMPTY_META: SfMeta = { available: false, queues: [], case_types: [], modules: [], case_fields: [], users: [] };
 const _metaCache = new Map<string, SfMeta>();
+
+/** One or two plain-English sentences per node type — every registered
+ *  handler in interpreter/registry.py gets an entry, shown above that
+ *  node's config form so the editor explains itself instead of leaving
+ *  a bare JSON blob to reverse-engineer. Especially useful for the four
+ *  similar-sounding "get a human involved" nodes (notify / ask_human /
+ *  handover / notify_human), which differ in a way that isn't obvious
+ *  from their names alone. */
+const NODE_HELP: Record<string, string> = {
+  trigger: "Entry point for a non-Case flow (a webhook or schedule). Renames/defaults the incoming payload's fields before anything else runs.",
+  identify: "Resolves who's contacting you — an exact CRM contact/lead by email, else the sender's email domain against an Account — before anything Salesforce-specific runs.",
+  sf_case: "Resolves the inbound message to a real Salesforce Case: creates one (or reuses an open thread) so every downstream Salesforce node has an sf_id to act on.",
+  sf_context: "Pulls the surrounding Salesforce picture — Account, Contact, case history, account team — into state for the classifier and gate to use. Put it after identify.",
+  attachments: "Pulls image/video attachments off the Case or inbound email and OCRs/transcribes them so classify and draft can reference what's actually attached.",
+  classify: "AI triage: topic, type, urgency, and answer mode (informational / diagnostic / action / status). Everything downstream branches on this.",
+  extract: "Pulls named fields out of the case text with AI (e.g. an account ID mentioned in the message) so policy rules can key on them.",
+  team_route: "Picks which team owns this case by keyword match over the subject/body — no AI, deterministic. ask_human/handover resolve their queue from this.",
+  retrieve: "Searches the knowledge base for docs relevant to the case. Feeds draft's context and the confidence gate's retrieval score.",
+  kb_lookup: "Consults one or more internal KB collections at this exact point in the flow — the result is treated as authoritative context for draft, ahead of the public docs.",
+  case_lookup: "Looks for past resolved Cases similar to this one, so draft can reuse a real resolution instead of only KB docs.",
+  draft: "Writes the AI's reply from everything gathered so far (KB docs, internal runbook, prior resolved cases). The core drafting step.",
+  agent: "A bounded retrieve+draft loop: if the first draft isn't well grounded, reformulates the search query and retries. Drop-in replacement for a plain retrieve+draft pair.",
+  ai_prompt: "A free-form AI call for anything the built-in nodes don't cover — write your own prompt (with attachments as vision input, optionally); the structured output feeds an edge condition.",
+  http_request: "Calls an external HTTP API through a saved Connection (Admin tab) — for integrations this platform has no dedicated node for.",
+  transform: "Reshapes state between nodes with no LLM — copy a value by dotted path, render a template, or drop a scratch key.",
+  confidence_gate: "Blends retrieval/draft/groundedness scores against a tier-specific threshold to decide: auto-reply, ask a human, or hand over.",
+  policy_gate: "Evaluates this team's structured rules (Rules tab) against the run so far; route on policy.action == 'ask_human', etc.",
+  task_dispatch: "Raises the matched policy rule's task (e.g. a GitHub issue) for Slack approval. Wire it after policy_gate, on policy.task != None.",
+  sf_writeback: "Writes the triage result — priority, module, case type, routed team — back onto the real Salesforce Case fields.",
+  auto_reply: "Sends the drafted reply automatically. Reachable only once the confidence gate has already cleared it — no human touches this case.",
+  notify: "Pings an internal rep about this Case WITHOUT reassigning it — a heads-up via Chatter, Case stays wherever it already is.",
+  ask_human: "Escalates to a human queue and posts the draft for review — pauses; the flow resumes once someone replies (Chatter/Case Comment).",
+  handover: "Full handoff to a human queue/owner. Terminal — the AI is done with this Case, no resume path.",
+  notify_human: "Sends the actual Slack and/or Chatter alert for an escalation — place it after ask_human/handover (or on any escalation edge) to pick who gets pinged and where.",
+  clarify: "Low-confidence recovery: instead of a blind handoff, produces the specific follow-up questions that would let the bot resolve this on the next round.",
+};
 const _metaPromise = new Map<string, Promise<SfMeta>>();
 
 function useSfMeta(tenantId: string, orgLabel = "default"): SfMeta {
@@ -119,6 +155,81 @@ function SfMentionPicker({
         </optgroup>
       )}
     </select>
+  );
+}
+
+// The LLM model roster (BYOK, 2026-09-04) — fetched once per tenant (its
+// `available` flags depend on that tenant's own keys, per /api/models),
+// shared by every node's model picker in this editor session.
+const _modelsCache = new Map<string, ModelInfo[]>();
+const _modelsPromise = new Map<string, Promise<ModelInfo[]>>();
+
+function useModelRoster(tenantId: string): ModelInfo[] {
+  const [models, setModels] = useState<ModelInfo[]>(_modelsCache.get(tenantId) ?? []);
+  useEffect(() => {
+    if (!tenantId) return;
+    if (_modelsCache.has(tenantId)) {
+      setModels(_modelsCache.get(tenantId)!);
+      return;
+    }
+    const p = _modelsPromise.get(tenantId) ||
+      api.models(tenantId).then((r) => r.models).catch(() => []);
+    _modelsPromise.set(tenantId, p);
+    p.then((list) => {
+      _modelsCache.set(tenantId, list);
+      setModels(list);
+    });
+  }, [tenantId]);
+  return models;
+}
+
+const _PROVIDER_LABEL: Record<string, string> = {
+  groq: "Groq (free)", anthropic: "Anthropic", openrouter: "OpenRouter",
+};
+
+/** A real dropdown of known model ids, grouped by provider, each flagged
+ *  unavailable when neither this tenant nor the platform has a key for its
+ *  provider (Settings → AI models). Falls back to a plain text input if the
+ *  roster hasn't loaded yet, or lets you type a ':free'-slug/custom id the
+ *  roster doesn't know about — same escape hatch every other picker here
+ *  keeps for a value the fetched list doesn't cover. */
+function ModelPicker({
+  value,
+  onChange,
+  tenantId,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  tenantId: string;
+}) {
+  const models = useModelRoster(tenantId);
+  if (models.length === 0) {
+    return <input value={value} onChange={(e) => onChange(e.target.value.trim())} />;
+  }
+  const byProvider = models.reduce<Record<string, ModelInfo[]>>((acc, m) => {
+    (acc[m.provider] ||= []).push(m);
+    return acc;
+  }, {});
+  const known = models.some((m) => m.id === value);
+  return (
+    <div className="col" style={{ gap: 4 }}>
+      <select value={known ? value : ""} onChange={(e) => e.target.value && onChange(e.target.value)}>
+        {!known && <option value="">{value ? `${value} (custom)` : "choose a model…"}</option>}
+        {Object.entries(byProvider).map(([prov, ms]) => (
+          <optgroup key={prov} label={_PROVIDER_LABEL[prov] || prov}>
+            {ms.map((m) => (
+              <option key={m.id} value={m.id}>{m.id}{m.available ? "" : "  (no key)"}</option>
+            ))}
+          </optgroup>
+        ))}
+      </select>
+      <input
+        value={value}
+        placeholder="or type a custom model id"
+        style={{ fontSize: 11 }}
+        onChange={(e) => onChange(e.target.value.trim())}
+      />
+    </div>
   );
 }
 
@@ -283,6 +394,20 @@ const SF_WRITEBACK_SRC_KEYS = [
   "case_type", "case_topic", "case_module", "case_submodule", "case_region",
 ];
 
+// interpreter/registry.py::h_sf_writeback's own fallback when config has no
+// field_map at all -- kept in sync by hand (small, rarely-changed list).
+// A published flow with an empty {} config (the seed flows all ship this
+// way -- config-driven means "the interpreter's default", not "nothing
+// happens") was showing a blank form with zero rows, which reads as
+// "this node writes nothing" even though it's actively writing 6 fields
+// on every run. Found by an actual browser click-through against the
+// live email flow (2026-09-03).
+const SF_WRITEBACK_DEFAULT_FIELD_MAP: Record<string, string> = {
+  urgency: "Priority", case_type: "Type", case_topic: "Topic__c",
+  case_module: "Module__c", case_submodule: "SubModule__c",
+  case_region: "Region__c",
+};
+
 /** `sf_writeback`'s field_map: platform concept -> a REAL field on this
  *  tenant's connected Salesforce org, fetched live — not a hardcoded
  *  platform field name. Falls back to free text when the org isn't
@@ -300,7 +425,14 @@ function SfWritebackForm({
   const org = typeof config.org === "string" ? config.org : "";
   const meta = useSfMeta(tenantId, org || undefined);
   const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
-  const fieldMap = (config.field_map as Record<string, string>) || {};
+  // undefined (never configured) shows -- and edits from -- the
+  // interpreter's own default map, so the form reflects what's actually
+  // running. An explicit {} (the user cleared every row on purpose) stays
+  // genuinely empty rather than snapping back to the defaults.
+  const usingDefaults = config.field_map === undefined;
+  const fieldMap = usingDefaults
+    ? SF_WRITEBACK_DEFAULT_FIELD_MAP
+    : (config.field_map as Record<string, string>) || {};
   const rows = Object.entries(fieldMap);
   const fields = meta.case_fields || [];
 
@@ -327,7 +459,14 @@ function SfWritebackForm({
         <span className="muted" style={{ width: 90 }}>org</span>
         <OrgPicker value={org} onChange={(v) => set({ org: v || undefined })} tenantId={tenantId} />
       </div>
-      <label style={{ marginTop: 6, display: "block" }}>field_map</label>
+      <label style={{ marginTop: 6, display: "block" }}>
+        field_map{" "}
+        {usingDefaults && (
+          <span className="muted" style={{ fontWeight: "normal" }}>
+            (showing the platform default — not yet saved on this node; edit a row to make it explicit)
+          </span>
+        )}
+      </label>
       <datalist id="sfwb-src-keys">
         {SF_WRITEBACK_SRC_KEYS.map((k) => <option key={k} value={k} />)}
       </datalist>
@@ -393,6 +532,11 @@ export function NodeInspector({
       <h4>
         <span className="muted">{node.data.nodeType}</span> node
       </h4>
+      {NODE_HELP[node.data.nodeType] && (
+        <p className="muted" style={{ margin: "0 0 10px", fontSize: 12, lineHeight: 1.4 }}>
+          {NODE_HELP[node.data.nodeType]}
+        </p>
+      )}
       <div className="field">
         <label>label</label>
         <input value={node.data.label} onChange={(e) => onLabel(e.target.value)} />
@@ -451,7 +595,7 @@ export function NodeInspector({
       )}
 
       {node.data.nodeType === "ai_prompt" && (
-        <AiPromptForm config={config} onConfig={onConfig} />
+        <AiPromptForm config={config} onConfig={onConfig} tenantId={tenantId} />
       )}
 
       {node.data.nodeType === "sf_context" && (
@@ -476,14 +620,6 @@ export function NodeInspector({
 
       {node.data.nodeType === "identify" && (
         <IdentifyForm config={config} onConfig={onConfig} tenantId={tenantId} />
-      )}
-
-      {(node.data.nodeType === "policy_gate" || node.data.nodeType === "task_dispatch") && (
-        <div className="muted" style={{ fontSize: 11, borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
-          {node.data.nodeType === "policy_gate"
-            ? "evaluates this team's rules (Rules tab) against the run; route on policy.action == 'ask_human' etc."
-            : "raises the matched rule's task for Slack approval; wire it after policy_gate on policy.task != None"}
-        </div>
       )}
 
       <JsonField label="config (jsonb)" value={config} onChange={onConfig} />
@@ -703,6 +839,13 @@ function NotifyForm({
     else delete next[t];
     set({ target_by_type: next });
   };
+  const byModule = (config.target_by_module as Record<string, string>) || {};
+  const setModuleTarget = (m: string, v: string) => {
+    const next = { ...byModule };
+    if (v) next[m] = v;
+    else delete next[m];
+    set({ target_by_module: next });
+  };
 
   return (
     <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
@@ -737,6 +880,31 @@ function NotifyForm({
           />
         </div>
       ))}
+
+      {meta.modules.length > 0 && (
+        <>
+          <label style={{ marginTop: 10, display: "block" }}>
+            override target by Module__c{" "}
+            <span className="muted">(picklist from Salesforce)</span>
+          </label>
+          {meta.modules.map((m) => (
+            <div className="row" key={m} style={{ gap: 4 }}>
+              <span className="muted" style={{ width: 110 }}>{m}</span>
+              <SfMentionPicker
+                value={byModule[m] ?? ""}
+                onChange={(v) => setModuleTarget(m, v)}
+                tenantId={tenantId}
+                orgLabel={typeof config.org === "string" ? config.org : undefined}
+                placeholder="User/Group id or name"
+              />
+            </div>
+          ))}
+          <div className="muted" style={{ fontSize: 11 }}>
+            only consulted when the Case.Type override above doesn't match.
+          </div>
+        </>
+      )}
+
       <div className="row" style={{ marginTop: 6 }}>
         <span className="muted" style={{ width: 110 }}>fallback target</span>
         <SfMentionPicker
@@ -746,6 +914,20 @@ function NotifyForm({
           orgLabel={typeof config.org === "string" ? config.org : undefined}
           placeholder="(optional)"
         />
+      </div>
+      <div className="row" style={{ marginTop: 6 }}>
+        <span className="muted" style={{ width: 110 }}>Chatter @mention</span>
+        <SfMentionPicker
+          value={typeof config.mention_id === "string" ? config.mention_id : ""}
+          onChange={(v) => set({ mention_id: v || undefined })}
+          tenantId={tenantId}
+          orgLabel={typeof config.org === "string" ? config.org : undefined}
+          placeholder="005xxxxxxxxxxxx (last-resort mention)"
+        />
+      </div>
+      <div className="muted" style={{ fontSize: 11 }}>
+        used to @mention someone when the resolved target is a Queue (not
+        directly mentionable) and none of its members can be found.
       </div>
       <div className="row" style={{ marginTop: 6 }}>
         <span className="muted" style={{ width: 110 }}>org</span>
@@ -762,9 +944,11 @@ function NotifyForm({
 function AiPromptForm({
   config,
   onConfig,
+  tenantId,
 }: {
   config: Record<string, unknown>;
   onConfig: (v: Record<string, unknown>) => void;
+  tenantId: string;
 }) {
   const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
   const str = (k: string, d = "") => (typeof config[k] === "string" ? (config[k] as string) : d);
@@ -792,10 +976,13 @@ function AiPromptForm({
         <input value={str("output_key", "ai_output")}
                onChange={(e) => set({ output_key: e.target.value.trim() || "ai_output" })} />
       </div>
-      <div className="row" style={{ marginTop: 4 }}>
-        <span className="muted" style={{ width: 90 }}>model</span>
-        <input value={str("model", "openai/gpt-oss-120b")}
-               onChange={(e) => set({ model: e.target.value.trim() })} />
+      <div className="row" style={{ marginTop: 4, alignItems: "flex-start" }}>
+        <span className="muted" style={{ width: 90, marginTop: 4 }}>model</span>
+        <ModelPicker
+          value={str("model", "openai/gpt-oss-120b")}
+          onChange={(v) => set({ model: v })}
+          tenantId={tenantId}
+        />
       </div>
       <div className="row" style={{ marginTop: 4 }}>
         <span className="muted" style={{ width: 90 }}>max tokens</span>
@@ -1474,12 +1661,23 @@ export function EdgeInspector({
 
   const insert = (snippet: string) => {
     const ta = taRef.current;
-    const start = ta?.selectionStart ?? ifExpr.length;
-    const end = ta?.selectionEnd ?? ifExpr.length;
-    const next = ifExpr.slice(0, start) + snippet + ifExpr.slice(end);
+    // A textarea's selectionStart is 0 (not null) when it has never been
+    // focused -- picking a quick-insert option without clicking into the
+    // box first (the whole point of the feature) would otherwise splice
+    // the snippet in at position 0 with no separator, mashing it directly
+    // onto existing text (e.g. "classification.case_type == 'Question'tier
+    // == 'enterprise'", no space, no &&). Only trust selectionStart/End
+    // when the textarea is actually the focused element; otherwise treat
+    // this as "append", joined with " && " when there's already content.
+    const focused = !!ta && document.activeElement === ta;
+    const start = focused ? ta!.selectionStart ?? ifExpr.length : ifExpr.length;
+    const end = focused ? ta!.selectionEnd ?? ifExpr.length : ifExpr.length;
+    const needsJoin = !focused && ifExpr.slice(0, start).trim() !== "" && !/[\s(]$/.test(ifExpr.slice(0, start));
+    const joined = (needsJoin ? " && " : "") + snippet;
+    const next = ifExpr.slice(0, start) + joined + ifExpr.slice(end);
     onCondition({ if: next });
     if (ta) {
-      const pos = start + snippet.length;
+      const pos = start + joined.length;
       requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(pos, pos); });
     }
   };

@@ -117,7 +117,7 @@ def judge_human_reply(sb, *, run_row: dict, reply_text: str,
     team = run_row.get("routed_team") or run_row.get("team") or ""
 
     contexts = assemble_contexts(run_row)
-    verdict = integrity.check(reply_text, contexts, kind="human_reply")
+    verdict = integrity.check(reply_text, contexts, kind="human_reply", tenant_id=tenant_id)
 
     if verdict.get("flagged"):
         trigger, kind = "contradicts", "human_reply_review"

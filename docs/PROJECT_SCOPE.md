@@ -707,29 +707,144 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**Current focus (2026-09-03): the self-serve multi-tenant/multi-org
-Salesforce connector, and making the flow editor fetch real data
-instead of hardcoding it** — see "Multi-tenant / multi-Salesforce-org
-scoping" below for the full chunk-by-chunk history. Status:
-connector + introspection + OAuth + org-label threading through every
-SF-touching node handler are all built and live-verified; every flow
-editor node whose config is genuinely backed by an external system
-(Salesforce Case fields/Queues/connected-orgs, Slack channels/users/
-usergroups, per-tenant HTTP Connections, internal KB collections) now
-renders a real picker instead of raw JSON, including edge conditions
-(`classification.case_type` / `routed_team` quick-insert dropdowns) and
-Salesforce User/Queue @mention targets (`notify`/`notify_human`) — see
-"Flow editor Inspector: real Salesforce data instead of hardcoded/raw
-JSON", "Every node with a real data source gets a real picker", and
-"Closing the last gaps: SF User picker + edge conditions" for the three
-chunks. **Only open item now**: none of the three editor chunks has
-been clicked through in a real browser — next step before calling this
-fully shipped. Deferred, **explicitly out of scope until asked for
-again**: Google Calendar
-meeting-scheduling as its own node type (design decided — time from
-BOTH the customer's message AND Google Calendar free/busy; needs a new
-`interpreter/gcalendar.py` + widening `gdrive.py`'s OAuth scopes, with
-a reconnect caveat).
+**Self-serve multi-tenant/multi-org Salesforce + Slack connector, and a
+flow editor that fetches real data instead of hardcoding it — DONE and
+browser-verified (2026-09-03).** See "Multi-tenant / multi-Salesforce-org
+scoping" below for the full chunk-by-chunk history. Connector +
+introspection + OAuth + org-label threading through every SF-touching
+node handler; every flow editor node whose config is genuinely backed
+by an external system (Salesforce Case fields/Queues/Users/connected-orgs,
+Slack channels/users/usergroups, per-tenant HTTP Connections, internal
+KB collections) renders a real picker instead of raw JSON, including
+edge conditions and Salesforce User/Queue @mention targets. **Actually
+clicked through in a real browser** (headless Chromium set up from
+scratch in this sandbox — see "First real browser click-through" below
+for how, since there's no browser here by default) — found and fixed 4
+real bugs in the process (a Slack-meta endpoint that always reported
+"not connected" for every tenant due to an RLS-vs-service-role client
+mismatch; an edge-condition quick-insert that mashed text together with
+no separator; `sf_writeback`'s form going blank on a real published
+flow whose config relies on the interpreter's own defaults; a `notify`
+node's `target_by_module`/`mention_id` fields that had real saved data
+but no picker at all). This whole thread is closed.
+
+**Current focus (2026-09-03): "complete the multi-tenant project
+end-to-end, very robust, flexible and easy"** — the user's own framing,
+deliberately broad; scoped down via `AskUserQuestion` into three
+tracks, of which the browser click-through above was the first and the
+robustness pass (below) was the second.
+**Systematic robustness pass — DONE (2026-09-04).** Error-handling/retry
+audit across node handlers + external connectors, plus a real
+multi-tenant concurrency stress test. Three parts, all on branch
+`browser-verified-picker-fixes`:
+- Part 1 (`cddb5e5`) — the `available()` self-serve-tenant gating bug
+  present in every SF write/read path, plus a CI-breaking upsert bug
+  found along the way.
+- Part 2 (`e3cdc64`) — job retry backoff + failed-job visibility.
+- Part 3 (`a14137c`) — the `available()` bug reached 5 more call sites
+  beyond `salesforce.py` (routing.py, sf_context.py, attachments.py,
+  worker.py), plus a real cross-tenant cache leak: `_intake_queue_id`
+  and `routing.py`'s `queue_member` cache keyed only on queue
+  name/org_label, not `tenant_id` — two tenants sharing an underlying
+  SF org (true for today's two demo tenants) would silently get each
+  other's cached Group id. Both caches now key on `(tenant_id,
+  org_label)`.
+- `tests/test_multitenant_concurrency.py` (added 2026-09-04) —
+  genuinely interleaved concurrent flow runs for two tenants via a
+  thread pool (not sequential), proving no cross-tenant config/cache
+  leak under real concurrency, the exact condition the part-3 bugs
+  needed to surface. `pytest tests/test_multitenant_concurrency.py -m
+  integration`: 2 passed against live Salesforce/Supabase.
+
+**Third track — guided onboarding + self-explanatory editor + LLM BYOK,
+DONE (2026-09-04).** The user restated the same broad goal even more
+concretely ("easy onboarding with Salesforce, Slack, OpenRouter, Claude
+— given token choose model — easy editor design, make the platform
+understandable"); scoped via `AskUserQuestion` into three ordered
+chunks, built in that order:
+
+- **Guided setup wizard** — `web/src/onboarding/OnboardingWizard.tsx`,
+  a new always-visible "⚙ Setup" nav item. Four skippable steps
+  (Connect Salesforce / Connect Slack / choose an AI model / create a
+  first flow from a template) that reuse the existing OAuth-connect
+  logic rather than duplicating it; auto-shows once for a brand-new
+  tenant (localStorage-tracked per tenant, not per-session) since
+  previously "Connect Salesforce" and Slack connect each lived in a
+  separate tab (Connections, buried under Admin; Slack connect was
+  oddly inside the Rules tab) with nothing walking a new user through
+  either.
+- **Self-explanatory editor** — every one of the 26 registered node
+  types (`interpreter/registry.py`) now gets a one/two-sentence purpose
+  blurb in the Inspector (`NODE_HELP` map, `web/src/flows/Inspector.tsx`),
+  sourced from the actual handler docstrings, not guessed. Particularly
+  closes the confusion between the four similar-sounding "get a human
+  involved" nodes (`notify` doesn't reassign the Case; `ask_human`
+  escalates + pauses for a reply; `handover` is terminal; `notify_human`
+  is the actual Slack/Chatter delivery mechanism for the other three).
+- **LLM BYOK** — a tenant can now paste their own Groq/Anthropic/
+  OpenRouter key (Admin → Connections → "AI models" panel) instead of
+  sharing this deployment's own; the `ai_prompt` node's `model` field is
+  a real dropdown (grouped by provider, `GET /api/models`) instead of
+  free text. Backend: `interpreter/llm.py`'s `complete()` /
+  `complete_with_tools()` and every internal dispatch/chain function now
+  take an optional `tenant_id`, resolving that tenant's own key with a
+  fallback to this process's env key — per-key client caching (not
+  per-tenant; the common case is many tenants sharing the platform's one
+  key) mirrors `salesforce.py`'s `client_for` safety pattern from the
+  robustness pass. Reuses the existing `tenant_integrations` table
+  (kind='llm') — no migration. Threaded `tenant_id` through all 12 real
+  `llm.complete*` call sites across `registry.py` + 5 other files;
+  `reasoning.py`'s pluggable `LLMFn` interface was deliberately left on
+  the platform default (a disclosed, narrow gap — that one node type
+  doesn't honor a tenant's own key yet — rather than risk breaking its
+  test-double contract for a lower-traffic path).
+
+Live-verified, not just offline-tested: `tests/test_llm_byok.py` (new,
+`-m integration`) round-trips a real key through the real
+`tenant_integrations` row against the live Globex tenant via the actual
+FastAPI app — 3/3 passed. Full offline suite 574/574 after fixing the
+19 test doubles the new `tenant_id`/`api_key` kwargs broke (narrower
+monkeypatched signatures needed `**kw`). `tests/test_multiflow.py`
+re-run live after the refactor: 4/4 (one transient failure on the first
+pass was pre-existing live-LLM-call flakiness — Groq's retired
+`llama-3.3-70b-versatile` 404'd, OpenRouter's free tier also errored
+that attempt, landing on a fallback model whose confidence just missed
+the auto-reply threshold that one run — confirmed by an isolated re-run
+passing cleanly, not a regression from this change). `web/`: `tsc -b`,
+`vite build`, `vitest run` all clean.
+
+Also fixed along the way, from live user feedback on the running app:
+the Triggers panel's webhook URL wasn't actually ellipsizing (`<code>`
+is inline; `text-overflow: ellipsis` needs `display: block/inline-block`
+to do anything) so a real URL spanned half the page — fixed, plus made
+the panel collapsible with a purpose blurb; the sidebar nav's 12 items
+were jammed into one unwrapped horizontal row inside the 240px sidebar —
+regrouped into collapsible categories (Build / Knowledge / Admin). A
+user-reported "I can see another account's Slack connection" turned out
+not to be a cross-tenant leak — traced live against the DB (RLS policy,
+`_caller_tenant`, and the Slack-status/meta endpoints all independently
+verified correctly scoped) to the same real account owning a second,
+unnamed leftover demo tenant from earlier test sessions that already had
+a real Slack connection from 2026-08-29 — fixed by giving that tenant a
+real name ("Acme (demo)") instead of the confusing `workspace 00000000`
+label, not by touching any access-control code.
+
+**Not yet started, still open**:
+- **An onboarding UX walkthrough** — actually drive the new-tenant path
+  (create workspace → connect Salesforce/Slack → auto-detect modules/
+  teams → build first flow) as a brand-new user would, and fix
+  friction. The wizard above makes this materially easier but hasn't
+  itself been driven end-to-end by a fresh browser session — still the
+  next real-world test of it.
+
+Deferred, **explicitly out of scope until asked for again**: Google
+Calendar meeting-scheduling as its own node type (design decided — time
+from BOTH the customer's message AND Google Calendar free/busy; needs a
+new `interpreter/gcalendar.py` + widening `gdrive.py`'s OAuth scopes,
+with a reconnect caveat). Also not started: Phase 16's rule form
+builder (policy rules still edited as raw JSON) and Phase 14's file
+upload (`.pdf`/`.docx`) for the KB — raised as options in the same
+`AskUserQuestion` round but not picked this time.
 
 **Phase KIL — Knowledge Integrity Loop (COMPLETE a–f + live-verified,
 2026-09-02; PR #29).** Catch
@@ -1578,6 +1693,293 @@ Full offline suite 549/549. Frontend: `tsc -b` clean, `vitest run` 6/6,
 end-to-end `org_metadata` `users` field against the real `acme-dev`
 org. Not yet clicked through in a real browser — three editor chunks
 in a row now share that same open item.
+
+### First real browser click-through of the picker work — 4 bugs found, all fixed (2026-09-03)
+
+Per the user's direction ("complete full multi tenant project end to
+end & with very robust... flexible and easy") the session split into
+three tracks; this is the first: an actual browser session driving the
+flow editor, closing the "not yet clicked through" item every picker
+chunk this session had carried. No headless browser was available in
+this sandbox by default — set one up from scratch: `playwright` (npm,
+already vendored in scratchpad from an earlier attempt) + Chromium
+binary (already cached), but `chrome-headless-shell` was missing
+`libnspr4.so`/`libnss3.so`/`libasound.so.2` and `apt-get install`
+needs root (no passwordless sudo here). Worked around it with
+`apt-get download` (no root needed, just fetches `.deb`s) +
+`dpkg-deb -x` to extract the `.so` files into a scratch directory, then
+`LD_LIBRARY_PATH` pointed at it for the Chromium launch — no system
+changes, nothing installed outside the scratchpad. Logged in as a real
+account (`scripts/set_editor_password.py` to set a password on the
+existing Supabase Auth user) and drove the actual live `email` flow
+(the most fully-built real flow: `identify`, `sf_case`, `retrieve`,
+`sf_writeback`, `handover`, `team_route`, `clarify`, `notify`,
+`ask_human`, `notify_human`, plus an edge) exactly as a user would —
+clicking every node, reading the rendered Inspector, checking the
+browser console.
+
+**Bug 1 — real, significant: `GET /api/slack/meta` always reported
+`available:false`, for every tenant, regardless of a real connection.**
+The endpoint passed the caller's RLS-scoped client (`c.sb`) into
+`workspace_meta`; `tenant_integrations` has RLS enabled with **no
+policy at all** (service-role only, by design — it holds secrets), so
+that client silently saw zero rows for every tenant. Every
+`notify_human` channel/@mention picker built this session had been
+silently falling back to plain text this whole time in the one place
+that would have shown it: a real browser. `salesforce_meta` never had
+this bug because `org_metadata` doesn't take an `sb` argument at all
+(defaults to its own service-role client internally) — `slack_meta`
+should have matched that pattern from the start. Fixed: stopped
+passing `sb=c.sb`; tenant scoping is already enforced by
+`_caller_tenant`'s RLS-backed membership check before this line runs,
+same security model `salesforce_meta` already uses. **Root cause of
+why no test caught it**: the one integration test for this endpoint
+used `if body["available"]:` instead of asserting it — and its own
+premise was wrong too (copied "Globex has connected Slack live" from
+the `salesforce_meta` test's comment without checking; only Acme has
+ever connected Slack). Fixed both: added an offline regression test
+(`test_slack_meta_does_not_leak_the_rls_scoped_client_into_workspace_meta`,
+overrides the `caller` dependency with a fake whose `.sb` is a
+sentinel and asserts `workspace_meta` is called without it — so this
+class of bug can't silently reappear) and corrected the integration
+test to assert Globex's real (correct) state instead of a guessed one.
+Live-verified in the browser after the fix: `notify_human`'s channel
+picker now shows real dropdowns.
+
+**Bug 2 — real: edge-condition quick-insert mashed text together with
+no separator when the textarea hadn't been focused first.**
+`EdgeInspector`'s new quick-insert dropdowns (previous chunk) used
+`textarea.selectionStart`, which is `0` — not `null` — on an unfocused
+textarea, so `?? ifExpr.length` never triggered and every insert landed
+at position 0: picking "Case Type → Question" against the existing
+`tier == 'enterprise'` produced `classification.case_type ==
+'Question'tier == 'enterprise'`, a syntax error, with zero clicks
+required to hit it (this is the *point* of a quick-insert — clicking it
+without first clicking into the box). Fixed: only trust
+`selectionStart`/`End` when `document.activeElement === textarea`;
+otherwise treat it as "append", auto-joined with `&& ` when there's
+already non-empty content. Verified live: the same repro now produces
+`tier == 'enterprise' && classification.case_type == 'Question'`.
+
+**Bug 3 — a real UX gap, not a wire-format bug:** `sf_writeback`'s
+`field_map` form went completely blank (zero rows) on the live email
+flow's actual `sf_writeback` node, which has `config: {}` — the
+interpreter's own `field_map = config.get("field_map") or {defaults}`
+fallback means this node genuinely writes 6 fields on every run
+(`Priority`, `Type`, `Topic__c`, `Module__c`, `SubModule__c`,
+`Region__c`), but the *editor* showed nothing, reading as "this node
+does nothing." Fixed: when `config.field_map` is `undefined` (never
+configured — distinct from an explicit `{}`, which a user could set by
+deliberately clearing every row), the form now shows the interpreter's
+own default map, labeled "showing the platform default — not yet saved
+on this node," and editing any row seeds the full explicit map into
+config on that first edit. Live-verified: the form now shows all 6 rows
+with their real Salesforce field already matched.
+
+**Bug 4 — a real coverage gap, found by comparing the rendered form
+against the actual saved config:** the live `notify` node's raw config
+had `target_by_module` and a top-level `mention_id` — two real fields
+`h_notify` (`interpreter/registry.py`) has always read, neither of
+which `NotifyForm` exposed (only `target_by_type`/`fallback_target`
+had pickers). `target_by_module` is exactly the same shape as the
+already-built `target_by_type` section, just keyed by `Module__c`
+instead of `Case.Type` (real values already sitting in
+`meta.modules`), and `mention_id` is the same kind of SF User/Queue id
+as everything else `SfMentionPicker` already covers. Added both — live
+data confirmed the module override renders all 7 real `Module__c`
+values, and the Chatter @mention correctly resolved the live flow's
+saved `mention_id` to "Gundam Vishnu."
+
+**Verify:** every node type in the live flow clicked (10 types + an
+edge), zero browser console errors across the full walkthrough, before
+and after all four fixes. Full offline suite 550/550 (the new offline
+regression test). Both live `@pytest.mark.integration` Slack/Salesforce
+meta tests pass. Frontend `tsc -b` / `vitest run` (6/6) / `vite build`
+all clean. Docker `api` rebuilt and re-verified live after the fix
+(the fix lives in `api/main.py`, served by the Docker container, not
+the Vite dev server used for the click-through itself).
+
+### Robustness pass, part 1 — the `available()` bug was in every SF write/read, not just introspection (2026-09-03)
+
+Track 2 of the three the user selected (browser click-through — done
+above; robustness pass — this and the next entry; onboarding UX
+walkthrough — not started). Spawned a forked agent to survey
+`interpreter/registry.py`'s node handlers and the connector modules for
+real error-handling gaps (not theoretical ones). Its top finding —
+`update_case_fields`'s Salesforce write had no guard against a
+transient failure and would `raise`, killing the whole case run — led
+to checking every other function in `salesforce.py` for the same
+`available()` gate, since `update_case_fields` also had it. That
+turned into the real, much bigger finding.
+
+**The bug**: `available()` only ever checks *env* vars
+(`SF_USERNAME`/`SF_CONSUMER_KEY`/...). `org_metadata` was already fixed
+two chunks ago for gating on it before `client_for` got a chance to
+resolve a tenant's own connected org. **The same `if not available():`
+gate turned out to be sitting in front of 12 more functions** —
+`latest_inbound_email`, `agent_response_since`, `identify_sender`,
+`update_case_fields`, `post_chatter`, `add_case_comment`,
+`find_case_by_thread`, `log_email_message`, `user_email`,
+`assign_case`, `ensure_case`, `send_case_reply` — meaning **every
+Salesforce read and write** (not just the dropdown-metadata reads fixed
+before) silently dry-ran forever for any self-serve tenant with their
+own connected org and zero env creds. This is the core self-serve
+product story from the start of this session ("if the user creates the
+workspace we need to collect these details") — quietly broken for
+every write the whole time, only invisible because this dev box's
+`.env` happens to carry real SF creds, so `available()` was always
+`True` here regardless of which tenant a call was for. `get_case`
+(no `tenant_id` param — genuinely env-only by design, used by the CDC
+subscriber/worker hydration) and `pubsub_auth` (platform-wide Pub/Sub
+auth) keep their `available()` gates; those are correct.
+
+**Fix**: new `_try_client(tenant_id, org_label)` — `client_for(...)`,
+or `None` when neither the tenant's own org nor the env fallback
+resolves (catches `_build_client`'s `KeyError` on a bare `{}` creds
+dict). Every one of the 12 functions now calls `_try_client` first and
+branches on `is None`, instead of gating on `available()` before ever
+trying. Also fixes the fork's original finding along the way:
+`update_case_fields` used to `raise` on any non-field-error (rate
+limit, 5xx, timeout, expired session) — the one write path in the
+module that didn't match every sibling's "best-effort, never raises"
+docstring — now logs + returns `{"error": ...}` like the others. Its
+`append`-mode `sf.Case.get(case_id)` read gained the same treatment (a
+transient failure there no longer blocks the field write).
+
+**Verify:** 11 new tests in `tests/test_salesforce_multi_org.py`
+(`_try_client` resolving/failing correctly; a parametrized check that
+6 of the 12 functions no longer return the dry-run shape once
+`client_for` resolves a fake tenant client; `update_case_fields`
+writing for real *and* degrading instead of raising on a simulated
+`REQUEST_LIMIT_EXCEEDED`; `ensure_case`'s `dry_run` flag tracking the
+real client, not `available()`). Full offline suite 561/561. **Live-verified against the real `acme-dev`
+Salesforce connection**: `salesforce.available = lambda: False` (forcing
+the exact lie the old code effectively told itself for every self-serve
+tenant), then called `identify_sender` for tenant
+`00000000-0000-0000-0000-000000000000` — correctly resolved the real
+Contact/Account (`Gundam Vishnu` / `Gundam Vishnu (Gmail)`) instead of
+returning `{"reason": "salesforce not configured"}`.
+
+**Bonus catch, unrelated to the above but found while re-running this
+PR's CI**: the `integration` job failed 5 tests with `postgrest.
+exceptions.APIError: ... there is no unique or exclusion constraint
+matching the ON CONFLICT specification (42P10)` — `interpreter/
+mailbox.py::save_channel`'s upsert still named `on_conflict="tenant_id,
+kind"`, the *old* `tenant_integrations` primary key from before
+migration `082` (two chunks ago, multi-org Salesforce) widened it to
+`(tenant_id, kind, org_label)`. Postgres rejects an `ON CONFLICT` column
+list that doesn't exactly match a real constraint, so every email-
+channel connect/save had been silently broken since `082` shipped —
+missed because no test exercises `save_channel` against live Postgres
+in the offline suite, and this box's local testing that session didn't
+happen to touch the email channel. Fixed: `on_conflict="tenant_id,kind,
+org_label"` + `org_label: "default"` in the row (email channels don't
+vary it, same "one per tenant by convention" note `082`'s own comment
+already made — this just makes the upsert's conflict target match the
+constraint that comment assumed). The `google`/`slack` OAuth-callback
+upserts in `api/main.py` were checked too — they don't pass
+`on_conflict` at all, so they already use the *real* primary key
+implicitly and were never broken. Verified: the 5 previously-failing
+tests (`test_email_channel_configure_status_and_disconnect`,
+`test_tick_finds_an_active_channel_and_records_a_fetch_error`,
+`test_post_run_against_a_real_channel_dry_runs_the_send`, plus 2 more)
+now pass live. The other 2 CI failures on this run
+(`test_seeded_flow_routes_as_designed` / `test_same_case_diverges_
+across_tenants`) are the already-documented shared-LLM-quota flakiness
+below, not a regression. A re-run also showed
+`test_kb_entry_roundtrip_embeds_and_scopes` failing (`hybrid_retrieve`
+not finding the expected chunk) — passed cleanly in isolation locally
+right after, so timing/embedding-variance flake, not a regression from
+this chunk either (nothing here touches retrieval).
+
+### Robustness pass, part 2 — job retry had zero backoff, and a permanently-failed job was invisible (2026-09-03)
+
+The fork's original survey (part 1, above) flagged this as its #2
+finding, alongside the `available()` bug that turned out to be the
+bigger story. Two separate gaps in `interpreter/jobs.py`/`api/worker.py`:
+
+**No backoff on retry.** `jobs.fail()` set a retried job straight back
+to `status="queued"` without ever touching `run_after`, so it kept
+whatever (already-past) value it had — `claim_job()` could pick it
+right back up on the very next poll. A transient outage (a rate limit,
+a brief Salesforce blip — exactly what part 1 just made `update_case_
+fields` degrade from instead of crashing) got hit 2-3 times back to
+back with zero delay, worsening the very failure it was retrying from.
+Fixed: `fail()` now sets `run_after` to `now() + min(30s * 2^(attempts-1),
+15min)` on every retry that isn't the last one.
+
+**A `status='failed'` job was invisible.** Once `attempts >=
+max_attempts`, a job flips to `'failed'` and nothing anywhere —  no
+sweep, no health check, no Slack alert — ever looks at that status
+again. A real case that failed 3x (plausibly *because* of the
+`available()` bug in part 1) would rot in the `jobs` table forever with
+no one notified. Fixed: new `sweeps.failed_jobs_sweep` (every 10 min,
+following the exact `queue_sweep`/`_page()`/`SWEEP_DRY_RUN` pattern
+already established) pages once per newly-failed job, windowed by
+`updated_at` so the same job isn't re-paged every tick without needing
+a new "already alerted" column. Registered in `api/worker.py`'s
+`_SWEEP_EVERY_MIN`/`HANDLERS` alongside the other periodic sweeps —
+no new pattern invented.
+
+**Verify:** new `tests/test_jobs.py` (5 tests — backoff grows with
+attempts, is capped, is skipped once attempts are exhausted) +
+3 new tests in `tests/test_sweeps.py` (pages once per failed job,
+dry-run pages nothing, a query failure degrades cleanly). Full offline
+suite 569/569. Live-verified `failed_jobs_sweep` against the real
+`jobs` table (dry-run, 0 failed jobs currently — clean query, no
+schema mismatch).
+
+### Robustness pass, part 3 — the `available()` bug reached beyond `salesforce.py`, plus a real cross-tenant cache leak (2026-09-03)
+
+While designing the multi-tenant concurrency stress test the user's
+third selected track asked for, a broader grep for `salesforce.
+available()` across the whole codebase (part 1 only checked
+`salesforce.py` itself) turned up the same bug in 5 more call sites
+still in the live case-processing path: `routing.py`'s
+`queue_member`/`_sf_team_member`/`_sf_queue_id` (resolve a Case's
+notify/handover target), `sf_context.py::load` (the `sf_context` node,
+runs on most flows), `attachments.py::_sf_case_files`, plus 3 redundant
+`available()` gates in `agent_reply.py` and `api/worker.py` sitting in
+front of functions part 1 had *already* fixed internally — the outer
+gate still skipped them entirely for a self-serve tenant. All now use
+`salesforce._try_client` (routing/sf_context/attachments) or just
+dropped the redundant outer check (agent_reply/worker, since the inner
+call already resolves the right tenant). `worker.py::_case_owned_by_user`
+had its own direct unguarded `client_for` call, fixed the same way.
+
+**A second, distinct bug found in the same sweep, this one a real
+cross-tenant leak, not just a self-serve dry-run gap**:
+`salesforce.py::_intake_queue_id` cached the `AI_Intake` queue's Group
+id keyed **only by the queue's constant name** — a single global slot,
+not per tenant. `routing.py::queue_member`'s cache had the same shape
+(`queue_ref` + `org_label`, no `tenant_id`). Since
+`scripts/sf_support_setup.py` has every tenant provision identically-
+named queues, the **second** tenant to create a Case or resolve a
+notify target would silently get the **first** tenant's cached
+(wrong-org) Group id — real cross-tenant Case-ownership risk once two
+tenants are on genuinely separate Salesforce orgs. Today's two demo
+tenants (Acme/Globex) happen to resolve to the exact same underlying
+org (confirmed live: `AI_Intake`'s Group id is identical for both),
+which is exactly why this stayed invisible — it only became visible by
+reading the code with "would this actually work for two *real*,
+*different* customer orgs" in mind, the question a concurrency stress
+test exists to force. Fixed: both caches now key on
+`(tenant_id, org_label)`.
+
+**Verify:** new `tests/test_routing_tenant_scoping.py` (5 tests) —
+directly proves the fix for the cross-tenant scenario: two fake tenant
+clients with different queue members behind the *same* `queue_ref`,
+asserting tenant B's `queue_member()` call returns tenant B's real
+member, not tenant A's cached one (and the equivalent for
+`_intake_queue_id`). Full offline suite 574/574, zero regressions
+despite touching 5 files. Re-ran this PR's CI: the mailbox fix's 5
+tests stayed green; the 2 documented shared-LLM-quota-flaky
+`test_multiflow` tests plus (newly, this run) `test_kb_entry_
+roundtrip_embeds_and_scopes` failed on CI but passed cleanly in
+isolation locally right after — consistent with the same shared-quota
+root cause (reranking/embedding also draws on the shared provider
+pool), not a regression from this chunk (nothing here touches
+retrieval).
 
 ### Scoped, not built: per-tenant case-taxonomy config
 

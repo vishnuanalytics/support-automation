@@ -265,13 +265,18 @@ def save_channel(tenant_id: str, sb, cfg: "MailboxConfig", *,
             "p_tenant": tenant_id, "p_kind": KIND, "p_plaintext": plaintext_secret,
         }).execute().data
     row = {
-        "tenant_id": tenant_id, "kind": KIND, "secret": {},
+        "tenant_id": tenant_id, "kind": KIND, "org_label": "default", "secret": {},
         "config": cfg.to_config(), "status": cfg.status,
         "updated_by": updated_by, "updated_at": _now_iso(),
     }
     if vault_id:
         row["vault_secret_id"] = vault_id
-    sb.table("tenant_integrations").upsert(row, on_conflict="tenant_id,kind").execute()
+    # migration 082 widened tenant_integrations' primary key to
+    # (tenant_id, kind, org_label) for multi-org Salesforce; email channels
+    # don't vary org_label (always 'default') but the ON CONFLICT target
+    # must name the real constraint or Postgres rejects it outright
+    # (42P10) -- this broke every email-channel save until caught by CI.
+    sb.table("tenant_integrations").upsert(row, on_conflict="tenant_id,kind,org_label").execute()
 
 
 def delete_channel(tenant_id: str, sb) -> None:

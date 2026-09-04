@@ -44,7 +44,7 @@ def _lexical(draft: str, chunks: list[dict[str, Any]]) -> dict[str, Any]:
     return {"score": score, "backend": "lexical", "unsupported": unsupported[:15]}
 
 
-def _judge(draft: str, chunks: list[dict[str, Any]]) -> dict[str, Any]:
+def _judge(draft: str, chunks: list[dict[str, Any]], tenant_id: str | None = None) -> dict[str, Any]:
     # cap each chunk / the total — a lone 27k-char chunk otherwise blows the
     # judge model's per-request token limit (mirrors registry._context_block).
     used = 0
@@ -69,6 +69,7 @@ def _judge(draft: str, chunks: list[dict[str, Any]]) -> dict[str, Any]:
         model=llm.FAST_MODEL,
         json_object=True,
         max_tokens=400,
+        tenant_id=tenant_id,
     )
     try:
         p = json.loads(raw)
@@ -80,7 +81,8 @@ def _judge(draft: str, chunks: list[dict[str, Any]]) -> dict[str, Any]:
         return _lexical(draft, chunks)
 
 
-def check(draft: str, chunks: list[dict[str, Any]]) -> dict[str, Any]:
+def check(draft: str, chunks: list[dict[str, Any]], tenant_id: str | None = None) -> dict[str, Any]:
     if not draft or not chunks:
         return {"score": 0.0, "backend": "none", "unsupported": []}
-    return _judge(draft, chunks) if llm.available() else _lexical(draft, chunks)
+    return (_judge(draft, chunks, tenant_id=tenant_id) if llm.available(tenant_id=tenant_id)
+            else _lexical(draft, chunks))

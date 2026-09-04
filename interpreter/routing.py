@@ -72,10 +72,12 @@ def _sf_team_member(team: str | None, tenant_id: str | None,
     Two hops — SOQL forbids a nested semi-join sub-select, so resolve the
     queue's Group id first, then the User that is a member of it.
     """
-    if not (team and salesforce.available()):
+    if not team:
+        return None, None
+    sf = salesforce._try_client(tenant_id, org_label)
+    if sf is None:
         return None, None
     try:
-        sf = salesforce.client_for(tenant_id, org_label)
         dev = salesforce._soql_lit(f"Team_{team}")
         grp = sf.query(
             f"SELECT Id FROM Group WHERE Type = 'Queue' AND DeveloperName = '{dev}' LIMIT 1"
@@ -99,14 +101,21 @@ def queue_member(queue_ref: str | None, tenant_id: str | None = None,
     """(user_id, name) of an active member of the queue — Chatter can't
     @mention a Queue group, so `notify` / `clarify` mention a person in it.
     `queue_ref` = a Queue DeveloperName / Name / Id. Cached; best-effort."""
-    if not queue_ref or not salesforce.available():
+    if not queue_ref:
         return None, None
-    ck = f"qm:{queue_ref}:{org_label or 'default'}"
+    # keyed by tenant too -- two tenants' queues can share a DeveloperName
+    # (scripts/sf_support_setup.py provisions the same names for every
+    # tenant), so the cache must not let tenant B's request resolve to
+    # tenant A's cached member id (found in a 2026-09-03 robustness pass,
+    # same bug class as salesforce.py's _intake_queue_id).
+    ck = f"qm:{tenant_id or '_env'}:{queue_ref}:{org_label or 'default'}"
     hit = _cache_get(ck)
     if hit is not None:
         return hit
+    sf = salesforce._try_client(tenant_id, org_label)
+    if sf is None:
+        return None, None
     try:
-        sf = salesforce.client_for(tenant_id, org_label)
         gid = queue_ref
         if not (len(queue_ref) in (15, 18) and queue_ref[:3] in ("00G",)):
             q = salesforce._soql_lit(queue_ref)
@@ -131,10 +140,12 @@ def queue_member(queue_ref: str | None, tenant_id: str | None = None,
 
 def _sf_queue_id(name: str | None, tenant_id: str | None,
                  org_label: str | None = None) -> str | None:
-    if not (name and salesforce.available()):
+    if not name:
+        return None
+    sf = salesforce._try_client(tenant_id, org_label)
+    if sf is None:
         return None
     try:
-        sf = salesforce.client_for(tenant_id, org_label)
         q = salesforce._soql_lit(name)
         rows = sf.query(
             "SELECT Id FROM Group WHERE Type = 'Queue' AND "

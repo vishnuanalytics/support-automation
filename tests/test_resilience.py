@@ -135,7 +135,7 @@ def _anthropic_text_resp(text="final answer"):
 def test_complete_with_tools_groq_parses_a_tool_call(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "x")
     captured: list[dict] = []
-    monkeypatch.setattr(llm, "_groq", lambda: _fake_groq_client(_groq_tool_call_resp(), captured))
+    monkeypatch.setattr(llm, "_groq", lambda *a, **k: _fake_groq_client(_groq_tool_call_resp(), captured))
     res = llm.complete_with_tools(
         [{"role": "user", "content": "look up x"}], tools=_TOOLS, model="openai/gpt-oss-120b")
     assert res.stop_reason == "tool_use"
@@ -153,7 +153,7 @@ def test_complete_with_tools_groq_parses_final_text(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "x")
     captured: list[dict] = []
     monkeypatch.setattr(llm, "_groq",
-                        lambda: _fake_groq_client(_groq_text_resp("the answer is 42"), captured))
+                        lambda *a, **k: _fake_groq_client(_groq_text_resp("the answer is 42"), captured))
     res = llm.complete_with_tools([{"role": "user", "content": "what is it"}], tools=_TOOLS,
                                   model="openai/gpt-oss-120b")
     assert res.stop_reason == "stop"
@@ -164,7 +164,7 @@ def test_complete_with_tools_groq_parses_final_text(monkeypatch):
 def test_complete_with_tools_groq_multiturn_wire_shape(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "x")
     captured: list[dict] = []
-    monkeypatch.setattr(llm, "_groq", lambda: _fake_groq_client(_groq_text_resp("done"), captured))
+    monkeypatch.setattr(llm, "_groq", lambda *a, **k: _fake_groq_client(_groq_text_resp("done"), captured))
     messages = [
         {"role": "user", "content": "look up x"},
         {"role": "assistant", "content": None,
@@ -181,7 +181,7 @@ def test_complete_with_tools_anthropic_parses_a_tool_call(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
     captured: list[dict] = []
     monkeypatch.setattr(llm, "_anthropic",
-                        lambda: _fake_anthropic_client(_anthropic_tool_use_resp(), captured))
+                        lambda *a, **k: _fake_anthropic_client(_anthropic_tool_use_resp(), captured))
     res = llm.complete_with_tools([{"role": "user", "content": "look up x"}], tools=_TOOLS,
                                   model="claude-sonnet-5")
     assert res.stop_reason == "tool_use"
@@ -194,7 +194,7 @@ def test_complete_with_tools_anthropic_parses_final_text(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
     captured: list[dict] = []
     monkeypatch.setattr(llm, "_anthropic",
-                        lambda: _fake_anthropic_client(_anthropic_text_resp("42 is the answer"), captured))
+                        lambda *a, **k: _fake_anthropic_client(_anthropic_text_resp("42 is the answer"), captured))
     res = llm.complete_with_tools([{"role": "user", "content": "what"}], tools=_TOOLS,
                                   model="claude-sonnet-5")
     assert res.stop_reason == "stop"
@@ -205,7 +205,7 @@ def test_complete_with_tools_anthropic_multiturn_wire_shape(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
     captured: list[dict] = []
     monkeypatch.setattr(llm, "_anthropic",
-                        lambda: _fake_anthropic_client(_anthropic_text_resp("done"), captured))
+                        lambda *a, **k: _fake_anthropic_client(_anthropic_text_resp("done"), captured))
     messages = [
         {"role": "user", "content": "look up x"},
         {"role": "assistant", "content": None,

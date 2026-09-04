@@ -82,7 +82,7 @@ def _cap_contexts(contexts: list[dict[str, Any]], *, budget: int = 7000) -> str:
 
 
 def _judge_groq(statement: str, contexts: list[dict[str, Any]],
-                *, model: str | None) -> dict[str, Any]:
+                *, model: str | None, tenant_id: str | None = None) -> dict[str, Any]:
     raw = llm.complete(
         system=(
             "You are a fact-consistency checker for a support knowledge base. "
@@ -98,6 +98,7 @@ def _judge_groq(statement: str, contexts: list[dict[str, Any]],
         model=model or llm.FAST_MODEL,
         json_object=True,
         max_tokens=500,
+        tenant_id=tenant_id,
     )
     try:
         claims = json.loads(raw).get("claims", [])
@@ -142,7 +143,8 @@ def _summarize(verdicts: list[dict[str, Any]], *, backend: str) -> dict[str, Any
 
 
 def check(statement: str, contexts: list[dict[str, Any]] | None = None,
-          *, kind: str = "draft", model: str | None = None) -> dict[str, Any]:
+          *, kind: str = "draft", model: str | None = None,
+          tenant_id: str | None = None) -> dict[str, Any]:
     """See module docstring. `kind` ∈ {draft, inbound, human_reply} — only
     affects `novel` (a still-unsupported factual claim matters on a human reply
     or a bot draft, less so on inbound customer text)."""
@@ -150,7 +152,7 @@ def check(statement: str, contexts: list[dict[str, Any]] | None = None,
              "verdicts": [], "salient": [], "backend": "none"}
     if not (statement or "").strip() or not contexts:
         return empty
-    res = (_judge_groq(statement, contexts, model=model) if llm.available()
+    res = (_judge_groq(statement, contexts, model=model, tenant_id=tenant_id) if llm.available(tenant_id=tenant_id)
            else _judge_heuristic(statement, contexts))
     res["flagged"] = res["relation"] == "contradicts"
     res["novel"] = (kind in ("draft", "human_reply")

@@ -274,3 +274,64 @@ def test_queue_sweep_dead_letters_escalated_but_unrouted(monkeypatch):
     out = sweeps.queue_sweep(sf, dry_run=False)
     assert out["breached"] == ["0011"]
     assert any(k["queue"] == "Unrouted_Review" for _c, k in sf.assigns)
+
+
+# ── failed_jobs_sweep (robustness pass, 2026-09-03) ──────────────────────
+class _JobsSB:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def table(self, name):
+        return self
+
+    def select(self, *a):
+        return self
+
+    def eq(self, *a):
+        return self
+
+    def gte(self, *a):
+        return self
+
+    def order(self, *a):
+        return self
+
+    def limit(self, *a):
+        return self
+
+    def execute(self):
+        return type("R", (), {"data": self.rows})()
+
+
+def test_failed_jobs_sweep_pages_once_per_failed_job(monkeypatch):
+    paged = []
+    monkeypatch.setattr(sweeps, "_page", lambda text, **k: paged.append(text))
+    sb = _JobsSB([
+        {"job_id": "j1", "kind": "run_flow", "error": "REQUEST_LIMIT_EXCEEDED",
+         "attempts": 3, "updated_at": "2026-09-03T00:00:00Z"},
+        {"job_id": "j2", "kind": "embed_kb_entry", "error": "timeout",
+         "attempts": 3, "updated_at": "2026-09-03T00:01:00Z"},
+    ])
+    out = sweeps.failed_jobs_sweep(sb, dry_run=False)
+    assert out["failed"] == 2
+    assert len(paged) == 2
+    assert "run_flow" in paged[0] and "j1" in paged[0]
+
+
+def test_failed_jobs_sweep_dry_run_pages_nothing(monkeypatch):
+    paged = []
+    monkeypatch.setattr(sweeps, "_page", lambda text, **k: paged.append(text))
+    sb = _JobsSB([{"job_id": "j1", "kind": "run_flow", "error": "boom",
+                  "attempts": 3, "updated_at": "2026-09-03T00:00:00Z"}])
+    out = sweeps.failed_jobs_sweep(sb, dry_run=True)
+    assert out["dry_run"] is True
+    assert paged == []
+
+
+def test_failed_jobs_sweep_query_failure_is_a_clean_skip(monkeypatch):
+    class _Broken(_JobsSB):
+        def execute(self):
+            raise RuntimeError("db down")
+
+    out = sweeps.failed_jobs_sweep(_Broken([]), dry_run=False)
+    assert "error" in out

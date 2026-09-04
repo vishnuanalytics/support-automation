@@ -16,8 +16,10 @@ import { ConnectionsView } from "./channels/ConnectionsView";
 import { FlowGuideView } from "./guide/FlowGuideView";
 import { BillingView } from "./billing/BillingView";
 import { ActivityView } from "./activity/ActivityView";
+import { OnboardingWizard } from "./onboarding/OnboardingWizard";
 
 type View =
+  | "setup"
   | "editor"
   | "runs"
   | "review"
@@ -33,6 +35,39 @@ type View =
 
 type TenantMembership = { tenant_id: string; role: string; name?: string | null };
 
+const NAV_GROUPS: { key: string; label: string; items: { view: View; label: string; ownerOnly?: boolean }[] }[] = [
+  {
+    key: "build",
+    label: "Build",
+    items: [
+      { view: "editor", label: "Editor" },
+      { view: "runs", label: "Runs" },
+      { view: "activity", label: "Activity" },
+      { view: "review", label: "Approvals" },
+      { view: "trace", label: "Trace" },
+    ],
+  },
+  {
+    key: "knowledge",
+    label: "Knowledge",
+    items: [
+      { view: "knowledge", label: "Knowledge" },
+      { view: "rules", label: "Rules" },
+      { view: "guide", label: "Guide" },
+    ],
+  },
+  {
+    key: "admin",
+    label: "Admin",
+    items: [
+      { view: "team", label: "Team", ownerOnly: true },
+      { view: "channels", label: "Channels", ownerOnly: true },
+      { view: "connections", label: "Connections", ownerOnly: true },
+      { view: "billing", label: "Billing", ownerOnly: true },
+    ],
+  },
+];
+
 function tenantLabel(t: TenantMembership): string {
   return t.name || `workspace ${t.tenant_id.slice(0, 8)}`;
 }
@@ -44,6 +79,30 @@ export function App() {
   const [flowId, setFlowId] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [view, setView] = useState<View>("editor");
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({
+    build: true,
+    knowledge: true,
+    admin: false,
+  });
+
+  useEffect(() => {
+    const owning = NAV_GROUPS.find((g) => g.items.some((i) => i.view === view));
+    if (owning) setOpenGroups((prev) => (prev[owning.key] ? prev : { ...prev, [owning.key]: true }));
+  }, [view]);
+
+  // land a brand-new (or not-yet-dismissed) tenant on the setup wizard once,
+  // the first time we know which tenant is active — never fights later nav.
+  const [setupCheckedFor, setSetupCheckedFor] = useState<string | null>(null);
+  useEffect(() => {
+    if (!tenantId || setupCheckedFor === tenantId) return;
+    setSetupCheckedFor(tenantId);
+    if (!localStorage.getItem(`onboarding-dismissed:${tenantId}`)) setView("setup");
+  }, [tenantId, setupCheckedFor]);
+
+  function dismissOnboarding() {
+    if (tenantId) localStorage.setItem(`onboarding-dismissed:${tenantId}`, "1");
+    setView("editor");
+  }
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
@@ -151,75 +210,65 @@ export function App() {
   return (
     <div className="shell">
       <div className="sidebar col">
-        <div className="row" style={{ justifyContent: "space-between" }}>
-          <div className="row" style={{ gap: 4 }}>
-            <button className={view === "editor" ? "primary" : ""} onClick={() => setView("editor")}>
-              Editor
-            </button>
-            <button className={view === "runs" ? "primary" : ""} onClick={() => setView("runs")}>
-              Runs
-            </button>
-            <button className={view === "activity" ? "primary" : ""} onClick={() => setView("activity")}>
-              Activity
-            </button>
-            <button className={view === "review" ? "primary" : ""} onClick={() => setView("review")}>
-              Approvals
-            </button>
-            <button className={view === "trace" ? "primary" : ""} onClick={() => setView("trace")}>
-              Trace
-            </button>
-            <button className={view === "knowledge" ? "primary" : ""} onClick={() => setView("knowledge")}>
-              Knowledge
-            </button>
-            <button className={view === "rules" ? "primary" : ""} onClick={() => setView("rules")}>
-              Rules
-            </button>
-            <button className={view === "guide" ? "primary" : ""} onClick={() => setView("guide")}>
-              Guide
-            </button>
-            {isOwner && (
-              <button className={view === "team" ? "primary" : ""} onClick={() => setView("team")}>
-                Team
-              </button>
-            )}
-            {isOwner && (
-              <button className={view === "channels" ? "primary" : ""} onClick={() => setView("channels")}>
-                Channels
-              </button>
-            )}
-            {isOwner && (
-              <button className={view === "connections" ? "primary" : ""} onClick={() => setView("connections")}>
-                Connections
-              </button>
-            )}
-            {isOwner && (
-              <button className={view === "billing" ? "primary" : ""} onClick={() => setView("billing")}>
-                Billing
-              </button>
-            )}
-          </div>
-          <div className="row" style={{ gap: 6 }}>
-            {tenants.length > 1 && (
-              <select
-                value={tenantId}
-                onChange={(e) => chooseTenant(e.target.value)}
-                title="switch workspace"
-              >
-                {tenants.map((t) => (
-                  <option key={t.tenant_id} value={t.tenant_id}>
-                    {tenantLabel(t)}
-                  </option>
-                ))}
-              </select>
-            )}
-            {role && !canEdit && (
-              <span className="pill" title="your access is view-only">view-only</span>
-            )}
-            <button onClick={() => supabase.auth.signOut()} title={session.user.email ?? ""}>
-              sign out
-            </button>
-          </div>
+        <div className="row" style={{ justifyContent: "space-between", flexWrap: "wrap" }}>
+          {tenants.length > 1 && (
+            <select
+              value={tenantId}
+              onChange={(e) => chooseTenant(e.target.value)}
+              title="switch workspace"
+            >
+              {tenants.map((t) => (
+                <option key={t.tenant_id} value={t.tenant_id}>
+                  {tenantLabel(t)}
+                </option>
+              ))}
+            </select>
+          )}
+          {role && !canEdit && (
+            <span className="pill" title="your access is view-only">view-only</span>
+          )}
+          <button onClick={() => supabase.auth.signOut()} title={session.user.email ?? ""}>
+            sign out
+          </button>
         </div>
+        <nav className="nav-list col">
+          <button
+            className={"nav-item" + (view === "setup" ? " active" : "")}
+            style={{ fontWeight: 600 }}
+            onClick={() => setView("setup")}
+          >
+            ⚙ Setup
+          </button>
+          {NAV_GROUPS.map((g) => {
+            const items = g.items.filter((i) => !i.ownerOnly || isOwner);
+            if (items.length === 0) return null;
+            const open = openGroups[g.key];
+            return (
+              <div key={g.key} className="nav-group">
+                <button
+                  className="nav-group-header"
+                  onClick={() => setOpenGroups((prev) => ({ ...prev, [g.key]: !prev[g.key] }))}
+                  aria-expanded={open}
+                >
+                  <span className="nav-caret">{open ? "▾" : "▸"}</span> {g.label}
+                </button>
+                {open && (
+                  <div className="nav-group-items col">
+                    {items.map((i) => (
+                      <button
+                        key={i.view}
+                        className={"nav-item" + (view === i.view ? " active" : "")}
+                        onClick={() => setView(i.view)}
+                      >
+                        {i.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </nav>
         {view === "editor" && (
           <FlowList
             key={reloadKey}
@@ -262,7 +311,19 @@ export function App() {
         )}
       </div>
       <div className={view === "editor" && flowId ? "editor" : "pane"}>
-        {view === "billing" ? (
+        {view === "setup" ? (
+          <OnboardingWizard
+            key={tenantId}
+            tenantId={tenantId}
+            isOwner={isOwner}
+            onNavigate={(v) => setView(v)}
+            onFlowCreated={(id) => {
+              setReloadKey((k) => k + 1);
+              setFlowId(id);
+            }}
+            onDismiss={dismissOnboarding}
+          />
+        ) : view === "billing" ? (
           <BillingView key={tenantId} tenantId={tenantId} />
         ) : view === "connections" ? (
           <ConnectionsView key={tenantId} tenantId={tenantId} />

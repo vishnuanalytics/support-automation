@@ -490,7 +490,7 @@ def test_llm_recovers_from_groq_json_validate_failed(monkeypatch):
 
     calls = {"n": 0}
 
-    def fake_call(model, system, user, max_tokens, temperature, *, response_format):
+    def fake_call(model, system, user, max_tokens, temperature, *, response_format, **kw):
         calls["n"] += 1
         if response_format:
             raise _BadRequestError({"error": {
@@ -699,7 +699,7 @@ def test_agent_reformulates_and_retries_when_first_pass_is_ungrounded(monkeypatc
     def fake_complete(system, user, **kw):
         return '{"reply": "widgets need a firmware update", "confidence": 0.9}'
 
-    def fake_tools(messages, *, system, tools, model=None, max_tokens=1024, temperature=0.2):
+    def fake_tools(messages, *, system, tools, model=None, max_tokens=1024, temperature=0.2, **kw):
         ToolCall, ToolResult = _registry.llm.ToolCall, _registry.llm.ToolResult
         return ToolResult(text=None, stop_reason="tool_use", tool_calls=[
             ToolCall(id="1", name="search_kb", arguments={"query": "firmware update guide"})
@@ -734,7 +734,7 @@ def test_agent_stops_at_max_iterations_even_if_the_model_never_gives_up(monkeypa
     def fake_complete(system, user, **kw):
         return '{"reply": "widgets need a firmware update", "confidence": 0.9}'
 
-    def fake_tools(messages, *, system, tools, model=None, max_tokens=1024, temperature=0.2):
+    def fake_tools(messages, *, system, tools, model=None, max_tokens=1024, temperature=0.2, **kw):
         n["tools"] += 1
         ToolCall, ToolResult = _registry.llm.ToolCall, _registry.llm.ToolResult
         return ToolResult(text=None, stop_reason="tool_use", tool_calls=[

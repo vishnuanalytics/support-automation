@@ -57,7 +57,7 @@ class _SB:
 
 @pytest.fixture(autouse=True)
 def _stub(monkeypatch):
-    monkeypatch.setattr(llm, "available", lambda: False)
+    monkeypatch.setattr(llm, "available", lambda *a, **k: False)
     monkeypatch.setattr(hw, "_context_for", lambda *a, **k: _CTX)
     monkeypatch.setattr(hw, "_target", lambda *a, **k: ("#cx-tier2", "t.1"))
     monkeypatch.setattr(hw, "_missed_pointers", lambda *a, **k: [])

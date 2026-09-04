@@ -13,6 +13,19 @@ without touching flows, set in `.env`:
 `complete()` works with **no** key for the chosen provider: it returns a
 deterministic stub (`"_stub": true` in JSON) so the graph runs offline in
 CI / eval / demos. The stub is heuristic, not smart.
+
+BYOK (chunk 3 of the 2026-09-04 onboarding/robustness work) — every call
+site now threads an optional `tenant_id` through to `complete()` /
+`complete_with_tools()` / `available()`. When a tenant has pasted their own
+key for a provider (`tenant_integrations`, kind='llm', saved via
+`/api/integrations/llm`), that key is used instead of this process's own
+`GROQ_API_KEY` / `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY` env vars for
+calls routed to that provider — the platform's own keys stay the fallback
+for every tenant that hasn't set one. Per-key client caching (keyed by the
+resolved API key string, mirroring `salesforce.py`'s `client_for` pattern
+from the robustness pass) keeps this safe under concurrent multi-tenant
+requests: a race can only build a redundant client, never hand one
+tenant's request a different tenant's key.
 """
 
 from __future__ import annotations
@@ -21,6 +34,7 @@ import json
 import logging
 import os
 import re
+import time as _time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -69,12 +83,10 @@ VISION_MODELS = [m.strip() for m in os.environ.get(
 ).split(",") if m.strip()]
 VISION_PAID = os.environ.get("LLM_VISION_PAID", "claude-haiku-4-5").strip()
 
-_groq_client = None
-_anthropic_client = None
-
 _PROVIDER_KEY = {"groq": "GROQ_API_KEY", "anthropic": "ANTHROPIC_API_KEY",
                  "openrouter": "OPENROUTER_API_KEY"}
-
+_PROVIDER_SECRET_FIELD = {"groq": "groq_api_key", "anthropic": "anthropic_api_key",
+                          "openrouter": "openrouter_api_key"}
 
 # allow an out-of-roster fallback id (a new OpenRouter free model) without a code change
 if FALLBACK_MODEL not in MODELS:
@@ -86,6 +98,47 @@ def provider(model: str) -> str:
         return MODELS[model]
     # unknown id: an ":free" / vendor-slash id is OpenRouter, else Groq
     return "openrouter" if (":" in model or model.count("/") == 1) else "groq"
+
+
+# tenant_id -> {provider: api_key}, 5 min TTL (same pattern/window as
+# api/main.py's _SF_META_CACHE / _SLACK_META_CACHE — this is read on every
+# complete() call, so a per-request DB round trip would be real overhead).
+_tenant_keys_cache: dict[str, tuple[float, dict[str, str]]] = {}
+_TENANT_KEYS_TTL = 300
+
+
+def _tenant_keys(tenant_id: str | None) -> dict[str, str]:
+    """{provider: api_key} for this tenant's own pasted keys (`tenant_integrations`,
+    kind='llm'), via /api/integrations/llm. Empty — never an error — with no
+    tenant_id, no row, or any lookup failure; callers fall back to this
+    process's own env keys exactly as before BYOK existed."""
+    if not tenant_id:
+        return {}
+    now = _time.time()
+    hit = _tenant_keys_cache.get(tenant_id)
+    if hit and now - hit[0] < _TENANT_KEYS_TTL:
+        return hit[1]
+    keys: dict[str, str] = {}
+    try:
+        from ingestion.scraper import get_supabase
+        sb = get_supabase()
+        rows = (sb.table("tenant_integrations").select("secret")
+                .eq("tenant_id", tenant_id).eq("kind", "llm").execute().data or [])
+        secret = rows[0]["secret"] if rows else {}
+        for prov, field in _PROVIDER_SECRET_FIELD.items():
+            v = (secret or {}).get(field)
+            if v:
+                keys[prov] = v
+    except Exception as e:  # noqa: BLE001
+        log.warning("_tenant_keys(%s): %s", tenant_id, e)
+    _tenant_keys_cache[tenant_id] = (now, keys)
+    return keys
+
+
+def _resolve_key(prov: str, tenant_id: str | None) -> str:
+    """This tenant's own key for `prov` if they've set one, else the
+    platform's own env var for it (may be empty)."""
+    return _tenant_keys(tenant_id).get(prov) or os.environ.get(_PROVIDER_KEY[prov], "")
 
 
 def _roster(capability: str) -> tuple[list[str], list[str]]:
@@ -101,46 +154,48 @@ def _roster(capability: str) -> tuple[list[str], list[str]]:
     return free, premium
 
 
-def _dedup_available(*groups) -> list[str]:
+def _dedup_available(*groups, tenant_id: str | None = None) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
     for g in groups:
         for m in g:
-            if m and m not in seen and available(m):
+            if m and m not in seen and available(m, tenant_id=tenant_id):
                 seen.add(m)
                 out.append(m)
     return out
 
 
-def _fallback_chain(model: str) -> list[str]:
+def _fallback_chain(model: str, tenant_id: str | None = None) -> list[str]:
     """Models `complete()` tries, in order, before the stub: the chosen model,
     then today's free roster (Phase 26), then the env fallbacks, then the
-    roster's paid tail. Only providers with a key survive."""
+    roster's paid tail. Only providers with a key (tenant's own or the
+    platform's) survive."""
     free, premium = _roster("text")
     return _dedup_available(
-        [model], free, [FALLBACK_MODEL, DEFAULT_MODEL, FAST_MODEL], premium)
+        [model], free, [FALLBACK_MODEL, DEFAULT_MODEL, FAST_MODEL], premium,
+        tenant_id=tenant_id)
 
 
-def _vision_chain(model: str | None = None) -> list[str]:
+def _vision_chain(model: str | None = None, tenant_id: str | None = None) -> list[str]:
     """Models for a call with images — the chosen model (if vision-capable),
     today's free vision roster, the env `LLM_VISION_MODELS`, then the paid
     tail (roster premium, then `LLM_VISION_PAID`)."""
     free, premium = _roster("vision")
     head: list[str] = []
-    if model and model != VISION_PAID and available(model) \
+    if model and model != VISION_PAID and available(model, tenant_id=tenant_id) \
             and provider(model) in ("anthropic", "openrouter"):
         head = [model]
     for m in VISION_MODELS:
         MODELS.setdefault(m, "openrouter")
-    return _dedup_available(head, free, VISION_MODELS, premium, [VISION_PAID])
+    return _dedup_available(head, free, VISION_MODELS, premium, [VISION_PAID], tenant_id=tenant_id)
 
 
-def _video_chain(model: str | None = None) -> list[str]:
+def _video_chain(model: str | None = None, tenant_id: str | None = None) -> list[str]:
     """Models for a call that includes video (Phase 26). Usually thin — the
     caller falls back to local whisper+ffmpeg when this is empty."""
     free, premium = _roster("video")
-    head = [model] if (model and available(model)) else []
-    return _dedup_available(head, free, premium, [VISION_PAID])
+    head = [model] if (model and available(model, tenant_id=tenant_id)) else []
+    return _dedup_available(head, free, premium, [VISION_PAID], tenant_id=tenant_id)
 
 
 _RECOVERABLE = ("rate_limit", "ratelimit", "429", "timeout", "timed out",
@@ -155,35 +210,46 @@ def _is_recoverable(e: Exception) -> bool:
     return any(t in s for t in _RECOVERABLE)
 
 
-def available(model: str | None = None) -> bool:
-    """With `model`: is that model's provider configured? Without: is *any*
-    provider configured (i.e. will real calls happen anywhere)?"""
+def available(model: str | None = None, tenant_id: str | None = None) -> bool:
+    """With `model`: is that model's provider configured — this tenant's own
+    key, or (with no tenant_id, or the tenant hasn't set one) the platform's?
+    Without `model`: is *any* provider configured for this tenant/platform?"""
     if model is not None:
-        return bool(os.environ.get(_PROVIDER_KEY[provider(model)]))
-    return any(os.environ.get(k) for k in _PROVIDER_KEY.values())
+        return bool(_resolve_key(provider(model), tenant_id))
+    tk = _tenant_keys(tenant_id)
+    return bool(tk) or any(os.environ.get(k) for k in _PROVIDER_KEY.values())
 
 
 # usage of the most recent complete() call: {"prompt", "completion", "total"}
 # or None for a stub call. Handlers read this straight after calling complete().
 last_usage: dict[str, int] | None = None
 
+# clients keyed by the resolved API key string (not by tenant_id, so the
+# platform's own default key — the common case — is built once regardless
+# of which/how many tenants share it). A race populating this dict can only
+# build a redundant client for the same key, never hand out a wrong one —
+# same safety argument as salesforce.py's client_for cache.
+_groq_clients: dict[str, Any] = {}
+_anthropic_clients: dict[str, Any] = {}
 
-def _groq():
-    global _groq_client
-    if _groq_client is None:
+
+def _groq(api_key: str):
+    if api_key not in _groq_clients:
         from groq import Groq
 
-        _groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
-    return _groq_client
+        _groq_clients[api_key] = Groq(api_key=api_key)
+    return _groq_clients[api_key]
 
 
-def _anthropic():
-    global _anthropic_client
-    if _anthropic_client is None:
+def _anthropic(api_key: str | None):
+    key = api_key or ""
+    if key not in _anthropic_clients:
         import anthropic
 
-        _anthropic_client = anthropic.Anthropic()   # resolves ANTHROPIC_API_KEY / ant profile
-    return _anthropic_client
+        # empty key -> anthropic.Anthropic() resolves ANTHROPIC_API_KEY / ant
+        # profile itself; a real key is passed through explicitly.
+        _anthropic_clients[key] = anthropic.Anthropic(**({"api_key": key} if key else {}))
+    return _anthropic_clients[key]
 
 
 # small in-process cache (kills retry-storms + re-run cost). Opt-in per call.
@@ -202,16 +268,19 @@ def _ckey(model: str, system: str, user: str, max_tokens: int) -> str:
 
 
 def _dispatch(model: str, system: str, user: str, max_tokens: int,
-              temperature: float, json_object: bool, images=None) -> str:
+              temperature: float, json_object: bool, images=None,
+              tenant_id: str | None = None) -> str:
     prov = provider(model)
+    key = _resolve_key(prov, tenant_id)
     if prov == "anthropic":
-        return _anthropic_complete(system, user, model, max_tokens, json_object, images=images)
+        return _anthropic_complete(system, user, model, max_tokens, json_object,
+                                   images=images, api_key=key)
     if prov == "openrouter":
         return _openrouter_complete(system, user, model, max_tokens, temperature, json_object,
-                                    images=images)
+                                    images=images, api_key=key)
     if images:
         raise RuntimeError(f"model {model!r} ({prov}) has no vision support")
-    return _groq_complete(system, user, model, max_tokens, temperature, json_object)
+    return _groq_complete(system, user, model, max_tokens, temperature, json_object, api_key=key)
 
 
 def complete(
@@ -224,6 +293,7 @@ def complete(
     json_object: bool = False,
     cache: bool = False,
     images: "list[tuple[bytes, str]] | None" = None,
+    tenant_id: str | None = None,
 ) -> str:
     """
     One-shot completion. Returns the assistant text (a JSON string when
@@ -238,6 +308,11 @@ def complete(
     `images` = a list of `(bytes, mime)`. When given, the call goes through
     the **vision** chain instead (free OpenRouter vision models → paid
     Anthropic), and `cache` is ignored.
+
+    `tenant_id` — BYOK: when set and that tenant has pasted their own key
+    for a chain model's provider, it's used instead of this process's env
+    key. Omit it (every pre-BYOK caller still does) to always use the
+    platform's own keys, unchanged from before BYOK existed.
     """
     global last_usage
     model = model or DEFAULT_MODEL
@@ -245,13 +320,13 @@ def complete(
         raise ValueError(f"model {model!r} is not in the roster {sorted(MODELS)}")
 
     if images:
-        chain = _vision_chain(model if model in MODELS else None)
+        chain = _vision_chain(model if model in MODELS else None, tenant_id=tenant_id)
         if not chain:
             last_usage = None
             return _stub(system, user + "\n[image omitted — no vision model]",
                          json_object=json_object)
         return _run_chain(chain, system, user, max_tokens, temperature, json_object,
-                          images=images)
+                          images=images, tenant_id=tenant_id)
 
     if cache and _CACHE_ON:
         ck = _ckey(model, system, user, max_tokens)
@@ -261,12 +336,12 @@ def complete(
             last_usage = None
             return hit
 
-    chain = _fallback_chain(model)
+    chain = _fallback_chain(model, tenant_id=tenant_id)
     if not chain:
         last_usage = None
         return _stub(system, user, json_object=json_object)
 
-    out = _run_chain(chain, system, user, max_tokens, temperature, json_object)
+    out = _run_chain(chain, system, user, max_tokens, temperature, json_object, tenant_id=tenant_id)
     if cache and _CACHE_ON:
         _cache[ck] = out
         if len(_cache) > _CACHE_MAX:
@@ -275,12 +350,14 @@ def complete(
 
 
 def _run_chain(chain: list[str], system: str, user: str, max_tokens: int,
-               temperature: float, json_object: bool, *, images=None) -> str:
+               temperature: float, json_object: bool, *, images=None,
+               tenant_id: str | None = None) -> str:
     global last_usage
     last_err: Exception | None = None
     for i, m in enumerate(chain):
         try:
-            out = _dispatch(m, system, user, max_tokens, temperature, json_object, images=images)
+            out = _dispatch(m, system, user, max_tokens, temperature, json_object, images=images,
+                           tenant_id=tenant_id)
             if i > 0:
                 log.warning("llm: %s failed — served by fallback %s", chain[0], m)
             return out
@@ -307,7 +384,7 @@ def _retry_after_seconds(err: Any) -> float:
 
 
 def _groq_call(model: str, system: str, user: str, max_tokens: int,
-               temperature: float, *, response_format: bool) -> Any:
+               temperature: float, *, response_format: bool, api_key: str) -> Any:
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": [
@@ -331,10 +408,9 @@ def _groq_call(model: str, system: str, user: str, max_tokens: int,
     except Exception:  # noqa: BLE001
         RateLimitError = ()  # type: ignore[assignment]
 
-    import time as _time
     for attempt in range(3):
         try:
-            return _groq().chat.completions.create(**kwargs)
+            return _groq(api_key).chat.completions.create(**kwargs)
         except RateLimitError as e:  # type: ignore[misc]
             if attempt == 2:
                 raise
@@ -342,7 +418,7 @@ def _groq_call(model: str, system: str, user: str, max_tokens: int,
 
 
 def _groq_complete(system: str, user: str, model: str, max_tokens: int,
-                   temperature: float, json_object: bool) -> str:
+                   temperature: float, json_object: bool, *, api_key: str) -> str:
     global last_usage
     try:
         from groq import BadRequestError
@@ -361,7 +437,7 @@ def _groq_complete(system: str, user: str, model: str, max_tokens: int,
 
     try:
         return _record(_groq_call(model, system, user, max_tokens, temperature,
-                                  response_format=json_object))
+                                  response_format=json_object, api_key=api_key))
     except BadRequestError as e:  # type: ignore[misc]
         code = getattr(e, "code", None) or ""
         body = getattr(e, "body", None) or {}
@@ -389,6 +465,7 @@ def _groq_complete(system: str, user: str, model: str, max_tokens: int,
             max(max_tokens, 1024),
             temperature,
             response_format=False,
+            api_key=api_key,
         )
         return _record(resp)
 
@@ -420,7 +497,8 @@ def _img_data_url(data: bytes, mime: str) -> str:
 
 
 def _openrouter_complete(system: str, user: str, model: str, max_tokens: int,
-                         temperature: float, json_object: bool, images=None) -> str:
+                         temperature: float, json_object: bool, images=None,
+                         api_key: str = "") -> str:
     """OpenAI-compatible call to OpenRouter (free `:free` models). Plain httpx
     — no extra SDK. Raises on 429 / 5xx so `complete()` moves to the next
     model in the chain."""
@@ -446,7 +524,7 @@ def _openrouter_complete(system: str, user: str, model: str, max_tokens: int,
     r = httpx.post(
         _OPENROUTER_URL,
         headers={
-            "Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}",
+            "Authorization": f"Bearer {api_key or os.environ.get('OPENROUTER_API_KEY', '')}",
             "HTTP-Referer": os.environ.get("OPENROUTER_REFERER", "https://support-automation.local"),
             "X-Title": "support-automation",
         },
@@ -465,7 +543,7 @@ def _openrouter_complete(system: str, user: str, model: str, max_tokens: int,
 
 
 def _anthropic_complete(system: str, user: str, model: str, max_tokens: int,
-                        json_object: bool, images=None) -> str:
+                        json_object: bool, images=None, api_key: str | None = None) -> str:
     global last_usage
     import base64
 
@@ -482,7 +560,7 @@ def _anthropic_complete(system: str, user: str, model: str, max_tokens: int,
         ] + [{"type": "text", "text": user}]
     # No `temperature` / `thinking` / `effort`: sampling params are rejected on
     # the Claude 5 family; defaults are fine for classify/draft.
-    resp = _anthropic().messages.create(
+    resp = _anthropic(api_key).messages.create(
         model=model,
         max_tokens=max_tokens,
         system=sys_prompt,
@@ -631,6 +709,7 @@ def complete_with_tools(
     model: str | None = None,
     max_tokens: int = 1024,
     temperature: float = 0.2,
+    tenant_id: str | None = None,
 ) -> ToolResult:
     """Multi-turn, tool-calling completion for an agentic loop (the caller
     owns the loop: inspect `tool_calls`, run them, append a `{"role": "tool",
@@ -646,16 +725,19 @@ def complete_with_tools(
     Sets `last_usage` exactly like `complete()`, so a caller's token spend
     is picked up by the existing trace -> billing pipeline
     (interpreter/runs.py::_token_usage) with no new plumbing.
+
+    `tenant_id` — BYOK, same as `complete()`.
     """
     model = model or DEFAULT_MODEL
-    if not available(model):
+    if not available(model, tenant_id=tenant_id):
         return _stub_tool_result(messages, tools)
 
     prov = provider(model)
+    key = _resolve_key(prov, tenant_id)
     if prov == "groq":
-        return _groq_complete_tools(messages, system, tools, model, max_tokens, temperature)
+        return _groq_complete_tools(messages, system, tools, model, max_tokens, temperature, api_key=key)
     if prov == "anthropic":
-        return _anthropic_complete_tools(messages, system, tools, model, max_tokens, temperature)
+        return _anthropic_complete_tools(messages, system, tools, model, max_tokens, temperature, api_key=key)
     raise ValueError(
         f"complete_with_tools: model {model!r} is {prov!r} -- only "
         f"{_TOOL_PROVIDERS} are supported for tool-calling"
@@ -694,14 +776,13 @@ def _groq_messages_wire(system: str, messages: list[dict[str, Any]]) -> list[dic
 
 
 def _groq_complete_tools(messages: list[dict[str, Any]], system: str, tools: list[dict[str, Any]],
-                         model: str, max_tokens: int, temperature: float) -> ToolResult:
+                         model: str, max_tokens: int, temperature: float, *,
+                         api_key: str) -> ToolResult:
     global last_usage
     try:
         from groq import RateLimitError
     except Exception:  # noqa: BLE001
         RateLimitError = ()  # type: ignore[assignment]
-
-    import time as _time
 
     kwargs = {
         "model": model,
@@ -714,7 +795,7 @@ def _groq_complete_tools(messages: list[dict[str, Any]], system: str, tools: lis
     resp = None
     for attempt in range(3):
         try:
-            resp = _groq().chat.completions.create(**kwargs)
+            resp = _groq(api_key).chat.completions.create(**kwargs)
             break
         except RateLimitError as e:  # type: ignore[misc]
             if attempt == 2:
@@ -770,9 +851,10 @@ def _anthropic_messages_wire(messages: list[dict[str, Any]]) -> list[dict[str, A
 
 
 def _anthropic_complete_tools(messages: list[dict[str, Any]], system: str, tools: list[dict[str, Any]],
-                              model: str, max_tokens: int, temperature: float) -> ToolResult:
+                              model: str, max_tokens: int, temperature: float, *,
+                              api_key: str) -> ToolResult:
     global last_usage
-    resp = _anthropic().messages.create(
+    resp = _anthropic(api_key).messages.create(
         model=model,
         max_tokens=max_tokens,
         system=system,

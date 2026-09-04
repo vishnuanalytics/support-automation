@@ -24,6 +24,8 @@ import type {
   ReviewTask,
   KilMetrics,
   KilDigest,
+  LlmKeyStatus,
+  ModelsResp,
   SfMeta,
   SlackMeta,
   TraceResult,
@@ -122,6 +124,18 @@ export const api = {
       req<void>(`/connections/${encodeURIComponent(slug)}${tenantId ? `?tenant_id=${tenantId}` : ""}`,
         { method: "DELETE" }),
   },
+
+  llmKeys: {
+    status: (tenantId: string) =>
+      req<LlmKeyStatus>(`/integrations/llm?tenant_id=${tenantId}`),
+    save: (b: { provider: string; api_key: string; tenant_id: string }) =>
+      req<LlmKeyStatus>("/integrations/llm", { method: "PUT", body: JSON.stringify(b) }),
+    remove: (provider: string, tenantId: string) =>
+      req<void>(`/integrations/llm/${encodeURIComponent(provider)}?tenant_id=${tenantId}`,
+        { method: "DELETE" }),
+  },
+  models: (tenantId?: string) =>
+    req<ModelsResp>(`/models${tenantId ? `?tenant_id=${tenantId}` : ""}`),
 
   salesforceOrgs: {
     list: (tenantId?: string) =>

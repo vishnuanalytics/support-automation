@@ -160,6 +160,130 @@ export function ConnectionsView({ tenantId }: { tenantId: string }) {
       </div>
 
       <SalesforceOrgsPanel tenantId={tenantId} />
+      <AiModelsPanel tenantId={tenantId} />
+    </div>
+  );
+}
+
+const LLM_PROVIDERS = [
+  { key: "groq", label: "Groq", hint: "the default — free tier, no key needed to start" },
+  { key: "anthropic", label: "Anthropic (Claude)", hint: "paid — set a model to claude-* in a node to use it" },
+  { key: "openrouter", label: "OpenRouter", hint: "free-tier fallback models, plus paid ones with your own key" },
+] as const;
+
+/** BYOK (2026-09-04) — a tenant can paste their own API key per LLM
+ * provider instead of sharing this deployment's own keys. Never required:
+ * every provider without a tenant key falls back to the platform's own
+ * (Groq works out of the box with neither). */
+function AiModelsPanel({ tenantId }: { tenantId: string }) {
+  const [status, setStatus] = useState<import("../types").LlmKeyStatus | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+
+  const load = () => {
+    api.llmKeys.status(tenantId).then(setStatus).catch((e: ApiError) => setErr(e.message));
+  };
+  useEffect(load, [tenantId]);
+
+  const save = async (provider: string) => {
+    const key = (drafts[provider] || "").trim();
+    if (!key) return;
+    setBusy(provider);
+    setErr(null);
+    try {
+      await api.llmKeys.save({ provider, api_key: key, tenant_id: tenantId });
+      setDrafts({ ...drafts, [provider]: "" });
+      load();
+    } catch (e) {
+      setErr((e as ApiError).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const remove = async (provider: string) => {
+    setBusy(provider);
+    try {
+      await api.llmKeys.remove(provider, tenantId);
+      load();
+    } catch (e) {
+      setErr((e as ApiError).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="col" style={{ gap: 12, borderTop: "1px solid var(--hair,#ddd)", paddingTop: 16 }}>
+      <h3 style={{ margin: 0 }}>AI models</h3>
+      <p style={{ margin: 0, color: "var(--muted, #667)" }}>
+        Every flow node that calls an LLM (drafting a reply, classifying, judging)
+        uses this deployment's own key by default — Groq's free tier needs nothing
+        set up. Paste your own key for a provider to use it (and its usage) instead,
+        for every flow in this workspace. A node still picks which <em>model</em> to
+        use — set that per-node in the editor.
+      </p>
+      {err && <div className="banner err">{err}</div>}
+      {status && (
+        <table className="runs-table">
+          <thead>
+            <tr>
+              <th>provider</th>
+              <th>status</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {LLM_PROVIDERS.map((p) => {
+              const mine = status.tenant[p.key];
+              const platform = status.platform[p.key];
+              return (
+                <tr key={p.key}>
+                  <td>
+                    <b>{p.label}</b>
+                    <div className="muted" style={{ fontSize: 11 }}>{p.hint}</div>
+                  </td>
+                  <td>
+                    {mine ? (
+                      <span className="ok">✓ your own key set</span>
+                    ) : platform ? (
+                      <span className="muted">using this deployment's key</span>
+                    ) : (
+                      <span className="muted">no key anywhere — falls back to another provider</span>
+                    )}
+                  </td>
+                  <td>
+                    <div className="row" style={{ gap: 6, justifyContent: "flex-end" }}>
+                      {mine ? (
+                        <button className="err" disabled={busy === p.key} onClick={() => remove(p.key)}>
+                          {busy === p.key ? "removing…" : "remove"}
+                        </button>
+                      ) : (
+                        <>
+                          <input
+                            type="password"
+                            placeholder={`${p.label} API key`}
+                            value={drafts[p.key] || ""}
+                            style={{ width: 200 }}
+                            onChange={(e) => setDrafts({ ...drafts, [p.key]: e.target.value })}
+                          />
+                          <button
+                            disabled={busy === p.key || !(drafts[p.key] || "").trim()}
+                            onClick={() => save(p.key)}
+                          >
+                            {busy === p.key ? "saving…" : "save"}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }
