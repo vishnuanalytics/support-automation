@@ -167,7 +167,13 @@ planned future channel — it must slot in as another adapter, not a rewrite
   `post_chatter`) are idempotent within a 3 h window. CDC ignores the bot's own
   Case writes. `validate_env()` fails a process fast on bad config.
 - **NFR-4 Security:** bearer tokens verified server-side; per-user
-  rate-limiting on write endpoints; secrets only in Vault.
+  rate-limiting on write endpoints; secrets only in Vault. *(This line
+  claimed "secrets only in Vault" since it was written, but until
+  2026-09-04 that was only true for the email channel — Salesforce/Slack/
+  Google/LLM-BYOK/GitHub secrets sat in plaintext in `tenant_integrations.
+  secret`. `interpreter/vault_secrets.py` + a live backfill closed that
+  gap; see `PROJECT_SCOPE.md`'s "Immediate next step." Noting the history
+  here so a future stale-claim audit doesn't have to rediscover it.)*
 - **NFR-5 Safety:** the system MUST NOT send a customer-facing email on any
   outcome other than `auto_reply` + switch-on + non-empty draft. Escalations
   and handovers never send.

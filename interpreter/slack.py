@@ -80,11 +80,12 @@ def verify_signature(signing_secret: str, timestamp: str, raw_body: bytes,
 
 # ── messaging ──────────────────────────────────────────────────────
 def _bot_token(tenant_id: str, sb) -> str:
-    rows = (sb.table("tenant_integrations").select("secret")
-            .eq("tenant_id", tenant_id).eq("kind", "slack").execute().data or [])
-    if not rows or not rows[0]["secret"].get("bot_token"):
+    from interpreter import vault_secrets
+
+    token = vault_secrets.get(tenant_id, "slack", sb=sb).get("bot_token")
+    if not token:
         raise RuntimeError(f"tenant {tenant_id} has not connected Slack")
-    return rows[0]["secret"]["bot_token"]
+    return token
 
 
 def connected(tenant_id: str, sb) -> bool:

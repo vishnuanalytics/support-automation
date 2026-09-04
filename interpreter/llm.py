@@ -108,10 +108,11 @@ _TENANT_KEYS_TTL = 300
 
 
 def _tenant_keys(tenant_id: str | None) -> dict[str, str]:
-    """{provider: api_key} for this tenant's own pasted keys (`tenant_integrations`,
-    kind='llm'), via /api/integrations/llm. Empty — never an error — with no
-    tenant_id, no row, or any lookup failure; callers fall back to this
-    process's own env keys exactly as before BYOK existed."""
+    """{provider: api_key} for this tenant's own pasted keys (Vault, kind
+    'llm' — 2026-09-04, was plaintext `tenant_integrations.secret`), via
+    /api/integrations/llm. Empty — never an error — with no tenant_id, no
+    secret, or any lookup failure; callers fall back to this process's own
+    env keys exactly as before BYOK existed."""
     if not tenant_id:
         return {}
     now = _time.time()
@@ -120,11 +121,8 @@ def _tenant_keys(tenant_id: str | None) -> dict[str, str]:
         return hit[1]
     keys: dict[str, str] = {}
     try:
-        from ingestion.scraper import get_supabase
-        sb = get_supabase()
-        rows = (sb.table("tenant_integrations").select("secret")
-                .eq("tenant_id", tenant_id).eq("kind", "llm").execute().data or [])
-        secret = rows[0]["secret"] if rows else {}
+        from interpreter import vault_secrets
+        secret = vault_secrets.get(tenant_id, "llm")
         for prov, field in _PROVIDER_SECRET_FIELD.items():
             v = (secret or {}).get(field)
             if v:

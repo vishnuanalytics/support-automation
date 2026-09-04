@@ -2049,10 +2049,16 @@ def google_callback(code: str = "", state: str = "", error: str = "") -> HTMLRes
         tok = gdrive.exchange_code(code, GOOGLE_REDIRECT_URI)
     except Exception as e:  # noqa: BLE001
         return page(f"Could not complete Google sign-in: {e}")
-    _service.table("tenant_integrations").upsert({
-        "tenant_id": tenant_id, "kind": "google",
-        "secret": {"refresh_token": tok["refresh_token"], "scope": tok.get("scope")},
-    }).execute()
+    from interpreter import vault_secrets
+
+    vault_id = vault_secrets.put(tenant_id, "google", {
+        "refresh_token": tok["refresh_token"], "scope": tok.get("scope"),
+    }, sb=_service)
+    row = {"tenant_id": tenant_id, "kind": "google",
+           "secret": {"scope": tok.get("scope"), "has_credentials": True}}
+    if vault_id:
+        row["vault_secret_id"] = vault_id
+    _service.table("tenant_integrations").upsert(row).execute()
     return page("Google connected. You can close this window.")
 
 
@@ -2323,11 +2329,9 @@ def llm_key_status(tenant_id: str | None = None, c: Caller = Depends(caller)) ->
     works, nothing to do" instead of implying every provider needs setup).
     Never returns a key — only booleans."""
     tid = _caller_tenant(c, tenant_id)
-    rows = (_service.table("tenant_integrations").select("secret")
-            .eq("tenant_id", tid).eq("kind", "llm").execute().data or [])
-    secret = (rows[0]["secret"] if rows else {}) or {}
-    from interpreter import llm as llmmod
+    from interpreter import llm as llmmod, vault_secrets
 
+    secret = vault_secrets.get(tid, "llm", sb=_service)
     return {
         "tenant_id": tid,
         "tenant": {p: bool(secret.get(f"{p}_api_key")) for p in _LLM_PROVIDERS},
@@ -2345,12 +2349,15 @@ def llm_key_save(body: LlmKeyIn, c: Caller = Depends(caller)) -> dict:
     _require_owner(c, tid)
     rate_limit(c.user_id, "integration", 30)
 
-    rows = (_service.table("tenant_integrations").select("secret")
-            .eq("tenant_id", tid).eq("kind", "llm").execute().data or [])
-    secret = dict((rows[0]["secret"] if rows else {}) or {})
+    from interpreter import vault_secrets
+
+    secret = dict(vault_secrets.get(tid, "llm", sb=_service))
     secret[f"{body.provider}_api_key"] = body.api_key.strip()
-    _service.table("tenant_integrations").upsert(
-        {"tenant_id": tid, "kind": "llm", "secret": secret}).execute()
+    vault_id = vault_secrets.put(tid, "llm", secret, sb=_service)
+    row = {"tenant_id": tid, "kind": "llm", "secret": {}}
+    if vault_id:
+        row["vault_secret_id"] = vault_id
+    _service.table("tenant_integrations").upsert(row).execute()
 
     # llm.py caches tenant keys for 5 min (one lookup per complete() call
     # would otherwise be a DB round trip on every LLM call) -- drop the
@@ -2373,13 +2380,11 @@ def llm_key_remove(provider: str, tenant_id: str | None = None, c: Caller = Depe
     tid = _caller_tenant(c, tenant_id)
     _require_owner(c, tid)
 
-    rows = (_service.table("tenant_integrations").select("secret")
-            .eq("tenant_id", tid).eq("kind", "llm").execute().data or [])
-    if rows:
-        secret = dict(rows[0]["secret"] or {})
-        secret.pop(f"{provider}_api_key", None)
-        _service.table("tenant_integrations").upsert(
-            {"tenant_id": tid, "kind": "llm", "secret": secret}).execute()
+    from interpreter import vault_secrets
+
+    secret = dict(vault_secrets.get(tid, "llm", sb=_service))
+    if secret.pop(f"{provider}_api_key", None) is not None:
+        vault_secrets.put(tid, "llm", secret, sb=_service)
 
     from interpreter import llm as llmmod
     llmmod._tenant_keys_cache.pop(tid, None)
@@ -2418,14 +2423,17 @@ class SalesforceOrgIn(BaseModel):
 
 @app.get("/api/integrations/salesforce")
 def salesforce_orgs(tenant_id: str | None = None, c: Caller = Depends(caller)) -> list[dict]:
-    """Every Salesforce org this tenant has connected — never the secret."""
-    from interpreter import salesforce as _sf
-
+    """Every Salesforce org this tenant has connected — never the secret.
+    `secret` is already the `redact_org_secret()` view as of 2026-09-04
+    (`save_tenant_org` writes it that way, real creds live in Vault) — do
+    NOT redact it again here: re-running redact_org_secret on already-safe
+    data recomputes `has_credentials` from a dict with no secret keys left
+    and silently reports `False` even for a fully connected org."""
     tid = _caller_tenant(c, tenant_id)
     rows = (_service.table("tenant_integrations").select("org_label, secret, updated_at")
             .eq("tenant_id", tid).eq("kind", "salesforce").order("org_label").execute().data or [])
-    return [{"org_label": r["org_label"], "updated_at": r["updated_at"],
-             **_sf.redact_org_secret(r["secret"])} for r in rows]
+    return [{"org_label": r["org_label"], "updated_at": r["updated_at"], **(r["secret"] or {})}
+            for r in rows]
 
 
 @app.put("/api/integrations/salesforce", status_code=201)
@@ -2697,11 +2705,17 @@ def slack_callback(code: str = "", state: str = "", error: str = "") -> HTMLResp
         tok = slackmod.exchange_code(code, SLACK_REDIRECT_URI)
     except Exception as e:  # noqa: BLE001
         return page(f"Could not complete Slack install: {e}")
-    _service.table("tenant_integrations").upsert({
-        "tenant_id": tenant_id, "kind": "slack",
-        "secret": {"bot_token": tok["bot_token"], "team": tok.get("team"),
-                   "bot_user_id": tok.get("bot_user_id")},
-    }).execute()
+    from interpreter import vault_secrets
+
+    vault_id = vault_secrets.put(tenant_id, "slack", {
+        "bot_token": tok["bot_token"], "team": tok.get("team"),
+        "bot_user_id": tok.get("bot_user_id"),
+    }, sb=_service)
+    row = {"tenant_id": tenant_id, "kind": "slack",
+           "secret": {"team": tok.get("team"), "has_credentials": True}}
+    if vault_id:
+        row["vault_secret_id"] = vault_id
+    _service.table("tenant_integrations").upsert(row).execute()
     return page("Slack connected. You can close this window.")
 
 

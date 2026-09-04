@@ -100,11 +100,12 @@ def _credentials(refresh_token: str):
 
 
 def _integration(tenant_id: str, sb) -> dict[str, Any]:
-    rows = (sb.table("tenant_integrations").select("secret")
-            .eq("tenant_id", tenant_id).eq("kind", "google").execute().data or [])
-    if not rows:
+    from interpreter import vault_secrets
+
+    secret = vault_secrets.get(tenant_id, "google", sb=sb)
+    if not secret:
         raise RuntimeError(f"tenant {tenant_id} has not connected Google")
-    return rows[0]["secret"]
+    return secret
 
 
 def connected(tenant_id: str, sb) -> bool:

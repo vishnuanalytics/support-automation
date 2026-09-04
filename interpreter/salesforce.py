@@ -160,25 +160,23 @@ def pubsub_auth(*, refresh: bool = False) -> tuple[str, str, str]:
 
 
 def client_for(tenant_id: str | None, org_label: str | None = None, sb=None):
-    """Per-tenant, per-org client from `tenant_integrations` if a row
-    exists, else the env client. (Phase 12 — real multi-tenancy; multi-org
-    support added 2026-09-03 — every existing call site that doesn't pass
-    `org_label` keeps resolving the tenant's 'default' org, unchanged.)"""
+    """Per-tenant, per-org client from Vault (`vault_secrets`) if a secret
+    exists for `f"salesforce:{org_label}"`, else the env client. (Phase 12 —
+    real multi-tenancy; multi-org support added 2026-09-03 — every existing
+    call site that doesn't pass `org_label` keeps resolving the tenant's
+    'default' org, unchanged. 2026-09-04 — the real creds moved out of the
+    plaintext `tenant_integrations.secret` column into Vault; see
+    `interpreter/vault_secrets.py`.)"""
     if not tenant_id:
         return _client()
     org_label = org_label or "default"
     key = (tenant_id, org_label)
     if key not in _tenant_clients:
         try:
-            from ingestion.scraper import get_supabase
+            from . import vault_secrets
 
-            sb = sb or get_supabase()
-            rows = (
-                sb.table("tenant_integrations").select("secret")
-                .eq("tenant_id", tenant_id).eq("kind", "salesforce").eq("org_label", org_label)
-                .execute().data
-            )
-            _tenant_clients[key] = _build_client(rows[0]["secret"]) if rows else _client()
+            creds = vault_secrets.get(tenant_id, f"salesforce:{org_label}", sb=sb)
+            _tenant_clients[key] = _build_client(creds) if creds else _client()
         except Exception as e:  # noqa: BLE001
             log.warning("tenant %s org %s SF creds lookup failed (%s); using env client",
                        tenant_id, org_label, e)
@@ -225,24 +223,37 @@ def list_tenant_orgs(tenant_id: str, sb=None) -> list[str]:
 def save_tenant_org(tenant_id: str, org_label: str, creds: dict[str, str], sb=None) -> None:
     """Store (or replace) one named Salesforce org connection for a tenant.
     `creds` keys mirror the env var names (SF_USERNAME, SF_CONSUMER_KEY,
-    ...) — same shape `_build_client` already expects."""
+    ...) — same shape `_build_client` already expects. The real `creds` go
+    to Vault (2026-09-04); `tenant_integrations.secret` gets only the
+    already-safe `redact_org_secret()` view, never the raw blob."""
     from ingestion.scraper import get_supabase
 
+    from . import vault_secrets
+
     sb = sb or get_supabase()
-    sb.table("tenant_integrations").upsert({
+    org_label = org_label or "default"
+    vault_id = vault_secrets.put(tenant_id, f"salesforce:{org_label}", creds, sb=sb)
+    row: dict = {
         "tenant_id": str(tenant_id), "kind": "salesforce",
-        "org_label": org_label or "default", "secret": creds,
-    }, on_conflict="tenant_id,kind,org_label").execute()
-    _tenant_clients.pop((str(tenant_id), org_label or "default"), None)
+        "org_label": org_label, "secret": redact_org_secret(creds),
+    }
+    if vault_id:
+        row["vault_secret_id"] = vault_id
+    sb.table("tenant_integrations").upsert(row, on_conflict="tenant_id,kind,org_label").execute()
+    _tenant_clients.pop((str(tenant_id), org_label), None)
 
 
 def delete_tenant_org(tenant_id: str, org_label: str, sb=None) -> None:
     from ingestion.scraper import get_supabase
 
+    from . import vault_secrets
+
     sb = sb or get_supabase()
+    org_label = org_label or "default"
+    vault_secrets.delete(tenant_id, f"salesforce:{org_label}", sb=sb)
     sb.table("tenant_integrations").delete() \
         .eq("tenant_id", str(tenant_id)).eq("kind", "salesforce").eq("org_label", org_label).execute()
-    _tenant_clients.pop((str(tenant_id), org_label or "default"), None)
+    _tenant_clients.pop((str(tenant_id), org_label), None)
 
 
 _SAFE_ORG_KEYS = ("SF_USERNAME", "SF_DOMAIN", "SF_OAUTH_INSTANCE_URL")   # everything else is secret

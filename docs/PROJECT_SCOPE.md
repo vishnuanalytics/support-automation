@@ -707,10 +707,58 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-04 — connector-generality chunk, done; this is the most recent
-work in this file (see the top-of-file note: this doc is edited in place,
-not strictly appended to — check dates, not physical position).** A gap
-audit found `docs/REQUIREMENTS.md`'s FR-47 ("connectors are data, not a
+**2026-09-04 — production-hardening chunk: every tenant secret is now
+Vault-encrypted, not plaintext. This is the most recent work in this file
+(see the top-of-file note: this doc is edited in place, not strictly
+appended to — check dates, not physical position).** Picked as the next
+track after connector generality. Two of the four candidate items turned
+out already done: `interpreter/jobs.py::fail()` already has exponential
+backoff (earlier robustness pass); a real `/security-review` already ran
+2026-09-03 (see "Known issues" below) — a stale leftover note elsewhere in
+this file claimed otherwise, fixed in place. The shared-LLM-quota issue
+stays a documented, deliberate billing tradeoff, not a code defect.
+
+That left one real, confirmed gap: migration `035` (Phase 20a) built
+Vault-backed `integration_secret_put/get/delete()` SQL functions and
+`interpreter/mailbox.py` already used them correctly for the email
+channel — but its own comment said *"a later phase can migrate the Slack /
+SF / Google rows onto the same mechanism"* and that phase never happened.
+`interpreter/salesforce.py` (`client_for`/`save_tenant_org`), `slack.py`
+(`_bot_token`), `gdrive.py` (`_integration`), `llm.py` (`_tenant_keys`,
+BYOK), and `github.py` (`token_for`, found in a final sweep, not part of
+the original 4) all read/wrote `tenant_integrations.secret` in the clear —
+real Salesforce JWT keys / OAuth refresh tokens, Slack bot tokens, Google
+refresh tokens, tenants' own pasted LLM keys, GitHub PATs.
+
+Fixed: new `interpreter/vault_secrets.py` (a thin `get`/`put`/`delete`
+wrapper generalizing the exact pattern `mailbox.py` already used inline)
++ every one of those 5 modules' read/write call sites switched to it.
+`tenant_integrations.secret` now holds only non-sensitive display fields
+(username, domain, workspace name, `has_credentials`) — never the real
+value. Salesforce is per-org, so it namespaces its Vault kind as
+`f"salesforce:{org_label}"`, giving each connected org its own entry under
+the existing `(tenant_id, kind, org_label)` PK (migration `082`) with no
+schema change needed. **A real correctness bug found and fixed along the
+way, not hypothetical:** `GET /api/integrations/salesforce` was calling
+`redact_org_secret()` a second time on data that's now already redacted —
+recomputing `has_credentials` from a dict with no secret keys left, which
+would have silently reported `False` for a fully connected org. Fixed by
+not re-redacting already-safe data.
+
+The 5 live rows in `tenant_integrations` were backfilled via a new
+`scripts/backfill_vault_secrets.py` (idempotent, `--dry-run` first) —
+**verified live**, not just offline: a direct `salesforce.list_queues()`
+call against the real org after the backfill returned all 12 real queues,
+proving `client_for` correctly resolves Vault-sourced creds, and
+`tests/test_llm_byok.py -m integration` (a real round trip through the
+API) passed unmodified. 607 offline tests green (was 598) — 9 new in
+`tests/test_vault_secrets.py`; `test_salesforce_multi_org.py`'s and
+`test_slack_introspection.py`'s fake-Supabase fixtures gained an `.rpc()`
+method to keep exercising the real vault-backed path instead of a stale
+direct-table-read shape.
+
+**Old connector-generality note, superseded by the above as "most
+recent," kept for its own history:** A gap audit found `docs/REQUIREMENTS.md`'s FR-47 ("connectors are data, not a
 hardcoded node handler") had been marked "built" without actually being
 true — no `ConnectorSpec`/registry existed anywhere, and 9 of 26
 `registry.py` node types were (and still are) hardwired straight to
@@ -3821,9 +3869,15 @@ From the 2026-08-29 self-review. Each is intentional MVP scope, not a bug:
   token-bucket `rate_limit(user_id, bucket, limit, window)` (line ~199)
   is applied to `run` (20/min), `assist` (30 or 12/min per endpoint),
   `enqueue` (120/min), and public webhooks (300/min, keyed by trigger
-  token). **Still genuinely open:** no `/security-review` has been run
-  over the accumulated `api/`+`web/` diff (Phase 5 through Phase 29 —
-  a lot of surface since Phase 13 was written); `sop_conflicts.py`
-  exists but isn't wired into CI as a non-blocking report (needs Phase
-  12's divergent per-team retrieval to have something to actually find
-  first — check whether that's true yet before wiring it).
+  token). ~~**Still genuinely open:** no `/security-review` has been run
+  over the accumulated `api/`+`web/` diff (Phase 5 through Phase 29).~~
+  **Stale note (fixed 2026-09-04):** this claim was itself out of date —
+  see "first real security review of the accumulated api/+web/ surface"
+  above (2026-09-03, same "Known issues" section): it already ran, found
+  and fixed 2 real SSRF issues, AuthZ/RLS/secrets came back clean. Two
+  stale claims about the same fact, in the same file, is exactly the
+  "edited in place, not appended" drift CLAUDE.md now warns about —
+  fixed here rather than left for a third session to trip over.
+  `sop_conflicts.py` exists but isn't wired into CI as a non-blocking
+  report (needs Phase 12's divergent per-team retrieval to have something
+  to actually find first — check whether that's true yet before wiring it).

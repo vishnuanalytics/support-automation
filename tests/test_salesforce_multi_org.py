@@ -89,12 +89,36 @@ class _FakeTable:
 
 
 class _FakeSB:
+    """2026-09-04: the real creds live in Vault (`integration_secret_*`
+    RPCs), not `tenant_integrations.secret` -- `.rpc()` fakes that broker
+    with a plain in-memory dict, same idea as the real Vault-backed SQL
+    functions (migration 035), just in Python."""
+
     def __init__(self):
         self.rows: list[dict] = []
+        self.vault: dict[tuple[str, str], str] = {}
 
     def table(self, name):
         assert name == "tenant_integrations"
         return _FakeTable(self.rows, name)
+
+    def rpc(self, name, params):
+        vault = self.vault
+
+        class _Exec:
+            def execute(self):
+                if name == "integration_secret_get":
+                    data = vault.get((params["p_tenant"], params["p_kind"]))
+                elif name == "integration_secret_put":
+                    vault[(params["p_tenant"], params["p_kind"])] = params["p_plaintext"]
+                    data = "00000000-0000-0000-0000-000000000000"
+                elif name == "integration_secret_delete":
+                    vault.pop((params["p_tenant"], params["p_kind"]), None)
+                    data = None
+                else:
+                    raise AssertionError(f"unexpected rpc {name!r}")
+                return type("R", (), {"data": data})()
+        return _Exec()
 
 
 def test_client_for_defaults_to_the_default_org_and_falls_back_to_env(monkeypatch):
