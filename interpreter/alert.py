@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from interpreter import salesforce, slack
+from interpreter import connectors, salesforce, slack
 
 log = logging.getLogger("interpreter.alert")
 
@@ -115,10 +115,10 @@ def alert_human(state: dict, config: dict) -> dict[str, Any]:
 
     if want in ("both", "slack") and (slack_ch or config.get("slack_webhook")
                                       or _has_alert_webhook()):
-        out["slack"] = slack.post_message(
-            root, tenant_id=tenant_id, channel=slack_ch,
-            webhook=config.get("slack_webhook"),
-            blocks=_handoff_card(root, has_draft=bool((state.get("draft") or "").strip())),
+        out["slack"] = connectors.invoke(
+            tenant_id, "slack", "post_message",
+            {"text": root, "channel": slack_ch, "webhook": config.get("slack_webhook"),
+             "blocks": _handoff_card(root, has_draft=bool((state.get("draft") or "").strip()))},
         )
         sl = out["slack"]
         if sl.get("sent") and sl.get("channel") and sl.get("ts"):
@@ -132,8 +132,10 @@ def alert_human(state: dict, config: dict) -> dict[str, Any]:
                 f"{' in Slack' if out.get('reasoning_session') else ''}. "
                 f"It has **not** replied to the customer — we'll reason through "
                 f"the response together before anything is sent.")
-        out["chatter"] = salesforce.post_chatter(sf_id, body, mention_id=mid, tenant_id=tenant_id,
-                                                 org_label=org_label)
+        out["chatter"] = connectors.invoke(
+            tenant_id, "salesforce", "post_note",
+            {"case_id": sf_id, "body": body, "mention_id": mid}, org_label=org_label,
+        )
 
     return out
 

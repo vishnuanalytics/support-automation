@@ -730,18 +730,36 @@ form per vendor. 600 offline tests green (13 new in `tests/test_connectors.py`),
 `scripts/verify_migrations.py` clean, `web`'s `tsc -b && vite build` clean.
 See FR-47 in `docs/REQUIREMENTS.md` for the full detail.
 
-**Explicitly not done — real follow-on work, don't assume it's finished:**
-the 9 Salesforce-hardwired node types (`sf_writeback`, `sf_case`, `notify`,
-`notify_human`, `ask_human`, `handover`, `identify`, `clarify`,
-`sf_context`) still call `interpreter/salesforce.py` directly, not through
-the new connector framework — they're live, production-seeded flows
-(Acme/Globex/email/router), so migrating them is deliberately out of
-scope for this chunk (would need real regression testing against every
-seeded flow, not a quick follow-on). Next real step, if this thread
-continues: pick 1-2 of those handlers and migrate them onto
-`connector_action` as a proof that the *existing* Salesforce behavior can
-be expressed the same way a brand-new connector now can, without changing
-any flow's actual behavior.
+**Follow-on completed the same day (2026-09-04):** 7 of the 9 originally
+SF-hardwired node handlers (`sf_writeback`, `sf_case`, `notify`,
+`ask_human`, `handover`, `identify`, `clarify`) plus `alert.alert_human`
+(behind `notify_human`) were migrated to call Salesforce/Slack through
+`connectors.invoke(tenant_id, "salesforce"|"slack", "<action>", params)`
+instead of importing `salesforce.py`/`slack.py` directly — added 4 new
+Salesforce actions (`ensure_case`, `log_email_message`, `identify_sender`,
+`send_case_reply`) and widened Slack's `post_message` action (`webhook`/
+`blocks`) to cover every call site. **Zero behavior change, proven, not
+assumed:** `salesforce.py`/`slack.py` themselves are untouched, and every
+existing test that monkeypatches `salesforce.<verb>`/`slack.<verb>`
+directly — dozens of them, across `test_sf_case.py`, `test_notify_and_type.py`,
+`test_case_control_plane.py`, `test_resilience.py`, `test_salesforce_multi_org.py`,
+and more — still passes unmodified, since the monkeypatch still lands on
+the same underlying function one indirection layer down. A new
+`tests/test_sf_handlers_use_connectors.py` (11 tests) additionally asserts
+the *connector/action name* each handler now uses, so a future accidental
+revert to a direct call would be caught even if behavior happened to still
+look right. 598 offline tests green (was 587); `scripts/verify_migrations.py`
+clean (no schema change this round); `web`'s build unaffected (backend-only).
+
+**`sf_context` is a deliberate, documented exception** — see its own
+module docstring. It's a bespoke, `want`-driven fan-out of several SOQL
+reads (Account hierarchy, Contacts, Leads, Case history, team) into one
+nested result, not a single named write action with a flat params dict;
+forcing it into the connector-action shape would lose that flexibility or
+need one action per read, neither of which is what a connector *action* is
+for. Left as a normal internal helper — this is a considered judgment call,
+not an oversight, so don't "finish" it later without re-examining whether
+that's actually the right shape.
 
 **Self-serve multi-tenant/multi-org Salesforce + Slack connector, and a
 flow editor that fetches real data instead of hardcoding it — DONE and

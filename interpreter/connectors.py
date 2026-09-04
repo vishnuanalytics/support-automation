@@ -18,6 +18,18 @@ never touches `registry.py` — it's a row in `connections`/`connection_actions`
 managed entirely from the web UI. The two builtins below are the exception
 (Salesforce/Slack need real SDK/API-shaped logic, not raw HTTP), registered
 once here as thin wrappers, not reimplemented.
+
+2026-09-04 — the 9 originally SF/Slack-hardwired node handlers in
+`registry.py` (`sf_writeback`, `sf_case`, `notify`, `ask_human`, `handover`,
+`identify`, `clarify`, plus `alert.alert_human` behind `notify_human`) were
+migrated to call their Salesforce/Slack side effects through `invoke()`
+below instead of importing `salesforce`/`slack` and calling a verb directly
+— proving the *existing* production behavior can be expressed the same way
+a brand-new connector now can, with zero change to any node's config shape,
+output shape, or the seeded flows that use them. `sf_context` is a
+deliberate exception (see its own module) — it's a bespoke multi-object
+SOQL read, not a single named write action, and doesn't fit this shape
+without forcing it.
 """
 
 from __future__ import annotations
@@ -58,10 +70,22 @@ _ORG_PARAM = {"key": "org", "label": "Salesforce org (blank = default)",
               "type": "string", "required": False}
 
 
+def _as_bool(v: Any, default: bool) -> bool:
+    """A param may arrive as a real Python bool (an internal `invoke()` call
+    passing a real dict) or as the string "true"/"false" (the generic
+    connector_action UI's `select` param type) — normalize either."""
+    if v is None:
+        return default
+    if isinstance(v, str):
+        return v.strip().lower() not in ("false", "0", "")
+    return bool(v)
+
+
 def _sf_update_fields(tenant_id: str | None, org_label: str | None, params: dict) -> dict:
     from . import salesforce
     return salesforce.update_case_fields(
         params["case_id"], dict(params.get("fields") or {}),
+        append=dict(params.get("append") or {}),
         tenant_id=tenant_id, org_label=org_label or params.get("org"),
     )
 
@@ -90,11 +114,55 @@ def _sf_assign_owner(tenant_id: str | None, org_label: str | None, params: dict)
     )
 
 
+def _sf_ensure_case(tenant_id: str | None, org_label: str | None, params: dict) -> dict:
+    from . import salesforce
+    return salesforce.ensure_case(
+        dict(params.get("case") or {}), dict(params.get("sender") or {}),
+        origin=params.get("origin", "Email"), status=params.get("status", "New"),
+        create_contact=_as_bool(params.get("create_contact"), True),
+        create_account=_as_bool(params.get("create_account"), True),
+        reuse=str(params.get("reuse", "thread")),
+        tenant_id=tenant_id, org_label=org_label or params.get("org"),
+    )
+
+
+def _sf_log_email_message(tenant_id: str | None, org_label: str | None, params: dict) -> dict:
+    from . import salesforce
+    return salesforce.log_email_message(
+        params["case_id"], incoming=_as_bool(params.get("incoming"), True),
+        from_addr=params.get("from_addr", ""), from_name=params.get("from_name", ""),
+        to_addrs=params.get("to_addrs", ""), subject=params.get("subject", ""),
+        body=params.get("body", ""), message_id=params.get("message_id", ""),
+        status=params.get("status"),
+        tenant_id=tenant_id, org_label=org_label or params.get("org"),
+    )
+
+
+def _sf_identify_sender(tenant_id: str | None, org_label: str | None, params: dict) -> dict:
+    from . import salesforce
+    return salesforce.identify_sender(
+        params.get("email", ""), free_domains=params.get("free_domains"),
+        domain_match=_as_bool(params.get("domain_match"), True),
+        create_lead=_as_bool(params.get("create_lead"), False),
+        tenant_id=tenant_id, org_label=org_label or params.get("org"),
+    )
+
+
+def _sf_send_case_reply(tenant_id: str | None, org_label: str | None, params: dict) -> dict:
+    from . import salesforce
+    return salesforce.send_case_reply(
+        params["case_id"], params.get("body", ""),
+        to_email=params.get("to_email"), subject=params.get("subject"),
+        tenant_id=tenant_id, org_label=org_label or params.get("org"),
+    )
+
+
 def _slack_post_message(tenant_id: str | None, org_label: str | None, params: dict) -> dict:
     from . import slack
     return slack.post_message(
         params.get("text", ""), tenant_id=tenant_id, channel=params.get("channel"),
-        thread_ts=params.get("thread_ts"),
+        thread_ts=params.get("thread_ts"), webhook=params.get("webhook"),
+        blocks=params.get("blocks"),
     )
 
 
@@ -105,6 +173,8 @@ register_builtin(ConnectorSpec(
             "update_fields", "Update fields on a Case",
             params=[{"key": "case_id", "label": "Case Id", "type": "template", "required": True},
                     {"key": "fields", "label": "Fields (JSON)", "type": "json", "required": True},
+                    {"key": "append", "label": "Append to fields (JSON: field -> text)",
+                     "type": "json", "required": False},
                     _ORG_PARAM],
             impl=_sf_update_fields),
         "post_note": ActionSpec(
@@ -127,6 +197,45 @@ register_builtin(ConnectorSpec(
                     {"key": "user_id", "label": "User Id", "type": "string", "required": False},
                     _ORG_PARAM],
             impl=_sf_assign_owner),
+        "ensure_case": ActionSpec(
+            "ensure_case", "Resolve/create a Case (+ Contact/Account) for an inbound message",
+            params=[{"key": "case", "label": "Case (JSON)", "type": "json", "required": True},
+                    {"key": "sender", "label": "Sender (JSON)", "type": "json", "required": False},
+                    {"key": "origin", "label": "Origin", "type": "string", "required": False},
+                    {"key": "status", "label": "Status", "type": "string", "required": False},
+                    {"key": "reuse", "label": "Reuse", "type": "select", "required": False,
+                     "options": ["thread", "never"]},
+                    _ORG_PARAM],
+            impl=_sf_ensure_case),
+        "log_email_message": ActionSpec(
+            "log_email_message", "Add an EmailMessage to a Case",
+            params=[{"key": "case_id", "label": "Case Id", "type": "template", "required": True},
+                    {"key": "incoming", "label": "Incoming", "type": "select", "required": False,
+                     "options": ["true", "false"]},
+                    {"key": "from_addr", "label": "From", "type": "template", "required": False},
+                    {"key": "to_addrs", "label": "To", "type": "template", "required": False},
+                    {"key": "subject", "label": "Subject", "type": "template", "required": False},
+                    {"key": "body", "label": "Body", "type": "template", "required": False},
+                    {"key": "message_id", "label": "Message-Id", "type": "template", "required": False},
+                    _ORG_PARAM],
+            impl=_sf_log_email_message),
+        "identify_sender": ActionSpec(
+            "identify_sender", "Resolve a sender email to a Contact/Lead/Account",
+            params=[{"key": "email", "label": "Email", "type": "template", "required": True},
+                    {"key": "domain_match", "label": "Domain match", "type": "select", "required": False,
+                     "options": ["true", "false"]},
+                    {"key": "create_lead", "label": "Create lead if missing", "type": "select",
+                     "required": False, "options": ["true", "false"]},
+                    _ORG_PARAM],
+            impl=_sf_identify_sender),
+        "send_case_reply": ActionSpec(
+            "send_case_reply", "Send a customer-facing reply on a Case",
+            params=[{"key": "case_id", "label": "Case Id", "type": "template", "required": True},
+                    {"key": "body", "label": "Body", "type": "template", "required": True},
+                    {"key": "to_email", "label": "To", "type": "template", "required": False},
+                    {"key": "subject", "label": "Subject", "type": "template", "required": False},
+                    _ORG_PARAM],
+            impl=_sf_send_case_reply),
     },
 ))
 
@@ -137,7 +246,9 @@ register_builtin(ConnectorSpec(
             "post_message", "Post a Slack message",
             params=[{"key": "text", "label": "Text", "type": "template", "required": True},
                     {"key": "channel", "label": "Channel", "type": "string", "required": True},
-                    {"key": "thread_ts", "label": "Thread ts", "type": "template", "required": False}],
+                    {"key": "thread_ts", "label": "Thread ts", "type": "template", "required": False},
+                    {"key": "webhook", "label": "Webhook URL override", "type": "string", "required": False},
+                    {"key": "blocks", "label": "Block Kit blocks (JSON)", "type": "json", "required": False}],
             impl=_slack_post_message),
     },
 ))
@@ -167,3 +278,15 @@ def get_action(tenant_id: str | None, connector_slug: str | None,
     if action is None:
         raise KeyError(f"unknown action {action_name!r} on connector {connector_slug!r}")
     return spec, action
+
+
+def invoke(tenant_id: str | None, connector_slug: str, action_name: str,
+           params: dict[str, Any], *, org_label: str | None = None, sb=None) -> dict[str, Any]:
+    """Convenience for an internal caller (a migrated node handler) that
+    already has real Python values in hand — skips the `connector_action`
+    node's own param-templating, which is only needed when values come from
+    a flow's own JSON config. Raises `KeyError` for an unknown connector/
+    action; whatever the action's `impl` raises otherwise propagates too —
+    callers keep whatever try/except semantics they already had."""
+    _spec, action = get_action(tenant_id, connector_slug, action_name, sb=sb)
+    return action.impl(tenant_id, org_label, params)

@@ -13,6 +13,18 @@ their CSM is Priya".
     ctx = load(state["sender"], want={"account", "contacts", "cases", "team"}, tenant_id=tid)
 
 Best-effort: any missing piece is left out, nothing raises.
+
+2026-09-04 — deliberately NOT migrated onto `interpreter/connectors.py`'s
+connector-action framework, unlike the 7 other SF-hardwired node handlers
+(sf_writeback/sf_case/notify/ask_human/handover/identify/clarify) and
+`alert.alert_human`. Those all boil down to one named write with a flat
+params dict (post a note, update fields, assign an owner...) — this module
+is a bespoke, `want`-driven fan-out of several different SOQL reads (Account
+hierarchy, Contacts, Leads, Case history, team) into one nested result.
+Forcing that into a single "action" would either lose the `want` flexibility
+or need one action per read (account/contacts/leads/cases/team), neither of
+which is what a genuine connector *action* (a thing an outside caller invokes
+by name with a few params) is for. Left as a normal internal helper.
 """
 
 from __future__ import annotations
