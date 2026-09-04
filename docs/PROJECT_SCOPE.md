@@ -731,13 +731,32 @@ but no picker at all). This whole thread is closed.
 **Current focus (2026-09-03): "complete the multi-tenant project
 end-to-end, very robust, flexible and easy"** — the user's own framing,
 deliberately broad; scoped down via `AskUserQuestion` into three
-tracks, of which the browser click-through above was the first.
+tracks, of which the browser click-through above was the first and the
+robustness pass (below) was the second.
+**Systematic robustness pass — DONE (2026-09-04).** Error-handling/retry
+audit across node handlers + external connectors, plus a real
+multi-tenant concurrency stress test. Three parts, all on branch
+`browser-verified-picker-fixes`:
+- Part 1 (`cddb5e5`) — the `available()` self-serve-tenant gating bug
+  present in every SF write/read path, plus a CI-breaking upsert bug
+  found along the way.
+- Part 2 (`e3cdc64`) — job retry backoff + failed-job visibility.
+- Part 3 (`a14137c`) — the `available()` bug reached 5 more call sites
+  beyond `salesforce.py` (routing.py, sf_context.py, attachments.py,
+  worker.py), plus a real cross-tenant cache leak: `_intake_queue_id`
+  and `routing.py`'s `queue_member` cache keyed only on queue
+  name/org_label, not `tenant_id` — two tenants sharing an underlying
+  SF org (true for today's two demo tenants) would silently get each
+  other's cached Group id. Both caches now key on `(tenant_id,
+  org_label)`.
+- `tests/test_multitenant_concurrency.py` (added 2026-09-04) —
+  genuinely interleaved concurrent flow runs for two tenants via a
+  thread pool (not sequential), proving no cross-tenant config/cache
+  leak under real concurrency, the exact condition the part-3 bugs
+  needed to surface. `pytest tests/test_multitenant_concurrency.py -m
+  integration`: 2 passed against live Salesforce/Supabase.
+
 **Not yet started, still open**:
-- **A systematic robustness pass** — error-handling/retry audit across
-  the node handlers + external connectors, and a real multi-tenant
-  concurrency stress test (two tenants hitting the platform at once).
-  The one security review done so far (SSRF/authZ, see Known issues)
-  isn't the same thing as a robustness/reliability audit.
 - **An onboarding UX walkthrough** — actually drive the new-tenant path
   (create workspace → connect Salesforce/Slack → auto-detect modules/
   teams → build first flow) as a brand-new user would, and fix
