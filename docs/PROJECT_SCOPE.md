@@ -707,10 +707,27 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-04 — Phase 29 step 3 closed: the agent-vs-baseline eval, real
-number in hand. This is the most recent work in this file (see the
+**2026-09-04 — Phase 29 step 4 closed: self-critique wired into KIL's
+`draft_change`, live. This is the most recent work in this file (see the
 top-of-file note: this doc is edited in place, not strictly appended to —
-check dates, not physical position).** New `eval/agent/run_agent_eval.py`
+check dates, not physical position).** `interpreter/kb_writeback.py`'s
+`_self_critique()` runs the exact same `integrity.check(statement,
+[new_body])` shape `eval/writeback/run_writeback_eval.py` already used to
+*grade* drafts post-hoc — now it runs live, inside `draft_change` itself,
+with one bounded LLM-only retry when the confirmed statement still
+`contradicts` the drafted body. The verdict rides on the `change` dict and
+`_post_card` warns the Slack approval card whenever it isn't a clean
+`entails`. 653 offline tests green (7 new). Real before/after via the
+*existing* eval, unmodified: resolution 1.000 (7/7), lift +0.611 — matches
+the pre-existing baseline within noise, an honest ceiling-effect result
+(this eval set has no first-draft failures for the retry to catch) — see
+the full Phase 29 step 4 writeup below for why the new unit tests, not
+this eval, are what actually prove the retry mechanism works. Phase 29:
+steps 1-4 done, 5 (autonomous reasoning-session continuation) not started.
+
+**Old step-3 note, superseded by the above as "most recent," kept for its
+own history:** the agent-vs-baseline eval, real number in hand. New
+`eval/agent/run_agent_eval.py`
 compares Acme's real live `agent` node against a single `h_retrieve()`
 call on the 10-question hard qrels set, reusing `run_eval.py`'s own
 `score()` rather than reimplementing it. **Real result:** baseline and
@@ -1339,8 +1356,45 @@ live adoption (the step-2 live `test_multiflow.py` run already showed it
 producing a correct outcome, just slower/more expensive), but also not
 evidence to expand `agent` to more flows without a cleaner-quota rerun or
 a version of this eval that goes through the full `confidence_gate`
-decision rather than raw retrieval rank alone. **Phase 29 status: steps
-1-3 done, 4 (self-critique on KIL's `draft_change`) and 5 (autonomous
+decision rather than raw retrieval rank alone.
+
+**Step 4 — self-critique on KIL's `draft_change` (DONE 2026-09-04).**
+`interpreter/kb_writeback.py::draft_change` proposed a KB rewrite and sent
+it straight to a Slack approval card with zero automatic verification it
+actually resolved the contradiction — despite the exact check already
+existing: `eval/writeback/run_writeback_eval.py` (P8c) already graded this
+*post-hoc* via `integrity.check(statement, [new_body])`. Step 4 wires that
+same check into `draft_change` itself, live: `_self_critique()` runs it on
+every draft (LLM-drafted or the deterministic fallback) and, when the
+confirmed statement still `contradicts` the drafted body **and** a real
+LLM produced it (retrying the deterministic fallback would just reproduce
+the same text), asks the model to revise once with the critique as
+feedback and re-checks. The verdict — `entails`/`neutral`/`contradicts` +
+whether it was retried — ships on the `change` dict either way (never a
+silent block, matching KIL's whole "flag to a human" philosophy) and
+`_post_card` adds a `:warning:` line to the Slack card whenever it isn't
+a clean `entails`, so the approving manager sees the machine's own doubt
+about its work instead of a confident-looking card regardless of quality.
+`_llm_draft` was extracted verbatim from the old inline call so both the
+first attempt and the one bounded redraft share it — no duplicated
+prompt-construction logic. 7 new offline tests in `tests/test_kb_writeback.py`
+(clean-entails stamps correctly, a `contradicts` verdict retries exactly
+once and the retried draft ships, no-LLM mode stamps the verdict without
+retrying, a malformed redraft keeps the original, both `_post_card`
+branches) — 653 offline tests green, zero regression to the file's
+existing 9. **Real before/after, reusing the existing eval unchanged**
+(`python -m eval.writeback.run_writeback_eval`, live Groq): resolution
+rate **1.000** (7/7 valid cases), answer lift **+0.611** (keyword coverage
+0.30→0.92) — matching the pre-self-critique KIL-d baseline (resolution
+1.00, lift +0.63) within noise, not a dramatic jump. **Honest read:** this
+eval set was already at a resolution ceiling before self-critique existed
+— no case in it fails on the first draft, so the retry path had nothing
+to catch here and this measurement can't demonstrate improvement on its
+own; the new unit tests are what prove the retry mechanism itself works
+(a `contradicts` verdict really does trigger exactly one redraft and the
+better result really does ship). The value add is a safety net for a
+future harder case plus reviewer transparency, not a lift on this
+particular 12-case set. **Phase 29 status: steps 1-4 done, 5 (autonomous
 reasoning-session continuation) not started.**
 
 ## Multi-tenant / multi-Salesforce-org scoping (2026-09-03)
