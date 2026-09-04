@@ -707,10 +707,40 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-04 — production-hardening chunk: every tenant secret is now
-Vault-encrypted, not plaintext. This is the most recent work in this file
-(see the top-of-file note: this doc is edited in place, not strictly
-appended to — check dates, not physical position).** Picked as the next
+**2026-09-04 — test-coverage chunk: the three "live-verified once" spots
+(Slack approval buttons, GitHub issue creation, KIL approval flow) now
+have real offline test coverage. This is the most recent work in this
+file (see the top-of-file note: this doc is edited in place, not strictly
+appended to — check dates, not physical position).** Third of the three
+tracks scoped earlier in the day (connector generality → production
+hardening → this). Confirmed by grep before writing anything, not assumed:
+- `slack_socket.dispatch_action`'s KIL-c review-card branches
+  (`review_correct/wrong/dismiss`) and the KIL-d/Phase-16 approval-card
+  branches (`kb_approve/kb_reject/approve/reject`) had zero coverage —
+  `test_slack_socket.py` only exercised the reasoning-session action
+  branches (`cx_send`/`cx_edit`/...). Added 8 tests.
+- `api/worker.py`'s `HANDLERS` dict dispatches `_create_github_issue` and
+  `_apply_kb_change` for real jobs, but only the *library* functions they
+  call (`github.create_issue`, `kb_writeback.apply_kb_change`) had
+  coverage — the worker-level wrapper (status/idempotency checks, the
+  Slack card update, error → `action_requests.status='error'`) did not.
+  New `tests/test_worker_job_handlers.py`, 10 tests.
+- `interpreter/approvals.py` (P3/FR-44 — the one place `dispatch_action`,
+  the signed HTTP Slack callback, and `/api/review-tasks/{id}/resolve` all
+  funnel an approval decision through) had zero dedicated tests at all.
+  New `tests/test_approvals.py`, 11 tests.
+- `interpreter/github.py` itself (token resolution, `create_issue`'s HTTP
+  call) also had zero dedicated tests — found while tracing the GitHub
+  path, not part of the original 3-item list. New `tests/test_github.py`,
+  10 tests.
+
+646 offline tests green (was 607 before this chunk). Purely additive —
+no production code paths changed, so no live-verification step was needed
+this time (unlike the previous two chunks).
+
+**Old production-hardening note, superseded by the above as "most
+recent," kept for its own history:** every tenant secret is now
+Vault-encrypted, not plaintext. Picked as the next
 track after connector generality. Two of the four candidate items turned
 out already done: `interpreter/jobs.py::fail()` already has exponential
 backoff (earlier robustness pass); a real `/security-review` already ran

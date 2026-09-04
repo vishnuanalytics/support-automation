@@ -186,3 +186,125 @@ def test_redrive_nudges_open_sessions():
     ]
     slack_socket._redrive_open_sessions(_SB(rows), lambda c, t, x: posts.append((c, t)))
     assert posts == [("#x", "1.1"), ("#x", "2.2")]      # the channelless one is skipped
+
+
+# --------------------------------------------------------------------------
+# 2026-09-04 -- the KIL-c human-reply-review card and the KIL-d/Phase-16
+# action_requests approval card. Previously "live-verified once" only --
+# these branches (`dispatch_action`'s review_*/kb_approve/kb_reject/approve/
+# reject handling) had zero offline coverage even though the reasoning-
+# session action branches above (cx_send/cx_edit/...) did.
+# --------------------------------------------------------------------------
+def _action_value(action_id: str, value: str):
+    return _payload(action_id, actions=[{"action_id": action_id, "value": value}])
+
+
+def test_review_correct_resolves_and_posts(monkeypatch):
+    from interpreter import approvals
+
+    monkeypatch.setattr(approvals, "resolve_review_task",
+                        lambda sb, tid, *, status, reviewed_by: {"task": {"id": tid}, "kb_change": None})
+    posts = []
+    out = slack_socket.dispatch_action(None, _action_value("review_correct", "task-1"),
+                                       post=lambda c, t, x: posts.append(x))
+    assert out == {"action": "review_correct", "task": "task-1", "status": "correct"}
+    assert "drafting a KB update" in posts[0]
+
+
+def test_review_wrong_and_dismissed_post_the_right_note(monkeypatch):
+    from interpreter import approvals
+
+    monkeypatch.setattr(approvals, "resolve_review_task",
+                        lambda sb, tid, *, status, reviewed_by: {"task": {"id": tid}})
+    posts = []
+    slack_socket.dispatch_action(None, _action_value("review_wrong", "t2"),
+                                 post=lambda c, t, x: posts.append(x))
+    assert "coaching" in posts[0]
+
+    posts.clear()
+    slack_socket.dispatch_action(None, _action_value("review_dismiss", "t3"),
+                                 post=lambda c, t, x: posts.append(x))
+    assert "Dismissed" in posts[0]
+
+
+def test_review_action_already_resolved_is_a_skip(monkeypatch):
+    from interpreter import approvals
+
+    monkeypatch.setattr(approvals, "resolve_review_task",
+                        lambda *a, **k: {"skipped": "not open", "task_id": "t1"})
+    posts = []
+    out = slack_socket.dispatch_action(None, _action_value("review_correct", "t1"),
+                                       post=lambda c, t, x: posts.append(x))
+    assert out == {"skip": "review task not open", "action": "review_correct"}
+    assert "already resolved" in posts[0]
+
+
+def test_review_missing_task_id_is_a_skip_without_calling_resolve(monkeypatch):
+    from interpreter import approvals
+
+    def _boom(*a, **k):
+        raise AssertionError("resolve_review_task must not be called with no task id")
+    monkeypatch.setattr(approvals, "resolve_review_task", _boom)
+    out = slack_socket.dispatch_action(None, _action_value("review_correct", ""),
+                                       post=lambda c, t, x: None)
+    assert out["skip"] == "review task not open"
+
+
+def test_kb_approve_calls_decide_action_request_and_posts(monkeypatch):
+    from interpreter import approvals
+
+    captured = {}
+
+    def fake_decide(sb, ar_id, *, approve, decided_by):
+        captured.update(ar_id=ar_id, approve=approve, decided_by=decided_by)
+        return {"status": "approved", "slack": {"channel": "C1", "ts": "1", "text": "approved!"}}
+
+    monkeypatch.setattr(approvals, "decide_action_request", fake_decide)
+    posts = []
+    out = slack_socket.dispatch_action(None, _action_value("kb_approve", "ar-1"),
+                                       post=lambda c, t, x: posts.append(x))
+    assert captured == {"ar_id": "ar-1", "approve": True, "decided_by": "UAGENT"}
+    assert out == {"action": "kb_approve", "action_request": "ar-1", "status": "approved"}
+    assert "approved!" in posts[0]
+
+
+def test_kb_reject_passes_approve_false(monkeypatch):
+    from interpreter import approvals
+
+    captured = {}
+
+    def fake_decide(sb, ar_id, *, approve, decided_by):
+        captured["approve"] = approve
+        return {"status": "rejected", "slack": {"text": "rejected."}}
+
+    monkeypatch.setattr(approvals, "decide_action_request", fake_decide)
+    slack_socket.dispatch_action(None, _action_value("kb_reject", "ar-2"), post=lambda c, t, x: None)
+    assert captured["approve"] is False
+
+
+def test_generic_approve_and_reject_aliases_also_dispatch(monkeypatch):
+    """The unified-approvals web tab (`interpreter/approvals.py`, P4) posts
+    the generic `approve`/`reject` action_ids, not just KIL-d's
+    kb_approve/kb_reject -- both must resolve to the same handler."""
+    from interpreter import approvals
+
+    captured = {}
+    monkeypatch.setattr(approvals, "decide_action_request",
+                        lambda sb, ar_id, *, approve, decided_by:
+                        captured.update(approve=approve) or {"status": "x", "slack": {"text": "ok"}})
+    slack_socket.dispatch_action(None, _action_value("approve", "ar-3"), post=lambda c, t, x: None)
+    assert captured["approve"] is True
+
+    slack_socket.dispatch_action(None, _action_value("reject", "ar-3"), post=lambda c, t, x: None)
+    assert captured["approve"] is False
+
+
+def test_kb_action_already_decided_is_a_skip(monkeypatch):
+    from interpreter import approvals
+
+    monkeypatch.setattr(approvals, "decide_action_request", lambda *a, **k: {"skipped": "approved"})
+    posts = []
+    out = slack_socket.dispatch_action(None, _action_value("kb_approve", "ar-4"),
+                                       post=lambda c, t, x: posts.append(x))
+    assert out == {"skip": "action_request approved", "action": "kb_approve"}
+    assert "Already decided" in posts[0]
