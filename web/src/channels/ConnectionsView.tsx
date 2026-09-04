@@ -1,14 +1,18 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
-import type { Connection, SalesforceOrg, SalesforceOrgSchema } from "../types";
+import type { Connection, ConnectionAction, SalesforceOrg, SalesforceOrgSchema } from "../types";
 
 const AUTH_TYPES = ["none", "bearer", "header", "basic"] as const;
 
-/** P6c — per-tenant HTTP connections for the `http_request` flow node. */
+/** P6c — per-tenant HTTP connections for the `http_request` flow node.
+ * FR-47 — a connection can also carry named, reusable *actions*, turning it
+ * into a connector next to the salesforce/slack builtins (GET /api/connectors),
+ * usable from any flow's `connector_action` node with zero Python changes. */
 export function ConnectionsView({ tenantId }: { tenantId: string }) {
   const [rows, setRows] = useState<Connection[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [expanded, setExpanded] = useState<string | null>(null);
   const [f, setF] = useState({
     slug: "",
     base_url: "",
@@ -60,32 +64,47 @@ export function ConnectionsView({ tenantId }: { tenantId: string }) {
             <th>base URL</th>
             <th>auth</th>
             <th />
+            <th />
           </tr>
         </thead>
         <tbody>
           {rows?.map((c) => (
-            <tr key={c.slug}>
-              <td>
-                <code>{c.slug}</code>
-              </td>
-              <td>{c.base_url}</td>
-              <td>
-                {c.auth.type || "none"}
-                {c.has_secret && " 🔒"}
-              </td>
-              <td>
-                <button
-                  className="err"
-                  onClick={() => api.connections.remove(c.slug, tenantId).then(load).catch(() => {})}
-                >
-                  delete
-                </button>
-              </td>
-            </tr>
+            <>
+              <tr key={c.slug}>
+                <td>
+                  <code>{c.slug}</code>
+                </td>
+                <td>{c.base_url}</td>
+                <td>
+                  {c.auth.type || "none"}
+                  {c.has_secret && " 🔒"}
+                </td>
+                <td>
+                  <button onClick={() => setExpanded(expanded === c.slug ? null : c.slug)}>
+                    {expanded === c.slug ? "hide actions" : "manage actions"}
+                  </button>
+                </td>
+                <td>
+                  <button
+                    className="err"
+                    onClick={() => api.connections.remove(c.slug, tenantId).then(load).catch(() => {})}
+                  >
+                    delete
+                  </button>
+                </td>
+              </tr>
+              {expanded === c.slug && (
+                <tr key={`${c.slug}-actions`}>
+                  <td colSpan={5}>
+                    <ConnectionActionsPanel slug={c.slug} tenantId={tenantId} />
+                  </td>
+                </tr>
+              )}
+            </>
           ))}
           {rows && rows.length === 0 && (
             <tr>
-              <td colSpan={4} className="muted">
+              <td colSpan={5} className="muted">
                 none yet
               </td>
             </tr>
@@ -161,6 +180,115 @@ export function ConnectionsView({ tenantId }: { tenantId: string }) {
 
       <SalesforceOrgsPanel tenantId={tenantId} />
       <AiModelsPanel tenantId={tenantId} />
+    </div>
+  );
+}
+
+/** FR-47 — named, reusable actions on one connection (e.g. "create_ticket"
+ * on a "zendesk" connection): method + path + params it declares (drives the
+ * flow editor's generic connector_action form) + an optional body template.
+ * Both `path` and `body_template` support "{{ param_key }}" substitution over
+ * the action's own params at run time (interpreter/connections.py::_fill). */
+function ConnectionActionsPanel({ slug, tenantId }: { slug: string; tenantId: string }) {
+  const [rows, setRows] = useState<ConnectionAction[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [f, setF] = useState({ name: "", method: "GET", path: "", paramsJson: "[]", bodyJson: "" });
+  const [jsonErr, setJsonErr] = useState<string | null>(null);
+
+  const load = () => {
+    api.connections.actions.list(slug, tenantId).then(setRows).catch((e: ApiError) => setErr(e.message));
+  };
+  useEffect(load, [slug, tenantId]);
+
+  const add = async () => {
+    setJsonErr(null);
+    let params: ConnectionAction["params"];
+    let body_template: unknown;
+    try {
+      params = JSON.parse(f.paramsJson || "[]");
+      body_template = f.bodyJson.trim() ? JSON.parse(f.bodyJson) : undefined;
+    } catch (e) {
+      setJsonErr((e as Error).message);
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.connections.actions.save(
+        slug, { name: f.name.trim(), method: f.method, path: f.path.trim(), params, body_template }, tenantId);
+      setF({ name: "", method: "GET", path: "", paramsJson: "[]", bodyJson: "" });
+      load();
+    } catch (e) {
+      setErr((e as ApiError).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="col" style={{ gap: 8, padding: "8px 0" }}>
+      <p className="muted" style={{ margin: 0, fontSize: 12 }}>
+        Actions this connection exposes to any flow's <code>connector_action</code> node —
+        e.g. a Zendesk connection's <code>create_ticket</code>.{" "}
+        <code>path</code>/<code>body_template</code> support{" "}
+        <code>{"{{ param_key }}"}</code> from the action's own params.
+      </p>
+      {err && <div className="banner err">{err}</div>}
+      <table className="runs-table">
+        <thead>
+          <tr>
+            <th>name</th>
+            <th>method</th>
+            <th>path</th>
+            <th>params</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {rows?.map((a) => (
+            <tr key={a.name}>
+              <td><code>{a.name}</code></td>
+              <td>{a.method}</td>
+              <td><code>{a.path}</code></td>
+              <td className="muted">{a.params.map((p) => p.key).join(", ") || "—"}</td>
+              <td>
+                <button className="err"
+                        onClick={() => api.connections.actions.remove(slug, a.name, tenantId).then(load).catch(() => {})}>
+                  delete
+                </button>
+              </td>
+            </tr>
+          ))}
+          {rows && rows.length === 0 && (
+            <tr><td colSpan={5} className="muted">no actions saved yet</td></tr>
+          )}
+        </tbody>
+      </table>
+
+      <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+        <input placeholder="name (e.g. create_ticket)" value={f.name}
+               onChange={(e) => setF({ ...f, name: e.target.value })} />
+        <select value={f.method} onChange={(e) => setF({ ...f, method: e.target.value })}>
+          {["GET", "POST", "PUT", "PATCH", "DELETE"].map((m) => <option key={m}>{m}</option>)}
+        </select>
+        <input placeholder="/tickets/{{ id }}.json" value={f.path} style={{ minWidth: 220 }}
+               onChange={(e) => setF({ ...f, path: e.target.value })} />
+      </div>
+      <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+        <textarea rows={3} style={{ flex: 1, fontFamily: "monospace", fontSize: 12 }}
+                  placeholder='params: [{"key":"id","label":"Id","type":"template","required":true}]'
+                  value={f.paramsJson} onChange={(e) => setF({ ...f, paramsJson: e.target.value })} />
+        <textarea rows={3} style={{ flex: 1, fontFamily: "monospace", fontSize: 12 }}
+                  placeholder='body_template (optional): {"ticket":{"subject":"{{ subject }}"}}'
+                  value={f.bodyJson} onChange={(e) => setF({ ...f, bodyJson: e.target.value })} />
+      </div>
+      {jsonErr && <div className="err" style={{ fontSize: 11 }}>{jsonErr}</div>}
+      <div>
+        <button className="primary" disabled={busy || !f.name.trim() || !f.path.trim()} onClick={add}>
+          Save action
+        </button>
+      </div>
     </div>
   );
 }

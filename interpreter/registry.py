@@ -17,7 +17,7 @@ import logging
 import re
 from typing import Any, Callable
 
-from . import groundedness, integrity, llm, policy, salesforce
+from . import connectors, groundedness, integrity, llm, policy, salesforce
 from .retrieval import hybrid_retrieve
 from .state import CaseState
 
@@ -203,8 +203,8 @@ def _cp_write(state: CaseState, config: dict, *, action: str, actor: str = "ai",
         fields.pop("Status")
     if sf_id and fields:
         try:
-            salesforce.update_case_fields(sf_id, fields, tenant_id=state.get("tenant_id"),
-                                          org_label=config.get("org"))
+            connectors.invoke(state.get("tenant_id"), "salesforce", "update_fields",
+                              {"case_id": sf_id, "fields": fields}, org_label=config.get("org"))
         except Exception as e:  # noqa: BLE001
             log.warning("cp_write(%s): %s", sf_id, e)
     # keep the in-run view current so the *next* node doesn't clobber this
@@ -542,8 +542,9 @@ def h_sf_writeback(state: CaseState, config: dict) -> dict:
             **_trace(config["_node_id"], "sf_writeback", "no sf_id — nothing written", info),
         }
 
-    result = salesforce.update_case_fields(
-        sf_id, fields, append=append, tenant_id=state.get("tenant_id"), org_label=config.get("org")
+    result = connectors.invoke(
+        state.get("tenant_id"), "salesforce", "update_fields",
+        {"case_id": sf_id, "fields": fields, "append": append}, org_label=config.get("org"),
     )
     result["target"] = sf_id
     if result["dry_run"]:
@@ -589,14 +590,14 @@ def h_sf_case(state: CaseState, config: dict) -> dict:
     """
     nid = config["_node_id"]
     case = dict(state.get("case") or {})
-    info = salesforce.ensure_case(
-        case, state.get("sender") or {},
-        origin=config.get("origin", "Email"),
-        status=config.get("status", "New"),
-        create_contact=bool(config.get("create_contact", True)),
-        create_account=bool(config.get("create_account", True)),
-        reuse=str(config.get("reuse", "thread")),
-        tenant_id=state.get("tenant_id"), org_label=config.get("org"),
+    info = connectors.invoke(
+        state.get("tenant_id"), "salesforce", "ensure_case",
+        {"case": case, "sender": state.get("sender") or {},
+         "origin": config.get("origin", "Email"), "status": config.get("status", "New"),
+         "create_contact": bool(config.get("create_contact", True)),
+         "create_account": bool(config.get("create_account", True)),
+         "reuse": str(config.get("reuse", "thread"))},
+        org_label=config.get("org"),
     )
 
     if info.get("sf_id"):
@@ -609,13 +610,14 @@ def h_sf_case(state: CaseState, config: dict) -> dict:
             case["owner_id"] = info["owner_id"]
         # FR-7: the customer's email itself, on the Case (not just Description)
         if case.get("channel") == "email" and not info.get("dry_run"):
-            info["inbound_email"] = salesforce.log_email_message(
-                info["sf_id"], incoming=True,
-                from_addr=case.get("from", ""), from_name=case.get("from_name", ""),
-                to_addrs=case.get("to") or case.get("supplied_email") or "",
-                subject=case.get("subject", ""), body=case.get("body", ""),
-                message_id=case.get("message_id", ""),
-                tenant_id=state.get("tenant_id"), org_label=config.get("org"),
+            info["inbound_email"] = connectors.invoke(
+                state.get("tenant_id"), "salesforce", "log_email_message",
+                {"case_id": info["sf_id"], "incoming": True,
+                 "from_addr": case.get("from", ""), "from_name": case.get("from_name", ""),
+                 "to_addrs": case.get("to") or case.get("supplied_email") or "",
+                 "subject": case.get("subject", ""), "body": case.get("body", ""),
+                 "message_id": case.get("message_id", "")},
+                org_label=config.get("org"),
             )
     acct = dict(case.get("account") or {})
     for k, v in (info.get("account") or {}).items():
@@ -1447,17 +1449,18 @@ def h_notify(state: CaseState, config: dict) -> dict:
             )[0] or config.get("mention_id")
         else:
             mention = config.get("mention_id")
-        chatter = salesforce.post_chatter(
-            sf_id, body, mention_id=mention, tenant_id=state.get("tenant_id"),
-            org_label=config.get("org"),
+        chatter = connectors.invoke(
+            state.get("tenant_id"), "salesforce", "post_note",
+            {"case_id": sf_id, "body": body, "mention_id": mention}, org_label=config.get("org"),
         )
         outcome["chatter"] = chatter
         mode = "dry-run" if chatter.get("dry_run") else "posted"
         summary = f"Chatter {mode} → {label} [{resolved_via}] (no reassign)"
         if draft.strip() and not inline:
-            note = salesforce.add_case_comment(
-                sf_id, f"[bot draft — {label}; review before sending]\n\n{draft}",
-                published=False, tenant_id=state.get("tenant_id"), org_label=config.get("org"),
+            note = connectors.invoke(
+                state.get("tenant_id"), "salesforce", "add_comment",
+                {"case_id": sf_id, "body": f"[bot draft — {label}; review before sending]\n\n{draft}"},
+                org_label=config.get("org"),
             )
             outcome["draft_comment"] = note
             if note.get("created"):
@@ -1471,8 +1474,9 @@ def h_notify(state: CaseState, config: dict) -> dict:
             rendered = {k: (v.format(label=label, case_type=case_type or "",
                                      module=module or "") if isinstance(v, str) else v)
                         for k, v in af.items()}
-            outcome["attention"] = salesforce.update_case_fields(
-                sf_id, rendered, tenant_id=state.get("tenant_id"), org_label=config.get("org"))
+            outcome["attention"] = connectors.invoke(
+                state.get("tenant_id"), "salesforce", "update_fields",
+                {"case_id": sf_id, "fields": rendered}, org_label=config.get("org"))
     else:
         summary = f"notify {label!r} (no sf_id — not posted)"
 
@@ -1562,8 +1566,9 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
             f"Support bot needs a human on this case (confidence {confidence}). "
             f"Suggested draft below — please review before sending.\n\n{draft}"
         )
-        chatter = salesforce.post_chatter(
-            sf_id, body, mention_id=config.get("mention_id"), tenant_id=state.get("tenant_id"),
+        chatter = connectors.invoke(
+            state.get("tenant_id"), "salesforce", "post_note",
+            {"case_id": sf_id, "body": body, "mention_id": config.get("mention_id")},
             org_label=config.get("org"),
         )
         outcome["chatter"] = chatter
@@ -1571,9 +1576,10 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
         summary = f"Chatter {mode} on Case {sf_id}"
 
         if draft.strip():
-            note = salesforce.add_case_comment(
-                sf_id, f"[bot draft — review before sending]\n\n{draft}",
-                published=False, tenant_id=state.get("tenant_id"), org_label=config.get("org"),
+            note = connectors.invoke(
+                state.get("tenant_id"), "salesforce", "add_comment",
+                {"case_id": sf_id, "body": f"[bot draft — review before sending]\n\n{draft}"},
+                org_label=config.get("org"),
             )
             outcome["draft_comment"] = note
             if note.get("created"):
@@ -1589,8 +1595,8 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
     forced = bool((state.get("confidence_gate") or {}).get("forced_escalation"))
     queue = _route_queue(state, config)
     if sf_id and queue:
-        assignment = salesforce.assign_case(sf_id, queue=queue, tenant_id=state.get("tenant_id"),
-                                            org_label=config.get("org"))
+        assignment = connectors.invoke(state.get("tenant_id"), "salesforce", "assign_owner",
+                                       {"case_id": sf_id, "queue": queue}, org_label=config.get("org"))
         outcome["assignment"] = assignment
         if assignment.get("assigned"):
             summary += f" → {queue}"
@@ -1635,9 +1641,10 @@ def h_handover(state: CaseState, config: dict) -> dict:
     else:
         queue = _route_queue(state, config) or queue
     if sf_id and (queue or config.get("owner_user_id")):
-        assignment = salesforce.assign_case(
-            sf_id, queue=queue, user_id=config.get("owner_user_id"),
-            tenant_id=state.get("tenant_id"), org_label=config.get("org"),
+        assignment = connectors.invoke(
+            state.get("tenant_id"), "salesforce", "assign_owner",
+            {"case_id": sf_id, "queue": queue, "user_id": config.get("owner_user_id")},
+            org_label=config.get("org"),
         )
         outcome["assignment"] = assignment
         if assignment.get("assigned"):
@@ -1681,12 +1688,12 @@ def h_identify(state: CaseState, config: dict) -> dict:
             email = v
             break
 
-    sender = salesforce.identify_sender(
-        email,
-        free_domains=config.get("free_email_domains"),
-        domain_match=bool(config.get("domain_match", True)),
-        create_lead=bool(config.get("create_lead_if_missing", False)),
-        tenant_id=state.get("tenant_id"), org_label=config.get("org"),
+    sender = connectors.invoke(
+        state.get("tenant_id"), "salesforce", "identify_sender",
+        {"email": email, "free_domains": config.get("free_email_domains"),
+         "domain_match": bool(config.get("domain_match", True)),
+         "create_lead": bool(config.get("create_lead_if_missing", False))},
+        org_label=config.get("org"),
     )
     acct = f" / account '{sender['account_name']}'" if sender.get("account_matched") else ""
     summary = f"{email or '(no email)'} → {sender['match']}{acct}"
@@ -1808,10 +1815,11 @@ def h_clarify(state: CaseState, config: dict) -> dict:
             "Thanks for reaching out. To help you with this, could you share:\n\n"
             + numbered + "\n\nOnce we have that we'll follow up."
         )
-        delivery = salesforce.send_case_reply(
-            sf_id, customer_msg, to_email=recipient,
-            subject=config.get("subject", "We need a bit more information"),
-            tenant_id=state.get("tenant_id"), org_label=config.get("org"),
+        delivery = connectors.invoke(
+            state.get("tenant_id"), "salesforce", "send_case_reply",
+            {"case_id": sf_id, "body": customer_msg, "to_email": recipient,
+             "subject": config.get("subject", "We need a bit more information")},
+            org_label=config.get("org"),
         )
     elif sf_id:
         note = (
@@ -1835,9 +1843,9 @@ def h_clarify(state: CaseState, config: dict) -> dict:
                 mention = uid or mention
         except Exception:  # noqa: BLE001
             pass
-        delivery = salesforce.post_chatter(
-            sf_id, note, mention_id=mention, tenant_id=state.get("tenant_id"),
-            org_label=config.get("org"),
+        delivery = connectors.invoke(
+            state.get("tenant_id"), "salesforce", "post_note",
+            {"case_id": sf_id, "body": note, "mention_id": mention}, org_label=config.get("org"),
         )
 
     auto_sent = bool(auto_send and delivery and delivery.get("sent"))
@@ -1850,8 +1858,9 @@ def h_clarify(state: CaseState, config: dict) -> dict:
     handover_queue = config.get("handover_queue")
     handover_assignment = None
     if exhausted and sf_id and handover_queue:
-        handover_assignment = salesforce.assign_case(
-            sf_id, queue=handover_queue, tenant_id=state.get("tenant_id"), org_label=config.get("org")
+        handover_assignment = connectors.invoke(
+            state.get("tenant_id"), "salesforce", "assign_owner",
+            {"case_id": sf_id, "queue": handover_queue}, org_label=config.get("org"),
         )
 
     clarification = {
@@ -2163,8 +2172,6 @@ def h_http_request(state: CaseState, config: dict) -> dict:
     absolute URL in `path` is rejected. No LLM. Best-effort — a failure lands
     `{error}` in `out_key` (unless `on_error="fail"`).
     """
-    import requests  # noqa: PLC0415
-
     from . import connections
 
     nid = config["_node_id"]
@@ -2179,11 +2186,8 @@ def h_http_request(state: CaseState, config: dict) -> dict:
                 **_trace(nid, "http_request", msg, {"connection": slug})}
 
     path = _render_template(str(config.get("path", "")), state)
-    if "://" in path:
-        raise ValueError("http_request `path` must be relative to the connection base_url")
-    url = conn["base_url"].rstrip("/") + "/" + path.lstrip("/")
     method = str(config.get("method", "GET")).upper()
-    headers = {**connections.auth_headers(conn.get("auth")), **(config.get("headers") or {})}
+    headers = config.get("headers") or {}
     query = {k: _render_template(str(v), state) for k, v in (config.get("query") or {}).items()}
     raw_body = config.get("body")
     json_body = None
@@ -2193,13 +2197,13 @@ def h_http_request(state: CaseState, config: dict) -> dict:
         rendered = _render_template(raw_body, state)
         json_body = _safe_json(rendered) or {"_raw": rendered}
 
+    url = conn["base_url"].rstrip("/") + "/" + path.lstrip("/")  # for the trace only; execute() rebuilds it
     try:
-        r = requests.request(method, url, headers=headers or None, params=query or None,
-                             json=json_body, timeout=float(config.get("timeout", 15)))
-        ct = (r.headers.get("content-type") or "").lower()
-        payload = r.json() if "json" in ct else None
-        res = {"status": r.status_code, "ok": 200 <= r.status_code < 300,
-               "json": payload, "text": None if payload is not None else r.text[:8000]}
+        res = connections.execute(conn, method=method, path=path, query=query,
+                                  headers=headers, body=json_body,
+                                  timeout=float(config.get("timeout", 15)))
+    except ValueError:
+        raise  # absolute path -- always a hard error, regardless of on_error
     except Exception as e:  # noqa: BLE001
         if config.get("on_error") == "fail":
             raise
@@ -2212,6 +2216,62 @@ def h_http_request(state: CaseState, config: dict) -> dict:
                  + (str(res.get("status")) if "status" in res else res.get("error", "?")),
                  {"connection": slug, "method": method, "url": url,
                   "status": res.get("status"), "ok": res.get("ok")}),
+    }
+
+
+@register("connector_action")
+def h_connector_action(state: CaseState, config: dict) -> dict:
+    """FR-47 — call a declared action on any connector: a `salesforce` /
+    `slack` builtin, or one of the tenant's own named HTTP connections (each
+    carrying its own saved `connection_actions`, see `connections.py`).
+    Genuinely data-driven — adding a new connector or action for a tenant's
+    own REST API never touches this file; `GET /api/connectors` is the
+    catalog the web editor's pickers read from.
+
+    config: {
+      connector: "salesforce" | "slack" | "<tenant connection slug>",
+      action: "post_note" | "update_fields" | "post_message" | "<saved action name>",
+      params: {...},          # values, or "{{ dotted.path }}" templates over
+                               # state — see the action's declared param list
+      org: "<org label>",     # Salesforce actions only; ignored otherwise
+      out_key: "connector_result",
+      on_error: "passthrough" | "fail",
+    }
+    """
+    from . import connectors
+
+    nid = config["_node_id"]
+    out_key = config.get("out_key", "connector_result")
+    connector_slug = config.get("connector")
+    action_name = config.get("action")
+    tenant_id = state.get("tenant_id")
+
+    try:
+        _spec, action = connectors.get_action(tenant_id, connector_slug, action_name)
+    except KeyError as e:
+        msg = str(e)
+        if config.get("on_error") == "fail":
+            raise
+        return {"context": {out_key: {"error": msg}},
+                **_trace(nid, "connector_action", msg,
+                         {"connector": connector_slug, "action": action_name})}
+
+    rendered = {k: (_render_template(v, state) if isinstance(v, str) else v)
+                for k, v in (config.get("params") or {}).items()}
+
+    try:
+        result = action.impl(tenant_id, config.get("org"), rendered)
+    except Exception as e:  # noqa: BLE001
+        if config.get("on_error") == "fail":
+            raise
+        result = {"error": f"{type(e).__name__}: {e}"[:300]}
+
+    outcome = (str(result.get("status")) if "status" in result
+               else result.get("error") or ("ok" if result else "?"))
+    return {
+        "context": {out_key: result},
+        **_trace(nid, "connector_action", f"{connector_slug}.{action_name} -> {outcome}",
+                 {"connector": connector_slug, "action": action_name, "params": sorted(rendered)}),
     }
 
 

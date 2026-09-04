@@ -16,10 +16,11 @@ _API = "https://api.github.com"
 
 def token_for(tenant_id: str | None, sb) -> str:
     if tenant_id and sb is not None:
-        rows = (sb.table("tenant_integrations").select("secret")
-                .eq("tenant_id", tenant_id).eq("kind", "github").execute().data or [])
-        if rows and rows[0]["secret"].get("token"):
-            return rows[0]["secret"]["token"]
+        from interpreter import vault_secrets
+
+        token = vault_secrets.get(tenant_id, "github", sb=sb).get("token")
+        if token:
+            return token
     tok = os.environ.get("GITHUB_TOKEN")
     if not tok:
         raise RuntimeError(f"no GitHub token for tenant {tenant_id} and GITHUB_TOKEN unset")

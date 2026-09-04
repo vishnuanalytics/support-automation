@@ -106,6 +106,10 @@ NODE_DEFAULTS: dict[str, dict[str, Any]] = {
     "trigger": {"map": {}, "required": [], "defaults": {}},
     "http_request": {"connection": "", "method": "GET", "path": "", "query": {},
                      "out_key": "http", "timeout": 15, "on_error": "passthrough"},
+    # FR-47 — any connector (salesforce/slack builtins, or a tenant's own
+    # named HTTP connection + saved connection_actions); see GET /api/connectors.
+    "connector_action": {"connector": "", "action": "", "params": {},
+                         "out_key": "connector_result", "on_error": "passthrough"},
     "transform": {"map": {}, "set": {}, "drop": [], "into": "context"},
     "case_lookup": {"k": 3, "pool": 10, "min_similarity": 0.35},
     # Phase 25 — image attachments, Salesforce context, generic AI prompt
@@ -1159,6 +1163,80 @@ def delete_connection(slug: str, tenant_id: str | None = None,
                  summary=f"removed connection {slug}")
 
 
+class ConnectionActionIn(BaseModel):
+    name: str
+    method: str = "GET"
+    path: str
+    params: list[dict[str, Any]] = []
+    body_template: Any = None
+
+
+@app.get("/api/connections/{slug}/actions")
+def list_connection_actions(slug: str, tenant_id: str | None = None,
+                            c: Caller = Depends(caller)) -> list[dict]:
+    from interpreter import connections
+    tid = _caller_tenant(c, tenant_id)
+    conn = connections.resolve(tid, slug, sb=_service)
+    if not conn:
+        raise HTTPException(404, "connection not found")
+    return connections.list_actions(conn["connection_id"], sb=_service)
+
+
+@app.post("/api/connections/{slug}/actions", status_code=201)
+def save_connection_action(slug: str, body: ConnectionActionIn, tenant_id: str | None = None,
+                           c: Caller = Depends(caller)) -> dict:
+    from interpreter import connections
+    tid = _caller_tenant(c, tenant_id)
+    _require_editor(c, tid)
+    conn = connections.resolve(tid, slug, sb=_service)
+    if not conn:
+        raise HTTPException(404, "connection not found")
+    row = connections.save_action(conn["connection_id"], body.name, method=body.method,
+                                  path=body.path, params=body.params,
+                                  body_template=body.body_template, sb=_service)
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="connection_action.added",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="connection", target_id=f"{slug}/{body.name}",
+                 summary=f"saved action {body.name} on connection {slug}")
+    return row
+
+
+@app.delete("/api/connections/{slug}/actions/{name}", status_code=204)
+def delete_connection_action(slug: str, name: str, tenant_id: str | None = None,
+                             c: Caller = Depends(caller)) -> None:
+    from interpreter import connections
+    tid = _caller_tenant(c, tenant_id)
+    _require_editor(c, tid)
+    conn = connections.resolve(tid, slug, sb=_service)
+    if not conn:
+        raise HTTPException(404, "connection not found")
+    connections.delete_action(conn["connection_id"], name, sb=_service)
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="connection_action.removed",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="connection", target_id=f"{slug}/{name}",
+                 summary=f"removed action {name} on connection {slug}")
+
+
+@app.get("/api/connectors")
+def list_connectors_ep(tenant_id: str | None = None, c: Caller = Depends(caller)) -> list[dict]:
+    """FR-47 — the full connector catalog (the salesforce/slack builtins plus
+    this tenant's own HTTP connections-as-connectors) for the flow editor's
+    connector/action pickers. `impl` is a Python callable, never serialized."""
+    from interpreter import connectors
+    tid = _caller_tenant(c, tenant_id)
+    specs = connectors.list_connectors(tid, sb=_service)
+    return [
+        {"slug": s.slug, "label": s.label, "auth": s.auth,
+         "actions": [{"name": a.name, "description": a.description, "params": a.params}
+                     for a in s.actions.values()]}
+        for s in specs
+    ]
+
+
 class SFCaseHookIn(BaseModel):
     case_id: str
     flow_id: str | None = None       # optional override; else the flow marked `sf_entry`
@@ -1971,10 +2049,16 @@ def google_callback(code: str = "", state: str = "", error: str = "") -> HTMLRes
         tok = gdrive.exchange_code(code, GOOGLE_REDIRECT_URI)
     except Exception as e:  # noqa: BLE001
         return page(f"Could not complete Google sign-in: {e}")
-    _service.table("tenant_integrations").upsert({
-        "tenant_id": tenant_id, "kind": "google",
-        "secret": {"refresh_token": tok["refresh_token"], "scope": tok.get("scope")},
-    }).execute()
+    from interpreter import vault_secrets
+
+    vault_id = vault_secrets.put(tenant_id, "google", {
+        "refresh_token": tok["refresh_token"], "scope": tok.get("scope"),
+    }, sb=_service)
+    row = {"tenant_id": tenant_id, "kind": "google",
+           "secret": {"scope": tok.get("scope"), "has_credentials": True}}
+    if vault_id:
+        row["vault_secret_id"] = vault_id
+    _service.table("tenant_integrations").upsert(row).execute()
     return page("Google connected. You can close this window.")
 
 
@@ -2245,11 +2329,9 @@ def llm_key_status(tenant_id: str | None = None, c: Caller = Depends(caller)) ->
     works, nothing to do" instead of implying every provider needs setup).
     Never returns a key — only booleans."""
     tid = _caller_tenant(c, tenant_id)
-    rows = (_service.table("tenant_integrations").select("secret")
-            .eq("tenant_id", tid).eq("kind", "llm").execute().data or [])
-    secret = (rows[0]["secret"] if rows else {}) or {}
-    from interpreter import llm as llmmod
+    from interpreter import llm as llmmod, vault_secrets
 
+    secret = vault_secrets.get(tid, "llm", sb=_service)
     return {
         "tenant_id": tid,
         "tenant": {p: bool(secret.get(f"{p}_api_key")) for p in _LLM_PROVIDERS},
@@ -2267,12 +2349,15 @@ def llm_key_save(body: LlmKeyIn, c: Caller = Depends(caller)) -> dict:
     _require_owner(c, tid)
     rate_limit(c.user_id, "integration", 30)
 
-    rows = (_service.table("tenant_integrations").select("secret")
-            .eq("tenant_id", tid).eq("kind", "llm").execute().data or [])
-    secret = dict((rows[0]["secret"] if rows else {}) or {})
+    from interpreter import vault_secrets
+
+    secret = dict(vault_secrets.get(tid, "llm", sb=_service))
     secret[f"{body.provider}_api_key"] = body.api_key.strip()
-    _service.table("tenant_integrations").upsert(
-        {"tenant_id": tid, "kind": "llm", "secret": secret}).execute()
+    vault_id = vault_secrets.put(tid, "llm", secret, sb=_service)
+    row = {"tenant_id": tid, "kind": "llm", "secret": {}}
+    if vault_id:
+        row["vault_secret_id"] = vault_id
+    _service.table("tenant_integrations").upsert(row).execute()
 
     # llm.py caches tenant keys for 5 min (one lookup per complete() call
     # would otherwise be a DB round trip on every LLM call) -- drop the
@@ -2295,13 +2380,11 @@ def llm_key_remove(provider: str, tenant_id: str | None = None, c: Caller = Depe
     tid = _caller_tenant(c, tenant_id)
     _require_owner(c, tid)
 
-    rows = (_service.table("tenant_integrations").select("secret")
-            .eq("tenant_id", tid).eq("kind", "llm").execute().data or [])
-    if rows:
-        secret = dict(rows[0]["secret"] or {})
-        secret.pop(f"{provider}_api_key", None)
-        _service.table("tenant_integrations").upsert(
-            {"tenant_id": tid, "kind": "llm", "secret": secret}).execute()
+    from interpreter import vault_secrets
+
+    secret = dict(vault_secrets.get(tid, "llm", sb=_service))
+    if secret.pop(f"{provider}_api_key", None) is not None:
+        vault_secrets.put(tid, "llm", secret, sb=_service)
 
     from interpreter import llm as llmmod
     llmmod._tenant_keys_cache.pop(tid, None)
@@ -2340,14 +2423,17 @@ class SalesforceOrgIn(BaseModel):
 
 @app.get("/api/integrations/salesforce")
 def salesforce_orgs(tenant_id: str | None = None, c: Caller = Depends(caller)) -> list[dict]:
-    """Every Salesforce org this tenant has connected — never the secret."""
-    from interpreter import salesforce as _sf
-
+    """Every Salesforce org this tenant has connected — never the secret.
+    `secret` is already the `redact_org_secret()` view as of 2026-09-04
+    (`save_tenant_org` writes it that way, real creds live in Vault) — do
+    NOT redact it again here: re-running redact_org_secret on already-safe
+    data recomputes `has_credentials` from a dict with no secret keys left
+    and silently reports `False` even for a fully connected org."""
     tid = _caller_tenant(c, tenant_id)
     rows = (_service.table("tenant_integrations").select("org_label, secret, updated_at")
             .eq("tenant_id", tid).eq("kind", "salesforce").order("org_label").execute().data or [])
-    return [{"org_label": r["org_label"], "updated_at": r["updated_at"],
-             **_sf.redact_org_secret(r["secret"])} for r in rows]
+    return [{"org_label": r["org_label"], "updated_at": r["updated_at"], **(r["secret"] or {})}
+            for r in rows]
 
 
 @app.put("/api/integrations/salesforce", status_code=201)
@@ -2619,11 +2705,17 @@ def slack_callback(code: str = "", state: str = "", error: str = "") -> HTMLResp
         tok = slackmod.exchange_code(code, SLACK_REDIRECT_URI)
     except Exception as e:  # noqa: BLE001
         return page(f"Could not complete Slack install: {e}")
-    _service.table("tenant_integrations").upsert({
-        "tenant_id": tenant_id, "kind": "slack",
-        "secret": {"bot_token": tok["bot_token"], "team": tok.get("team"),
-                   "bot_user_id": tok.get("bot_user_id")},
-    }).execute()
+    from interpreter import vault_secrets
+
+    vault_id = vault_secrets.put(tenant_id, "slack", {
+        "bot_token": tok["bot_token"], "team": tok.get("team"),
+        "bot_user_id": tok.get("bot_user_id"),
+    }, sb=_service)
+    row = {"tenant_id": tenant_id, "kind": "slack",
+           "secret": {"team": tok.get("team"), "has_credentials": True}}
+    if vault_id:
+        row["vault_secret_id"] = vault_id
+    _service.table("tenant_integrations").upsert(row).execute()
     return page("Slack connected. You can close this window.")
 
 

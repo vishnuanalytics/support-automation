@@ -8,39 +8,52 @@ file is the operating rules for how to work in it.
 ## Repository layout
 
 ```
-docs/            PROJECT_SCOPE.md (the real memory), SALESFORCE_SETUP.md
-db/migrations/   001_*.sql .. 010_*.sql   (sequential, single-concern)
-ingestion/       Phase 1 — scraper.py, neo4j_sync.py, eval/
-interpreter/     Phase 2-4 — the config-driven LangGraph interpreter
-  flows/         validate_flow.py, flow_support_example.json
+docs/            PROJECT_SCOPE.md (the real memory), REQUIREMENTS.md (the spec), SALESFORCE_SETUP.md, +7 more setup docs
+db/migrations/   001_*.sql .. NNN_*.sql   (sequential, single-concern — run `ls db/migrations | tail` for the real current number; do not trust a count written in this file, it will go stale)
+ingestion/       scraper.py, neo4j_sync.py, email_watch.py, sf_cdc_watch.py, webcrawl.py, case_graph_sync.py, case_memory_sync.py, eval/
+interpreter/     the config-driven LangGraph interpreter — 50+ modules (builder/loader/registry/conditions/retrieval/llm/salesforce/runs/billing/integrity/kb_writeback/handoff_watch/approvals/connections/triggers/cron/templates/fileimport/reasoning/slack_socket/…)
+  flows/         validate_flow.py, flow_support_example.json, templates/*.json
   cases/         sample support cases
-api/             Phase 5 — FastAPI backend (reuses interpreter/)
-web/             Phase 5 — React Flow editor
-scripts/         one-off ops helpers (SF field setup, seed data, RLS check)
-tests/           test_interpreter.py (offline), test_multiflow.py (integration)
+api/             FastAPI backend (reuses interpreter/) — main.py, worker.py, trace.py
+web/             React Flow editor — feature-organized under web/src/ (billing, kb, rules, review, trace, onboarding, channels, team, auth, …)
+scripts/         ops helpers (SF field setup, seed data, RLS check, migration-drift check, health check)
+tests/           57+ files — offline unit tests + `-m integration` tests against live Supabase/Salesforce/Slack
 ```
 Run modules from the repo root: `python -m ingestion.scraper`,
 `python -m interpreter.run …`, `python -m ingestion.eval.run_eval`.
 
-## Don't build ahead
+## Don't build ahead — and don't trust a phase count written in this file
 
 This project is built in explicit, sequenced phases (see
-`docs/PROJECT_SCOPE.md` for the phase table). **All phases 0–16 are
-built** (0–6 the MVP; 7–13 the hardening roadmap; 14 self-serve internal
-KB; 15 Google Docs connector; 16 structured policy rules + Slack-approved
-GitHub actions). No open phase.
+`docs/PROJECT_SCOPE.md` for the real phase table and `docs/REQUIREMENTS.md`
+for the numbered FR/NFR spec). **This file previously claimed "phases 0–16,
+no open phase" for weeks after the project had grown well past that** — the
+build had reached a full Knowledge Integrity Loop (contradiction detection →
+manager review → approved KB rewrite, KIL a–f complete, only KIL-g
+deferred), a 9-chunk post-KIL platform-hardening roadmap (P1–P9, all
+complete: generic non-Salesforce `RunContext`, webhook/schedule triggers,
+declarative connectors, self-serve onboarding with file-upload/URL-crawl KB
+ingestion, KIL observability, a usage/billing dashboard), a multi-tenant
+multi-Salesforce-org connector layer with real-data pickers in the flow
+editor (browser-verified), a systematic robustness pass (retry backoff,
+cross-tenant cache-leak fixes, concurrency-stress-tested at both the
+interpreter and the real HTTP API layer), a guided onboarding wizard, and
+an in-progress **Phase 29 "Agentic AI"** track — none of which this file
+mentioned. Don't let that happen again:
 
-- Remaining work is **live verification of the external connectors**
-  (need creds: Phase 15 `GOOGLE_CLIENT_ID`/`SECRET`; Phase 16 a Slack app
-  + `GITHUB_TOKEN`) and polish (Phase 16 rule form builder; Phase 14 file
-  upload). See "Immediate next step" in `PROJECT_SCOPE.md`.
-- The hardening roadmap (7–13) was built in order **7 → 9 → 8 → 10 → 11 →
-  12 → 13**; 14 → 15 → 16 followed. New work still lands one verifiable
-  chunk at a time.
-- Don't expand scope mid-phase. Each roadmap phase is a small, verifiable
-  chunk — land it and its verification before moving on.
-- If a task surfaces something that belongs to a later phase, note it in
-  your response and stop there — don't implement it preemptively.
+- **Never hardcode "phases 0–N are done" in this file.** State the shape of
+  the project (MVP → hardening → self-serve KB/connectors → KIL →
+  platform-hardening roadmap → agentic AI), not a specific ceiling number,
+  since the number *will* be higher by the time you read this.
+- Before claiming to know the current state, read `docs/PROJECT_SCOPE.md`'s
+  **"Immediate next step"** section — but note the doc is not strictly
+  append-only; later sections get edited in place, so also skim for the
+  most recent dates (`2026-09-0X`) wherever they appear, not just whatever
+  is physically last in the file.
+- New work still lands one verifiable chunk at a time — don't expand scope
+  mid-chunk.
+- If a task surfaces something that belongs to a later, unbuilt phase, note
+  it in your response and stop there — don't implement it preemptively.
 
 ## Before making changes
 

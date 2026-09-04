@@ -11,6 +11,7 @@ Run:  pytest tests/test_slack_introspection.py
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 
@@ -20,23 +21,23 @@ from interpreter import slack
 
 
 class _FakeSb:
-    """Just enough of the supabase client for `_bot_token`/`connected`."""
+    """Just enough of the supabase client for `_bot_token`/`connected` --
+    2026-09-04: the bot token lives in Vault (`integration_secret_get` RPC),
+    not the `tenant_integrations.secret` column, so this fakes the RPC."""
 
     def __init__(self, token: str | None = "xoxb-fake"):
         self._token = token
 
-    def table(self, name):
-        return self
+    def rpc(self, name, params):
+        token = self._token
+        if name != "integration_secret_get":
+            raise AssertionError(f"unexpected rpc {name!r}")
 
-    def select(self, *_a, **_k):
-        return self
-
-    def eq(self, *_a, **_k):
-        return self
-
-    def execute(self):
-        data = [{"secret": {"bot_token": self._token}}] if self._token else []
-        return type("R", (), {"data": data})()
+        class _Exec:
+            def execute(self):
+                data = json.dumps({"bot_token": token}) if token else None
+                return type("R", (), {"data": data})()
+        return _Exec()
 
 
 def test_list_channels_filters_to_id_name_membership(monkeypatch):

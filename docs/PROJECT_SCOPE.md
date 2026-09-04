@@ -707,6 +707,138 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-04 — test-coverage chunk: the three "live-verified once" spots
+(Slack approval buttons, GitHub issue creation, KIL approval flow) now
+have real offline test coverage. This is the most recent work in this
+file (see the top-of-file note: this doc is edited in place, not strictly
+appended to — check dates, not physical position).** Third of the three
+tracks scoped earlier in the day (connector generality → production
+hardening → this). Confirmed by grep before writing anything, not assumed:
+- `slack_socket.dispatch_action`'s KIL-c review-card branches
+  (`review_correct/wrong/dismiss`) and the KIL-d/Phase-16 approval-card
+  branches (`kb_approve/kb_reject/approve/reject`) had zero coverage —
+  `test_slack_socket.py` only exercised the reasoning-session action
+  branches (`cx_send`/`cx_edit`/...). Added 8 tests.
+- `api/worker.py`'s `HANDLERS` dict dispatches `_create_github_issue` and
+  `_apply_kb_change` for real jobs, but only the *library* functions they
+  call (`github.create_issue`, `kb_writeback.apply_kb_change`) had
+  coverage — the worker-level wrapper (status/idempotency checks, the
+  Slack card update, error → `action_requests.status='error'`) did not.
+  New `tests/test_worker_job_handlers.py`, 10 tests.
+- `interpreter/approvals.py` (P3/FR-44 — the one place `dispatch_action`,
+  the signed HTTP Slack callback, and `/api/review-tasks/{id}/resolve` all
+  funnel an approval decision through) had zero dedicated tests at all.
+  New `tests/test_approvals.py`, 11 tests.
+- `interpreter/github.py` itself (token resolution, `create_issue`'s HTTP
+  call) also had zero dedicated tests — found while tracing the GitHub
+  path, not part of the original 3-item list. New `tests/test_github.py`,
+  10 tests.
+
+646 offline tests green (was 607 before this chunk). Purely additive —
+no production code paths changed, so no live-verification step was needed
+this time (unlike the previous two chunks).
+
+**Old production-hardening note, superseded by the above as "most
+recent," kept for its own history:** every tenant secret is now
+Vault-encrypted, not plaintext. Picked as the next
+track after connector generality. Two of the four candidate items turned
+out already done: `interpreter/jobs.py::fail()` already has exponential
+backoff (earlier robustness pass); a real `/security-review` already ran
+2026-09-03 (see "Known issues" below) — a stale leftover note elsewhere in
+this file claimed otherwise, fixed in place. The shared-LLM-quota issue
+stays a documented, deliberate billing tradeoff, not a code defect.
+
+That left one real, confirmed gap: migration `035` (Phase 20a) built
+Vault-backed `integration_secret_put/get/delete()` SQL functions and
+`interpreter/mailbox.py` already used them correctly for the email
+channel — but its own comment said *"a later phase can migrate the Slack /
+SF / Google rows onto the same mechanism"* and that phase never happened.
+`interpreter/salesforce.py` (`client_for`/`save_tenant_org`), `slack.py`
+(`_bot_token`), `gdrive.py` (`_integration`), `llm.py` (`_tenant_keys`,
+BYOK), and `github.py` (`token_for`, found in a final sweep, not part of
+the original 4) all read/wrote `tenant_integrations.secret` in the clear —
+real Salesforce JWT keys / OAuth refresh tokens, Slack bot tokens, Google
+refresh tokens, tenants' own pasted LLM keys, GitHub PATs.
+
+Fixed: new `interpreter/vault_secrets.py` (a thin `get`/`put`/`delete`
+wrapper generalizing the exact pattern `mailbox.py` already used inline)
++ every one of those 5 modules' read/write call sites switched to it.
+`tenant_integrations.secret` now holds only non-sensitive display fields
+(username, domain, workspace name, `has_credentials`) — never the real
+value. Salesforce is per-org, so it namespaces its Vault kind as
+`f"salesforce:{org_label}"`, giving each connected org its own entry under
+the existing `(tenant_id, kind, org_label)` PK (migration `082`) with no
+schema change needed. **A real correctness bug found and fixed along the
+way, not hypothetical:** `GET /api/integrations/salesforce` was calling
+`redact_org_secret()` a second time on data that's now already redacted —
+recomputing `has_credentials` from a dict with no secret keys left, which
+would have silently reported `False` for a fully connected org. Fixed by
+not re-redacting already-safe data.
+
+The 5 live rows in `tenant_integrations` were backfilled via a new
+`scripts/backfill_vault_secrets.py` (idempotent, `--dry-run` first) —
+**verified live**, not just offline: a direct `salesforce.list_queues()`
+call against the real org after the backfill returned all 12 real queues,
+proving `client_for` correctly resolves Vault-sourced creds, and
+`tests/test_llm_byok.py -m integration` (a real round trip through the
+API) passed unmodified. 607 offline tests green (was 598) — 9 new in
+`tests/test_vault_secrets.py`; `test_salesforce_multi_org.py`'s and
+`test_slack_introspection.py`'s fake-Supabase fixtures gained an `.rpc()`
+method to keep exercising the real vault-backed path instead of a stale
+direct-table-read shape.
+
+**Old connector-generality note, superseded by the above as "most
+recent," kept for its own history:** A gap audit found `docs/REQUIREMENTS.md`'s FR-47 ("connectors are data, not a
+hardcoded node handler") had been marked "built" without actually being
+true — no `ConnectorSpec`/registry existed anywhere, and 9 of 26
+`registry.py` node types were (and still are) hardwired straight to
+Salesforce. Built the real thing: `interpreter/connectors.py`
+(`ConnectorSpec`/`ActionSpec` registry) + a generic `connector_action`
+node, with `salesforce`/`slack` builtins (thin wrappers, `salesforce.py`/
+`slack.py` unmodified) and, more importantly, **user-definable named
+actions on a tenant's own HTTP connection** (migration `083`,
+`connection_actions`) — so a brand-new third-party API (Zendesk, Jira,
+anything REST) is addable as a first-class connector from the web UI with
+**zero Python changes**. `http_request`'s request logic was extracted
+into `connections.execute()`, shared by both paths — its existing 8 tests
+pass unmodified, no behavior change. Web: one generic `ConnectorActionForm`
+(connector → action → dynamically-rendered params) plus a "manage
+actions" panel on the Connections tab, instead of a new bespoke Inspector
+form per vendor. 600 offline tests green (13 new in `tests/test_connectors.py`),
+`scripts/verify_migrations.py` clean, `web`'s `tsc -b && vite build` clean.
+See FR-47 in `docs/REQUIREMENTS.md` for the full detail.
+
+**Follow-on completed the same day (2026-09-04):** 7 of the 9 originally
+SF-hardwired node handlers (`sf_writeback`, `sf_case`, `notify`,
+`ask_human`, `handover`, `identify`, `clarify`) plus `alert.alert_human`
+(behind `notify_human`) were migrated to call Salesforce/Slack through
+`connectors.invoke(tenant_id, "salesforce"|"slack", "<action>", params)`
+instead of importing `salesforce.py`/`slack.py` directly — added 4 new
+Salesforce actions (`ensure_case`, `log_email_message`, `identify_sender`,
+`send_case_reply`) and widened Slack's `post_message` action (`webhook`/
+`blocks`) to cover every call site. **Zero behavior change, proven, not
+assumed:** `salesforce.py`/`slack.py` themselves are untouched, and every
+existing test that monkeypatches `salesforce.<verb>`/`slack.<verb>`
+directly — dozens of them, across `test_sf_case.py`, `test_notify_and_type.py`,
+`test_case_control_plane.py`, `test_resilience.py`, `test_salesforce_multi_org.py`,
+and more — still passes unmodified, since the monkeypatch still lands on
+the same underlying function one indirection layer down. A new
+`tests/test_sf_handlers_use_connectors.py` (11 tests) additionally asserts
+the *connector/action name* each handler now uses, so a future accidental
+revert to a direct call would be caught even if behavior happened to still
+look right. 598 offline tests green (was 587); `scripts/verify_migrations.py`
+clean (no schema change this round); `web`'s build unaffected (backend-only).
+
+**`sf_context` is a deliberate, documented exception** — see its own
+module docstring. It's a bespoke, `want`-driven fan-out of several SOQL
+reads (Account hierarchy, Contacts, Leads, Case history, team) into one
+nested result, not a single named write action with a flat params dict;
+forcing it into the connector-action shape would lose that flexibility or
+need one action per read, neither of which is what a connector *action* is
+for. Left as a normal internal helper — this is a considered judgment call,
+not an oversight, so don't "finish" it later without re-examining whether
+that's actually the right shape.
+
 **Self-serve multi-tenant/multi-org Salesforce + Slack connector, and a
 flow editor that fetches real data instead of hardcoding it — DONE and
 browser-verified (2026-09-03).** See "Multi-tenant / multi-Salesforce-org
@@ -3767,9 +3899,15 @@ From the 2026-08-29 self-review. Each is intentional MVP scope, not a bug:
   token-bucket `rate_limit(user_id, bucket, limit, window)` (line ~199)
   is applied to `run` (20/min), `assist` (30 or 12/min per endpoint),
   `enqueue` (120/min), and public webhooks (300/min, keyed by trigger
-  token). **Still genuinely open:** no `/security-review` has been run
-  over the accumulated `api/`+`web/` diff (Phase 5 through Phase 29 —
-  a lot of surface since Phase 13 was written); `sop_conflicts.py`
-  exists but isn't wired into CI as a non-blocking report (needs Phase
-  12's divergent per-team retrieval to have something to actually find
-  first — check whether that's true yet before wiring it).
+  token). ~~**Still genuinely open:** no `/security-review` has been run
+  over the accumulated `api/`+`web/` diff (Phase 5 through Phase 29).~~
+  **Stale note (fixed 2026-09-04):** this claim was itself out of date —
+  see "first real security review of the accumulated api/+web/ surface"
+  above (2026-09-03, same "Known issues" section): it already ran, found
+  and fixed 2 real SSRF issues, AuthZ/RLS/secrets came back clean. Two
+  stale claims about the same fact, in the same file, is exactly the
+  "edited in place, not appended" drift CLAUDE.md now warns about —
+  fixed here rather than left for a third session to trip over.
+  `sop_conflicts.py` exists but isn't wired into CI as a non-blocking
+  report (needs Phase 12's divergent per-team retrieval to have something
+  to actually find first — check whether that's true yet before wiring it).
