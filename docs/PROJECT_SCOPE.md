@@ -707,8 +707,28 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-05 — retention/pruning built for the 3 tables the audit flagged as
+missing it (this is the most recent work in this file).** Migration `087`
+(`purge_old_case_events`, `purge_old_audit_log` — age-only, default 365d;
+`purge_old_reasoning_sessions` — terminal states only, `sent`/`abandoned`,
+aged off `updated_at`, never touches an open session regardless of age),
+same pattern as `runs`/`jobs` (059) and `flow_versions` (077). Applied to
+the real Supabase project; `test_verify_migrations.py`'s live drift check
+confirms zero drift; `scripts/purge_old.py` gains
+`--case-events-days`/`--audit-log-days`/`--reasoning-days` (default 365
+each) and was run for real against the live project (a 3650-day cutoff, to
+confirm the whole call chain works without actually deleting live data —
+all three returned 0, correctly, on a project created 2026-08-25). 769
+offline tests green (no new tests — matches the existing convention: `059`/
+`077`'s purge functions have no unit tests either, verified live only).
+No unit-test coverage added for the SQL functions themselves, consistent
+with that precedent.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
 **2026-09-05 — architecture/cost audit run, one chunk built: judge-call
-caching (this is the most recent work in this file).** User asked for a
+caching.** User asked for a
 whole-system pass on storage/compute cost, accuracy, and where else
 agentic orchestration earns its cost. Three read-only audits (DB schema
 across all 86 migrations, LLM call sites, and node-handler agentic
@@ -727,12 +747,11 @@ future session (not built now — the user picks the next one)**:
   Same convention, zero behavior change (cache keys on exact
   model+system+user+max_tokens, so a genuinely different input always
   misses). 769 offline tests green, no regression.
-- **Not built — storage:** `case_events`, `reasoning_sessions`, and
-  `audit_log` are the only append-only tables with no pruning, unlike
-  `runs`/`jobs` (`purge_old()`, migration 059) and `flow_versions`
-  (`purge_old_flow_versions()`, 077). Small, safe next migration if
-  storage growth becomes a real concern — note this is a different gap
-  from the `runs.case_payload`/`runs.trace` redundancy point below.
+- ~~**Not built — storage:** `case_events`, `reasoning_sessions`, and
+  `audit_log` are the only append-only tables with no pruning~~ **Built
+  2026-09-05, migration 087 — see the entry above.** (Note this was always
+  a different gap from the `runs.case_payload`/`runs.trace` redundancy
+  point below, which is still open.)
 - **Not built — compute:** `h_draft` makes two separate `integrity.check()`
   Groq round-trips per invocation (`kind="draft"` and `kind="inbound"`)
   against the same context — collapsible into one prompt, halving that
