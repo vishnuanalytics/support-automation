@@ -232,3 +232,94 @@ def test_dispatch_kb_approve_enqueues_apply(monkeypatch):
     out = slack_socket.dispatch_action(sb, payload, post=lambda *a: None)
     assert out["status"] == "approved"
     assert enq and enq[0][0] == "apply_kb_change"
+
+
+# ── Phase 29 step 4 — self-critique ──────────────────────────────────────
+from interpreter import integrity  # noqa: E402
+
+
+def test_self_critique_stamps_entails_cleanly(monkeypatch):
+    monkeypatch.setattr(integrity, "check", lambda *a, **k: {"relation": "entails"})
+    c = kb_writeback.draft_change({"statement": "Refunds take 45 days.", "contexts": [], "verdict": {}})
+    assert c["self_critique"] == {"relation": "entails", "retried": False}
+
+
+def test_contradicts_with_no_llm_does_not_retry_but_stamps_verdict(monkeypatch):
+    # the file's autouse _no_llm fixture already forces llm.available() False
+    calls = []
+    monkeypatch.setattr(integrity, "check", lambda *a, **k: calls.append(1) or {"relation": "contradicts"})
+    statement = "Refunds take 45 days."
+    c = kb_writeback.draft_change({"statement": statement, "contexts": [], "verdict": {}})
+    assert c["self_critique"] == {"relation": "contradicts", "retried": False}
+    assert c["body_md"] == statement            # unchanged -- the fallback draft, never redrafted
+    assert len(calls) == 1                       # checked once, never re-checked (no retry)
+
+
+def test_contradicts_triggers_exactly_one_retry_when_llm_available(monkeypatch):
+    monkeypatch.setattr(llm, "available", lambda *a, **k: True)
+    drafts = iter([
+        '{"op": "create", "title": "v1", "body_md": "first attempt", "rationale": "r1"}',
+        '{"op": "create", "title": "v2", "body_md": "revised attempt", "rationale": "r2"}',
+    ])
+    monkeypatch.setattr(llm, "complete", lambda **k: next(drafts))
+    verdicts = iter([{"relation": "contradicts"}, {"relation": "entails"}])
+    seen_bodies = []
+
+    def fake_check(statement, contexts, **k):
+        seen_bodies.append(contexts[0]["text"])
+        return next(verdicts)
+    monkeypatch.setattr(integrity, "check", fake_check)
+
+    c = kb_writeback.draft_change({"statement": "Refunds take 45 days.", "contexts": [], "verdict": {}})
+
+    assert c["body_md"] == "revised attempt"     # the retried draft is what ships
+    assert c["self_critique"] == {"relation": "entails", "retried": True}
+    assert seen_bodies == ["first attempt", "revised attempt"]   # checked, redrafted, re-checked
+
+
+def test_entails_first_try_never_retries(monkeypatch):
+    monkeypatch.setattr(llm, "available", lambda *a, **k: True)
+    calls = []
+    monkeypatch.setattr(llm, "complete", lambda **k: calls.append(1) or
+                        '{"op": "create", "title": "v1", "body_md": "good draft", "rationale": "r1"}')
+    monkeypatch.setattr(integrity, "check", lambda *a, **k: {"relation": "entails"})
+
+    c = kb_writeback.draft_change({"statement": "Refunds take 45 days.", "contexts": [], "verdict": {}})
+    assert c["body_md"] == "good draft" and len(calls) == 1     # one draft call, no redraft
+    assert c["self_critique"] == {"relation": "entails", "retried": False}
+
+
+def test_redraft_parse_failure_keeps_the_original_draft(monkeypatch):
+    monkeypatch.setattr(llm, "available", lambda *a, **k: True)
+    drafts = iter([
+        '{"op": "create", "title": "v1", "body_md": "first attempt", "rationale": "r1"}',
+        "not json",   # the redraft call comes back malformed
+    ])
+    monkeypatch.setattr(llm, "complete", lambda **k: next(drafts))
+    monkeypatch.setattr(integrity, "check", lambda *a, **k: {"relation": "contradicts"})
+
+    c = kb_writeback.draft_change({"statement": "Refunds take 45 days.", "contexts": [], "verdict": {}})
+    assert c["body_md"] == "first attempt"       # redraft failed to parse -> keep the original
+    assert c["self_critique"] == {"relation": "contradicts", "retried": False}
+
+
+def test_post_card_warns_when_critique_is_not_clean():
+    posts = []
+    kb_writeback._post_card(
+        None, tenant_id="t1", ar_id="ar1", channel="#kb",
+        change={"op": "create", "title": "T", "body_md": "B", "rationale": "R",
+               "self_critique": {"relation": "contradicts", "retried": True}},
+        post=lambda text, **k: posts.append(k["blocks"][0]["text"]["text"]),
+    )
+    assert "self-check" in posts[0] and "review carefully" in posts[0]
+
+
+def test_post_card_no_warning_when_entails():
+    posts = []
+    kb_writeback._post_card(
+        None, tenant_id="t1", ar_id="ar1", channel="#kb",
+        change={"op": "create", "title": "T", "body_md": "B", "rationale": "R",
+               "self_critique": {"relation": "entails", "retried": False}},
+        post=lambda text, **k: posts.append(k["blocks"][0]["text"]["text"]),
+    )
+    assert "self-check" not in posts[0]

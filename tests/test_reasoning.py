@@ -195,6 +195,77 @@ def test_terminal_states_are_inert():
         assert out["action"] is None and st in out["reply"]
 
 
+# ── Phase 29 step 5 — autonomous continuation of a stalled dialogue ────
+def _tool_result(*, text=None, calls=(), stop_reason="tool_use"):
+    from interpreter import llm as _llm
+    return _llm.ToolResult(text=text, stop_reason=stop_reason,
+                           tool_calls=[_llm.ToolCall(id=str(i), name=n, arguments=a)
+                                      for i, (n, a) in enumerate(calls)])
+
+
+def test_autonomous_continue_no_open_gaps_is_trivially_resolved():
+    s = _session([("Q1", True)])
+    s["pointers"][0]["answered"] = True
+    out = reasoning.autonomous_continue(s, CASE)
+    assert out == {"pointers": s["pointers"], "resolved": True, "iterations": 0, "kb_hits": []}
+
+
+def test_autonomous_continue_grounds_and_resolves_a_gap(monkeypatch):
+    calls = iter([
+        _tool_result(calls=[("search_kb", {"query": "refund policy"})]),
+        _tool_result(text="that's everything documented", calls=[]),
+    ])
+    monkeypatch.setattr(reasoning.llm, "complete_with_tools", lambda **_k: next(calls))
+    monkeypatch.setattr(reasoning, "_autonomous_search",
+                        lambda q, tenant_id: [{"doc_url": "kb:refunds",
+                                               "chunk_text": "Refunds post within 5 days."}])
+    s = _session(P2)
+    ingest = json.dumps([{"answered": True, "note": "5 business days"},
+                        {"answered": True, "note": "no data needed"}])
+    out = reasoning.autonomous_continue(s, CASE, llm_fn=lambda *_a, **_k: ingest)
+    assert out["resolved"] is True and out["iterations"] == 1
+    assert out["kb_hits"] == ["Refunds post within 5 days."]
+    assert all(p["answered"] for p in out["pointers"])
+    assert out["pointers"][0]["agent_note"].startswith("[autonomous, unconfirmed by human]")
+
+
+def test_autonomous_continue_gives_up_when_the_model_never_searches(monkeypatch):
+    monkeypatch.setattr(reasoning.llm, "complete_with_tools",
+                        lambda **_k: _tool_result(text="not documented", calls=[]))
+    out = reasoning.autonomous_continue(_session(P2), CASE)
+    assert out["resolved"] is False and out["iterations"] == 0 and out["kb_hits"] == []
+
+
+def test_autonomous_continue_survives_a_tool_call_error(monkeypatch):
+    def boom(**_k):
+        raise RuntimeError("429")
+    monkeypatch.setattr(reasoning.llm, "complete_with_tools", boom)
+    out = reasoning.autonomous_continue(_session(P2), CASE)
+    assert out["resolved"] is False and out["iterations"] == 0
+
+
+def test_autonomous_continue_respects_max_iterations(monkeypatch):
+    calls = []
+    monkeypatch.setattr(reasoning.llm, "complete_with_tools",
+                        lambda **_k: (calls.append(1) or
+                                     _tool_result(calls=[("search_kb", {"query": f"q{len(calls)}"})])))
+    monkeypatch.setattr(reasoning, "_autonomous_search",
+                        lambda q, tenant_id: [{"doc_url": "kb:x", "chunk_text": "unrelated"}])
+    out = reasoning.autonomous_continue(_session(P2), CASE, max_iterations=2,
+                                        llm_fn=make_stub(ingest=[]))
+    assert out["iterations"] == 2
+    assert calls == [1, 1]
+
+
+def test_autonomous_continue_stub_path_never_resolves(monkeypatch):
+    """No API key -> complete_with_tools's own stub never calls a tool
+    (interpreter/llm.py's `_stub_tool_result`) -- deterministic, matching
+    every other agentic step's offline behavior."""
+    monkeypatch.setattr(reasoning.llm, "available", lambda *a, **k: False)
+    out = reasoning.autonomous_continue(_session(P2), CASE)
+    assert out["resolved"] is False
+
+
 def test_open_session_records_max_rounds(monkeypatch):
     sb = _FakeSB({"Billing": ["a", "b", "c"]})
     s = reasoning.open_session(sb, case=CASE, tenant_id="t", case_type="Billing",

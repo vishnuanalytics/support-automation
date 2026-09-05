@@ -243,6 +243,57 @@ def test_reasoning_ttl_nudges_then_escalates(monkeypatch):
     assert {"state": "abandoned"} in sb.updated
 
 
+def test_reasoning_ttl_autonomous_continue_resolves(monkeypatch):
+    """Phase 29 step 5 — a stalled `clarifying` session the bot can close out
+    itself off documentation moves to `awaiting_approval` with a draft
+    instead of being escalated + abandoned."""
+    from interpreter import reasoning
+
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(salesforce, "available", lambda *a, **k: False)
+    monkeypatch.setattr(reasoning, "_case_for_session", lambda _sb, _s: {"subject": "x"})
+    monkeypatch.setattr(reasoning, "autonomous_continue",
+                        lambda _s, _case, **_k: {"pointers": [{"q": "Q", "critical": True,
+                                                                "answered": True, "agent_note": "n"}],
+                                                 "resolved": True, "iterations": 1,
+                                                 "kb_hits": ["doc says X"]})
+    monkeypatch.setattr(reasoning, "_compose_draft", lambda *a, **k: "Here's our answer.")
+    rows = [
+        {"session_id": "s2", "state": "clarifying", "case_id": "500H", "case_number": "0008",
+         "slack_channel": "#x", "slack_thread_ts": "2.2", "tenant_id": "t",
+         "pointers": [{"q": "Q", "critical": True, "answered": False, "agent_note": None}],
+         "updated_at": (now - timedelta(minutes=600)).isoformat()},
+    ]
+    sb = _SessSB(rows)
+    out = sweeps.reasoning_ttl(sb, dry_run=False)
+    assert out["continued"] == ["0008"] and out["escalated"] == []
+    assert {"state": "awaiting_approval", "pointers": rows[0]["pointers"],
+            "draft": "Here's our answer.", "updated_at": "now()"} in sb.updated
+
+
+def test_reasoning_ttl_autonomous_continue_falls_back_to_escalate(monkeypatch):
+    """When the bot can't close the gaps itself, the existing escalate +
+    abandon path runs unchanged."""
+    from interpreter import reasoning
+
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(salesforce, "available", lambda *a, **k: False)
+    monkeypatch.setattr(reasoning, "_case_for_session", lambda _sb, _s: {"subject": "x"})
+    monkeypatch.setattr(reasoning, "autonomous_continue",
+                        lambda _s, _case, **_k: {"pointers": [], "resolved": False,
+                                                 "iterations": 1, "kb_hits": []})
+    rows = [
+        {"session_id": "s2", "state": "clarifying", "case_id": "500H", "case_number": "0008",
+         "slack_channel": "#x", "slack_thread_ts": "2.2", "tenant_id": "t",
+         "pointers": [{"q": "Q", "critical": True, "answered": False, "agent_note": None}],
+         "updated_at": (now - timedelta(minutes=600)).isoformat()},
+    ]
+    sb = _SessSB(rows)
+    out = sweeps.reasoning_ttl(sb, dry_run=False)
+    assert out["continued"] == [] and out["escalated"] == ["0008"]
+    assert {"state": "abandoned"} in sb.updated
+
+
 def test_queue_sweep_auto_resolves_stale_waiting_on_customer(monkeypatch):
     now = datetime.now(timezone.utc)
     sf = _SF([{

@@ -35,7 +35,7 @@ _UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
 def _is_uuid(s: Any) -> bool:
     return isinstance(s, str) and bool(_UUID_RE.match(s))
 
-from . import llm
+from . import integrity, llm
 
 log = logging.getLogger("interpreter.kb_writeback")
 
@@ -67,18 +67,20 @@ def _fallback_change(statement: str, target_entry_id: str | None) -> dict:
     }
 
 
-def draft_change(task_row: dict, *, model: str | None = None) -> dict:
-    """Propose a `kb_entries` change from a confirmed-correct review task."""
-    statement = task_row.get("statement") or ""
-    contexts = task_row.get("contexts") or []
-    verdict = task_row.get("verdict") or {}
-    tenant_id = task_row.get("tenant_id")
-    target_entry_id, _sid = _kb_ref(contexts)
-    if not llm.available(tenant_id=tenant_id):
-        return _fallback_change(statement, target_entry_id)
-
+def _llm_draft(statement: str, contexts: list[dict], verdict: dict, target_entry_id: str | None,
+               model: str | None, tenant_id: str | None, *, feedback: str | None = None) -> dict | None:
+    """The LLM-drafting call, extracted verbatim from `draft_change` (Phase
+    29 step 4) so both the first attempt and `_self_critique`'s one bounded
+    redraft share the same call + JSON-parse logic. Returns `None` (not the
+    fallback) on a parse failure -- the caller decides what "no valid draft"
+    means for it (first attempt -> fall back; redraft -> keep the original)."""
     ctx_txt = "\n\n".join(f"[{c.get('ref')}] {c.get('text', '')}" for c in contexts[:4]) or "(none)"
     salient = "; ".join(verdict.get("salient") or []) or "(the statement itself)"
+    user = (f"# Confirmed-correct statement\n{statement}\n\n"
+           f"# Claim at issue\n{salient}\n\n"
+           f"# Existing KB / context it contradicts\n{ctx_txt}")
+    if feedback:
+        user += f"\n\n# Your previous attempt needs revision\n{feedback}"
     raw = llm.complete(
         system=(
             "You maintain a support knowledge base. A support agent's reply was "
@@ -89,9 +91,7 @@ def draft_change(task_row: dict, *, model: str | None = None) -> dict:
             "no greeting. Return JSON {\"op\": \"create\"|\"supersede\", "
             "\"title\": string, \"body_md\": string, \"rationale\": string}."
         ),
-        user=(f"# Confirmed-correct statement\n{statement}\n\n"
-              f"# Claim at issue\n{salient}\n\n"
-              f"# Existing KB / context it contradicts\n{ctx_txt}"),
+        user=user,
         model=model or llm.FAST_MODEL,
         json_object=True,
         max_tokens=600,
@@ -111,7 +111,61 @@ def draft_change(task_row: dict, *, model: str | None = None) -> dict:
             "supersedes_entry_id": target_entry_id if op == "supersede" else None,
         }
     except (json.JSONDecodeError, TypeError, AttributeError):
-        return _fallback_change(statement, target_entry_id)
+        return None
+
+
+def _self_critique(statement: str, change: dict, *, tenant_id: str | None,
+                   model: str | None, contexts: list[dict], verdict: dict,
+                   target_entry_id: str | None) -> dict:
+    """Phase 29 step 4 -- verify the draft actually resolves the confirmed
+    contradiction before a human ever sees it, using the exact same
+    `integrity.check(statement, [new_body])` shape
+    `eval/writeback/run_writeback_eval.py` already grades this with post-hoc
+    (reused, not reimplemented). One bounded retry, only when a real LLM
+    produced the draft (retrying a deterministic fallback draft would just
+    reproduce the same text): if the confirmed statement still
+    `contradicts` the drafted body, ask the model to revise once with the
+    critique as feedback, then re-check. The verdict ships either way --
+    this is a signal for the human reviewer (`_post_card` surfaces it),
+    never a silent block."""
+    def _verdict(body_md: str) -> dict:
+        return integrity.check(statement, [{"ref": "kb://draft", "text": body_md,
+                                            "kind": "internal_kb"}],
+                               kind="draft", tenant_id=tenant_id)
+
+    v = _verdict(change["body_md"])
+    retried = False
+    if v["relation"] == "contradicts" and llm.available(tenant_id=tenant_id):
+        redrafted = _llm_draft(
+            statement, contexts, verdict, target_entry_id, model, tenant_id,
+            feedback=(f"Your draft still contradicts the confirmed statement per an "
+                     f"automated check. Previous draft: {change['body_md']!r}. Revise "
+                     f"it so it clearly reflects: {statement!r}."),
+        )
+        if redrafted:
+            change, retried = redrafted, True
+            v = _verdict(change["body_md"])
+    change["self_critique"] = {"relation": v["relation"], "retried": retried}
+    return change
+
+
+def draft_change(task_row: dict, *, model: str | None = None) -> dict:
+    """Propose a `kb_entries` change from a confirmed-correct review task,
+    self-critiqued (Phase 29 step 4) before it's returned for approval."""
+    statement = task_row.get("statement") or ""
+    contexts = task_row.get("contexts") or []
+    verdict = task_row.get("verdict") or {}
+    tenant_id = task_row.get("tenant_id")
+    target_entry_id, _sid = _kb_ref(contexts)
+
+    if not llm.available(tenant_id=tenant_id):
+        change = _fallback_change(statement, target_entry_id)
+    else:
+        change = (_llm_draft(statement, contexts, verdict, target_entry_id, model, tenant_id)
+                 or _fallback_change(statement, target_entry_id))
+
+    return _self_critique(statement, change, tenant_id=tenant_id, model=model,
+                          contexts=contexts, verdict=verdict, target_entry_id=target_entry_id)
 
 
 # ── approval request + Slack card ────────────────────────────────────────
@@ -155,6 +209,13 @@ def _post_card(sb, *, tenant_id, ar_id, change, channel, post=None) -> None:
             f"```{change['body_md'][:1500]}```\n"
             f"_why: {change['rationale']}_"
         )
+        # Phase 29 step 4 -- surface the self-critique verdict rather than
+        # a confident-looking card regardless of quality. `entails` is the
+        # clean case (no extra line); `neutral`/`contradicts` (retry
+        # exhausted) both mean the machine itself isn't sure this landed.
+        if change.get("self_critique", {}).get("relation") != "entails":
+            text += ("\n:warning: _self-check: this draft may not fully resolve the "
+                    "contradiction — review carefully_")
         blocks = [
             {"type": "section", "text": {"type": "mrkdwn", "text": text}},
             {"type": "actions", "block_id": "kb", "elements": [

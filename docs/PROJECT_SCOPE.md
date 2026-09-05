@@ -707,9 +707,72 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-04 — test-coverage chunk: the three "live-verified once" spots
-(Slack approval buttons, GitHub issue creation, KIL approval flow) now
-have real offline test coverage. This is the most recent work in this
+**2026-09-05 — Phase 29 CLOSED: step 5 (autonomous reasoning-session
+continuation) done, all 5 steps complete. This is the most recent work in
+this file (see the top-of-file note: this doc is edited in place, not
+strictly appended to — check dates, not physical position).** New
+`interpreter/reasoning.autonomous_continue()` gives the bot one bounded,
+tool-calling shot at closing a stalled `clarifying` Slack dialogue's still-
+open critical pointers itself — reusing `complete_with_tools` (step 1) +
+`hybrid_retrieve` exactly like `h_agent` (step 2) rather than a
+reimplemented ReAct loop — before `sweeps.reasoning_ttl` escalates +
+abandons a session the human agent stopped replying to. Grounded-only (a
+pointer is marked answered only off documentation a real `search_kb` call
+returned, never an ungrounded guess, so the offline stub path never
+resolves anything, deterministically); still requires an explicit human
+`send` before anything reaches the customer — this unsticks the dialogue,
+not the approval gate, same "never act silently" discipline as step 4's
+self-critique. Wired into `reasoning_ttl` for `clarifying` sessions only
+(`awaiting_handoff` = nobody ever engaged, still escalates as before;
+`awaiting_approval` already has a draft awaiting explicit approval — not
+touched). 661 offline tests green (8 new: 6 in `tests/test_reasoning.py`,
+2 in `tests/test_sweeps.py`). **Not yet done, deliberately not built now:**
+no live verification — this needs a real stalled Slack thread + real KB to
+exercise end to end, and the shared-quota rate-limiting documented
+elsewhere in this file made that an unappealing time to spend it; the full
+writeup (including why `awaiting_handoff`/`awaiting_approval` are excluded)
+is under "Phase 29 — Agentic AI" below. **Phase 29 status: all 5 steps
+done — see that section for the per-step history.**
+
+**Old step-4 note, superseded by the above as "most recent," kept for its
+own history:** self-critique wired into KIL's
+`draft_change`, live. `interpreter/kb_writeback.py`'s
+`_self_critique()` runs the exact same `integrity.check(statement,
+[new_body])` shape `eval/writeback/run_writeback_eval.py` already used to
+*grade* drafts post-hoc — now it runs live, inside `draft_change` itself,
+with one bounded LLM-only retry when the confirmed statement still
+`contradicts` the drafted body. The verdict rides on the `change` dict and
+`_post_card` warns the Slack approval card whenever it isn't a clean
+`entails`. 653 offline tests green (7 new). Real before/after via the
+*existing* eval, unmodified: resolution 1.000 (7/7), lift +0.611 — matches
+the pre-existing baseline within noise, an honest ceiling-effect result
+(this eval set has no first-draft failures for the retry to catch) — see
+the full Phase 29 step 4 writeup below for why the new unit tests, not
+this eval, are what actually prove the retry mechanism works. Phase 29:
+steps 1-4 done, 5 (autonomous reasoning-session continuation) not started.
+
+**Old step-3 note, superseded by the above as "most recent," kept for its
+own history:** the agent-vs-baseline eval, real number in hand. New
+`eval/agent/run_agent_eval.py`
+compares Acme's real live `agent` node against a single `h_retrieve()`
+call on the 10-question hard qrels set, reusing `run_eval.py`'s own
+`score()` rather than reimplementing it. **Real result:** baseline and
+agent scored identically (hit@1 0.200, MRR@10 0.240) — only 1/10 questions
+reformulated, and that one didn't change the outcome. This ran during the
+same sustained Groq/OpenRouter rate-limiting seen all session (weak
+fallback model doing most of the groundedness scoring that decides
+whether to reformulate) — a genuine caveat, not a reason to dismiss the
+result. Net: **step 3 is answered (a null result under real conditions),
+not "proven agent helps"** — see the full writeup under "Phase 29 —
+Agentic AI" below for the two caveats and what would be needed for a
+cleaner signal. Phase 29: steps 1-3 done, 4-5 not started. No production
+code changed — purely a new eval script, 646 offline tests still green
+(unaffected).
+
+**Old test-coverage note, superseded by the above as "most recent," kept
+for its own history:** the three "live-verified once" spots (Slack
+approval buttons, GitHub issue creation, KIL approval flow) now have real
+offline test coverage. This is the most recent work in this
 file (see the top-of-file note: this doc is edited in place, not strictly
 appended to — check dates, not physical position).** Third of the three
 tracks scoped earlier in the day (connector generality → production
@@ -1101,8 +1164,9 @@ one already has, via the Supabase MCP).
 **Phase 29 — Agentic AI, a 5-step ordered list (infra-first, same
 discipline as Phase 28): 1. tool-calling plumbing in `interpreter/llm.py`
 ✅ · 2. a new `agent` node type (a bounded ReAct loop consuming #1) ✅ · 3.
-multi-hop research/retrieval (piggybacks on #2) · 4. self-critique on
-KIL's `draft_change` · 5. autonomous reasoning-session continuation.**
+multi-hop research/retrieval (piggybacks on #2) ✅ (closed 2026-09-04 with
+a real, honest null result — see below) · 4. self-critique on KIL's
+`draft_change` · 5. autonomous reasoning-session continuation.**
 Before starting, an Explore agent confirmed nothing like this existed:
 every one of the (then) 26 `interpreter/registry.py` node handlers made
 exactly one fixed `llm.complete()` call; `interpreter/reasoning.py`'s
@@ -1271,6 +1335,139 @@ questions × up to 3 agent iterations each, under the fallback chain seen
 all session, could plausibly take 20-30+ minutes and mostly exercise the
 weak fallback model rather than a clean signal). Flagged for the user
 rather than silently spent.
+
+**Step 3 — CLOSED (2026-09-04) — the purpose-built comparison, built and
+run for a real number.** New `eval/agent/run_agent_eval.py`: pulls Acme's
+*real, live* `agent` node config from the published flow (not a guess),
+runs each of the 10 hard questions through one direct `h_retrieve()` call
+(baseline, zero LLM cost) and one `h_agent()` call (up to 3 rounds), scores
+both through `ingestion/eval/run_eval.py`'s existing `score()` — reused,
+not reimplemented, so the numbers are directly comparable to that file's
+own dense/sparse/hybrid/hybrid_rerank blocks.
+
+**Real result, run live against Supabase/Neo4j/Groq (2026-09-04):**
+baseline and agent scored **identically** — hit@1 0.200, hit@5 0.400,
+MRR@10 0.240, same 6/10 questions missed, same top-1 doc on every single
+question. Only **1 of 10** questions triggered a reformulation at all
+(`h06`, the throttling question), and even that reformulation didn't
+change the top-ranked result. 21,958 tokens spent on the agent side for
+zero measured retrieval gain.
+
+**Two honest caveats, not swept under the rug:**
+1. **This run landed during the same sustained Groq/OpenRouter
+   rate-limiting seen all session** — the log shows repeated 429s
+   forcing the fallback chain down to `nvidia/nemotron-3-ultra-550b-a55b:
+   free` for most calls, and the one reformulation attempt that did fire
+   hit a tool-call JSON-parsing error on that fallback model (`Failed to
+   parse tool call arguments as JSON`) — caught cleanly by the exact
+   `_agent_reformulate` resilience fix from step 2 ("keeping best attempt
+   so far"), a second live confirmation that fix holds, but it also means
+   a weak model's groundedness scoring drove the "should I reformulate"
+   decision most of the time, not a clean-quota run of the intended model
+   (`llama-3.3-70b-versatile`, itself a retired Groq name routed through
+   the roster).
+2. **n=1 reformulation event is not enough to conclude the loop never
+   helps** — it's enough to conclude it *did not help on this specific
+   10-question hard set today*. The original ROI framing (step 2) was
+   "only spend extra on cases a confidence_gate would otherwise escalate
+   anyway" — a pure-retrieval eval with no `confidence_gate` in the loop
+   doesn't test that framing directly; it tests whether reformulation
+   improves *raw retrieval rank*, which turned out to be rare-to-trigger
+   and, when triggered, unhelpful in this sample.
+
+**Net: step 3 is answered, not "proven agent helps."** The honest number
+is a null result under real conditions, which is a legitimate answer to
+"does the multi-hop loop earn its cost" — not a reason to revert Acme's
+live adoption (the step-2 live `test_multiflow.py` run already showed it
+producing a correct outcome, just slower/more expensive), but also not
+evidence to expand `agent` to more flows without a cleaner-quota rerun or
+a version of this eval that goes through the full `confidence_gate`
+decision rather than raw retrieval rank alone.
+
+**Step 4 — self-critique on KIL's `draft_change` (DONE 2026-09-04).**
+`interpreter/kb_writeback.py::draft_change` proposed a KB rewrite and sent
+it straight to a Slack approval card with zero automatic verification it
+actually resolved the contradiction — despite the exact check already
+existing: `eval/writeback/run_writeback_eval.py` (P8c) already graded this
+*post-hoc* via `integrity.check(statement, [new_body])`. Step 4 wires that
+same check into `draft_change` itself, live: `_self_critique()` runs it on
+every draft (LLM-drafted or the deterministic fallback) and, when the
+confirmed statement still `contradicts` the drafted body **and** a real
+LLM produced it (retrying the deterministic fallback would just reproduce
+the same text), asks the model to revise once with the critique as
+feedback and re-checks. The verdict — `entails`/`neutral`/`contradicts` +
+whether it was retried — ships on the `change` dict either way (never a
+silent block, matching KIL's whole "flag to a human" philosophy) and
+`_post_card` adds a `:warning:` line to the Slack card whenever it isn't
+a clean `entails`, so the approving manager sees the machine's own doubt
+about its work instead of a confident-looking card regardless of quality.
+`_llm_draft` was extracted verbatim from the old inline call so both the
+first attempt and the one bounded redraft share it — no duplicated
+prompt-construction logic. 7 new offline tests in `tests/test_kb_writeback.py`
+(clean-entails stamps correctly, a `contradicts` verdict retries exactly
+once and the retried draft ships, no-LLM mode stamps the verdict without
+retrying, a malformed redraft keeps the original, both `_post_card`
+branches) — 653 offline tests green, zero regression to the file's
+existing 9. **Real before/after, reusing the existing eval unchanged**
+(`python -m eval.writeback.run_writeback_eval`, live Groq): resolution
+rate **1.000** (7/7 valid cases), answer lift **+0.611** (keyword coverage
+0.30→0.92) — matching the pre-self-critique KIL-d baseline (resolution
+1.00, lift +0.63) within noise, not a dramatic jump. **Honest read:** this
+eval set was already at a resolution ceiling before self-critique existed
+— no case in it fails on the first draft, so the retry path had nothing
+to catch here and this measurement can't demonstrate improvement on its
+own; the new unit tests are what prove the retry mechanism itself works
+(a `contradicts` verdict really does trigger exactly one redraft and the
+better result really does ship). The value add is a safety net for a
+future harder case plus reviewer transparency, not a lift on this
+particular 12-case set. **Phase 29 status: steps 1-4 done, 5 (autonomous
+reasoning-session continuation) not started.**
+
+**Step 5 — autonomous reasoning-session continuation (DONE 2026-09-05).**
+The Phase 29 kickoff note flagged the exact gap this closes: `interpreter/
+reasoning.py`'s Slack reasoning dialogue (Phase 24) is entirely
+human-driven — when the responsible agent stops replying mid-`clarifying`
+dialogue, `sweeps.reasoning_ttl` had exactly two moves, nudge once then
+escalate + abandon, throwing away the questions already asked and any
+partial answers. New `reasoning.autonomous_continue(session, case, ...)`
+gives the bot one bounded, genuinely agentic shot at closing the
+still-open **critical** pointers itself before that happens — reusing
+`complete_with_tools` (step 1) + `hybrid_retrieve` exactly like `h_agent`
+(step 2/`registry.py`) rather than reimplementing a ReAct loop: the model
+decides whether a KB search would help or whether to `give_up`, it isn't
+a canned retry. **Grounded-only, by design:** a pointer is marked answered
+only off documentation a `search_kb` call actually returned (a separate
+JSON-graded pass, reusing the `_ingest`-style contract), never an
+ungrounded guess — so the stub path (no tool ever called) never resolves
+anything, deterministically, same discipline as every other agentic piece
+this phase built.
+
+Wired into `sweeps.reasoning_ttl` via `_try_autonomous_continue`: only for
+a stale session in `clarifying` state (`awaiting_handoff` means nobody
+ever engaged — a different problem, still escalates as before;
+`awaiting_approval` already has a draft awaiting an explicit human `send`
+— auto-sending it would break the "never act silently" rule the rest of
+this codebase holds to, including step 4's own self-critique). On success
+the session moves to `awaiting_approval` with a real draft (composed via
+the existing `_compose_draft`, grounded in what the bot found) and the
+Slack thread gets an explicit "*you'd gone quiet, so I dug through the
+docs myself — here's a draft (unconfirmed by you, please review)*"
+message — **a human `send` is still required**, this only unsticks the
+*dialogue*, not the approval gate. On failure (nothing found, or the
+model itself gives up) the existing escalate + abandon path runs
+unchanged. `reasoning_ttl`'s return dict gains a `continued` list
+alongside `nudged`/`escalated`.
+
+8 new offline tests (6 in `tests/test_reasoning.py` covering
+`autonomous_continue` itself — trivial-resolve on no open gaps, a
+grounded resolve, giving up when the model never searches, surviving a
+tool-call exception, the `max_iterations` cap, the no-API-key stub path
+never resolving; 2 in `tests/test_sweeps.py` covering the sweep wiring —
+resolves and moves to `awaiting_approval`, falls back to escalate when
+unresolved — the pre-existing nudge/escalate test needed one small fix
+alongside these, see below). No live verification yet — this needs a real stalled Slack thread to exercise end
+to end, deliberately not spent this session (see "Immediate next step").
+**Phase 29 status: steps 1-5 all done.**
 
 ## Multi-tenant / multi-Salesforce-org scoping (2026-09-03)
 
