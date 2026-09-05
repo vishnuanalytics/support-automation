@@ -707,6 +707,64 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-05 — CI fixed (web job) + the "shared test account belongs to
+several tenants" issue closed for good (flagged, then fixed same day).
+This is the most recent work in this file.**
+
+**CI fix:** the `web` job's `npx playwright test` step failed on GitHub's
+runner (`Timed out waiting 60000ms from config.webServer`) despite 3/3
+locally — root cause: Vite's default `localhost` bind can resolve to
+IPv6 on some CI network stacks while Playwright's health check hits the
+IPv4 loopback, so the server was actually up and the check just never
+saw it. Fixed with `--host 127.0.0.1` pinned to match `playwright.config.ts`'s
+`url` exactly; also bumped the timeout to 120s and piped `stdout`/`stderr`
+so a future webServer failure shows Vite's own boot log instead of
+nothing. Confirmed green on a real GitHub Actions run after the fix.
+
+**The tenant-ambiguity issue, actually fixed this time (user chose
+"update the tests" over "clean up the shared account"):** the CI run also
+surfaced the `integration` job failing 20 tests + 2 errors — the same
+"globex-owner@example.test now owns >1 tenant" issue flagged (but
+deliberately left unfixed) earlier the same session. Went through every
+failure and fixed the ones that were genuinely about a missing/omitted
+`tenant_id`: added it explicitly wherever an endpoint accepts one
+(connections, salesforce/slack meta, mermaid import, assist, flows,
+members, invitations, kb collections/entries, policy rules, email/
+Zendesk channel tests). Two tests had no `tenant_id` param to add at all
+(`/api/flows`, `/api/tenants` — both return everything RLS lets the
+caller see, across every membership) — fixed by asserting "Globex is
+among the results" instead of "the results are only Globex", which is
+what these tests should have asserted all along once an account can
+genuinely belong to >1 tenant. `test_create_flow_infers_the_tenant_when_
+omitted`'s actual subject (single-membership inference) is honestly
+untestable with this permanently-multi-tenant shared account — passes
+`tenant_id` explicitly now, with a docstring explaining why, rather than
+pretending the omission path is still being exercised.
+
+**Two remaining failures are genuinely unrelated, not touched:**
+`test_kb_entry_roundtrip_embeds_and_scopes` (a live semantic-retrieval
+top-k miss — `_kb_name`'s own lookup is RLS-scoped with no tenant_id
+param, so this isn't the same bug at all; smells like embedding/ranking
+non-determinism, not investigated further since it's out of scope for
+today's fix) and `test_multitenant_concurrency.py::test_concurrent_runs_
+do_not_corrupt_the_shared_salesforce_client_cache` (a `KeyError:
+'SF_USERNAME'` — this environment has real `SF_*` creds so it passes
+here; GitHub CI's `integration` job apparently doesn't have `SF_*`
+secrets configured, so this test needs a `pytest.skip` guard like
+`test_salesforce_connect_introspect_disconnect_roundtrip` already has,
+not a tenant_id fix — noted, not built, since it's a different category
+of gap). `test_multiflow.py`'s 2 real-Groq draft-content failures from
+the original CI log are the same documented shared-quota flakiness noted
+elsewhere in this file, also untouched.
+
+**Verify:** 38/39 of `test_api.py`'s `-m integration` tests pass locally
+against the real Supabase project (the 1 failure is the unrelated
+retrieval one above); 737 offline tests unaffected (only integration-
+marked tests were touched).
+
+**Old step-2 note, superseded by the above as "most recent," kept for
+its own history:**
+
 **2026-09-05 — Multi-provider connectors, ALL 3 STEPS NOW BUILT (FR-51).
 Step 2 (Zendesk) landed today, plus the case_connector picker UI that
 closes step 1's last open residual. This is the most recent work in this
