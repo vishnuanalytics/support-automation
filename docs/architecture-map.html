@@ -1,0 +1,692 @@
+<title>System of Record Map</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+  :root {
+    --ink: #12151b;
+    --paper: #eef1f2;
+    --surface: #ffffff;
+    --surface-2: #e2e7e9;
+    --hair: #ccd3d6;
+    --muted: #57616b;
+    --pg: #2f5f9e;
+    --pg-soft: #dde8f5;
+    --graph: #147a62;
+    --graph-soft: #ddf0ea;
+    --flow: #93590d;
+    --flow-soft: #f4e7d0;
+    --ext: #564f6c;
+    --ext-soft: #e7e4ef;
+    --warn: #a83c1d;
+    --warn-soft: #f6ddd3;
+    --font-display: 'IBM Plex Sans', system-ui, sans-serif;
+    --font-body: 'IBM Plex Sans', system-ui, sans-serif;
+    --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ink: #eef1f2;
+      --paper: #10131a;
+      --surface: #171c25;
+      --surface-2: #232a35;
+      --hair: #313a47;
+      --muted: #93a0ac;
+      --pg: #7fb1e9;
+      --pg-soft: #1c2e42;
+      --graph: #54d2ac;
+      --graph-soft: #133228;
+      --flow: #e6ac52;
+      --flow-soft: #382a10;
+      --ext: #b3abcb;
+      --ext-soft: #262239;
+      --warn: #f0805a;
+      --warn-soft: #3a2018;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ink: #eef1f2;
+    --paper: #10131a;
+    --surface: #171c25;
+    --surface-2: #232a35;
+    --hair: #313a47;
+    --muted: #93a0ac;
+    --pg: #7fb1e9;
+    --pg-soft: #1c2e42;
+    --graph: #54d2ac;
+    --graph-soft: #133228;
+    --flow: #e6ac52;
+    --flow-soft: #382a10;
+    --ext: #b3abcb;
+    --ext-soft: #262239;
+    --warn: #f0805a;
+    --warn-soft: #3a2018;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 15px;
+    line-height: 1.55;
+  }
+  h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
+  code, .mono { font-family: var(--font-mono); }
+  a { color: var(--pg); }
+
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 0 28px 100px; }
+
+  /* ---- hero ---- */
+  header.hero {
+    padding: 56px 28px 34px;
+    border-bottom: 1px solid var(--hair);
+  }
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 14px;
+  }
+  header.hero h1 {
+    font-size: clamp(32px, 4.4vw, 46px);
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    max-width: 16ch;
+  }
+  header.hero p.lede {
+    max-width: 62ch;
+    font-size: 16.5px;
+    color: var(--muted);
+    margin: 16px 0 0;
+  }
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 1px;
+    background: var(--hair);
+    border: 1px solid var(--hair);
+    margin-top: 30px;
+    max-width: 900px;
+  }
+  .stat {
+    background: var(--surface);
+    padding: 14px 16px;
+  }
+  .stat .n {
+    font-family: var(--font-mono);
+    font-size: 22px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat .l {
+    font-size: 11.5px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+
+  /* ---- nav ---- */
+  nav.subnav {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background: color-mix(in srgb, var(--paper) 88%, transparent);
+    backdrop-filter: blur(6px);
+    border-bottom: 1px solid var(--hair);
+    padding: 0 28px;
+    overflow-x: auto;
+  }
+  nav.subnav .row {
+    display: flex;
+    gap: 4px;
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 10px 0;
+    white-space: nowrap;
+  }
+  nav.subnav a {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--muted);
+    text-decoration: none;
+    padding: 6px 11px;
+    border-radius: 3px;
+  }
+  nav.subnav a:hover { color: var(--ink); background: var(--surface-2); }
+
+  /* ---- sections ---- */
+  section { padding: 54px 0 8px; border-top: 1px solid var(--hair); }
+  section:first-of-type { border-top: none; }
+  .sec-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 8px; }
+  .sec-num { font-family: var(--font-mono); color: var(--muted); font-size: 13px; }
+  section h2 { font-size: 24px; font-weight: 600; }
+  section > p.intro { max-width: 68ch; color: var(--muted); margin: 10px 0 28px; }
+
+  figure { margin: 24px 0; }
+  figure svg { width: 100%; height: auto; display: block; background: var(--surface); border: 1px solid var(--hair); border-radius: 4px; }
+  figcaption { font-size: 12.5px; color: var(--muted); margin-top: 10px; max-width: 70ch; }
+  figcaption b { color: var(--ink); font-weight: 600; }
+
+  .diagram-text { font-family: var(--font-mono); }
+  .lbl { font-family: var(--font-mono); font-size: 10.5px; }
+
+  pre.mermaid { background: var(--surface); border: 1px solid var(--hair); border-radius: 4px; padding: 18px; overflow-x: auto; margin: 22px 0; }
+
+  .callout {
+    border: 1px solid var(--hair);
+    border-left: 3px solid var(--ink);
+    background: var(--surface);
+    padding: 16px 18px;
+    margin: 22px 0;
+    font-size: 14px;
+  }
+  .callout b { font-family: var(--font-mono); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em; display: block; margin-bottom: 6px; color: var(--muted); }
+
+  /* ---- schema card grid ---- */
+  .domain-block { margin: 30px 0 44px; }
+  .domain-head { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  .domain-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  .domain-head h3 { font-size: 16.5px; font-weight: 600; }
+  .domain-note { color: var(--muted); font-size: 13px; max-width: 66ch; margin: 6px 0 16px; }
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 12px;
+  }
+  .t-card {
+    border: 1px solid var(--hair);
+    background: var(--surface);
+    border-radius: 4px;
+    padding: 13px 14px;
+    border-top-width: 3px;
+  }
+  .t-card .t-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .t-card .t-name { font-family: var(--font-mono); font-size: 13px; font-weight: 600; }
+  .t-card .t-rows { font-family: var(--font-mono); font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .t-card .t-cols { margin: 9px 0 0; font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); line-height: 1.65; }
+  .t-card .t-cols .pk { color: var(--ink); font-weight: 600; }
+  .t-card .t-desc { font-size: 12px; color: var(--muted); margin-top: 8px; line-height: 1.5; }
+
+  /* ---- ownership table ---- */
+  table.own { width: 100%; border-collapse: collapse; margin: 22px 0; font-size: 13.5px; }
+  table.own th { text-align: left; font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); font-weight: 500; padding: 8px 12px; border-bottom: 1px solid var(--hair); }
+  table.own td { padding: 12px; border-bottom: 1px solid var(--hair); vertical-align: top; }
+  table.own tr:last-child td { border-bottom: none; }
+  table.own td.owner { font-family: var(--font-mono); font-size: 12.5px; white-space: nowrap; }
+
+  .pill { display: inline-block; font-family: var(--font-mono); font-size: 10.5px; padding: 2px 7px; border-radius: 20px; font-weight: 500; }
+
+  /* ---- connector strip ---- */
+  .conn-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px,1fr)); gap: 12px; margin: 22px 0; }
+  .conn-card { border: 1px solid var(--hair); background: var(--surface); border-radius: 4px; padding: 14px; }
+  .conn-card .k { font-family: var(--font-mono); font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .conn-card .v { font-family: var(--font-mono); font-size: 13px; margin-top: 4px; }
+
+  /* ---- diagram 1: request flow ---- */
+  .d1-box { fill: var(--surface); stroke: var(--hair); stroke-width: 1; }
+  .d1-box-flow { stroke: var(--flow); stroke-width: 1.6; }
+  .d1-box-pg { stroke: var(--pg); stroke-width: 1.6; }
+  .d1-box-graph { stroke: var(--graph); stroke-width: 1.6; }
+  .d1-box-ext { stroke: var(--ext); stroke-width: 1.6; }
+  .d1-lab { font-family: 'IBM Plex Sans'; font-size: 13px; font-weight: 600; fill: var(--ink); }
+  .d1-sub { font-family: 'IBM Plex Mono'; font-size: 10.5px; fill: var(--muted); }
+  .d1-arrlab { font-family: 'IBM Plex Mono'; font-size: 10.5px; fill: var(--muted); }
+  .d1-arr { stroke: var(--muted); stroke-width: 1.3; fill: none; }
+  .d1-arr-dash { stroke: var(--flow); stroke-width: 1.4; fill: none; stroke-dasharray: 4 3; }
+  .d1-arr-today { stroke: var(--ext); stroke-width: 1.4; fill: none; }
+  .d1-divider { stroke: var(--hair); stroke-dasharray: 2 4; }
+
+  /* ---- diagram 2: neo4j graph model ---- */
+  .d2-node { fill: var(--surface); stroke: var(--graph); stroke-width: 1.6; }
+  .d2-node-case { fill: var(--graph-soft); stroke: var(--graph); stroke-width: 2; }
+  .d2-nlab { font-family: 'IBM Plex Sans'; font-size: 13px; font-weight: 600; fill: var(--ink); text-anchor: middle; }
+  .d2-ncount { font-family: 'IBM Plex Mono'; font-size: 10.5px; fill: var(--muted); text-anchor: middle; }
+  .d2-elab { font-family: 'IBM Plex Mono'; font-size: 10.5px; fill: var(--muted); }
+  .d2-edge { stroke: var(--muted); stroke-width: 1.2; fill: none; }
+  .d2-edge-warn { stroke: var(--warn); stroke-width: 1.5; fill: none; stroke-dasharray: 5 3; }
+
+  footer { border-top: 1px solid var(--hair); margin-top: 60px; padding: 24px 0 0; color: var(--muted); font-size: 12px; font-family: var(--font-mono); }
+
+  @media (max-width: 640px) {
+    header.hero { padding: 40px 20px 26px; }
+    .wrap { padding: 0 18px 80px; }
+  }
+</style>
+
+<header class="hero">
+  <div class="wrap" style="padding:0;">
+    <p class="eyebrow">support-automation platform — infrastructure reference</p>
+    <h1>System of Record Map</h1>
+    <p class="lede">Every table, node type, and graph relationship this platform actually runs on, and — the part that matters more than the inventory — which one system owns each fact so Postgres, Neo4j, Salesforce, and Slack never quietly disagree about the same case.</p>
+    <div class="stats" id="stats"></div>
+  </div>
+</header>
+
+<nav class="subnav">
+  <div class="row">
+    <a href="#flow">01 · request flow</a>
+    <a href="#spine">02 · relational spine</a>
+    <a href="#tables">03 · operational schema</a>
+    <a href="#graph">04 · neo4j graph model</a>
+    <a href="#ownership">05 · ownership matrix</a>
+    <a href="#connectors">06 · connector layer</a>
+  </div>
+</nav>
+
+<div class="wrap">
+
+  <section id="flow">
+    <div class="sec-head"><span class="sec-num">01</span><h2>How a case actually moves through the system</h2></div>
+    <p class="intro">One inbound event triggers a queued job, a LangGraph run through the interpreter, a write to Postgres, and — on a separate schedule, not inline — a merge into the Neo4j graph. Two of the arrows below are drawn as alternatives on purpose: today's graph sync re-polls Salesforce a second time for text the worker already captured.</p>
+
+    <figure>
+      <svg viewBox="0 0 1180 790" role="img" aria-label="Diagram: the flow editor publishes flow definitions, inbound channels enqueue a job the worker picks up, the interpreter invokes the flow's node graph and fans out to the connected case system, the runs table, and Slack; separately, and on a schedule rather than inline, a graph-sync sweep merges case and message data into Neo4j — today by re-polling Salesforce CaseComment and Chatter directly (shown solid), rather than reusing the human reply Postgres already captured (shown dashed, not built yet).">
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+
+        <!-- editor -->
+        <rect class="d1-box" x="30" y="30" width="190" height="56" rx="3"/>
+        <text class="d1-lab" x="46" y="52">Flow Editor</text>
+        <text class="d1-sub" x="46" y="70">web/ — React Flow</text>
+        <path class="d1-arr" marker-end="url(#ah)" d="M125,86 L125,140 L520,140"/>
+        <text class="d1-arrlab" x="300" y="132">defines — GET/PUT /api/flows</text>
+
+        <!-- channels -->
+        <rect class="d1-box" x="30" y="180" width="190" height="110" rx="3"/>
+        <text class="d1-lab" x="46" y="204">Inbound channels</text>
+        <text class="d1-sub" x="46" y="224">email · SF CDC event</text>
+        <text class="d1-sub" x="46" y="240">Slack event · Freshchat</text>
+        <text class="d1-sub" x="46" y="256">webhook trigger (P6a)</text>
+        <path class="d1-arr" marker-end="url(#ah)" d="M220,245 L300,245"/>
+        <text class="d1-arrlab" x="223" y="237">enqueue</text>
+
+        <!-- jobs queue -->
+        <rect class="d1-box d1-box-pg" x="300" y="225" width="150" height="60" rx="3"/>
+        <text class="d1-lab" x="316" y="250">jobs</text>
+        <text class="d1-sub" x="316" y="267">Postgres · queue</text>
+        <path class="d1-arr" marker-end="url(#ah)" d="M450,255 L520,255"/>
+        <text class="d1-arrlab" x="453" y="247">polls</text>
+
+        <!-- interpreter -->
+        <rect class="d1-box d1-box-flow" x="520" y="90" width="230" height="330" rx="3"/>
+        <text class="d1-lab" x="538" y="116">Interpreter</text>
+        <text class="d1-sub" x="538" y="136">LangGraph · build_graph()</text>
+        <text class="d1-sub" x="538" y="152">26 node types</text>
+        <text class="d1-sub" x="538" y="168">connector framework</text>
+        <text class="d1-sub" x="538" y="184">(interpreter/registry.py)</text>
+        <line x1="538" y1="200" x2="732" y2="200" stroke="var(--hair)"/>
+        <text class="d1-sub" x="538" y="222">classify → retrieve → draft</text>
+        <text class="d1-sub" x="538" y="238">→ confidence_gate → auto_reply</text>
+        <text class="d1-sub" x="538" y="254">  ↳ ask_human / handover</text>
+
+        <!-- fan out: case system -->
+        <path class="d1-arr" marker-end="url(#ah)" d="M750,120 L830,120"/>
+        <text class="d1-arrlab" x="755" y="112">invoke()</text>
+        <rect class="d1-box d1-box-ext" x="830" y="90" width="200" height="60" rx="3"/>
+        <text class="d1-lab" x="846" y="115">Case system</text>
+        <text class="d1-sub" x="846" y="133">Salesforce · Zendesk (FR-51)</text>
+
+        <!-- fan out: runs -->
+        <path class="d1-arr" marker-end="url(#ah)" d="M750,275 L830,275"/>
+        <text class="d1-arrlab" x="755" y="267">writes run</text>
+        <rect class="d1-box d1-box-pg" x="830" y="245" width="200" height="60" rx="3"/>
+        <text class="d1-lab" x="846" y="270">runs</text>
+        <text class="d1-sub" x="846" y="288">Postgres · flow history</text>
+
+        <!-- fan out: slack -->
+        <path class="d1-arr" marker-end="url(#ah)" d="M750,390 L800,390 L800,470 L830,470"/>
+        <text class="d1-arrlab" x="755" y="382">ask_human / notify</text>
+        <rect class="d1-box d1-box-ext" x="830" y="440" width="200" height="60" rx="3"/>
+        <text class="d1-lab" x="846" y="465">Slack</text>
+        <text class="d1-sub" x="846" y="483">human approval thread</text>
+
+        <!-- divider -->
+        <line class="d1-divider" x1="30" y1="560" x2="1150" y2="560"/>
+        <text class="d1-sub" x="30" y="552">separately, on a schedule — not part of the live request above</text>
+
+        <!-- graph sync mechanism -->
+        <rect class="d1-box d1-box-ext" x="60" y="610" width="250" height="60" rx="3"/>
+        <text class="d1-lab" x="76" y="635">Salesforce</text>
+        <text class="d1-sub" x="76" y="653">CaseComment / Chatter</text>
+
+        <rect class="d1-box d1-box-pg" x="60" y="700" width="250" height="60" rx="3"/>
+        <text class="d1-lab" x="76" y="725">runs.human_reply</text>
+        <text class="d1-sub" x="76" y="743">Postgres — same table as above</text>
+
+        <rect class="d1-box d1-box-flow" x="470" y="655" width="210" height="60" rx="3"/>
+        <text class="d1-lab" x="486" y="680">graph sync sweep</text>
+        <text class="d1-sub" x="486" y="698">case_graph_sync.py</text>
+
+        <rect class="d1-box d1-box-graph" x="850" y="655" width="200" height="60" rx="3"/>
+        <text class="d1-lab" x="866" y="680">Neo4j</text>
+        <text class="d1-sub" x="866" y="698">Case / Message / Account</text>
+
+        <path class="d1-arr-today" marker-end="url(#ah)" d="M310,640 L390,640 L390,675 L470,675"/>
+        <text class="d1-arrlab" x="322" y="628">today — re-fetches directly (dup. call)</text>
+
+        <path class="d1-arr-dash" marker-end="url(#ah)" d="M310,730 L400,730 L400,685 L470,685"/>
+        <text class="d1-arrlab" x="322" y="720">recommended — reuse, not built yet</text>
+
+        <path class="d1-arr" marker-end="url(#ah)" d="M680,685 L850,685"/>
+        <text class="d1-arrlab" x="700" y="677">MERGE</text>
+
+      </svg>
+      <figcaption><b>Fig. 1 — the request path, and the one redundancy in it.</b> Everything left of <code>runs</code> happens inline, per case. The Neo4j merge is a separate scheduled sweep (KIL-a), not triggered by the interpreter itself — and it currently re-polls Salesforce for CaseComment/Chatter text a second time (solid line) instead of reusing what the worker already wrote to <code>runs.human_reply</code> (dashed line, not built yet). See §5 for why that's worth fixing before anything downstream depends on the graph being accurate.</figcaption>
+    </figure>
+  </section>
+
+  <section id="spine">
+    <div class="sec-head"><span class="sec-num">02</span><h2>The relational spine</h2></div>
+    <p class="intro">Of the platform's 36 Postgres tables, this is the one cluster with real enforced foreign keys — a flow definition, its versions, its trigger, and the runs it produces. Everything past this section is intentionally <em>not</em> foreign-keyed together; see the callout in §3 for why.</p>
+    <pre class="mermaid">
+erDiagram
+  TENANTS ||--o{ FLOWS : "scopes (tenant_id, no FK)"
+  FLOWS ||--o{ FLOW_NODES : contains
+  FLOWS ||--o{ FLOW_EDGES : contains
+  FLOW_NODES ||--o{ FLOW_EDGES : "source"
+  FLOW_NODES ||--o{ FLOW_EDGES : "target"
+  FLOWS ||--o{ FLOW_VERSIONS : "snapshots (published_version)"
+  FLOWS ||--o{ FLOW_TRIGGERS : "fires via (webhook/cron)"
+  FLOWS ||--o{ RUNS : "each run targets"
+
+  TENANTS {
+    uuid tenant_id PK
+    text name
+    text plan "free or pro"
+    text case_connector "default connector slug"
+  }
+  FLOWS {
+    uuid flow_id PK
+    uuid tenant_id
+    text team
+    text status "draft or published"
+    int published_version
+  }
+  FLOW_NODES {
+    uuid node_id PK
+    uuid flow_id FK
+    text type "one of 26 registry.py handlers"
+    jsonb config
+  }
+  FLOW_EDGES {
+    uuid edge_id PK
+    uuid flow_id FK
+    uuid source_node_id FK
+    uuid target_node_id FK
+    jsonb condition
+  }
+  FLOW_VERSIONS {
+    uuid version_id PK
+    uuid flow_id FK
+    int version
+    jsonb nodes
+    jsonb edges
+    text definition_hash
+  }
+  FLOW_TRIGGERS {
+    uuid trigger_id PK
+    uuid flow_id FK
+    text kind "webhook or cron"
+    text token UK
+  }
+  RUNS {
+    uuid run_id PK
+    uuid flow_id FK
+    uuid tenant_id
+    text case_id
+    text outcome
+    text human_reply "capped 8000 chars"
+    jsonb trace
+    jsonb case_payload "no retention policy"
+    int tokens_total
+  }
+    </pre>
+  </section>
+
+  <section id="tables">
+    <div class="sec-head"><span class="sec-num">03</span><h2>Everything else: tenant_id + RLS, not foreign keys</h2></div>
+    <div class="callout">
+      <b>Why there's no ER diagram past this point</b>
+      Outside the spine above, this schema deliberately doesn't foreign-key tables to each other — a review task's <code>kb_change_id</code>, a KB entry's <code>supersedes_entry_id</code>, an action request's <code>run_id</code> are all plain <code>uuid</code> columns with no constraint. Every table carries its own <code>tenant_id</code> and Postgres RLS (<code>tenant_members</code>) instead. That means a service-role write to one subsystem — KIL writing a review task, a connector sync updating <code>tenant_integrations</code> — never blocks on another table's row existing, at the cost of the database itself not being able to tell you these rows are related. The cards below are grouped by the domain that actually links them in code, not by a constraint Postgres enforces.
+    </div>
+    <div id="domains"></div>
+  </section>
+
+  <section id="graph">
+    <div class="sec-head"><span class="sec-num">04</span><h2>The Neo4j graph model</h2></div>
+    <p class="intro">Two independent sync paths write into the same graph: <b class="mono" style="color:var(--flow)">case_graph_sync.py</b> mirrors every case's full lifecycle and message thread (any status), and <b class="mono" style="color:var(--graph)">case_memory_sync.py</b> embeds each <em>resolved</em> case and derives similarity edges. Counts below are live, read from the connected graph.</p>
+
+    <figure>
+      <svg viewBox="0 0 980 620" role="img" aria-label="Diagram: a central Case node connects to Message, Account, Module, CaseType, Reply and Agent nodes with labeled relationships, and to another Case node via a scored SIMILAR_TO edge; the derived DUPLICATE_OF edge is shown dashed and flagged, since it has never fired despite 232 live SIMILAR_TO edges.">
+        <defs>
+          <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+
+        <!-- Case (center) -->
+        <circle class="d2-node-case" cx="470" cy="330" r="62"/>
+        <text class="d2-nlab" x="470" y="326">Case</text>
+        <text class="d2-ncount" x="470" y="342">141 live</text>
+
+        <!-- Message -->
+        <circle class="d2-node" cx="720" cy="200" r="48"/>
+        <text class="d2-nlab" x="720" y="197">Message</text>
+        <text class="d2-ncount" x="720" y="212">248 live</text>
+        <path class="d2-edge" marker-end="url(#ah2)" d="M525,290 L677,220"/>
+        <text class="d2-elab" x="565" y="245">HAS_MESSAGE</text>
+
+        <!-- Account -->
+        <circle class="d2-node" cx="470" cy="110" r="48"/>
+        <text class="d2-nlab" x="470" y="107">Account</text>
+        <text class="d2-ncount" x="470" y="122">22 live</text>
+        <path class="d2-edge" marker-end="url(#ah2)" d="M470,268 L470,158"/>
+        <text class="d2-elab" x="482" y="215">FOR_ACCOUNT</text>
+
+        <!-- Module -->
+        <circle class="d2-node" cx="220" cy="200" r="48"/>
+        <text class="d2-nlab" x="220" y="197">Module</text>
+        <text class="d2-ncount" x="220" y="212">taxonomy</text>
+        <path class="d2-edge" marker-end="url(#ah2)" d="M415,290 L263,220"/>
+        <text class="d2-elab" x="270" y="245">ABOUT</text>
+
+        <!-- CaseType -->
+        <circle class="d2-node" cx="150" cy="400" r="48"/>
+        <text class="d2-nlab" x="150" y="397">CaseType</text>
+        <text class="d2-ncount" x="150" y="412">taxonomy</text>
+        <path class="d2-edge" marker-end="url(#ah2)" d="M410,350 L195,395"/>
+        <text class="d2-elab" x="240" y="400">OF_TYPE</text>
+
+        <!-- Reply -->
+        <circle class="d2-node" cx="330" cy="540" r="48"/>
+        <text class="d2-nlab" x="330" y="537">Reply</text>
+        <text class="d2-ncount" x="330" y="552">41 live</text>
+        <path class="d2-edge" marker-end="url(#ah2)" d="M430,382 L365,498"/>
+        <text class="d2-elab" x="345" y="450">RESOLVED_BY</text>
+
+        <!-- Agent -->
+        <circle class="d2-node" cx="560" cy="540" r="48"/>
+        <text class="d2-nlab" x="560" y="537">Agent</text>
+        <text class="d2-ncount" x="560" y="552">sf_user_id</text>
+        <path class="d2-edge" marker-end="url(#ah2)" d="M505,382 L570,498"/>
+        <text class="d2-elab" x="540" y="450">HANDLED_BY</text>
+
+        <!-- second Case node for SIMILAR_TO / DUPLICATE_OF -->
+        <circle class="d2-node-case" cx="850" cy="420" r="46"/>
+        <text class="d2-nlab" x="850" y="417">Case</text>
+        <text class="d2-ncount" x="850" y="432">(other)</text>
+
+        <path class="d2-edge" marker-end="url(#ah2)" d="M528,350 Q700,370 806,405"/>
+        <text class="d2-elab" x="640" y="378">SIMILAR_TO score — 232 live</text>
+
+        <path class="d2-edge-warn" marker-end="url(#ah2)" d="M525,310 Q700,290 808,395"/>
+        <text class="d2-elab" x="640" y="298" fill="var(--warn)">DUPLICATE_OF — 0 live ⚠</text>
+
+      </svg>
+      <figcaption><b>Fig. 2 — live graph, not a schema sketch.</b> <code>SIMILAR_TO</code> fires constantly (232 edges); the <code>DUPLICATE_OF</code> logic it's supposed to feed has <b>never fired once</b>. Most likely cause: Salesforce-sourced cases never get <code>account_id</code> set, so <code>same_account</code> is always false in the threshold check (<code>interpreter/case_memory.py</code>, <code>_MERGE_CYPHER</code>). Worth fixing before any duplicate-count report is built on top of it.</figcaption>
+    </figure>
+  </section>
+
+  <section id="ownership">
+    <div class="sec-head"><span class="sec-num">05</span><h2>Who owns what</h2></div>
+    <p class="intro">The rule the rest of this map is built to enforce: no two systems hold a conflicting copy of the same fact. Everyone else holds a reference, not a second original.</p>
+    <table class="own">
+      <thead><tr><th style="width:26%">Fact</th><th style="width:20%">System of record</th><th>Everyone else holds</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>The case, the email, CaseComments, Chatter</td>
+          <td class="owner"><span class="pill" style="background:var(--ext-soft);color:var(--ext)">Salesforce / Zendesk</span></td>
+          <td>A reference — Case / EmailMessage id</td>
+        </tr>
+        <tr>
+          <td>Flow execution state, what the pipeline decided and why, the human's resolution text</td>
+          <td class="owner"><span class="pill" style="background:var(--pg-soft);color:var(--pg)">Supabase runs</span></td>
+          <td>This <em>is</em> the flow history — nothing upstream re-derives it</td>
+        </tr>
+        <tr>
+          <td>Relationships + semantic similarity between cases</td>
+          <td class="owner"><span class="pill" style="background:var(--graph-soft);color:var(--graph)">Neo4j</span></td>
+          <td>Bounded, redacted excerpts + a pointer back to <code>run_id</code> / Case id</td>
+        </tr>
+        <tr>
+          <td>The human collaboration thread</td>
+          <td class="owner"><span class="pill" style="background:var(--ext-soft);color:var(--ext)">Slack</span></td>
+          <td>Nothing syncs in — Slack's own history is its own audit trail</td>
+        </tr>
+        <tr>
+          <td>Knowledge base content</td>
+          <td class="owner"><span class="pill" style="background:var(--pg-soft);color:var(--pg)">Supabase kb_entries</span></td>
+          <td>Neo4j can link a Case to the KB entry it resolved via — never holds KB text</td>
+        </tr>
+        <tr>
+          <td>A tenant's own product usage <span class="mono" style="color:var(--muted)">(planned)</span></td>
+          <td class="owner"><span class="pill" style="background:var(--ext-soft);color:var(--ext)">Tenant's Mixpanel / GA4</span></td>
+          <td>Neo4j <code>Event</code> nodes correlated to <code>Contact</code>/<code>Account</code> — not a warehouse copy</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="connectors">
+    <div class="sec-head"><span class="sec-num">06</span><h2>One connector framework, three uses</h2></div>
+    <p class="intro">A tenant's choice of case system, chat channel, or arbitrary HTTP integration all resolve through the same seam (<code>interpreter/connectors.py</code>) instead of three bespoke integrations — the reason adding Zendesk next to Salesforce was a second implementation, not a rewrite.</p>
+    <div class="conn-row">
+      <div class="conn-card"><div class="k">Case connector</div><div class="v">salesforce · zendesk</div><div class="conn-card k" style="margin-top:6px">8-action contract</div></div>
+      <div class="conn-card"><div class="k">Chat / inbound channel</div><div class="v">email · Freshchat</div><div class="conn-card k" style="margin-top:6px">tenant_integrations</div></div>
+      <div class="conn-card"><div class="k">Generic HTTP</div><div class="v">connections + connection_actions</div><div class="conn-card k" style="margin-top:6px">connector_action node</div></div>
+      <div class="conn-card"><div class="k">Internal ping</div><div class="v">Slack</div><div class="conn-card k" style="margin-top:6px">notify_targets resolver</div></div>
+    </div>
+  </section>
+
+  <footer>
+    Built from the live Supabase project (<span class="mono">mjohgmivnxfwkqmlojqs</span>) and the connected Neo4j graph, 2026-09-05. Row/edge counts are live reads, not estimates. Full narrative version: <code>docs/MULTI_SYSTEM_ARCHITECTURE.md</code>.
+  </footer>
+
+</div>
+
+<script>
+  const stats = [
+    { n: '86', l: 'migrations' },
+    { n: '36', l: 'postgres tables' },
+    { n: '26', l: 'flow node types' },
+    { n: '141', l: 'live Case nodes' },
+    { n: '2', l: 'neo4j sync paths' },
+    { n: '3', l: 'case connectors' },
+  ];
+  document.getElementById('stats').innerHTML = stats.map(s =>
+    `<div class="stat"><div class="n">${s.n}</div><div class="l">${s.l}</div></div>`
+  ).join('');
+
+  const domains = [
+    {
+      name: 'Tenancy & access', color: 'var(--pg)',
+      note: 'Beyond the spine (tenants, tenant_members) — invites and the platform-wide activity log.',
+      tables: [
+        { name: 'tenant_invitations', rows: 71, pk: 'invite_id', cols: ['tenant_id', 'email citext', 'role', 'status'], desc: 'pending | accepted | revoked' },
+        { name: 'audit_log', rows: 1293, pk: 'event_id', cols: ['tenant_id', 'actor_id', 'action', 'target_type', 'target_id'], desc: 'service-role write only, best-effort' },
+      ]
+    },
+    {
+      name: 'Knowledge base & RAG', color: 'var(--flow)',
+      note: 'The ingested + embedded content that draft/retrieve nodes cite from.',
+      tables: [
+        { name: 'sources', rows: 5, pk: 'source_id', cols: ['tenant_id', 'kind', 'name', 'config'], desc: 'a KB collection — url-crawl, file-upload, gdrive' },
+        { name: 'zapier_docs', rows: 410, pk: 'url', cols: ['content_hash', 'status', 'missed_runs', 'source_id'], desc: 'scraped page; soft-delete on repeated miss' },
+        { name: 'doc_chunks', rows: 3624, pk: 'chunk_id', cols: ['doc_url', 'embedding vector', 'fts tsvector', 'entry_status'], desc: 'hybrid dense + sparse retrieval unit' },
+        { name: 'doc_links', rows: 929, pk: '(source_url, target_url)', cols: ['anchor_text', 'status'], desc: 'link graph between crawled pages' },
+        { name: 'kb_entries', rows: 4, pk: 'entry_id', cols: ['status', 'origin', 'supersedes_entry_id', 'source_review_task'], desc: 'active | provisional | superseded | archived' },
+      ]
+    },
+    {
+      name: 'KIL — the review loop', color: 'var(--graph)',
+      note: 'Contradiction detected → human review → approved KB rewrite. KIL-a through -f, complete; -g (atomic claim graph) deferred.',
+      tables: [
+        { name: 'review_tasks', rows: 1, pk: 'id', cols: ['case_sf_id', 'statement', 'verdict jsonb', 'status', 'kb_change_id'], desc: 'KIL-c — a flagged human reply awaiting review' },
+        { name: 'graph_sync_state', rows: 1, pk: 'scope', cols: ['last_modified', 'cases_synced', 'messages_synced'], desc: 'KIL-a — resume cursor for the Neo4j lifecycle sync' },
+        { name: 'handoff_watch_state', rows: 0, pk: 'case_sf_id', cols: ['last_seen_ts', 'flags_sent', 'seen_sigs'], desc: 'KIL-e — dedup/rate-limit for post-handover watch' },
+      ]
+    },
+    {
+      name: 'Case memory & routing', color: 'var(--graph)',
+      note: 'The pgvector half of duplicate detection, plus where a case gets routed to a human.',
+      tables: [
+        { name: 'case_memory', rows: 21, pk: 'case_sf_id', cols: ['embedding vector', 'resolution_kind', 'resolution_text', 'status'], desc: 'feeds SIMILAR_TO/DUPLICATE_OF into Neo4j' },
+        { name: 'notify_targets', rows: 13, pk: 'id', cols: ['match_kind', 'match_value', 'resolver', 'sf_queue'], desc: 'case_type/module → the internal rep to ping' },
+        { name: 'case_events', rows: 36, pk: 'event_id', cols: ['case_sf_id', 'actor', 'action', 'from_status', 'to_status'], desc: 'per-case status-change timeline' },
+        { name: 'sla_policy', rows: 18, pk: '(tier, routed_team)', cols: ['ack_minutes', 'resolve_hours'], desc: 'SLA sweep thresholds' },
+        { name: 'reasoning_sessions', rows: 5, pk: 'session_id', cols: ['state', 'transcript jsonb', 'cursor', 'max_rounds'], desc: 'Phase 29 — autonomous multi-round reasoning' },
+        { name: 'pointer_bank', rows: 7, pk: 'case_type', cols: ['pointers jsonb'], desc: 'canned reference links by case type' },
+      ]
+    },
+    {
+      name: 'Connectors & channels', color: 'var(--ext)',
+      note: 'Where a tenant’s credentials and per-tenant config live — Vault-backed, owner-gated.',
+      tables: [
+        { name: 'tenant_integrations', rows: 5, pk: '(tenant_id, kind, org_label)', cols: ['secret jsonb', 'status', 'cursor'], desc: 'email, Freshchat, Slack, SF org creds' },
+        { name: 'connections', rows: 0, pk: 'connection_id', cols: ['slug', 'base_url', 'auth jsonb'], desc: 'generic http_request node target' },
+        { name: 'connection_actions', rows: 0, pk: 'action_id', cols: ['connection_id FK', 'method', 'path', 'params'], desc: 'named reusable action on a connection' },
+        { name: 'channel_threads', rows: 0, pk: '(tenant_id, channel, thread_key)', cols: ['case_ref', 'case_number'], desc: 'long-lived chat thread → same case' },
+        { name: 'case_taxonomy', rows: 0, pk: 'tenant_id', cols: ['config jsonb'], desc: 'per-tenant module/region/type override' },
+        { name: 'policy_rules', rows: 3, pk: 'rule_id', cols: ['when jsonb', 'then jsonb', 'priority', 'status'], desc: 'when/then routing + task-dispatch rules' },
+        { name: 'action_requests', rows: 5, pk: 'id', cols: ['run_id', 'kind', 'status', 'slack_ts'], desc: 'a Slack-approved task awaiting/after decision' },
+        { name: 'flow_templates', rows: 0, pk: 'template_id', cols: ['nodes jsonb', 'edges jsonb', 'category'], desc: 'user-saved, tenant-private flow starting points' },
+      ]
+    },
+    {
+      name: 'Platform ops', color: 'var(--muted)',
+      note: 'Small, mostly global tables the worker/health-check/LLM roster use.',
+      tables: [
+        { name: 'jobs', rows: 6757, pk: 'job_id', cols: ['kind', 'payload jsonb', 'status', 'attempts'], desc: 'the queue — payload not cleared post-run' },
+        { name: 'system_health', rows: 5, pk: 'component', cols: ['last_healthy_at', 'detail jsonb'], desc: 'scripts/health_check.py heartbeat' },
+        { name: 'llm_roster', rows: 3, pk: 'capability', cols: ['models jsonb', 'premium jsonb'], desc: 'draft/classify model fallback chain' },
+        { name: 'sf_cdc_state', rows: 2, pk: 'topic', cols: ['replay_id', 'event_count'], desc: 'Salesforce Change Data Capture cursor' },
+      ]
+    },
+  ];
+
+  document.getElementById('domains').innerHTML = domains.map(d => `
+    <div class="domain-block">
+      <div class="domain-head">
+        <span class="domain-dot" style="background:${d.color}"></span>
+        <h3>${d.name}</h3>
+      </div>
+      <p class="domain-note">${d.note}</p>
+      <div class="card-grid">
+        ${d.tables.map(t => `
+          <div class="t-card" style="border-top-color:${d.color}">
+            <div class="t-top">
+              <span class="t-name">${t.name}</span>
+              <span class="t-rows">${t.rows.toLocaleString()} rows</span>
+            </div>
+            <div class="t-cols">PK <span class="pk">${t.pk}</span><br>${t.cols.join(' · ')}</div>
+            <div class="t-desc">${t.desc}</div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `).join('');
+</script>
