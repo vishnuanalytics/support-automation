@@ -2870,6 +2870,67 @@ def set_case_connector(body: CaseConnectorIn, c: Caller = Depends(caller)) -> di
     return {"tenant_id": tid, "case_connector": value}
 
 
+# ── Per-tenant case-taxonomy config (migration 086) — overrides for the
+# module/submodule/region/case-type keyword rules
+# interpreter/case_taxonomy.py's map_case_fields/map_case_type use. See
+# PROJECT_SCOPE.md "Scoped, not built: per-tenant case-taxonomy config". ──
+class CaseTaxonomyIn(BaseModel):
+    config: dict[str, Any]
+    tenant_id: str | None = None
+
+
+@app.get("/api/tenants/case-taxonomy")
+def get_case_taxonomy(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    tid = _caller_tenant(c, tenant_id)
+    from interpreter import case_taxonomy
+
+    rows = (_service.table("case_taxonomy").select("config, updated_at")
+            .eq("tenant_id", tid).execute().data or [])
+    return {
+        "tenant_id": tid,
+        "config": rows[0]["config"] if rows else {},
+        "updated_at": rows[0].get("updated_at") if rows else None,
+        "defaults": case_taxonomy.DEFAULT_TAXONOMY,
+    }
+
+
+@app.put("/api/tenants/case-taxonomy")
+def set_case_taxonomy(body: CaseTaxonomyIn, c: Caller = Depends(caller)) -> dict:
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    from interpreter import case_taxonomy
+
+    errs = case_taxonomy.validate_config(body.config)
+    if errs:
+        raise HTTPException(422, f"invalid case-taxonomy config: {'; '.join(errs)}")
+    _service.table("case_taxonomy").upsert(
+        {"tenant_id": tid, "config": body.config, "updated_by": c.user_id},
+    ).execute()
+    case_taxonomy.invalidate(tid)
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="tenant.case_taxonomy_changed",
+                 actor_id=c.user_id, actor_email=c.email, target_type="tenant", target_id=tid,
+                 summary="case taxonomy config updated",
+                 metadata={"overridden_keys": sorted(body.config.keys())})
+    return {"tenant_id": tid, "config": body.config}
+
+
+@app.delete("/api/tenants/case-taxonomy", status_code=204)
+def reset_case_taxonomy(tenant_id: str | None = None, c: Caller = Depends(caller)) -> None:
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    from interpreter import case_taxonomy
+
+    _service.table("case_taxonomy").delete().eq("tenant_id", tid).execute()
+    case_taxonomy.invalidate(tid)
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="tenant.case_taxonomy_reset",
+                 actor_id=c.user_id, actor_email=c.email, target_type="tenant", target_id=tid,
+                 summary="case taxonomy reset to defaults")
+
+
 # ── Phase 16: policy rules ───────────────────────────────────────────
 class RuleIn(BaseModel):
     team: str

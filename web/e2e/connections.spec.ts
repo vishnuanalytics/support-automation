@@ -25,6 +25,8 @@ test("pick Zendesk as the case system and connect an account", async ({ page }) 
     route.fulfill({ json: route.request().method() === "GET" ? [] : {} }));
   await page.route("**/api/integrations/llm*", (route) =>
     route.fulfill({ json: { tenant_id: FAKE_TENANT_ID, tenant: { groq: false, anthropic: false, openrouter: false }, platform: { groq: true, anthropic: false, openrouter: false } } }));
+  await page.route("**/api/tenants/case-taxonomy*", (route) =>
+    route.fulfill({ json: { tenant_id: FAKE_TENANT_ID, config: {}, updated_at: null, defaults: {} } }));
 
   await page.route("**/api/tenants/case-connector*", (route) => {
     if (route.request().method() === "GET") {

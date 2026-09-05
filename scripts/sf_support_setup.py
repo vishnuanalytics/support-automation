@@ -350,14 +350,42 @@ STAGES = {"queues": stage_queues, "types": stage_types,
           "fls": stage_fls, "permset": stage_permset}
 
 
+def _apply_tenant_taxonomy(tenant_id: str) -> None:
+    """Pull Module/SubModule/Region/Case.Type picklist values from the same
+    per-tenant taxonomy config `interpreter.case_taxonomy`'s
+    map_case_fields/map_case_type use at runtime, instead of this script's
+    own separately-hardcoded lists -- closes the two-sources-of-truth bug
+    class migration 079 hit once (a rule produced a value the picklist
+    didn't have). Only called when --tenant-id is passed; the no-flag
+    default path is untouched, so existing usage is unaffected."""
+    global CASE_TYPE_VALUES, MODULE_VALUES, REGION_VALUES, SUBMODULE_BY_MODULE, PICKLIST_CONVERT
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+    from interpreter.case_taxonomy import valid_values
+
+    vv = valid_values(tenant_id)
+    CASE_TYPE_VALUES = vv["case_types"]
+    MODULE_VALUES = vv["modules"]
+    REGION_VALUES = vv["regions"]
+    SUBMODULE_BY_MODULE = vv["submodule_by_module"]
+    PICKLIST_CONVERT = [
+        {"api": "Case.Module__c", "label": "Module", "values": MODULE_VALUES},
+        {"api": "Case.Region__c", "label": "Region", "values": REGION_VALUES},
+    ]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", choices=list(STAGES), action="append",
                     help="run only these stage(s)")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--tenant-id", help="sync Module/SubModule/Region/Case.Type picklist "
+                     "values from this tenant's case_taxonomy config (PUT "
+                     "/api/tenants/case-taxonomy) instead of the built-in default")
     args = ap.parse_args()
     if not available():
         sys.exit("no SF creds in .env")
+    if args.tenant_id:
+        _apply_tenant_taxonomy(args.tenant_id)
     sf = _client()
     for name in (args.only or list(STAGES)):
         print(f"\n== {name} ==")

@@ -324,8 +324,9 @@ def h_classify(state: CaseState, config: dict) -> dict:
     # Case.Type — the field queue owners scan by and the key `notify` routes on
     # (Phase 20n). Trust the classifier's `type` when it maps to a real picklist
     # value; else derive deterministically from the topic/body (stub-safe).
-    case_type = (salesforce.normalize_case_type(parsed.get("type"))
-                 or salesforce.map_case_type(topic, body))
+    _tid, _sb = state.get("tenant_id"), config.get("_sb")
+    case_type = (salesforce.normalize_case_type(parsed.get("type"), tenant_id=_tid, sb=_sb)
+                 or salesforce.map_case_type(topic, body, tenant_id=_tid, sb=_sb))
     answer_mode = _norm_answer_mode(parsed.get("answer_mode"), topic, body)
     classification = {
         "topic": topic,
@@ -491,12 +492,14 @@ def h_sf_writeback(state: CaseState, config: dict) -> dict:
     derived = salesforce.map_case_fields(
         classification.get("topic"),
         state.get("region") or _dig(case, "account.region"),
+        tenant_id=state.get("tenant_id"), sb=config.get("_sb"),
     )
     # Phase 20n — Case.Type: the classifier's mapped value, else derived from
     # the topic. Written on every pass so it is set at first triage and kept
     # current on each customer-reply re-run while the Case sits in the queue.
     case_type = (classification.get("case_type")
-                 or salesforce.map_case_type(classification.get("topic")))
+                 or salesforce.map_case_type(classification.get("topic"),
+                                              tenant_id=state.get("tenant_id"), sb=config.get("_sb")))
     ctx: dict[str, Any] = {
         "classification": classification,
         "tier": state.get("tier"),
@@ -720,7 +723,7 @@ def h_case_lookup(state: CaseState, config: dict) -> dict:
 
     query = f"{case.get('subject', '')}\n{case.get('body', '')}\n{cls.get('summary', '')}".strip()
     module = ((state.get("sf_writeback") or {}).get("written") or {}).get("Module__c") \
-        or salesforce.map_case_fields(cls.get("topic"), None).get("Module__c")
+        or salesforce.map_case_fields(cls.get("topic"), None, tenant_id=tenant_id, sb=sb).get("Module__c")
     res = case_memory.lookup(
         sb, query, tenant_id=str(tenant_id),
         case_type=cls.get("case_type"), module=module, tier=state.get("tier"),
@@ -1290,7 +1293,8 @@ def h_confidence_gate(state: CaseState, config: dict) -> dict:
     # defaults to Billing & Plans; a flow can set `[]` to opt out.
     if not forced:
         esc_mods = config.get("escalate_modules", ["Billing & Plans"])
-        mod = salesforce.map_case_fields(topic, None).get("Module__c")
+        mod = salesforce.map_case_fields(topic, None, tenant_id=state.get("tenant_id"),
+                                          sb=config.get("_sb")).get("Module__c")
         if mod and mod in esc_mods:
             forced = f"module '{mod}'"
     # Case.Type escalation (Phase 20n): a whole class of request (Billing,
@@ -1299,7 +1303,8 @@ def h_confidence_gate(state: CaseState, config: dict) -> dict:
     if not forced:
         esc_types = config.get("escalate_types", [])
         ctype = ((state.get("classification") or {}).get("case_type")
-                 or salesforce.map_case_type(topic))
+                 or salesforce.map_case_type(topic, tenant_id=state.get("tenant_id"),
+                                              sb=config.get("_sb")))
         if ctype and ctype in esc_types:
             forced = f"type '{ctype}'"
     # answer_mode escalation (Phase 21, opt-in): an `action` request (cancel,
@@ -1397,10 +1402,11 @@ def h_notify(state: CaseState, config: dict) -> dict:
     confidence = state.get("confidence")
     draft = state.get("draft", "")
 
-    case_type = cls.get("case_type") or salesforce.map_case_type(cls.get("topic"))
+    _tid, _sb = state.get("tenant_id"), config.get("_sb")
+    case_type = cls.get("case_type") or salesforce.map_case_type(cls.get("topic"), tenant_id=_tid, sb=_sb)
     written = (state.get("sf_writeback") or {}).get("written") or {}
     module = written.get("Module__c") or salesforce.map_case_fields(
-        cls.get("topic"), None).get("Module__c")
+        cls.get("topic"), None, tenant_id=_tid, sb=_sb).get("Module__c")
 
     by_type = config.get("target_by_type") or {}
     by_module = config.get("target_by_module") or {}

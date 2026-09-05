@@ -43,6 +43,8 @@ import type {
   ZendeskConnection,
   ZendeskConnectionSave,
   CaseConnector,
+  CaseTaxonomy,
+  CaseTaxonomyConfig,
 } from "./types";
 
 const BASE = (import.meta.env.VITE_API_BASE as string) || ""; // "" -> vite proxy
@@ -208,6 +210,17 @@ export const api = {
       req<CaseConnector>("/tenants/case-connector", {
         method: "PUT", body: JSON.stringify({ case_connector: caseConnector, tenant_id: tenantId }),
       }),
+  },
+
+  caseTaxonomy: {
+    get: (tenantId?: string) =>
+      req<CaseTaxonomy>(`/tenants/case-taxonomy${tenantId ? `?tenant_id=${tenantId}` : ""}`),
+    set: (config: CaseTaxonomyConfig, tenantId?: string) =>
+      req<{ tenant_id: string; config: CaseTaxonomyConfig }>("/tenants/case-taxonomy", {
+        method: "PUT", body: JSON.stringify({ config, tenant_id: tenantId }),
+      }),
+    reset: (tenantId?: string) =>
+      req<void>(`/tenants/case-taxonomy${tenantId ? `?tenant_id=${tenantId}` : ""}`, { method: "DELETE" }),
   },
 
   rollbackFlow: (id: string, version: number) =>
