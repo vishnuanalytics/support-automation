@@ -81,6 +81,85 @@ def test_low_confidence_verdicts_are_ignored():
     assert integrity._summarize(v, backend="groq")["relation"] == "neutral"
 
 
+# ── check_many() — h_draft's combined-call path ─────────────────────────
+_CTX = [{"text": "Webhooks require a Business plan or above.", "ref": "kb1"}]
+
+
+def test_check_many_makes_one_call_for_two_statements(monkeypatch):
+    monkeypatch.setattr(llm, "available", lambda *a, **k: True)
+    calls = []
+
+    def fake_complete(**kw):
+        calls.append(kw)
+        return (
+            '{"statements": {'
+            '"draft": {"claims": [{"claim": "webhooks are free", "relation": "contradicts", '
+            '"evidence": "business plan required", "confidence": 0.9}]}, '
+            '"inbound": {"claims": [{"claim": "customer wants webhooks", "relation": "neutral", '
+            '"evidence": "", "confidence": 0.9}]}}}'
+        )
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    out = integrity.check_many(
+        {"draft": "Webhooks are free on every plan.", "inbound": "Can I get webhooks?"},
+        _CTX, kinds={"draft": "draft", "inbound": "inbound"},
+    )
+    assert len(calls) == 1                      # one Groq round-trip, not two
+    assert "STATEMENT[draft]" in calls[0]["user"] and "STATEMENT[inbound]" in calls[0]["user"]
+    assert out["draft"]["relation"] == "contradicts" and out["draft"]["flagged"] is True
+    assert out["inbound"]["relation"] == "neutral" and out["inbound"]["novel"] is False
+    # kind="inbound" never sets novel, even though this claim is unsupported-neutral
+    assert out["draft"]["novel"] is False        # this claim was `contradicts`, not neutral
+
+
+def test_check_many_skips_the_combined_call_with_only_one_statement(monkeypatch):
+    monkeypatch.setattr(llm, "available", lambda *a, **k: True)
+    calls = []
+    monkeypatch.setattr(llm, "complete", lambda **kw: calls.append(kw) or
+                        '{"claims": []}')
+    out = integrity.check_many({"draft": "Some reply.", "inbound": ""}, _CTX,
+                               kinds={"draft": "draft", "inbound": "inbound"})
+    assert len(calls) == 1                       # per-statement check(), not the multi-shape
+    assert "several labeled STATEMENTS" not in calls[0]["system"]
+    assert out["inbound"]["backend"] == "none"   # empty statement -> the safe empty result
+
+
+def test_check_many_falls_back_to_per_statement_on_malformed_json(monkeypatch):
+    monkeypatch.setattr(llm, "available", lambda *a, **k: True)
+    calls = []
+    monkeypatch.setattr(llm, "complete", lambda **kw: calls.append(kw) or "not json")
+    out = integrity.check_many({"draft": "reply text", "inbound": "inbound text"}, _CTX)
+    # 1 failed combined attempt + 2 per-statement fallback calls
+    assert len(calls) == 3
+    assert set(out) == {"draft", "inbound"}
+    assert out["draft"]["backend"] in ("groq", "heuristic")
+
+
+def test_check_many_falls_back_when_a_label_is_dropped(monkeypatch):
+    monkeypatch.setattr(llm, "available", lambda *a, **k: True)
+    calls = []
+
+    def fake_complete(**kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            return '{"statements": {"draft": {"claims": []}}}'   # "inbound" missing
+        return '{"claims": []}'
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    out = integrity.check_many({"draft": "reply text", "inbound": "inbound text"}, _CTX)
+    assert len(calls) == 3   # the dropped-label combined attempt + 2 fallback calls
+    assert set(out) == {"draft", "inbound"}
+
+
+def test_check_many_falls_back_without_llm():
+    # autouse fixture keeps llm.available() False for this one
+    out = integrity.check_many({"draft": "Webhooks are free everywhere.",
+                                "inbound": "Do you support webhooks?"}, _CTX,
+                               kinds={"draft": "draft", "inbound": "inbound"})
+    assert set(out) == {"draft", "inbound"}
+    assert out["draft"]["backend"] == "heuristic"
+
+
 def test_contexts_from_state_assembles_kb_and_history():
     ctx = integrity.contexts_from_state({
         "prior_resolutions": [{"resolution_text": "Toggle the Zap on from the dashboard.",

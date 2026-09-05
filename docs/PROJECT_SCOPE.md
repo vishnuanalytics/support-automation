@@ -707,9 +707,48 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-05 — `h_draft` collapsed to one `integrity.check` call instead of
+two (this is the most recent work in this file).** The last item from this
+session's architecture/compute audit: `h_draft` ran `integrity.check()`
+twice per invocation (`kind="draft"` on the reply, `kind="inbound"` on the
+customer's text) against the *same* `icontexts` — two separate Groq
+round-trips for what's really one judge task over two labeled inputs.
+
+New `integrity.check_many(statements: dict, contexts, *, kinds, ...)`
+scores several named statements against one shared context in a single
+call (a `{"statements": {"<label>": {"claims": [...]}}}` JSON shape,
+prompt asks the model to judge each label only against context, not the
+other labels) — falls back to the original per-statement `check()` calls
+when: fewer than 2 statements are non-empty, no LLM key, the JSON fails to
+parse, or the model drops a label from its response entirely (a real LLM
+won't always perfectly follow "one entry per label" — this never half-
+trusts a partial response). `check()` and `_judge_groq` are both unchanged
+in behavior; `_parse_claims`/`_finish` extracted so the new code doesn't
+duplicate their logic. `registry.py::h_draft` is the only caller changed —
+every other `integrity.check()` call site (`handoff_watch.py`, `review.py`,
+`kb_writeback.py`'s self-critique, the eval scripts) is untouched.
+
+**Verify:** 5 new offline tests (`tests/test_integrity.py` — one combined
+call for 2 statements, falls back below 2 non-empty, falls back on
+malformed JSON, falls back when a label is dropped, falls back cleanly
+with no LLM key) — 774 offline tests green (was 769), no regression.
+**Live-verified against real Groq**: a contradicting draft + a related
+inbound question, single call, correctly split into two independently-
+scored verdicts (both `contradicts`, real evidence quoted per label).
+
+**Audit fully closed**: all 4 chunks it surfaced are now either built
+(judge-call caching, this retention fix, this `h_draft` collapse, the
+`h_agent` eval re-run + the stale-model bug it found) or explicitly left
+open as a judgment call (`h_policy_gate` replacing `escalate_topics`'s
+static list — a real behavior change to what triggers escalation, not
+attempted this session; whether to keep/retune/revert `h_agent` given its
+honest null result).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
 **2026-09-05 — `eval/agent/run_agent_eval.py` re-run for real, plus a real
-bug it surfaced fixed (migration 088) — this is the most recent work in
-this file.** Answers the "genuinely open" agentic question this session's
+bug it surfaced fixed (migration 088).** Answers the "genuinely open" agentic question this session's
 audit flagged: does `h_agent`'s reformulation loop actually beat a single
 retrieve call? **Re-run clean (real Groq, `python -u` to avoid stdout
 buffering silently swallowing output under a hard `timeout` — the first
@@ -798,10 +837,9 @@ future session (not built now — the user picks the next one)**:
   2026-09-05, migration 087 — see the entry above.** (Note this was always
   a different gap from the `runs.case_payload`/`runs.trace` redundancy
   point below, which is still open.)
-- **Not built — compute:** `h_draft` makes two separate `integrity.check()`
-  Groq round-trips per invocation (`kind="draft"` and `kind="inbound"`)
-  against the same context — collapsible into one prompt, halving that
-  LLM leg. A real design change, not a one-liner.
+- ~~**Not built — compute:** `h_draft` makes two separate `integrity.check()`
+  Groq round-trips per invocation~~ **Built 2026-09-05 —
+  `integrity.check_many()`, see the entry above.**
 - **Not built — accuracy, wiring gap not new build:** `confidence_gate`'s
   `escalate_topics` is still a static slug-list even though `h_policy_gate`
   (its already-named successor, Phase 16) exists and isn't wired into the
