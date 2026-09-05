@@ -743,13 +743,50 @@ real compute-cost win, not just correctness). 4 new offline tests
 (`tests/test_case_memory_sync.py` — this ingestion module had zero
 coverage before). 778 offline tests green (was 774).
 
-**Not done in this chunk, deliberately:** re-running the actual sync
-against live data (`python -m ingestion.case_memory_sync --from-salesforce`
-/ default `runs` mode) to make the fix produce real `DUPLICATE_OF` edges
-for the existing 141 Case nodes — that's a live write to production
-Neo4j/Supabase, left for the user (or an explicit follow-up) rather than
-run autonomously here. The code fix is correct and tested either way; this
-is "will it actually create the edges when re-run," not "is the fix right."
+**Re-run live (user approved) — two more root causes found and fixed before
+it actually worked, all three now confirmed with real edges:**
+
+1. **`case_sf_id` vs the real Salesforce Id.** `_row_from_run`'s `case_sf_id`
+   is the Case *Number* (e.g. `"00001130"`), not the real 15/18-char
+   Salesforce Id — `case_payload["sf_id"]` is (the `case.get("sf_id") or
+   case.get("id")` convention used everywhere else in this codebase). Since
+   `case_sf_id` is the MERGE/upsert identity key for already-live
+   `case_memory` rows and Neo4j `Case` nodes, it couldn't just be
+   repointed at the real Id without orphaning/duplicating 141 existing
+   rows/nodes. Fix: a new `_sf_lookup_id` field (from `case_payload.sf_id`)
+   that `_enrich_from_sf` uses *only* to query Salesforce correctly —
+   `case_sf_id` itself, and every existing row/node it keys, is untouched.
+2. **`case_memory` never had an `account_id` column at all**, and
+   `match_case_memory()` never returned one — so even a correctly-computed
+   `account_id` on the row *being synced* had nothing to compare against
+   for a kNN neighbour, since that neighbour's `account_id` could never be
+   fetched. **Migration `089`**: adds the column, drops+recreates
+   `match_case_memory()` (return-type change) to include it.
+   `case_memory.upsert()` now persists it. Applied to the real Supabase
+   project; drift check clean.
+
+**Live-verified, fully working end to end:** re-running
+`python -m ingestion.case_memory_sync` (default `runs` mode, since these
+cases came from there) now produces **20 real `DUPLICATE_OF` edges**,
+correctly connecting the exact clusters found during investigation — the
+6-case proxy-timeout cluster (00001130/32/33/34/36/38, all pointing
+newer -> older), the 2-case renewal duplicate (00001189/00001190), and a
+third cluster (00001191/00001215/DEMO-1). Zero new Case nodes (141
+throughout — identity fix confirmed safe), `SIMILAR_TO` unchanged at 232
+(existing edges updated, not duplicated). **One operational gotcha hit and
+understood, not a residual bug:** the *first* post-fix run persisted
+correct `account_id` for these rows but created 0 edges — a same-batch
+ordering artifact (whichever cluster-mate is processed first in a run
+sees the others' pre-fix/stale `account_id`, since they haven't been
+re-upserted yet *in that same pass*). A second run (every row's
+`account_id` now already correct in the table from the first) produced
+all 20 edges immediately. This only ever affects the one-time backfill
+after adding a new enrichable field — routine incremental syncs going
+forward never hit it, since neighbours are always already-persisted from
+a prior run.
+
+7 new offline tests total for this fix (`tests/test_case_memory_sync.py`).
+781 offline tests green.
 
 **Older note, superseded by the above as "most recent," kept for its own
 history:**

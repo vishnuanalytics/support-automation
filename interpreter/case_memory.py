@@ -313,6 +313,7 @@ def upsert(sb, row: dict[str, Any]) -> None:
         "submodule": row.get("submodule"),
         "region": row.get("region"),
         "tier": row.get("tier"),
+        "account_id": row.get("account_id"),
         "resolution_kind": row.get("resolution_kind", "agent_reply"),
         "resolution_text": redact(row.get("resolution_text")),
         "generalizable": bool(row.get("generalizable", True)),

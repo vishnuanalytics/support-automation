@@ -45,6 +45,49 @@ def _no_real_sf(monkeypatch):
     monkeypatch.setattr(salesforce, "_client_obj", None, raising=False)
 
 
+# ── _row_from_run: case_sf_id (identity) vs _sf_lookup_id (real SF Id) ───
+def test_row_from_run_keeps_case_sf_id_but_adds_the_real_lookup_id():
+    # `runs.case_id` is the Case Number for this source -- case_sf_id (the
+    # MERGE/upsert identity key for already-live data) must stay exactly
+    # that, unchanged, to avoid orphaning/duplicating existing rows/nodes.
+    # The real Salesforce Id (from case_payload.sf_id) goes on a separate
+    # field so _enrich_from_sf can query Salesforce correctly without
+    # touching identity.
+    run = {"case_id": "00001130", "tenant_id": "t1", "human_action": "guided_resume",
+           "human_reply": "Here is the fix.",
+           "case_payload": {"sf_id": _CASE_1, "case_number": None}}
+    row = cms._row_from_run(run)
+    assert row["case_sf_id"] == "00001130"          # unchanged identity
+    assert row["_sf_lookup_id"] == _CASE_1           # the real Id, for lookup only
+
+
+def test_row_from_run_lookup_id_absent_when_payload_has_no_sf_id():
+    run = {"case_id": "00001130", "tenant_id": "t1", "human_action": "guided_resume",
+           "human_reply": "Here is the fix.", "case_payload": {}}
+    row = cms._row_from_run(run)
+    assert row["case_sf_id"] == "00001130"
+    assert row["_sf_lookup_id"] is None
+
+
+def test_enrich_uses_sf_lookup_id_not_the_case_number_identity(monkeypatch):
+    # The actual bug: case_sf_id ("00001130") is 8 chars, not a real Id, so
+    # naively querying Salesforce `WHERE Id IN (...)` on it could never
+    # match. _sf_lookup_id carries the real Id for the query; the result
+    # must still land back on the row keyed by case_sf_id.
+    monkeypatch.setattr(salesforce, "available", lambda: True)
+    monkeypatch.setattr(salesforce, "client_for",
+                        lambda *a, **k: _FakeSF([{"Id": _CASE_1, "CaseNumber": "00001130",
+                                                  "Type": "Bug", "Module__c": "Billing",
+                                                  "Region__c": "US", "AccountId": "001XX9",
+                                                  "Account": {"Tier__c": "gold"},
+                                                  "IsClosed": True, "ClosedDate": "2026-08-01"}]))
+    rows = [{"case_sf_id": "00001130", "_sf_lookup_id": _CASE_1,
+            "case_type": "Bug", "account_id": None}]
+    cms._enrich_from_sf(rows)
+    assert rows[0]["account_id"] == "001XX9"
+    assert rows[0]["case_sf_id"] == "00001130"       # identity untouched
+
+
 def test_enrich_backfills_account_id_even_when_case_type_already_set(monkeypatch):
     # Root cause: the old `want` filter only checked `case_type`, so a row
     # that already had it (e.g. from sf_writeback) was treated as fully

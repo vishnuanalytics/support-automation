@@ -136,9 +136,12 @@ cleanly.
   `account_id`, so a row that already had one (nearly every real row) was
   wrongly skipped for the other. Confirmed live: 20 case pairs score above
   the dup threshold, including a 6-case cluster sharing one real Salesforce
-  AccountId, currently invisible to duplicate detection. Fix is in;
-  re-running the sync against live data to actually populate the edges for
-  the existing 141 Case nodes is not done yet.
+  AccountId, currently invisible to duplicate detection. **Fully fixed and
+  live-verified 2026-09-05**: two more root causes surfaced while actually
+  making it work (a `case_sf_id`-vs-real-Id mismatch, and `case_memory`
+  never having an `account_id` column at all — migration `089`) — see
+  `PROJECT_SCOPE.md`. Re-running the sync now produces all 20 real
+  `DUPLICATE_OF` edges, zero new Case nodes.
 - Whether the product-analytics connector is worth building before or
   after the reporting/exposure layer above — they're independent, but a
   tenant would only value one once the other exists.

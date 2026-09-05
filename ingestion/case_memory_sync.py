@@ -69,6 +69,21 @@ def _row_from_run(r: dict) -> dict | None:
     cid = str(case_id)
     return {
         "case_sf_id": cid,
+        # `runs.case_id` (-> `case_sf_id` above) is the Case *Number* for
+        # this source (e.g. "00001130"), not the real Salesforce Id --
+        # `case_payload["sf_id"]` (registry.py's `case.get("sf_id") or
+        # case.get("id")` convention, used everywhere else) is the actual
+        # Id. `case_sf_id` is the MERGE/upsert identity key for already-live
+        # case_memory rows and Neo4j Case nodes, so it can't be repointed at
+        # the real Id without orphaning/duplicating existing data -- this
+        # separate field exists purely so `_enrich_from_sf` can query
+        # Salesforce by the *real* Id instead of searching `Id` for a case
+        # number, which could never match. Root cause of the
+        # DUPLICATE_OF-never-fires bug, found while re-syncing after the
+        # earlier account_id/`want`-filter fix still produced zero new
+        # edges. `_from_salesforce`'s rows need no equivalent -- their
+        # `case_sf_id` is already the real Id.
+        "_sf_lookup_id": payload.get("sf_id"),
         "tenant_id": r["tenant_id"],
         "case_number": payload.get("case_number") or (cid if cid.isdigit() else None),
         "subject": r.get("subject") or payload.get("subject"),
@@ -112,11 +127,20 @@ def _enrich_from_sf(rows: list[dict]) -> None:
     that hit this path came out with `account_id` unset -> DUPLICATE_OF's
     same-account gate was always False. Checking `account_id` too closes it."""
     from interpreter import salesforce
+
+    def _lookup_id(r: dict) -> str | None:
+        # prefer the real Id (`_sf_lookup_id`, set by `_row_from_run` from
+        # `case_payload["sf_id"]`) over `case_sf_id`, which for that source
+        # is actually the Case Number -- see `_row_from_run`'s comment.
+        # `_from_salesforce`'s rows have no `_sf_lookup_id`; their
+        # `case_sf_id` is already the real Id.
+        v = r.get("_sf_lookup_id") or r["case_sf_id"]
+        return v if isinstance(v, str) and len(v) in (15, 18) else None
+
     if not salesforce.available():
         return
-    want = {r["case_sf_id"] for r in rows
-            if isinstance(r["case_sf_id"], str) and len(r["case_sf_id"]) in (15, 18)
-            and (not r.get("case_type") or not r.get("account_id"))}
+    want = {lid for r in rows
+            if (lid := _lookup_id(r)) and (not r.get("case_type") or not r.get("account_id"))}
     if not want:
         return
     try:
@@ -132,7 +156,7 @@ def _enrich_from_sf(rows: list[dict]) -> None:
         log.warning("SF enrich failed: %s", e)
         return
     for r in rows:
-        c = by_id.get(r["case_sf_id"])
+        c = by_id.get(_lookup_id(r))
         if not c:
             continue
         r["case_number"] = r.get("case_number") or c.get("CaseNumber")
