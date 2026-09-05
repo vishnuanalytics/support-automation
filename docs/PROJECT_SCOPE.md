@@ -707,6 +707,59 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-05 — Playwright e2e on the web editor: built, live-verified in
+this sandbox, wired into CI. Closes a residual open since Phase 9. This is
+the most recent work in this file (see the top-of-file note: this doc is
+edited in place, not strictly appended to — check dates, not physical
+position).** Picked from a 3-option menu offered after Phase 29 closed
+(the other two — a second real connector, CI/eval hardening — not started).
+`web/e2e/flow-editor.spec.ts` (Playwright, `@playwright/test` added as a
+devDependency) drives the real app in a real Chromium: stubbed auth → load
+a flow → add a node via the palette → Save draft — exactly the scope
+Phase 9's own plan named but never built. `web/e2e/mocks.ts` intercepts
+every `/api/**` call the boot path needs (`page.route`) and seeds a fake
+Supabase session directly into `localStorage`, so the suite needs **zero**
+real Supabase project, Salesforce org, or backend process — it runs in CI
+the same "offline by default" way the pytest suite does.
+
+**A real gotcha, hit and fixed, not just theoretical:** the first attempt
+seeded the fake session correctly but the app still rendered the real
+Login screen. Root cause: `import.meta.env.VITE_*` is substituted at
+Vite's build/transform time, not read from `process.env` at serve time —
+so passing fake `VITE_SUPABASE_URL`/etc via Playwright's `webServer.env`
+had no effect; the already-built (or already-running dev-transformed)
+bundle kept reading the real `web/.env.local` project ref, so the
+Supabase-computed localStorage key (`sb-<project-ref>-auth-token`) never
+matched what the spec had seeded. Fixed the correct way, via Vite's own
+mechanism: a new committed `web/.env.e2e` (fake values only, safe to
+commit — `.gitignore`'s blanket `.env.*` rule gets a `!web/.env.e2e`
+exception, same pattern as `!.env.example`) + `playwright.config.ts`'s
+`webServer.command` runs `vite dev --mode e2e`, which loads `.env.e2e`
+over the real `.env.local`. Also had to add an explicit
+`vite.config.ts` `test.exclude: ["e2e/**"]` — vitest's default glob
+otherwise also picks up `*.spec.ts` and tries (and fails) to run
+Playwright's own `test`/`expect` outside Playwright's runner.
+
+**Live-verified in this sandbox** (no headless browser here by default,
+same missing-`.so`-libs problem the first browser click-through hit
+[2026-09-03] — `apt-get download libnspr4 libnss3 libasound2t64` +
+`dpkg-deb -x` into scratch, no root needed, `LD_LIBRARY_PATH` pointed at
+the extracted libs for the Chromium launch): the spec **genuinely caught
+a real setup bug** on its first run (the env-substitution gotcha above,
+via the Login screen instead of the expected flow list) before passing
+cleanly — 3/3 stable reruns after the fix. `tsc -b` / `vite build` /
+`vitest run` (6/6, unaffected) all still clean. `.github/workflows/ci.yml`
+gains `npx playwright install --with-deps chromium` + `npx playwright
+test` (root + apt available on the GitHub Actions runner, so none of this
+sandbox's workaround is needed there) + an `actions/upload-artifact` of
+the HTML report on failure.
+
+**Not yet done, deliberately not built now:** only one spec (the Phase 9
+scope) — no picker-specific coverage yet (Salesforce/Slack/Connections
+pickers, edge-condition quick-insert, etc., the exact areas the 2026-09-03
+manual click-through found 4 real bugs in). That's the natural next
+Playwright chunk if this track continues, not bundled into this one.
+
 **2026-09-05 — Phase 29 CLOSED and live-verified: step 5 (autonomous
 reasoning-session continuation) done + confirmed end to end against real
 Groq/Supabase/Slack, all 5 steps complete. This is the most recent work in
@@ -745,11 +798,13 @@ despite the bot token being live and fully functional — a stale display
 flag, not a functional gap; not chased further this session.
 
 **Phase 29 status: all 5 steps done, all 5 live-verified — the whole
-track is closed.** Next real work is picking a fresh chunk — see the
-"what's next" discussion from this session (a second real connector
-beyond Salesforce/Slack to prove FR-47 generalizes, Playwright e2e on the
-web editor, or wiring `eval/e2e`/`sop_conflicts.py` into CI — none started
-yet, nothing committed to).
+track is closed.** Of the "what's next" menu offered after this closed
+(a second real connector beyond Salesforce/Slack to prove FR-47
+generalizes, Playwright e2e on the web editor, or wiring
+`eval/e2e`/`sop_conflicts.py` into CI), Playwright was picked and is now
+done — see the entry above, physically above this one but written later
+(the usual "edited in place" caveat). The other two are still open,
+nothing committed to either yet.
 
 **Old step-4 note, superseded by the above as "most recent," kept for its
 own history:** self-critique wired into KIL's
@@ -3849,11 +3904,14 @@ Standing context (unchanged):
    uses the legacy 1-D blend — rewrite it to sweep the new `weights` /
    honour `escalate_topics`, or drop it. Headline metrics (per-run) are
    correct; only the sweep table is stale.
-3. Standing infra debt: Playwright e2e on the web; wire the `eval/e2e/`
-   auto-send-precision floor into CI; deploy `api/` + `web/` + the worker
-   + the `sf_case_watch` cron to real hosts; move rate-limit /
-   token-cache state to Redis; encrypt `tenant_integrations.secret` with
-   Supabase Vault. All noted under "Known issues / debt".
+3. Standing infra debt: ~~Playwright e2e on the web~~ **done 2026-09-05**;
+   wire the `eval/e2e/` auto-send-precision floor into CI; deploy `api/` +
+   `web/` + the worker + the `sf_case_watch` cron to real hosts; move
+   rate-limit / token-cache state to Redis; ~~encrypt
+   `tenant_integrations.secret` with Supabase Vault~~ **done** (see the
+   Vault-encryption chunk). This whole numbered list is old and mostly
+   stale — several items on it were independently closed since it was
+   written; don't trust the rest of it without checking current code.
 
 A Phase 7 follow-up, now **higher priority** after the real-draft e2e
 re-run (acc dropped 0.909 stub → 0.636 real):
@@ -4119,9 +4177,10 @@ From the 2026-08-29 self-review. Each is intentional MVP scope, not a bug:
   hand-rolled runner.~~ **Phase 9:** `pytest` + `pytest.ini`,
   `tests/test_api.py` (offline + integration), `web` `vitest`,
   `.github/workflows/ci.yml` gating `main`. `test_multiflow` now asserts
-  structural + relative invariants. *Residual:* no Playwright end-to-end on
-  the web; the `eval/e2e/` auto-send-precision floor isn't wired into CI
-  yet (needs Supabase creds in CI, or a recorded fixture).
+  structural + relative invariants. ~~*Residual:* no Playwright end-to-end
+  on the web~~ **closed 2026-09-05**, see below. *Residual still open:* the
+  `eval/e2e/` auto-send-precision floor isn't wired into CI yet (needs
+  Supabase creds in CI, or a recorded fixture).
 - ~~Nothing triggers the flow; synchronous in-request; no idempotency.~~
   **Phase 10:** `jobs` queue + `claim_job()`, `api/worker.py`,
   `ingestion/sf_case_watch.py` polling trigger, `Idempotency-Key` + unique
