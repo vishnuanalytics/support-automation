@@ -90,6 +90,27 @@ jobs:
           SF_DOMAIN: ${{ secrets.SF_DOMAIN }}
         run: python -m ingestion.case_graph_sync
 
+      # 2026-09-05 — scheduled re-crawl for every KB collection with a known
+      # crawl history (sources.config.crawl_urls, recorded by
+      # api/worker.py::_crawl_site the first time a tenant crawls a site).
+      # Just enqueues crawl_site jobs; the drain step right after actually
+      # runs them — there's no always-on worker host, same reason
+      # email-automation.yml drains its own queue in-workflow.
+      - name: Re-crawl KB sources with a known crawl history
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m ingestion.kb_recrawl
+
+      - name: Drain the job queue (crawl_site + embed_kb_entry)
+        continue-on-error: true
+        if: always()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m api.worker --once
+
       # audit C3 — trim old finished jobs / settled runs
       - name: Purge old jobs + runs
         continue-on-error: true

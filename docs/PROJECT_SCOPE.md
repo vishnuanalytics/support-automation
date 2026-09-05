@@ -707,8 +707,89 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-05 — the first connector-design chunk built: sitemap-first
+crawl discovery + scheduled re-crawl (this is the most recent work in
+this file).** Picked as the easiest item from `docs/KB_SOURCE_CONNECTORS.md`'s
+suggested build order (no new auth, extends code that already works).
+
+**`ingestion/webcrawl.py`**: `crawl()` now best-effort fetches
+`/sitemap.xml` (one level of `<sitemapindex>` indirection, namespace-
+agnostic parsing) and seeds every in-scope URL straight into the BFS queue
+before link-following starts — closes the real gap a pure link-follow
+crawl has (orphan pages nothing on the crawled path links to). Same
+"best-effort, never raises" discipline as the existing robots.txt handling
+— a missing/malformed/blocked sitemap just falls back to link-discovery
+alone. **Live-verified against the real `docs.zapier.com`**: its sitemap
+has 402 real URLs; a scoped prefix query correctly found 52 real pages
+under `/integrations/build`, and a full `crawl()` call against that section
+correctly picked them up.
+
+**`api/worker.py::_crawl_site`** gained three things: (1) skips the
+update+re-embed for a page whose markdown is byte-identical to what's
+already stored (a re-crawl of an unchanged site now costs nothing beyond
+the fetches themselves); (2) records the crawled URL onto the source's
+`config.crawl_urls` (deduped) so a scheduled re-crawl knows what to
+re-fetch without a human re-clicking "crawl a site"; (3) archives
+(soft-delete, `status='archived'`, never hard-delete) a crawl-origin entry
+whose page didn't appear in this run — but **only** when the run wasn't
+truncated by `max_pages` (fewer pages than the cap is the only reliable
+signal that a crawl actually exhausted everything reachable; hitting the
+cap says nothing about whether a missing page is gone or just outside this
+run's budget — tested explicitly, both directions).
+
+**New `ingestion/kb_recrawl.py`** — the scheduled path: reads every active
+source's `config.crawl_urls` and re-enqueues one `crawl_site` job per
+(source, url), same job-dedupe-key discipline as everywhere else in this
+codebase so a run that fires while a previous run's jobs are still queued
+is a no-op, not a pile-up. Wired into `.github/workflows/daily-sync.yml`
+(new "Re-crawl KB sources" step) **plus a `python -m api.worker --once`
+drain step right after it** — this project has no always-on worker host
+(a known, already-documented residual), so without an explicit drain the
+enqueued `crawl_site` jobs would just sit in the queue forever; same
+reason `email-automation.yml` already drains its own queue in-workflow.
+
+**Verify:** 12 new offline tests (4 sitemap-discovery tests in
+`tests/test_webcrawl.py`, 4 new `_crawl_site` tests covering unchanged-skip/
+archive-when-not-truncated/no-archive-when-truncated/crawl_urls-dedup, 4 in
+new `tests/test_kb_recrawl.py`). 793 offline tests green (was 781). No
+migration needed — `sources.config` was already free-form jsonb.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-05 — `docs/KB_SOURCE_CONNECTORS.md` written.** A design conversation worked out how
+new KB source types (public-URL crawl improvements, Google Docs at
+folder/Shared-Drive scope, Google Sheets, Linear, forums) should plug into
+the *existing* ingestion pipeline rather than each reinventing chunking/
+scoping/dedup — read that file before building any of them. It's a
+decision record, not new code — nothing in it is built yet. Key structural
+point: every existing ingestion path already converges on one narrow
+contract (`api/worker.py::_embed_kb_entry` — produce `(title, body_md)`
+pairs, everything downstream — chunking, `resolve_sources` scoping,
+retrieval — is already shared and untouched by source type), so a new
+connector is a new *producer*, mirroring `interpreter/connectors.py`'s
+existing "connector is data, not a hardcoded importer" philosophy for
+case-system actions. Also answers a related open question from the same
+conversation: Google OAuth (`gdrive.py`, `drive.readonly`) only ever means
+the structured Drive/Docs API — it is **not** a mechanism for crawling
+arbitrary third-party internal tools gated by "Sign in with Google" (those
+issue their own session after login; a Drive API token means nothing to
+them) — that would need its own bespoke connector per tool, not something
+this design makes easier.
+
+**Not built, deliberately — this session stayed at the design/decision
+level, no code changed:** none of the five connector types, no onboarding
+wizard step. The doc ends with a suggested (not committed) build order:
+public-URL sitemap+re-crawl first (cheapest, extends what exists), then
+Google Sheets (reuses existing Drive OAuth), then Linear, then forums,
+then the onboarding wizard step once ≥2 connectors exist to make a
+source-picker meaningful.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
 **2026-09-05 — root-caused and fixed why Neo4j's `DUPLICATE_OF` edges never
-fire (this is the most recent work in this file).** `docs/MULTI_SYSTEM_
+fire.** `docs/MULTI_SYSTEM_
 ARCHITECTURE.md` flagged this as "not investigated further yet" (0
 `DUPLICATE_OF` edges despite 232 `SIMILAR_TO`, suspected `account_id` never
 set on Salesforce-sourced cases). Investigated and confirmed, live: exactly

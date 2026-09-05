@@ -328,28 +328,64 @@ def _embed_kb_entry(payload: dict, sb) -> dict:
 
 
 def _crawl_site(payload: dict, sb) -> dict:
-    """P7c — crawl a docs site and land each page as a KB entry + embed it."""
+    """P7c — crawl a docs site and land each page as a KB entry + embed it.
+
+    2026-09-05: also (a) skips the update+re-embed for a page whose markdown
+    is byte-identical to what's already stored — a re-crawl of an unchanged
+    site should cost nothing beyond the fetches themselves, same
+    "don't re-spend on unchanged input" discipline as `llm.complete`'s
+    `cache=True` path; (b) records `url` onto the source's
+    `config.crawl_urls` so a scheduled re-crawl (`ingestion/kb_recrawl.py`)
+    knows what to re-fetch without a human re-clicking "crawl a site"; (c)
+    archives (soft-delete, never hard-delete) a crawl-origin entry whose
+    page no longer appeared in this run — but *only* when this run wasn't
+    truncated by `max_pages` (fewer pages than the cap means the crawl
+    actually exhausted everything reachable; hitting the cap tells you
+    nothing about whether a missing page is gone or just outside this
+    run's budget)."""
     from ingestion.webcrawl import crawl
 
     sid, tid = payload["source_id"], payload["tenant_id"]
     col_name = payload.get("collection_name", "")
+    max_pages = int(payload.get("max_pages", 20))
     try:
-        pages = crawl(payload["url"], max_pages=int(payload.get("max_pages", 20)))
+        pages = crawl(payload["url"], max_pages=max_pages)
     except Exception as e:  # noqa: BLE001
         return {"url": payload["url"], "error": str(e)[:300]}
 
-    made = 0
+    try:
+        src = sb.table("sources").select("config").eq("source_id", sid).limit(1).execute().data
+        cfg = (src[0]["config"] if src else {}) or {}
+        crawl_urls = list(dict.fromkeys([*(cfg.get("crawl_urls") or []), payload["url"]]))
+        if crawl_urls != (cfg.get("crawl_urls") or []):
+            sb.table("sources").update({"config": {**cfg, "crawl_urls": crawl_urls}}) \
+                .eq("source_id", sid).execute()
+    except Exception as e:  # noqa: BLE001
+        log.warning("crawl_site: could not record crawl_urls for %s: %s", sid, e)
+
+    existing_by_title = {
+        r["title"]: r for r in (
+            sb.table("kb_entries").select("entry_id, title, body_md")
+            .eq("source_id", sid).eq("origin", "crawl").eq("status", "active")
+            .execute().data or [])
+    }
+
+    made = skipped = 0
+    seen_titles: set[str] = set()
     for pg in pages:
         try:
-            existing = (sb.table("kb_entries").select("entry_id")
-                        .eq("source_id", sid).eq("title", pg["title"])
-                        .eq("origin", "crawl").limit(1).execute().data or [])
+            seen_titles.add(pg["title"])
+            body_md = f"<!-- {pg['url']} -->\n\n{pg['markdown']}"
+            existing = existing_by_title.get(pg["title"])
+            if existing and existing["body_md"] == body_md:
+                skipped += 1
+                continue
             row = {"source_id": sid, "tenant_id": tid, "title": pg["title"],
-                   "body_md": f"<!-- {pg['url']} -->\n\n{pg['markdown']}", "origin": "crawl",
+                   "body_md": body_md, "origin": "crawl", "status": "active",
                    "created_by": payload.get("created_by"), "updated_by": payload.get("created_by")}
             if existing:
                 entry = (sb.table("kb_entries").update(row)
-                         .eq("entry_id", existing[0]["entry_id"]).execute().data[0])
+                         .eq("entry_id", existing["entry_id"]).execute().data[0])
             else:
                 entry = sb.table("kb_entries").insert(row).execute().data[0]
             # embed off this job (fastembed × N pages would blow JOB_TIMEOUT)
@@ -360,7 +396,20 @@ def _crawl_site(payload: dict, sb) -> dict:
             made += 1
         except Exception as e:  # noqa: BLE001
             log.warning("crawl_site page %s: %s", pg.get("url"), e)
-    return {"url": payload["url"], "pages": len(pages), "entries": made}
+
+    archived = 0
+    if len(pages) < max_pages:   # not truncated -- this run saw everything reachable
+        gone = [r for t, r in existing_by_title.items() if t not in seen_titles]
+        for r in gone:
+            try:
+                sb.table("kb_entries").update({"status": "archived"}) \
+                    .eq("entry_id", r["entry_id"]).execute()
+                archived += 1
+            except Exception as e:  # noqa: BLE001
+                log.warning("crawl_site archive %s: %s", r["entry_id"], e)
+
+    return {"url": payload["url"], "pages": len(pages), "entries": made,
+            "unchanged": skipped, "archived": archived}
 
 
 def _import_kb_bundle(payload: dict, sb) -> dict:
