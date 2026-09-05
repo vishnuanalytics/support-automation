@@ -1,6 +1,7 @@
 .env
 .env.*
 !.env.example
+!web/.env.e2e
 venv/
 __pycache__/
 *.pyc
@@ -14,3 +15,8 @@ web/dist/
 web/.env
 web/.env.local
 web/*.tsbuildinfo
+
+# Playwright (Phase 9 residual, closed 2026-09-05)
+web/playwright-report/
+web/test-results/
+web/.playwright/

@@ -707,8 +707,62 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-05 — Phase 29 CLOSED: step 5 (autonomous reasoning-session
-continuation) done, all 5 steps complete. This is the most recent work in
+**2026-09-05 — Playwright e2e on the web editor: built, live-verified in
+this sandbox, wired into CI. Closes a residual open since Phase 9. This is
+the most recent work in this file (see the top-of-file note: this doc is
+edited in place, not strictly appended to — check dates, not physical
+position).** Picked from a 3-option menu offered after Phase 29 closed
+(the other two — a second real connector, CI/eval hardening — not started).
+`web/e2e/flow-editor.spec.ts` (Playwright, `@playwright/test` added as a
+devDependency) drives the real app in a real Chromium: stubbed auth → load
+a flow → add a node via the palette → Save draft — exactly the scope
+Phase 9's own plan named but never built. `web/e2e/mocks.ts` intercepts
+every `/api/**` call the boot path needs (`page.route`) and seeds a fake
+Supabase session directly into `localStorage`, so the suite needs **zero**
+real Supabase project, Salesforce org, or backend process — it runs in CI
+the same "offline by default" way the pytest suite does.
+
+**A real gotcha, hit and fixed, not just theoretical:** the first attempt
+seeded the fake session correctly but the app still rendered the real
+Login screen. Root cause: `import.meta.env.VITE_*` is substituted at
+Vite's build/transform time, not read from `process.env` at serve time —
+so passing fake `VITE_SUPABASE_URL`/etc via Playwright's `webServer.env`
+had no effect; the already-built (or already-running dev-transformed)
+bundle kept reading the real `web/.env.local` project ref, so the
+Supabase-computed localStorage key (`sb-<project-ref>-auth-token`) never
+matched what the spec had seeded. Fixed the correct way, via Vite's own
+mechanism: a new committed `web/.env.e2e` (fake values only, safe to
+commit — `.gitignore`'s blanket `.env.*` rule gets a `!web/.env.e2e`
+exception, same pattern as `!.env.example`) + `playwright.config.ts`'s
+`webServer.command` runs `vite dev --mode e2e`, which loads `.env.e2e`
+over the real `.env.local`. Also had to add an explicit
+`vite.config.ts` `test.exclude: ["e2e/**"]` — vitest's default glob
+otherwise also picks up `*.spec.ts` and tries (and fails) to run
+Playwright's own `test`/`expect` outside Playwright's runner.
+
+**Live-verified in this sandbox** (no headless browser here by default,
+same missing-`.so`-libs problem the first browser click-through hit
+[2026-09-03] — `apt-get download libnspr4 libnss3 libasound2t64` +
+`dpkg-deb -x` into scratch, no root needed, `LD_LIBRARY_PATH` pointed at
+the extracted libs for the Chromium launch): the spec **genuinely caught
+a real setup bug** on its first run (the env-substitution gotcha above,
+via the Login screen instead of the expected flow list) before passing
+cleanly — 3/3 stable reruns after the fix. `tsc -b` / `vite build` /
+`vitest run` (6/6, unaffected) all still clean. `.github/workflows/ci.yml`
+gains `npx playwright install --with-deps chromium` + `npx playwright
+test` (root + apt available on the GitHub Actions runner, so none of this
+sandbox's workaround is needed there) + an `actions/upload-artifact` of
+the HTML report on failure.
+
+**Not yet done, deliberately not built now:** only one spec (the Phase 9
+scope) — no picker-specific coverage yet (Salesforce/Slack/Connections
+pickers, edge-condition quick-insert, etc., the exact areas the 2026-09-03
+manual click-through found 4 real bugs in). That's the natural next
+Playwright chunk if this track continues, not bundled into this one.
+
+**2026-09-05 — Phase 29 CLOSED and live-verified: step 5 (autonomous
+reasoning-session continuation) done + confirmed end to end against real
+Groq/Supabase/Slack, all 5 steps complete. This is the most recent work in
 this file (see the top-of-file note: this doc is edited in place, not
 strictly appended to — check dates, not physical position).** New
 `interpreter/reasoning.autonomous_continue()` gives the bot one bounded,
@@ -726,13 +780,31 @@ self-critique. Wired into `reasoning_ttl` for `clarifying` sessions only
 (`awaiting_handoff` = nobody ever engaged, still escalates as before;
 `awaiting_approval` already has a draft awaiting explicit approval — not
 touched). 661 offline tests green (8 new: 6 in `tests/test_reasoning.py`,
-2 in `tests/test_sweeps.py`). **Not yet done, deliberately not built now:**
-no live verification — this needs a real stalled Slack thread + real KB to
-exercise end to end, and the shared-quota rate-limiting documented
-elsewhere in this file made that an unappealing time to spend it; the full
-writeup (including why `awaiting_handoff`/`awaiting_approval` are excluded)
-is under "Phase 29 — Agentic AI" below. **Phase 29 status: all 5 steps
-done — see that section for the per-step history.**
+2 in `tests/test_sweeps.py`).
+
+**Live-verified same day, two parts (see full writeup under "Phase 29 —
+Agentic AI" below for the complete detail):** (A) the mechanism alone —
+real Groq tool-calling (2 iterations), real KB retrieval, a correctly
+grounded answer, and a non-critical pointer correctly left untouched, all
+with zero side effects. (B) the full sweep wiring — a real backdated
+`reasoning_sessions` row + a real Slack thread, `reasoning_ttl` run for
+real, the session resolved to `awaiting_approval` with a real draft, a
+real `case_events` row landed, and the actual Slack reply was confirmed
+via `conversations.replies`. All test artifacts (DB rows, Slack messages)
+deleted afterward — the live DB is back to zero non-terminal
+`reasoning_sessions` rows. One non-blocking friction item found along the
+way: Acme's `tenant_integrations` Slack row shows `status: "inactive"`
+despite the bot token being live and fully functional — a stale display
+flag, not a functional gap; not chased further this session.
+
+**Phase 29 status: all 5 steps done, all 5 live-verified — the whole
+track is closed.** Of the "what's next" menu offered after this closed
+(a second real connector beyond Salesforce/Slack to prove FR-47
+generalizes, Playwright e2e on the web editor, or wiring
+`eval/e2e`/`sop_conflicts.py` into CI), Playwright was picked and is now
+done — see the entry above, physically above this one but written later
+(the usual "edited in place" caveat). The other two are still open,
+nothing committed to either yet.
 
 **Old step-4 note, superseded by the above as "most recent," kept for its
 own history:** self-critique wired into KIL's
@@ -1465,9 +1537,51 @@ tool-call exception, the `max_iterations` cap, the no-API-key stub path
 never resolving; 2 in `tests/test_sweeps.py` covering the sweep wiring —
 resolves and moves to `awaiting_approval`, falls back to escalate when
 unresolved — the pre-existing nudge/escalate test needed one small fix
-alongside these, see below). No live verification yet — this needs a real stalled Slack thread to exercise end
-to end, deliberately not spent this session (see "Immediate next step").
-**Phase 29 status: steps 1-5 all done.**
+alongside these, see below).
+
+**Live-verified (2026-09-05), two parts, real Groq + real Supabase KB +
+real Slack, both cleaned up after:**
+
+**Part A — the mechanism in isolation, no side effects.** Called
+`autonomous_continue()` directly with one open critical pointer (`h06`
+from `eval/qrels_hard.jsonl`, a known KB-answerable hard question — *"429
+throttling — API vs webhook vs polling request limits and retry-after"*)
+against the real Acme KB. The model made **2 real tool-calling
+iterations** (not a canned reply), `hybrid_retrieve` pulled real chunks
+from `docs.zapier.com/integrations/build/throttling`, and the grounded
+grading pass correctly marked the pointer answered — a second,
+**non-critical** pointer included in the same call was correctly left
+untouched, confirming the "critical gaps only" scoping works live, not
+just in the mocked tests.
+
+**Part B — the full sweep wiring end to end.** Posted a real root message
+into the live dev Slack workspace, inserted one throwaway
+`reasoning_sessions` row (`state='clarifying'`, the same open pointer,
+`updated_at` backdated 5h) pointed at that thread, then ran
+`sweeps.reasoning_ttl(sb, dry_run=False)` for real (first confirmed zero
+other open sessions existed, so nothing else could be swept up as a side
+effect). Result: `{"continued": ["LIVE-CHECK-B"], "escalated": [],
+"nudged": []}` — the session flipped to `awaiting_approval` with a real,
+better-grounded draft (this run's search surfaced specific numbers: 10k
+requests/5min for webhooks, 100 items/poll, `Retry-After`/`ThrottledError`
+handling), a real `case_events` row (`action='autonomous_continue'`)
+was written, and `conversations.replies` confirmed the actual Slack
+message landed in-thread verbatim: *"You'd gone quiet, so I dug through
+the docs myself — here's a draft (unconfirmed by you, please review)…"*.
+Test artifacts (the DB row, the `case_events` row, both Slack messages)
+were deleted afterward — the live DB has zero non-terminal
+`reasoning_sessions` rows again, same as before the test.
+
+**One friction point, not a code bug:** the live Acme
+`tenant_integrations` row for Slack shows `status: "inactive"` even
+though the bot token in Vault is live and fully working
+(`slack.connected()` → `True`, the post actually landed) — `status` is
+apparently a stale display flag from an earlier session, not derived from
+whether the token actually works. Worth a look if the web UI's
+Connections tab is trusted to reflect real connectivity, but out of scope
+for this chunk.
+
+**Phase 29 status: all 5 steps done, all 5 live-verified.**
 
 ## Multi-tenant / multi-Salesforce-org scoping (2026-09-03)
 
@@ -3790,11 +3904,14 @@ Standing context (unchanged):
    uses the legacy 1-D blend — rewrite it to sweep the new `weights` /
    honour `escalate_topics`, or drop it. Headline metrics (per-run) are
    correct; only the sweep table is stale.
-3. Standing infra debt: Playwright e2e on the web; wire the `eval/e2e/`
-   auto-send-precision floor into CI; deploy `api/` + `web/` + the worker
-   + the `sf_case_watch` cron to real hosts; move rate-limit /
-   token-cache state to Redis; encrypt `tenant_integrations.secret` with
-   Supabase Vault. All noted under "Known issues / debt".
+3. Standing infra debt: ~~Playwright e2e on the web~~ **done 2026-09-05**;
+   wire the `eval/e2e/` auto-send-precision floor into CI; deploy `api/` +
+   `web/` + the worker + the `sf_case_watch` cron to real hosts; move
+   rate-limit / token-cache state to Redis; ~~encrypt
+   `tenant_integrations.secret` with Supabase Vault~~ **done** (see the
+   Vault-encryption chunk). This whole numbered list is old and mostly
+   stale — several items on it were independently closed since it was
+   written; don't trust the rest of it without checking current code.
 
 A Phase 7 follow-up, now **higher priority** after the real-draft e2e
 re-run (acc dropped 0.909 stub → 0.636 real):
@@ -4060,9 +4177,10 @@ From the 2026-08-29 self-review. Each is intentional MVP scope, not a bug:
   hand-rolled runner.~~ **Phase 9:** `pytest` + `pytest.ini`,
   `tests/test_api.py` (offline + integration), `web` `vitest`,
   `.github/workflows/ci.yml` gating `main`. `test_multiflow` now asserts
-  structural + relative invariants. *Residual:* no Playwright end-to-end on
-  the web; the `eval/e2e/` auto-send-precision floor isn't wired into CI
-  yet (needs Supabase creds in CI, or a recorded fixture).
+  structural + relative invariants. ~~*Residual:* no Playwright end-to-end
+  on the web~~ **closed 2026-09-05**, see below. *Residual still open:* the
+  `eval/e2e/` auto-send-precision floor isn't wired into CI yet (needs
+  Supabase creds in CI, or a recorded fixture).
 - ~~Nothing triggers the flow; synchronous in-request; no idempotency.~~
   **Phase 10:** `jobs` queue + `claim_job()`, `api/worker.py`,
   `ingestion/sf_case_watch.py` polling trigger, `Idempotency-Key` + unique
