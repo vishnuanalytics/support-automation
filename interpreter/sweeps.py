@@ -14,7 +14,12 @@ They are the backstop for everything the pipeline + Omni-Channel can't catch.
   cdc_reconcile  hourly      — Cases with no matching `runs` row -> enqueue
                                (covers CDC's 72h retention cliff / cdc downtime).
   reasoning_ttl  every 5 min — reasoning_sessions stuck open past a ceiling:
-                               nudge the Slack thread, then escalate + abandon.
+                               nudge the Slack thread; if a `clarifying`
+                               session's human agent still doesn't respond,
+                               Phase 29 step 5 gives the bot one bounded
+                               attempt to close the open pointers itself off
+                               documentation alone before falling back to
+                               escalate + abandon.
   failed_jobs    every 10 min — jobs.py's `fail()` marks a job 'failed' once
                                it runs out of attempts; nothing else in the
                                codebase watched for that (found in a
@@ -268,6 +273,55 @@ def cdc_reconcile(sb, *, dry_run: bool | None = None) -> dict:
 
 
 # ── reasoning_ttl ───────────────────────────────────────────────────────
+def _try_autonomous_continue(sb, s: dict, *, dry: bool) -> bool:
+    """Phase 29 step 5 — before a stalled `clarifying` session (the human
+    agent went quiet mid-dialogue) is escalated + abandoned and its
+    reasoning thrown away, give the bot one bounded, tool-calling attempt
+    to close out the still-open CRITICAL pointers itself off documentation
+    alone (`reasoning.autonomous_continue`). Only applies to `clarifying`
+    — `awaiting_handoff` means nobody ever engaged (a different problem,
+    still escalates as before) and `awaiting_approval` already has a draft
+    awaiting a human's explicit `send` (auto-sending it would break the
+    "never act silently" rule the rest of this codebase holds to).
+    Returns True if it resolved the session (caller should skip the usual
+    escalate+abandon path)."""
+    if s.get("state") != "clarifying" or not s.get("pointers"):
+        return False
+    from interpreter import reasoning
+
+    sid, cn = s["session_id"], s.get("case_number") or s.get("case_id")
+    ch, ts = s.get("slack_channel"), s.get("slack_thread_ts")
+    try:
+        case = reasoning._case_for_session(sb, s)
+        out = reasoning.autonomous_continue(s, case, tenant_id=s.get("tenant_id"))
+    except Exception as e:  # noqa: BLE001
+        log.warning("reasoning_ttl autonomous_continue %s: %s", cn, e)
+        return False
+    if not out["resolved"]:
+        return False
+    if dry:
+        return True
+    draft = reasoning._compose_draft(case, out["pointers"], out["kb_hits"], reasoning._default_llm)
+    s["pointers"], s["draft"], s["state"] = out["pointers"], draft, "awaiting_approval"
+    try:
+        sb.table("reasoning_sessions").update({
+            "state": "awaiting_approval", "pointers": out["pointers"], "draft": draft,
+            "updated_at": "now()",
+        }).eq("session_id", sid).execute()
+    except Exception as e:  # noqa: BLE001
+        log.warning("reasoning_ttl autonomous_continue persist %s: %s", sid, e)
+        return False
+    if ch and ts:
+        _page(f":robot_face: You'd gone quiet, so I dug through the docs myself — here's a "
+              f"draft (unconfirmed by you, please review):\n\n————\n{draft}\n————\n\n"
+              f"Reply `send`, `edit: <what to change>`, or `no` to hold.",
+              tenant_id=s.get("tenant_id"), channel=ch, thread_ts=ts, sb=sb)
+    _event(sb, tenant_id=s.get("tenant_id"), case_sf_id=str(s.get("case_id") or ""), case_number=cn,
+           actor="system:sweep", action="autonomous_continue", reason="reasoning session TTL — "
+           "resolved without the human agent", slack_ts=ts, slack_channel=ch)
+    return True
+
+
 def reasoning_ttl(sb, *, dry_run: bool | None = None) -> dict:
     from interpreter import salesforce
 
@@ -284,6 +338,7 @@ def reasoning_ttl(sb, *, dry_run: bool | None = None) -> dict:
 
     nudged: list[str] = []
     escalated: list[str] = []
+    continued: list[str] = []
     for s in rows:
         age = _age_min(s.get("updated_at"), now)
         sid = s["session_id"]
@@ -295,6 +350,9 @@ def reasoning_ttl(sb, *, dry_run: bool | None = None) -> dict:
                 _page(":wave: This reasoning thread has been idle a while — @mention me to "
                       "continue, or it escalates to the team shortly.",
                       tenant_id=s.get("tenant_id"), channel=ch, thread_ts=ts, sb=sb)
+            continue
+        if _try_autonomous_continue(sb, s, dry=dry):
+            continued.append(cn)
             continue
         escalated.append(cn)
         if dry:
@@ -317,7 +375,8 @@ def reasoning_ttl(sb, *, dry_run: bool | None = None) -> dict:
         _event(sb, tenant_id=s.get("tenant_id"), case_sf_id=str(sf_id or ""), case_number=cn,
                actor="system:sweep", action="handover", to_status="Escalated",
                reason="reasoning session TTL", slack_ts=ts, slack_channel=ch)
-    return {"open": len(rows), "nudged": nudged, "escalated": escalated, "dry_run": dry}
+    return {"open": len(rows), "nudged": nudged, "escalated": escalated,
+            "continued": continued, "dry_run": dry}
 
 
 def handoff_watch(sb, *, dry_run: bool | None = None) -> dict:

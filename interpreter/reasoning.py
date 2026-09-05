@@ -220,6 +220,140 @@ def _ingest(pointers: list[dict], agent_text: str, llm_fn: LLMFn) -> None:
                 p["agent_note"] = agent_text.strip()[:300]
 
 
+# ── Phase 29 step 5 — autonomous continuation of a stalled dialogue ───
+# `reasoning_ttl` (interpreter/sweeps.py) used to have exactly two moves for
+# a `clarifying` session the human agent stopped replying to: nudge once,
+# then escalate + abandon — the reasoning already done (the questions were
+# picked, the thread exists) was thrown away every time. This gives the bot
+# ONE bounded, genuinely agentic shot at closing the still-open CRITICAL
+# pointers itself before giving up to a human queue — the exact gap the
+# Phase 29 kickoff note flagged ("the LLM never picks its own next
+# action"). Reuses complete_with_tools (step 1) + hybrid_retrieve exactly
+# like h_agent (step 2/registry.py) rather than reimplementing a ReAct
+# loop — the model decides whether a KB search would help or whether to
+# give up, it isn't a canned retry.
+_AUTONOMOUS_TOOLS = [
+    {
+        "name": "search_kb",
+        "description": ("Search the knowledge base for documentation that answers "
+                         "one of the still-open questions."),
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "the search query"}},
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "give_up",
+        "description": ("Stop -- these questions need the human agent's own judgement "
+                         "or the customer's own account data, not something documented."),
+        "parameters": {"type": "object", "properties": {}},
+    },
+]
+
+_AUTONOMOUS_SYS = (
+    "A colleague went quiet mid-conversation about a support case. Before "
+    "escalating, see if documentation alone can close the open questions below "
+    "-- call search_kb with a specific query, or give_up if these genuinely "
+    "need a human's judgement or the customer's own account data rather than "
+    "something written down."
+)
+
+_AUTONOMOUS_INGEST_SYS = (
+    "You searched documentation to answer open questions about a support case "
+    "because the human agent went quiet. For EACH question, decide if the "
+    "documentation below actually answers it -- do NOT guess or use general "
+    "knowledge, only what's written. Return a JSON array, same length and "
+    "order as the questions, of {\"answered\": boolean, \"note\": string}. "
+    "JSON only."
+)
+
+
+def _autonomous_search(query: str, tenant_id: str | None) -> list[dict]:
+    from .retrieval import hybrid_retrieve
+
+    try:
+        results, _score = hybrid_retrieve(query, top_k=4, tenant_id=tenant_id)
+    except Exception as e:  # noqa: BLE001
+        log.warning("reasoning autonomous_continue search failed: %s", e)
+        return []
+    return [{"doc_url": r.get("doc_url"), "chunk_text": r.get("chunk_text") or ""}
+            for r in results]
+
+
+def autonomous_continue(session: dict, case: dict, *, tenant_id: str | None = None,
+                        model: str | None = None, max_iterations: int = 3,
+                        llm_fn: LLMFn | None = None) -> dict[str, Any]:
+    """One bounded attempt for the bot to close out a stalled `clarifying`
+    session's still-open CRITICAL pointers itself, instead of only nudging
+    then abandoning to a human queue. Pure like `advance()`: mutates and
+    returns `pointers` (the caller persists). Grounded-only — a pointer is
+    marked answered here only off documentation the search actually
+    returned, never an ungrounded guess, so the stub path (no tools ever
+    called) never resolves anything, deterministically. **Never sends
+    anything itself** — the caller still needs a human `send` before a
+    resulting draft reaches the customer, same as every other draft this
+    module produces; this only unsticks the *dialogue*, not the approval
+    gate (KIL/step-4's "flag to a human, never act silently" applies here
+    too). Returns `{"pointers", "resolved", "iterations", "kb_hits"}` —
+    `resolved` is True only when every critical pointer is now answered.
+    """
+    llm_fn = llm_fn or _default_llm
+    pointers = _norm(session.get("pointers") or [])
+    gaps = _open_gaps(pointers, critical_only=True)
+    if not gaps:
+        return {"pointers": pointers, "resolved": True, "iterations": 0, "kb_hits": []}
+
+    tenant_id = tenant_id or session.get("tenant_id")
+    _model = model or llm.FAST_MODEL
+    qs = "\n".join(f"{i + 1}. {p['q']}" for i, p in enumerate(gaps))
+    messages: list[dict[str, Any]] = [{"role": "user", "content":
+        f"Case: {case.get('subject', '')}\n{_issue_summary(case)}\n\n"
+        f"Open questions the human agent hasn't answered:\n{qs}"}]
+    found: list[dict] = []
+    iterations = 0
+    for _ in range(max(1, int(max_iterations))):
+        try:
+            result = llm.complete_with_tools(
+                messages=messages, system=_AUTONOMOUS_SYS, tools=_AUTONOMOUS_TOOLS,
+                model=_model, max_tokens=300, tenant_id=tenant_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("reasoning autonomous_continue call failed: %s", e)
+            break
+        calls = [tc for tc in result.tool_calls if tc.name == "search_kb"]
+        if not calls:
+            break
+        iterations += 1
+        messages.append({"role": "assistant", "content": result.text,
+                         "tool_calls": [{"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+                                        for tc in result.tool_calls]})
+        for tc in calls:
+            q = str(tc.arguments.get("query") or "").strip()
+            if not q:
+                continue
+            hits = _autonomous_search(q, tenant_id)
+            found.extend(hits)
+            messages.append({"role": "tool", "tool_call_id": tc.id,
+                             "content": "\n".join(h["chunk_text"] for h in hits) or "(no results)"})
+
+    if not found:
+        return {"pointers": pointers, "resolved": False, "iterations": iterations, "kb_hits": []}
+
+    docs = "\n".join(f"- {h['chunk_text'][:500]}" for h in found[:8] if h.get("chunk_text"))
+    got = _json_slice(llm_fn(_AUTONOMOUS_INGEST_SYS, f"Questions:\n{qs}\n\nDocumentation found:\n{docs}",
+                             max_tokens=500))
+    if isinstance(got, list):
+        for p, item in zip(gaps, got):
+            if isinstance(item, dict) and item.get("answered"):
+                note = str(item.get("note") or "").strip()
+                p["answered"] = True
+                p["agent_note"] = f"[autonomous, unconfirmed by human] {note}"[:300]
+    resolved = not _open_gaps(pointers, critical_only=True)
+    kb_hits = [h["chunk_text"][:300] for h in found if h.get("chunk_text")]
+    return {"pointers": pointers, "resolved": resolved, "iterations": iterations, "kb_hits": kb_hits}
+
+
 def _norm(pointers: list[dict]) -> list[dict]:
     """Tolerate pre-24e rows (no `critical` key)."""
     for p in pointers or []:

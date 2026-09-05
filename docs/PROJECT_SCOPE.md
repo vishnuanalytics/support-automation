@@ -707,10 +707,36 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-04 — Phase 29 step 4 closed: self-critique wired into KIL's
-`draft_change`, live. This is the most recent work in this file (see the
-top-of-file note: this doc is edited in place, not strictly appended to —
-check dates, not physical position).** `interpreter/kb_writeback.py`'s
+**2026-09-05 — Phase 29 CLOSED: step 5 (autonomous reasoning-session
+continuation) done, all 5 steps complete. This is the most recent work in
+this file (see the top-of-file note: this doc is edited in place, not
+strictly appended to — check dates, not physical position).** New
+`interpreter/reasoning.autonomous_continue()` gives the bot one bounded,
+tool-calling shot at closing a stalled `clarifying` Slack dialogue's still-
+open critical pointers itself — reusing `complete_with_tools` (step 1) +
+`hybrid_retrieve` exactly like `h_agent` (step 2) rather than a
+reimplemented ReAct loop — before `sweeps.reasoning_ttl` escalates +
+abandons a session the human agent stopped replying to. Grounded-only (a
+pointer is marked answered only off documentation a real `search_kb` call
+returned, never an ungrounded guess, so the offline stub path never
+resolves anything, deterministically); still requires an explicit human
+`send` before anything reaches the customer — this unsticks the dialogue,
+not the approval gate, same "never act silently" discipline as step 4's
+self-critique. Wired into `reasoning_ttl` for `clarifying` sessions only
+(`awaiting_handoff` = nobody ever engaged, still escalates as before;
+`awaiting_approval` already has a draft awaiting explicit approval — not
+touched). 661 offline tests green (8 new: 6 in `tests/test_reasoning.py`,
+2 in `tests/test_sweeps.py`). **Not yet done, deliberately not built now:**
+no live verification — this needs a real stalled Slack thread + real KB to
+exercise end to end, and the shared-quota rate-limiting documented
+elsewhere in this file made that an unappealing time to spend it; the full
+writeup (including why `awaiting_handoff`/`awaiting_approval` are excluded)
+is under "Phase 29 — Agentic AI" below. **Phase 29 status: all 5 steps
+done — see that section for the per-step history.**
+
+**Old step-4 note, superseded by the above as "most recent," kept for its
+own history:** self-critique wired into KIL's
+`draft_change`, live. `interpreter/kb_writeback.py`'s
 `_self_critique()` runs the exact same `integrity.check(statement,
 [new_body])` shape `eval/writeback/run_writeback_eval.py` already used to
 *grade* drafts post-hoc — now it runs live, inside `draft_change` itself,
@@ -1396,6 +1422,52 @@ better result really does ship). The value add is a safety net for a
 future harder case plus reviewer transparency, not a lift on this
 particular 12-case set. **Phase 29 status: steps 1-4 done, 5 (autonomous
 reasoning-session continuation) not started.**
+
+**Step 5 — autonomous reasoning-session continuation (DONE 2026-09-05).**
+The Phase 29 kickoff note flagged the exact gap this closes: `interpreter/
+reasoning.py`'s Slack reasoning dialogue (Phase 24) is entirely
+human-driven — when the responsible agent stops replying mid-`clarifying`
+dialogue, `sweeps.reasoning_ttl` had exactly two moves, nudge once then
+escalate + abandon, throwing away the questions already asked and any
+partial answers. New `reasoning.autonomous_continue(session, case, ...)`
+gives the bot one bounded, genuinely agentic shot at closing the
+still-open **critical** pointers itself before that happens — reusing
+`complete_with_tools` (step 1) + `hybrid_retrieve` exactly like `h_agent`
+(step 2/`registry.py`) rather than reimplementing a ReAct loop: the model
+decides whether a KB search would help or whether to `give_up`, it isn't
+a canned retry. **Grounded-only, by design:** a pointer is marked answered
+only off documentation a `search_kb` call actually returned (a separate
+JSON-graded pass, reusing the `_ingest`-style contract), never an
+ungrounded guess — so the stub path (no tool ever called) never resolves
+anything, deterministically, same discipline as every other agentic piece
+this phase built.
+
+Wired into `sweeps.reasoning_ttl` via `_try_autonomous_continue`: only for
+a stale session in `clarifying` state (`awaiting_handoff` means nobody
+ever engaged — a different problem, still escalates as before;
+`awaiting_approval` already has a draft awaiting an explicit human `send`
+— auto-sending it would break the "never act silently" rule the rest of
+this codebase holds to, including step 4's own self-critique). On success
+the session moves to `awaiting_approval` with a real draft (composed via
+the existing `_compose_draft`, grounded in what the bot found) and the
+Slack thread gets an explicit "*you'd gone quiet, so I dug through the
+docs myself — here's a draft (unconfirmed by you, please review)*"
+message — **a human `send` is still required**, this only unsticks the
+*dialogue*, not the approval gate. On failure (nothing found, or the
+model itself gives up) the existing escalate + abandon path runs
+unchanged. `reasoning_ttl`'s return dict gains a `continued` list
+alongside `nudged`/`escalated`.
+
+8 new offline tests (6 in `tests/test_reasoning.py` covering
+`autonomous_continue` itself — trivial-resolve on no open gaps, a
+grounded resolve, giving up when the model never searches, surviving a
+tool-call exception, the `max_iterations` cap, the no-API-key stub path
+never resolving; 2 in `tests/test_sweeps.py` covering the sweep wiring —
+resolves and moves to `awaiting_approval`, falls back to escalate when
+unresolved — the pre-existing nudge/escalate test needed one small fix
+alongside these, see below). No live verification yet — this needs a real stalled Slack thread to exercise end
+to end, deliberately not spent this session (see "Immediate next step").
+**Phase 29 status: steps 1-5 all done.**
 
 ## Multi-tenant / multi-Salesforce-org scoping (2026-09-03)
 
