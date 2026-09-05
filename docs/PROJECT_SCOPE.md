@@ -707,8 +707,9 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-05 — Phase 29 CLOSED: step 5 (autonomous reasoning-session
-continuation) done, all 5 steps complete. This is the most recent work in
+**2026-09-05 — Phase 29 CLOSED and live-verified: step 5 (autonomous
+reasoning-session continuation) done + confirmed end to end against real
+Groq/Supabase/Slack, all 5 steps complete. This is the most recent work in
 this file (see the top-of-file note: this doc is edited in place, not
 strictly appended to — check dates, not physical position).** New
 `interpreter/reasoning.autonomous_continue()` gives the bot one bounded,
@@ -726,13 +727,29 @@ self-critique. Wired into `reasoning_ttl` for `clarifying` sessions only
 (`awaiting_handoff` = nobody ever engaged, still escalates as before;
 `awaiting_approval` already has a draft awaiting explicit approval — not
 touched). 661 offline tests green (8 new: 6 in `tests/test_reasoning.py`,
-2 in `tests/test_sweeps.py`). **Not yet done, deliberately not built now:**
-no live verification — this needs a real stalled Slack thread + real KB to
-exercise end to end, and the shared-quota rate-limiting documented
-elsewhere in this file made that an unappealing time to spend it; the full
-writeup (including why `awaiting_handoff`/`awaiting_approval` are excluded)
-is under "Phase 29 — Agentic AI" below. **Phase 29 status: all 5 steps
-done — see that section for the per-step history.**
+2 in `tests/test_sweeps.py`).
+
+**Live-verified same day, two parts (see full writeup under "Phase 29 —
+Agentic AI" below for the complete detail):** (A) the mechanism alone —
+real Groq tool-calling (2 iterations), real KB retrieval, a correctly
+grounded answer, and a non-critical pointer correctly left untouched, all
+with zero side effects. (B) the full sweep wiring — a real backdated
+`reasoning_sessions` row + a real Slack thread, `reasoning_ttl` run for
+real, the session resolved to `awaiting_approval` with a real draft, a
+real `case_events` row landed, and the actual Slack reply was confirmed
+via `conversations.replies`. All test artifacts (DB rows, Slack messages)
+deleted afterward — the live DB is back to zero non-terminal
+`reasoning_sessions` rows. One non-blocking friction item found along the
+way: Acme's `tenant_integrations` Slack row shows `status: "inactive"`
+despite the bot token being live and fully functional — a stale display
+flag, not a functional gap; not chased further this session.
+
+**Phase 29 status: all 5 steps done, all 5 live-verified — the whole
+track is closed.** Next real work is picking a fresh chunk — see the
+"what's next" discussion from this session (a second real connector
+beyond Salesforce/Slack to prove FR-47 generalizes, Playwright e2e on the
+web editor, or wiring `eval/e2e`/`sop_conflicts.py` into CI — none started
+yet, nothing committed to).
 
 **Old step-4 note, superseded by the above as "most recent," kept for its
 own history:** self-critique wired into KIL's
@@ -1465,9 +1482,51 @@ tool-call exception, the `max_iterations` cap, the no-API-key stub path
 never resolving; 2 in `tests/test_sweeps.py` covering the sweep wiring —
 resolves and moves to `awaiting_approval`, falls back to escalate when
 unresolved — the pre-existing nudge/escalate test needed one small fix
-alongside these, see below). No live verification yet — this needs a real stalled Slack thread to exercise end
-to end, deliberately not spent this session (see "Immediate next step").
-**Phase 29 status: steps 1-5 all done.**
+alongside these, see below).
+
+**Live-verified (2026-09-05), two parts, real Groq + real Supabase KB +
+real Slack, both cleaned up after:**
+
+**Part A — the mechanism in isolation, no side effects.** Called
+`autonomous_continue()` directly with one open critical pointer (`h06`
+from `eval/qrels_hard.jsonl`, a known KB-answerable hard question — *"429
+throttling — API vs webhook vs polling request limits and retry-after"*)
+against the real Acme KB. The model made **2 real tool-calling
+iterations** (not a canned reply), `hybrid_retrieve` pulled real chunks
+from `docs.zapier.com/integrations/build/throttling`, and the grounded
+grading pass correctly marked the pointer answered — a second,
+**non-critical** pointer included in the same call was correctly left
+untouched, confirming the "critical gaps only" scoping works live, not
+just in the mocked tests.
+
+**Part B — the full sweep wiring end to end.** Posted a real root message
+into the live dev Slack workspace, inserted one throwaway
+`reasoning_sessions` row (`state='clarifying'`, the same open pointer,
+`updated_at` backdated 5h) pointed at that thread, then ran
+`sweeps.reasoning_ttl(sb, dry_run=False)` for real (first confirmed zero
+other open sessions existed, so nothing else could be swept up as a side
+effect). Result: `{"continued": ["LIVE-CHECK-B"], "escalated": [],
+"nudged": []}` — the session flipped to `awaiting_approval` with a real,
+better-grounded draft (this run's search surfaced specific numbers: 10k
+requests/5min for webhooks, 100 items/poll, `Retry-After`/`ThrottledError`
+handling), a real `case_events` row (`action='autonomous_continue'`)
+was written, and `conversations.replies` confirmed the actual Slack
+message landed in-thread verbatim: *"You'd gone quiet, so I dug through
+the docs myself — here's a draft (unconfirmed by you, please review)…"*.
+Test artifacts (the DB row, the `case_events` row, both Slack messages)
+were deleted afterward — the live DB has zero non-terminal
+`reasoning_sessions` rows again, same as before the test.
+
+**One friction point, not a code bug:** the live Acme
+`tenant_integrations` row for Slack shows `status: "inactive"` even
+though the bot token in Vault is live and fully working
+(`slack.connected()` → `True`, the post actually landed) — `status` is
+apparently a stale display flag from an earlier session, not derived from
+whether the token actually works. Worth a look if the web UI's
+Connections tab is trusted to reflect real connectivity, but out of scope
+for this chunk.
+
+**Phase 29 status: all 5 steps done, all 5 live-verified.**
 
 ## Multi-tenant / multi-Salesforce-org scoping (2026-09-03)
 
