@@ -707,15 +707,36 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-05 — `docs/MULTI_SYSTEM_ARCHITECTURE.md` written (new file, this
+is the most recent work in this file).** A design conversation worked out
+how Postgres/Supabase, Neo4j, Salesforce/Zendesk, Slack, and a future
+per-tenant product-analytics connector (Mixpanel/GA4/GTM) should divide
+ownership so no two systems hold conflicting copies of the same fact —
+read that file before touching any of the sync paths between these
+systems (`case_graph_sync.py`, `case_memory_sync.py`, `runs.*`). It's a
+decision record, not new code — nothing in it is built yet except what it
+explicitly says already exists (the KIL loop, the connector pattern).
+**Two concrete, real gaps it surfaces, not yet fixed:** (1) `case_graph_
+sync.py` re-polls Salesforce for CaseComment/Chatter independently
+instead of sourcing from `runs.human_reply`, which the worker already
+captured — duplicate SF calls + a drift risk; (2) `runs.case_payload`/
+`runs.trace` have no retention policy at all and keep full case text
+forever even though Salesforce already durably owns it. Also flagged,
+not investigated: `DUPLICATE_OF` Neo4j edges have never fired (0 exist
+despite 232 `SIMILAR_TO` edges) — likely `account_id` never getting set
+on Salesforce-sourced cases, worth checking before building anything that
+assumes duplicate detection works.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
 **2026-09-05 — per-tenant case-taxonomy config built (see "Per-tenant
-case-taxonomy config — BUILT" above for the full writeup). This is the
-most recent work in this file.** PR open on `browser-verified-picker-
-fixes` (started for the SF-cache-skip fix below, same branch now also
-carries this). **Not yet confirmed:** a real GitHub Actions run of this
-branch (both this change and the SF-cache-skip fix below) — check CI,
-and specifically watch the `web` job for the new `case-taxonomy` mock in
-`connections.spec.ts` (untested locally, see that section for why).
-**Also still open:** live verification of the Zendesk/Freshchat
+case-taxonomy config — BUILT" above for the full writeup).** PR #81
+(SF-cache-skip fix + this) merged to `main` same day — CI confirmed
+green on `python`/`web`; `integration` had only the pre-existing,
+already-documented flaky failures (KB retrieval non-determinism, Groq
+quota), nothing caused by this change. **Also still open:** live
+verification of the Zendesk/Freshchat
 connectors (FR-51) against real accounts — blocked on the user obtaining
 credentials, unrelated to this work.
 
