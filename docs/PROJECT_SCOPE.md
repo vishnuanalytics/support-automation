@@ -707,9 +707,25 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-05 — the `test_multitenant_concurrency.py` SF-creds gap noted
+below is now closed. This is the most recent work in this file.**
+
+`test_concurrent_runs_do_not_corrupt_the_shared_salesforce_client_cache`
+now self-skips (like `test_salesforce_connect_introspect_disconnect_
+roundtrip` already does) when `client_for()` can't resolve creds for
+either tenant, instead of raising `KeyError('SF_USERNAME')` on GitHub
+CI's `integration` job (no `SF_*` secrets there). The probe discards
+whatever it caches in the process so the actual stress test below it
+still starts from a cold cache. Verified locally against real `SF_*`
+creds: both tests in the file pass (2 passed in ~8m). Not yet confirmed
+on a real GitHub Actions run — that's the next thing to check if CI is
+still red on this file.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
 **2026-09-05 — CI fixed (web job) + the "shared test account belongs to
-several tenants" issue closed for good (flagged, then fixed same day).
-This is the most recent work in this file.**
+several tenants" issue closed for good (flagged, then fixed same day).**
 
 **CI fix:** the `web` job's `npx playwright test` step failed on GitHub's
 runner (`Timed out waiting 60000ms from config.webServer`) despite 3/3
@@ -750,10 +766,9 @@ today's fix) and `test_multitenant_concurrency.py::test_concurrent_runs_
 do_not_corrupt_the_shared_salesforce_client_cache` (a `KeyError:
 'SF_USERNAME'` — this environment has real `SF_*` creds so it passes
 here; GitHub CI's `integration` job apparently doesn't have `SF_*`
-secrets configured, so this test needs a `pytest.skip` guard like
-`test_salesforce_connect_introspect_disconnect_roundtrip` already has,
-not a tenant_id fix — noted, not built, since it's a different category
-of gap). `test_multiflow.py`'s 2 real-Groq draft-content failures from
+secrets configured — **now fixed with a `pytest.skip` guard, see the
+"Immediate next step" entry above**). `test_multiflow.py`'s 2 real-Groq
+draft-content failures from
 the original CI log are the same documented shared-quota flakiness noted
 elsewhere in this file, also untouched.
 
