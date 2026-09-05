@@ -69,6 +69,7 @@ def _judge(draft: str, chunks: list[dict[str, Any]], tenant_id: str | None = Non
         model=llm.FAST_MODEL,
         json_object=True,
         max_tokens=400,
+        cache=True,   # same draft+docs -> same verdict; kills agent-loop/retry re-judge cost
         tenant_id=tenant_id,
     )
     try:

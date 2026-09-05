@@ -98,6 +98,7 @@ def _judge_groq(statement: str, contexts: list[dict[str, Any]],
         model=model or llm.FAST_MODEL,
         json_object=True,
         max_tokens=500,
+        cache=True,   # same statement+context -> same verdict; kills retry/re-run cost
         tenant_id=tenant_id,
     )
     try:

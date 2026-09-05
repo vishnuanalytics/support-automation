@@ -707,8 +707,55 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-05 — `docs/MULTI_SYSTEM_ARCHITECTURE.md` written (new file, this
-is the most recent work in this file).** A design conversation worked out
+**2026-09-05 — architecture/cost audit run, one chunk built: judge-call
+caching (this is the most recent work in this file).** User asked for a
+whole-system pass on storage/compute cost, accuracy, and where else
+agentic orchestration earns its cost. Three read-only audits (DB schema
+across all 86 migrations, LLM call sites, and node-handler agentic
+candidates) came back with no large/risky finding — this codebase's
+storage and agentic-scoping discipline are both already in good shape.
+Ranked findings, **one built, the rest deliberately left as options for a
+future session (not built now — the user picks the next one)**:
+
+- **Built:** `groundedness._judge`, `integrity._judge_groq`, and
+  `kb_writeback._llm_draft` (backs both the first KIL draft and
+  `_self_critique`'s one bounded redraft) now pass `cache=True` to
+  `llm.complete()` — they fire on every draft, and up to 3x inside
+  `h_agent`'s reformulation loop, but were the only judge/draft call sites
+  not using the in-process LRU cache `h_classify` already established
+  ("same case text -> same triage; kills retry/re-run cost", registry.py).
+  Same convention, zero behavior change (cache keys on exact
+  model+system+user+max_tokens, so a genuinely different input always
+  misses). 769 offline tests green, no regression.
+- **Not built — storage:** `case_events`, `reasoning_sessions`, and
+  `audit_log` are the only append-only tables with no pruning, unlike
+  `runs`/`jobs` (`purge_old()`, migration 059) and `flow_versions`
+  (`purge_old_flow_versions()`, 077). Small, safe next migration if
+  storage growth becomes a real concern — note this is a different gap
+  from the `runs.case_payload`/`runs.trace` redundancy point below.
+- **Not built — compute:** `h_draft` makes two separate `integrity.check()`
+  Groq round-trips per invocation (`kind="draft"` and `kind="inbound"`)
+  against the same context — collapsible into one prompt, halving that
+  LLM leg. A real design change, not a one-liner.
+- **Not built — accuracy, wiring gap not new build:** `confidence_gate`'s
+  `escalate_topics` is still a static slug-list even though `h_policy_gate`
+  (its already-named successor, Phase 16) exists and isn't wired into the
+  default flows in its place.
+- **Not built — the honest agentic question:** `h_agent`'s only real eval
+  (`eval/agent/run_agent_eval.py`, 2026-09-04) came back a null result, but
+  confounded by Groq/OpenRouter rate-limiting breaking the reformulation
+  call on the one case that triggered it. Before any *further* agentic
+  surface, re-running that eval off-peak or via `ANTHROPIC_API_KEY` would
+  turn a confounded null into an honest signal either way. No other node
+  handler (classify/extract/routing/escalate_topics) cleared the bar for a
+  new bounded agentic loop — routing.py and case_taxonomy.py are already
+  deterministic + TTL-cached, and wrapping them in an LLM call would be
+  pure cost with no accuracy upside on any documented failure mode.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-05 — `docs/MULTI_SYSTEM_ARCHITECTURE.md` written (new file).** A design conversation worked out
 how Postgres/Supabase, Neo4j, Salesforce/Zendesk, Slack, and a future
 per-tenant product-analytics connector (Mixpanel/GA4/GTM) should divide
 ownership so no two systems hold conflicting copies of the same fact —

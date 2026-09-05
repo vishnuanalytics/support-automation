@@ -95,6 +95,7 @@ def _llm_draft(statement: str, contexts: list[dict], verdict: dict, target_entry
         model=model or llm.FAST_MODEL,
         json_object=True,
         max_tokens=600,
+        cache=True,   # same statement+context+feedback -> same draft; kills retry/re-run cost
         tenant_id=tenant_id,
     )
     try:
