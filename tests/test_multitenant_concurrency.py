@@ -91,6 +91,24 @@ def test_concurrent_runs_do_not_corrupt_the_shared_salesforce_client_cache():
     back to the wrong caller."""
     from interpreter import salesforce
 
+    # client_for() falls back to the env-configured client for whichever
+    # tenant has no Vault-stored org creds -- fine when SF_* env vars are
+    # set (this sandbox), but GitHub CI's `integration` job has no SF_*
+    # secrets at all (only Supabase/Neo4j, per ci.yml), so that fallback
+    # raises KeyError('SF_USERNAME') instead of degrading. Self-skip like
+    # test_salesforce_connect_introspect_disconnect_roundtrip already does,
+    # rather than erroring on a genuinely missing-secrets environment --
+    # then discard whatever this probe just cached, so the concurrent
+    # stress test below still starts from a genuinely cold cache (its
+    # whole point is exercising concurrent *population* of that cache).
+    for tid in (ACME, GLOBEX):
+        try:
+            salesforce.client_for(tid, "default")
+        except Exception as e:  # noqa: BLE001
+            pytest.skip(f"no resolvable Salesforce creds for tenant {tid} ({e})")
+        finally:
+            salesforce._tenant_clients.pop((tid, "default"), None)
+
     tenants = [ACME, GLOBEX] * 15
 
     def _resolve(tid: str):
