@@ -1,18 +1,24 @@
-# Google Docs connector setup (Phase 15)
+# Google Docs / Sheets connector setup (Phase 15 + 2026-09-05)
 
-Lets a tenant link a Google Doc into a KB collection; a background job
-(`gdoc_sync.py`) keeps it in sync. All optional — the "Link Google Doc"
-button stays hidden until `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` are
-set on the API server.
+Lets a tenant link a Google Doc or Google Sheet into a KB collection; a
+background job keeps it in sync (`gdoc_sync.py` for Docs, `sync_gsheet`
+jobs for Sheets — a Sheet becomes one KB entry per data row, not one blob,
+since a support/FAQ spreadsheet is structured data, not prose). All
+optional — both "Link Google Doc"/"Google Sheet" buttons stay hidden until
+`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` are set on the API server.
 
 ## 1. Create an OAuth client (one, platform-level)
 
 1. <https://console.cloud.google.com> → create/select a project.
-2. **APIs & Services → Enabled APIs** → enable **Google Drive API** and
-   **Google Docs API**.
+2. **APIs & Services → Enabled APIs** → enable **Google Drive API**,
+   **Google Docs API**, and **Google Sheets API**.
 3. **APIs & Services → OAuth consent screen**:
    - User type **External** (or Internal if you have a Workspace).
-   - Scopes: `.../auth/drive.readonly`, `.../auth/documents.readonly`.
+   - Scopes: `.../auth/drive.readonly`, `.../auth/documents.readonly`,
+     `.../auth/spreadsheets.readonly`.
+   - A tenant that connected **before** the Sheets scope was added needs to
+     reconnect once — Google doesn't retroactively grant a new scope to an
+     existing token.
    - While it's in "Testing", add each Google account that will connect as
      a **Test user**.
 4. **APIs & Services → Credentials → Create credentials → OAuth client ID**:

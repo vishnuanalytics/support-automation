@@ -205,8 +205,11 @@ export interface KbEntryRow {
   embedded_at: string | null;
   updated_at: string;
   updated_by: string | null;
-  origin?: "manual" | "gdoc" | "file" | "crawl" | "import" | "review_writeback";
+  origin?: "manual" | "gdoc" | "gsheet" | "file" | "crawl" | "import" | "review_writeback";
   gdoc_url?: string | null;
+  gsheet_id?: string | null;
+  gsheet_range?: string | null;
+  gsheet_row?: number | null;
   synced_at?: string | null;
   sync_error?: string | null;
   provisional_until?: string | null;

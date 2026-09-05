@@ -195,8 +195,9 @@ design makes any easier or harder.
 Not committed to, just the honest ranking: (1) ~~public-URL sitemap +
 re-crawl~~ **built 2026-09-05, see PROJECT_SCOPE.md** (cheapest, extends
 what already works, no new auth model) →
-(2) Google Sheets (reuses existing Drive OAuth, high value for FAQ-shaped
-tenants like a fresh workspace would actually have) → (3) Linear (new
+(2) ~~Google Sheets~~ **built 2026-09-05, see PROJECT_SCOPE.md** (reuses
+existing Drive OAuth, high value for FAQ-shaped tenants like a fresh
+workspace would actually have) → (3) Linear (new
 auth, but a clean API) → (4) forums (most fragmented source shape, lowest
 priority until a real tenant asks for a specific one) → (5) the onboarding
 wizard step, once at least two connectors exist to make "pick your

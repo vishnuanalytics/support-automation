@@ -412,6 +412,83 @@ def _crawl_site(payload: dict, sb) -> dict:
             "unchanged": skipped, "archived": archived}
 
 
+def _sync_gsheet(payload: dict, sb) -> dict:
+    """KB source connector #2 (docs/KB_SOURCE_CONNECTORS.md) — sync a linked
+    Google Sheet, one `kb_entries` row per data row. Same diff/archive
+    discipline as `_crawl_site`: skip the update+re-embed for a row whose
+    body is unchanged, archive (soft-delete) a row that's gone. Unlike
+    crawling, there's no page-budget ambiguity here — `fetch_sheet` always
+    reads the sheet's *entire* current range, so "not in this run" always
+    means "no longer in the sheet," safe to archive unconditionally."""
+    from interpreter import gsheets
+
+    sid, tid = payload["source_id"], payload["tenant_id"]
+    col_name = payload.get("collection_name", "")
+    sheet_id = payload["sheet_id"]
+    try:
+        fetched = gsheets.fetch_sheet(tid, sheet_id, sheet_name=payload.get("sheet_name"), sb=sb)
+    except Exception as e:  # noqa: BLE001
+        return {"sheet_id": sheet_id, "error": str(e)[:300]}
+
+    try:
+        src = sb.table("sources").select("config").eq("source_id", sid).limit(1).execute().data
+        cfg = (src[0]["config"] if src else {}) or {}
+        known = cfg.get("gsheets") or []
+        entry = {"sheet_id": sheet_id, "sheet_name": payload.get("sheet_name")}
+        if entry not in known:
+            sb.table("sources").update({"config": {**cfg, "gsheets": [*known, entry]}}) \
+                .eq("source_id", sid).execute()
+    except Exception as e:  # noqa: BLE001
+        log.warning("sync_gsheet: could not record gsheets config for %s: %s", sid, e)
+
+    existing_by_row = {
+        r["gsheet_row"]: r for r in (
+            sb.table("kb_entries").select("entry_id, gsheet_row, body_md")
+            .eq("source_id", sid).eq("origin", "gsheet").eq("gsheet_id", sheet_id)
+            .eq("status", "active").execute().data or [])
+    }
+
+    made = skipped = 0
+    seen_rows: set[int] = set()
+    for r in fetched["rows"]:
+        try:
+            seen_rows.add(r["row"])
+            existing = existing_by_row.get(r["row"])
+            if existing and existing["body_md"] == r["body_md"]:
+                skipped += 1
+                continue
+            row = {"source_id": sid, "tenant_id": tid, "title": r["title"], "body_md": r["body_md"],
+                   "origin": "gsheet", "status": "active", "gsheet_id": sheet_id,
+                   "gsheet_range": fetched["tab"], "gsheet_row": r["row"],
+                   "gsheet_modified": fetched["modified_time"],
+                   "created_by": payload.get("created_by"), "updated_by": payload.get("created_by")}
+            if existing:
+                entry = (sb.table("kb_entries").update(row)
+                         .eq("entry_id", existing["entry_id"]).execute().data[0])
+            else:
+                entry = sb.table("kb_entries").insert(row).execute().data[0]
+            jobs.enqueue("embed_kb_entry",
+                         {"entry_id": entry["entry_id"], "source_id": sid,
+                          "collection_name": col_name},
+                         dedupe_key=f"embed:{entry['entry_id']}", sb=sb)
+            made += 1
+        except Exception as e:  # noqa: BLE001
+            log.warning("sync_gsheet row %s: %s", r.get("row"), e)
+
+    archived = 0
+    for row_num, r in existing_by_row.items():
+        if row_num not in seen_rows:
+            try:
+                sb.table("kb_entries").update({"status": "archived"}) \
+                    .eq("entry_id", r["entry_id"]).execute()
+                archived += 1
+            except Exception as e:  # noqa: BLE001
+                log.warning("sync_gsheet archive %s: %s", r["entry_id"], e)
+
+    return {"sheet_id": sheet_id, "rows": len(fetched["rows"]), "entries": made,
+            "unchanged": skipped, "archived": archived}
+
+
 def _import_kb_bundle(payload: dict, sb) -> dict:
     """Phase 28 step 6 — bulk-restore entries from an export bundle. Same
     shape as _crawl_site: upsert-by-title, embed off this job (fastembed x N
@@ -536,6 +613,7 @@ def _sweep_handler(fn):
 HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
             "embed_kb_entry": _embed_kb_entry, "create_github_issue": _create_github_issue,
             "apply_kb_change": _apply_kb_change, "crawl_site": _crawl_site,
+            "sync_gsheet": _sync_gsheet,
             "import_kb_bundle": _import_kb_bundle,
             "queue_sweep": _sweep_handler("queue_sweep"),
             "cdc_reconcile": _sweep_handler("cdc_reconcile"),

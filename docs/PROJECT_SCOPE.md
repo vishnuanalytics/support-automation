@@ -707,9 +707,61 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-05 — KB source connector #2 built: Google Sheets (this is the
+most recent work in this file).** Second item from `docs/KB_SOURCE_
+CONNECTORS.md`'s suggested build order — reuses the existing Google
+connection (`gdrive.py`, `tenant_integrations` kind='google'), no new
+OAuth flow.
+
+**One KB entry per data row, not the whole sheet as one blob** — the
+same reasoning the design doc gave for why this needed its own chunking
+model. New `interpreter/gsheets.py`: `parse_sheet_id`, `fetch_sheet`
+(`{title, modified_time, tab, rows: [{row, title, body_md}]}` — header is
+row 1, `_row_doc` renders each subsequent row as `**Header:** value` pairs
+for every non-empty column, title = the row's first non-empty cell,
+fully-empty rows skipped). `gdrive.SCOPES` now also requests
+`spreadsheets.readonly` — **a tenant connected before this shipped needs
+to reconnect once**, Google doesn't retroactively grant a new scope to an
+existing token (flagged in `docs/GOOGLE_SETUP.md` too).
+
+**Migration `090`** adds `gsheet_id`/`gsheet_range`/`gsheet_row`/
+`gsheet_modified` to `kb_entries`, same shape as migration `024`'s gdoc
+columns. New `api/worker.py::_sync_gsheet` job handler — same diff/archive
+discipline as `_crawl_site` (skip update+re-embed when a row's body is
+byte-identical to what's stored; archive a row that's gone) **but simpler
+than crawling's archive rule**: `fetch_sheet` always reads the sheet's
+entire current range (no page-budget ambiguity like `max_pages`), so
+"not in this run" always safely means "no longer in the sheet." Records
+`{sheet_id, sheet_name}` onto the source's `config.gsheets` (deduped),
+same as crawl's `config.crawl_urls`, so `ingestion/kb_recrawl.py` (renamed
+in spirit, not in file — now reads both) picks it up for scheduled
+re-sync. New `POST /api/kb/collections/{sid}/gsheet` (async job, same
+shape as `/crawl`; re-posting the same sheet re-syncs it — no separate
+resync endpoint needed) + a "+ Google Sheet" button in `KnowledgeView.tsx`.
+
+**Known row-identity limitation, stated not hidden:** a row's identity for
+re-sync is its row *number* within the tab — stable across an edit, not
+across an insert/delete that shifts subsequent rows' numbering (Sheets has
+no native stable per-row id without a helper column). Documented in
+`gsheets.py`'s docstring, not silently assumed away.
+
+**Verify:** 25 new offline tests (`tests/test_gsheets.py` — parsing,
+row-to-doc rendering, `fetch_sheet` against a mocked API client, the
+worker job's create/skip-unchanged/archive/dedup-config/error-handling
+paths; 2 new in `tests/test_kb_recrawl.py`). 810 offline tests green (was
+793). Migration applied to the real Supabase project, drift check clean,
+`tsc -b` clean. **Not live-verified** — no tenant in this sandbox has
+completed real Google OAuth consent (`tenant_integrations` shows
+`status: inactive` for the one `kind='google'` row), and OAuth consent is
+an interactive browser flow no agent can complete — same "flagged, not
+spent" category as this project's other OAuth-gated live-verification
+residuals (Freshchat, Salesforce OAuth).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
 **2026-09-05 — the first connector-design chunk built: sitemap-first
-crawl discovery + scheduled re-crawl (this is the most recent work in
-this file).** Picked as the easiest item from `docs/KB_SOURCE_CONNECTORS.md`'s
+crawl discovery + scheduled re-crawl.** Picked as the easiest item from `docs/KB_SOURCE_CONNECTORS.md`'s
 suggested build order (no new auth, extends code that already works).
 
 **`ingestion/webcrawl.py`**: `crawl()` now best-effort fetches

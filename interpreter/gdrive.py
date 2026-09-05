@@ -22,6 +22,10 @@ from typing import Any
 SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
     "https://www.googleapis.com/auth/documents.readonly",
+    # 2026-09-05 — Google Sheets KB connector (interpreter/gsheets.py). A
+    # tenant that connected before this shipped needs to reconnect once;
+    # Google doesn't retroactively grant a new scope to an existing token.
+    "https://www.googleapis.com/auth/spreadsheets.readonly",
 ]
 _AUTH_URI = "https://accounts.google.com/o/oauth2/v2/auth"
 _TOKEN_URI = "https://oauth2.googleapis.com/token"

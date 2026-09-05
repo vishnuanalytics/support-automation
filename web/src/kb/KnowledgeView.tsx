@@ -167,6 +167,19 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
     }
   }
 
+  async function linkGsheet() {
+    const u = prompt("Google Sheet URL")?.trim();
+    if (!u) return;
+    const tab = prompt("Tab/sheet name (blank = first tab)")?.trim() || undefined;
+    try {
+      await api.kb.linkGsheet(col.source_id, u, tab);
+      alert("Syncing in the background — one entry per row will appear here as they're embedded.");
+      void load();
+    } catch (e) {
+      alert(e instanceof ApiError ? String(e.detail) : String(e));
+    }
+  }
+
   async function crawlSite() {
     const u = prompt("Docs site URL to crawl (same host + path prefix, up to ~20 pages)")?.trim();
     if (!u) return;
@@ -269,7 +282,10 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
           </label>
           {gApi.configured &&
             (gApi.connected ? (
-              <button onClick={linkGdoc}>＋ Google Doc</button>
+              <>
+                <button onClick={linkGdoc}>＋ Google Doc</button>
+                <button onClick={linkGsheet}>＋ Google Sheet</button>
+              </>
             ) : (
               <button onClick={connectGoogle}>Connect Google</button>
             ))}

@@ -52,7 +52,7 @@ from interpreter.loader import (  # noqa: E402
 from interpreter import jobs, sf_ingest  # noqa: E402
 from interpreter.registry import known_types  # noqa: E402
 from interpreter.runs import record_run  # noqa: E402
-from interpreter import gdrive, github as githubmod, slack as slackmod  # noqa: E402
+from interpreter import gdrive, github as githubmod, gsheets, slack as slackmod  # noqa: E402
 from ingestion.sources.kb_common import delete_entry as _kb_delete, embed_entry as _kb_embed  # noqa: E402
 
 import hashlib  # noqa: E402
@@ -1871,7 +1871,8 @@ def kb_list_entries(sid: str, c: Caller = Depends(caller)) -> list[dict]:
     _kb_collection(c, sid)
     rows = (c.sb.table("kb_entries")
             .select("entry_id, title, status, chunk_count, embedded_at, updated_at, "
-                    "updated_by, origin, gdoc_url, synced_at, sync_error, "
+                    "updated_by, origin, gdoc_url, gsheet_id, gsheet_range, gsheet_row, "
+                    "synced_at, sync_error, "
                     "provisional_until, supersedes_entry_id, source_review_task")
             .eq("source_id", sid).neq("status", "archived")
             .order("updated_at", desc=True).execute().data or [])
@@ -2170,6 +2171,33 @@ def kb_link_gdoc(sid: str, body: GdocLinkIn, c: Caller = Depends(caller)) -> dic
                  target_type="kb_entry", target_id=entry["entry_id"],
                  summary=f"{verb} Google Doc {fetched['title']!r} into {col.get('name', sid)!r}")
     return _kb_after_write(entry, col, c)
+
+
+class GsheetLinkIn(BaseModel):
+    sheet_url: str
+    sheet_name: str | None = None
+
+
+@app.post("/api/kb/collections/{sid}/gsheet", status_code=202)
+def kb_link_gsheet(sid: str, body: GsheetLinkIn, c: Caller = Depends(caller)) -> dict:
+    """KB source connector #2 (docs/KB_SOURCE_CONNECTORS.md) — sync a Google
+    Sheet, one KB entry per data row. Async like /crawl (a sheet can have
+    hundreds of rows); re-posting the same sheet_url re-syncs it, same
+    pattern as re-crawling — no separate resync endpoint needed."""
+    rate_limit(c.user_id, "kb_write", 60)
+    col = _kb_collection(c, sid)
+    _require_editor(c, col["tenant_id"])
+    if not gdrive.connected(col["tenant_id"], _service):
+        raise HTTPException(400, "connect Google for this tenant first")
+    try:
+        sheet_id = gsheets.parse_sheet_id(body.sheet_url)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    job_id = jobs.enqueue("sync_gsheet", {
+        "source_id": sid, "tenant_id": col["tenant_id"], "collection_name": col["name"],
+        "sheet_id": sheet_id, "sheet_name": body.sheet_name, "created_by": c.user_id,
+    }, dedupe_key=f"gsheet:{sid}:{sheet_id}:{body.sheet_name or ''}", sb=_service)
+    return {"job_id": job_id, "deduped": job_id is None}
 
 
 @app.post("/api/kb/entries/{eid}/resync")
