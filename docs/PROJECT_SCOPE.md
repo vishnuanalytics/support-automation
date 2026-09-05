@@ -707,8 +707,54 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-05 — `eval/agent/run_agent_eval.py` re-run for real, plus a real
+bug it surfaced fixed (migration 088) — this is the most recent work in
+this file.** Answers the "genuinely open" agentic question this session's
+audit flagged: does `h_agent`'s reformulation loop actually beat a single
+retrieve call? **Re-run clean (real Groq, `python -u` to avoid stdout
+buffering silently swallowing output under a hard `timeout` — the first
+attempt looked hung and produced nothing for that reason, not an actual
+hang):** baseline and agent scored **identically** (hit@1 0.200, MRR@10
+0.253) — a stronger null result than the original confounded run, since
+this time 4/10 questions (not 1/10) triggered real reformulation and the
+agent spent 27,218 real tokens; on the two questions where reformulation
+changed the top-1 answer, it swapped one wrong answer for a different
+wrong one, never the right one. **Net: the agent node, as currently
+configured/thresholded, does not measurably improve retrieval accuracy on
+this hard-question set** — a real, if modest, finding, not a shrug.
+
+**A real bug the eval surfaced, root-caused and fixed, not left as noise:**
+every single agent-node call 404'd on Groq (`llama-3.3-70b-versatile`)
+before silently falling back to a free OpenRouter model — meaning neither
+this run nor the original one ever actually exercised a real strong model.
+Root cause: migration `081` (Phase 29 step 2, the `agent` node's adoption)
+hardcoded that retired model name as a literal in its own SQL, contradicting
+its comment that it "reuses both old nodes' settings verbatim" — the
+sibling `draft` node's *actual* live value had already been fixed by
+migration `017` (Phase 12) four years of migration history earlier; `081`
+silently reintroduced the exact string `017` fixed, just one level deeper
+in the jsonb (`config.draft.model` on an `agent` node vs. `017`'s
+`where type = 'draft'` filter, which never matched it). Same bug class
+`020` already hit once for `classify` nodes. **Migration `088`** (same
+`jsonb_set` + re-snapshot-published-flows shape as `017`/`020`) repoints it
+at `openai/gpt-oss-120b`; applied to the real Supabase project (by the
+user, via the SQL editor, after the MCP `apply_migration` call hit an
+auto-mode permission block — confirmed live: the agent node's
+`draft.model` now reads `openai/gpt-oss-120b`, Acme's flow re-snapshotted
+4→5). 769 offline tests green, no drift (data-only fix, no schema change).
+
+**Open question for a future session, not decided here:** given the honest
+null result, is `h_agent` worth keeping as-is, worth re-tuning
+(`groundedness_threshold`, `max_iterations`), or should Acme's flow revert
+to a plain `retrieve`+`draft` pair? Nothing changed here either way — this
+chunk was "get a clean signal + fix the bug it found," not "act on the
+signal."
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
 **2026-09-05 — retention/pruning built for the 3 tables the audit flagged as
-missing it (this is the most recent work in this file).** Migration `087`
+missing it.** Migration `087`
 (`purge_old_case_events`, `purge_old_audit_log` — age-only, default 365d;
 `purge_old_reasoning_sessions` — terminal states only, `sent`/`abandoned`,
 aged off `updated_at`, never touches an open session regardless of age),
