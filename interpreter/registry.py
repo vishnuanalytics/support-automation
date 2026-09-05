@@ -182,6 +182,19 @@ def _cp_fields(*, status=None, routed_team=None, next_action=None, due_minutes=N
     return f
 
 
+def _case_conn(state: CaseState, config: dict) -> str:
+    """Which connector slug a case-touching node invokes for its Salesforce-
+    shaped side effects (update_fields/ensure_case/post_note/add_comment/
+    assign_owner/log_email_message/identify_sender/send_case_reply — see
+    `connectors.CASE_ACTIONS`). Was a hardcoded `"salesforce"` literal at
+    every call site; now resolved once per call via
+    `connectors.resolve_case_connector` (config's own `connector` override >
+    the tenant's `tenants.case_connector` default, migration 084 >
+    `"salesforce"`) — every existing flow/tenant with neither set is
+    unaffected."""
+    return connectors.resolve_case_connector(state.get("tenant_id"), config, sb=config.get("_sb"))
+
+
 def _cp_write(state: CaseState, config: dict, *, action: str, actor: str = "ai",
               fields: dict[str, Any] | None = None, reason: str | None = None,
               routed_team: str | None = None, confidence: float | None = None,
@@ -203,7 +216,7 @@ def _cp_write(state: CaseState, config: dict, *, action: str, actor: str = "ai",
         fields.pop("Status")
     if sf_id and fields:
         try:
-            connectors.invoke(state.get("tenant_id"), "salesforce", "update_fields",
+            connectors.invoke(state.get("tenant_id"), _case_conn(state, config), "update_fields",
                               {"case_id": sf_id, "fields": fields}, org_label=config.get("org"))
         except Exception as e:  # noqa: BLE001
             log.warning("cp_write(%s): %s", sf_id, e)
@@ -543,7 +556,7 @@ def h_sf_writeback(state: CaseState, config: dict) -> dict:
         }
 
     result = connectors.invoke(
-        state.get("tenant_id"), "salesforce", "update_fields",
+        state.get("tenant_id"), _case_conn(state, config), "update_fields",
         {"case_id": sf_id, "fields": fields, "append": append}, org_label=config.get("org"),
     )
     result["target"] = sf_id
@@ -591,7 +604,7 @@ def h_sf_case(state: CaseState, config: dict) -> dict:
     nid = config["_node_id"]
     case = dict(state.get("case") or {})
     info = connectors.invoke(
-        state.get("tenant_id"), "salesforce", "ensure_case",
+        state.get("tenant_id"), _case_conn(state, config), "ensure_case",
         {"case": case, "sender": state.get("sender") or {},
          "origin": config.get("origin", "Email"), "status": config.get("status", "New"),
          "create_contact": bool(config.get("create_contact", True)),
@@ -611,7 +624,7 @@ def h_sf_case(state: CaseState, config: dict) -> dict:
         # FR-7: the customer's email itself, on the Case (not just Description)
         if case.get("channel") == "email" and not info.get("dry_run"):
             info["inbound_email"] = connectors.invoke(
-                state.get("tenant_id"), "salesforce", "log_email_message",
+                state.get("tenant_id"), _case_conn(state, config), "log_email_message",
                 {"case_id": info["sf_id"], "incoming": True,
                  "from_addr": case.get("from", ""), "from_name": case.get("from_name", ""),
                  "to_addrs": case.get("to") or case.get("supplied_email") or "",
@@ -1450,7 +1463,7 @@ def h_notify(state: CaseState, config: dict) -> dict:
         else:
             mention = config.get("mention_id")
         chatter = connectors.invoke(
-            state.get("tenant_id"), "salesforce", "post_note",
+            state.get("tenant_id"), _case_conn(state, config), "post_note",
             {"case_id": sf_id, "body": body, "mention_id": mention}, org_label=config.get("org"),
         )
         outcome["chatter"] = chatter
@@ -1458,7 +1471,7 @@ def h_notify(state: CaseState, config: dict) -> dict:
         summary = f"Chatter {mode} → {label} [{resolved_via}] (no reassign)"
         if draft.strip() and not inline:
             note = connectors.invoke(
-                state.get("tenant_id"), "salesforce", "add_comment",
+                state.get("tenant_id"), _case_conn(state, config), "add_comment",
                 {"case_id": sf_id, "body": f"[bot draft — {label}; review before sending]\n\n{draft}"},
                 org_label=config.get("org"),
             )
@@ -1475,7 +1488,7 @@ def h_notify(state: CaseState, config: dict) -> dict:
                                      module=module or "") if isinstance(v, str) else v)
                         for k, v in af.items()}
             outcome["attention"] = connectors.invoke(
-                state.get("tenant_id"), "salesforce", "update_fields",
+                state.get("tenant_id"), _case_conn(state, config), "update_fields",
                 {"case_id": sf_id, "fields": rendered}, org_label=config.get("org"))
     else:
         summary = f"notify {label!r} (no sf_id — not posted)"
@@ -1567,7 +1580,7 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
             f"Suggested draft below — please review before sending.\n\n{draft}"
         )
         chatter = connectors.invoke(
-            state.get("tenant_id"), "salesforce", "post_note",
+            state.get("tenant_id"), _case_conn(state, config), "post_note",
             {"case_id": sf_id, "body": body, "mention_id": config.get("mention_id")},
             org_label=config.get("org"),
         )
@@ -1577,7 +1590,7 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
 
         if draft.strip():
             note = connectors.invoke(
-                state.get("tenant_id"), "salesforce", "add_comment",
+                state.get("tenant_id"), _case_conn(state, config), "add_comment",
                 {"case_id": sf_id, "body": f"[bot draft — review before sending]\n\n{draft}"},
                 org_label=config.get("org"),
             )
@@ -1595,7 +1608,7 @@ def h_ask_human(state: CaseState, config: dict) -> dict:
     forced = bool((state.get("confidence_gate") or {}).get("forced_escalation"))
     queue = _route_queue(state, config)
     if sf_id and queue:
-        assignment = connectors.invoke(state.get("tenant_id"), "salesforce", "assign_owner",
+        assignment = connectors.invoke(state.get("tenant_id"), _case_conn(state, config), "assign_owner",
                                        {"case_id": sf_id, "queue": queue}, org_label=config.get("org"))
         outcome["assignment"] = assignment
         if assignment.get("assigned"):
@@ -1642,7 +1655,7 @@ def h_handover(state: CaseState, config: dict) -> dict:
         queue = _route_queue(state, config) or queue
     if sf_id and (queue or config.get("owner_user_id")):
         assignment = connectors.invoke(
-            state.get("tenant_id"), "salesforce", "assign_owner",
+            state.get("tenant_id"), _case_conn(state, config), "assign_owner",
             {"case_id": sf_id, "queue": queue, "user_id": config.get("owner_user_id")},
             org_label=config.get("org"),
         )
@@ -1689,7 +1702,7 @@ def h_identify(state: CaseState, config: dict) -> dict:
             break
 
     sender = connectors.invoke(
-        state.get("tenant_id"), "salesforce", "identify_sender",
+        state.get("tenant_id"), _case_conn(state, config), "identify_sender",
         {"email": email, "free_domains": config.get("free_email_domains"),
          "domain_match": bool(config.get("domain_match", True)),
          "create_lead": bool(config.get("create_lead_if_missing", False))},
@@ -1816,7 +1829,7 @@ def h_clarify(state: CaseState, config: dict) -> dict:
             + numbered + "\n\nOnce we have that we'll follow up."
         )
         delivery = connectors.invoke(
-            state.get("tenant_id"), "salesforce", "send_case_reply",
+            state.get("tenant_id"), _case_conn(state, config), "send_case_reply",
             {"case_id": sf_id, "body": customer_msg, "to_email": recipient,
              "subject": config.get("subject", "We need a bit more information")},
             org_label=config.get("org"),
@@ -1844,7 +1857,7 @@ def h_clarify(state: CaseState, config: dict) -> dict:
         except Exception:  # noqa: BLE001
             pass
         delivery = connectors.invoke(
-            state.get("tenant_id"), "salesforce", "post_note",
+            state.get("tenant_id"), _case_conn(state, config), "post_note",
             {"case_id": sf_id, "body": note, "mention_id": mention}, org_label=config.get("org"),
         )
 
@@ -1859,7 +1872,7 @@ def h_clarify(state: CaseState, config: dict) -> dict:
     handover_assignment = None
     if exhausted and sf_id and handover_queue:
         handover_assignment = connectors.invoke(
-            state.get("tenant_id"), "salesforce", "assign_owner",
+            state.get("tenant_id"), _case_conn(state, config), "assign_owner",
             {"case_id": sf_id, "queue": handover_queue}, org_label=config.get("org"),
         )
 

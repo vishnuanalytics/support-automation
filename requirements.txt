@@ -32,6 +32,12 @@ fastavro
 requests
 websockets
 
+# --- Freshchat channel (multi-provider connectors step 3) — webhook signature
+# verification (RSA/SHA256). Was already an undeclared transitive dep
+# (pulled in by simple-salesforce/google-auth); declared explicitly now that
+# interpreter/freshchat.py imports it directly.
+cryptography
+
 # --- api (Phase 5) ---
 fastapi
 uvicorn

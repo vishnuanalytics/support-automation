@@ -1110,6 +1110,75 @@ def fire_webhook(token: str, body: dict[str, Any],
     return {"job_id": job_id, "deduped": job_id is None}
 
 
+# ── Multi-provider connectors, step 3: the Freshchat channel ─────────────
+@app.post("/webhooks/freshchat/{tenant_id}", status_code=202)
+async def freshchat_webhook(tenant_id: str, request: Request) -> dict:
+    """Public webhook (no bearer auth — the tenant_id in the URL plus a
+    valid `X-Freshchat-Signature` from THAT tenant's own stored webhook
+    public key are the credential, verified before the body is trusted at
+    all). Turns a customer `message_create` event into a case-shaped
+    `run_flow` job, reusing the same case across a conversation via
+    `channel_threads` (migration 085) — the same "produce a case dict,
+    enqueue run_flow" shape the email channel uses, not the generic
+    Case-less webhook-trigger machinery (`/t/{token}`), since this needs to
+    flow through the real case-touching pipeline (`identify`/`sf_case`/...).
+    """
+    from interpreter import channel_threads, freshchat
+
+    raw = await request.body()
+    rate_limit(tenant_id, "freshchat_webhook", 300)
+
+    try:
+        cfg = freshchat.load_channel(tenant_id, _service)
+    except Exception:  # noqa: BLE001 — can't verify the tenant -> reject (matches /t/{token})
+        cfg = None
+    if not cfg or not cfg.webhook_public_key:
+        raise HTTPException(404, "freshchat not connected for this tenant")
+    if not freshchat.verify_signature(
+        cfg.webhook_public_key, raw, request.headers.get("X-Freshchat-Signature"),
+    ):
+        raise HTTPException(401, "bad freshchat signature")
+
+    import json as _json
+    try:
+        body = _json.loads(raw.decode())
+    except Exception:  # noqa: BLE001
+        raise HTTPException(400, "invalid JSON")
+
+    parsed = freshchat.parse_webhook_message(body)
+    if not parsed:
+        return {"ok": True, "skipped": "not a new customer message"}
+
+    conv_id = parsed["conversation_id"]
+    existing = channel_threads.get_case_ref(tenant_id, freshchat.KIND, conv_id, sb=_service)
+    case: dict[str, Any] = {
+        "tenant_id": tenant_id, "team": cfg.team, "channel": freshchat.KIND,
+        "conversation_id": conv_id, "case_id": f"freshchat:{conv_id}",
+        "subject": parsed["text"][:120], "body": parsed["text"],
+        "from": parsed.get("actor_id") or "",
+    }
+    if existing:
+        case["sf_id"] = existing["case_ref"]
+        case["case_number"] = existing.get("case_number")
+
+    try:
+        flow = load_flow(tenant_id=tenant_id, team=cfg.team, status="published", sb=_service)
+    except (FlowNotFound, FlowInvalid):
+        raise HTTPException(404, f"no published '{cfg.team}' flow for this tenant")
+
+    # Python's builtin hash() is randomized per-process (PYTHONHASHSEED) --
+    # useless as a dedupe key across a worker restart. A stable digest is
+    # the fallback when Freshchat's payload doesn't carry its own message id
+    # (see freshchat.parse_webhook_message's docstring on that uncertainty).
+    fallback_id = hashlib.sha256(f"{conv_id}:{parsed['text']}".encode()).hexdigest()[:16]
+    idem = f"freshchat:{parsed.get('message_id') or fallback_id}"
+    job_id = jobs.enqueue(
+        "run_flow", {"flow_id": flow["flow_id"], "case": case, "idempotency_key": idem},
+        dedupe_key=idem, sb=_service,
+    )
+    return {"job_id": job_id, "deduped": job_id is None}
+
+
 # ── P6c: per-tenant HTTP connections for the `http_request` node ─────
 class ConnectionIn(BaseModel):
     slug: str
@@ -2311,6 +2380,105 @@ def email_google_callback(code: str = "", state: str = "", error: str = "") -> H
     return page("Gmail connected. You can close this window.")
 
 
+# ── Multi-provider connectors step 3: connect a Freshchat account ────────
+class FreshchatChannelIn(BaseModel):
+    domain: str | None = None              # "yourcompany.freshchat.com"
+    team: str = "support"
+    api_token: str | None = None           # write-only, never returned; Vault-backed
+    webhook_public_key: str | None = None  # write-only PEM, never returned
+    auto_send_enabled: bool = False
+    tenant_id: str | None = None
+
+
+def _freshchat_cfg_from_body(tenant_id: str, body: "FreshchatChannelIn", existing):
+    from interpreter.freshchat import FreshchatConfig
+
+    return FreshchatConfig(
+        tenant_id=tenant_id,
+        domain=(body.domain or (existing.domain if existing else "")).strip(),
+        team=body.team or (existing.team if existing else "support"),
+        auto_send_enabled=bool(body.auto_send_enabled),
+        status=(existing.status if existing else "inactive"),
+    )
+
+
+@app.get("/api/integrations/freshchat")
+def freshchat_status(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    """Channel status for the caller's tenant. Never returns the token/key."""
+    tid = _caller_tenant(c, tenant_id)
+    from interpreter.freshchat import load_channel
+
+    ch = load_channel(tid, _service)
+    if not ch:
+        return {"tenant_id": tid, "configured": False, "status": "none"}
+    return {"tenant_id": tid, **ch.public_status()}
+
+
+@app.put("/api/integrations/freshchat")
+def freshchat_configure(body: FreshchatChannelIn, c: Caller = Depends(caller)) -> dict:
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    rate_limit(c.user_id, "integration", 30)
+    from interpreter.freshchat import load_channel, save_channel
+
+    existing = load_channel(tid, _service)
+    if not (body.domain or (existing and existing.domain)):
+        raise HTTPException(422, "domain is required")
+    has_token = bool(body.api_token) or bool(existing and existing.api_token)
+    if not has_token:
+        raise HTTPException(422, "api_token is required")
+
+    cfg = _freshchat_cfg_from_body(tid, body, existing)
+    cfg.status = "active"
+    save_channel(cfg, _service, api_token=body.api_token,
+                webhook_public_key=body.webhook_public_key)
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid,
+                 action="freshchat_channel.configured" if existing else "freshchat_channel.connected",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="freshchat_channel", target_id=tid,
+                 summary=f"{'updated' if existing else 'connected'} the Freshchat channel")
+    return freshchat_status(tenant_id=tid, c=c)
+
+
+@app.delete("/api/integrations/freshchat", status_code=204)
+def freshchat_disconnect(tenant_id: str | None = None, c: Caller = Depends(caller)) -> None:
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    from interpreter import audit
+    from interpreter.freshchat import delete_channel
+
+    delete_channel(tid, _service)
+    audit.record(_service, tenant_id=tid, action="freshchat_channel.disconnected",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="freshchat_channel", target_id=tid,
+                 summary="disconnected the Freshchat channel")
+
+
+@app.post("/api/integrations/freshchat/test")
+def freshchat_test(body: FreshchatChannelIn, c: Caller = Depends(caller)) -> dict:
+    """A lightweight authenticated read — saves nothing. Uses the posted
+    token, falling back to the stored one when the field is left blank."""
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    rate_limit(c.user_id, "integration", 20)
+    from interpreter.freshchat import load_channel, test_connection
+
+    existing = load_channel(tid, _service)
+    cfg = _freshchat_cfg_from_body(tid, body, existing)
+    cfg.api_token = body.api_token or (existing.api_token if existing else "")
+    return test_connection(cfg)
+
+
+@app.get("/api/integrations/freshchat/webhook-url")
+def freshchat_webhook_url(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    """The URL to paste into Freshchat's own webhook settings for this
+    tenant — a thin convenience so the web UI doesn't hardcode _public_base()."""
+    tid = _caller_tenant(c, tenant_id)
+    return {"url": f"{_public_base()}/webhooks/freshchat/{tid}"}
+
+
 # ── BYOK: self-serve LLM provider keys + model roster (chunk 3 of the
 #    2026-09-04 onboarding/robustness work) ─────────────────────────────
 _LLM_PROVIDERS = ("groq", "anthropic", "openrouter")
@@ -2567,6 +2735,139 @@ def salesforce_oauth_callback(code: str = "", state: str = "", error: str = "") 
                  actor_id=user_id, target_type="salesforce_org", target_id=org_label,
                  summary=f"connected Salesforce org {org_label!r} via OAuth")
     return page(f"Salesforce org {org_label!r} connected. You can close this window.")
+
+
+# ── Multi-provider connectors step 2: connect a Zendesk account ──────────
+class ZendeskConnectionIn(BaseModel):
+    subdomain: str | None = None
+    email: str | None = None
+    api_token: str | None = None       # write-only, never returned; Vault-backed
+    tenant_id: str | None = None
+
+
+def _zendesk_cfg_from_body(tenant_id: str, body: "ZendeskConnectionIn", existing):
+    from interpreter.zendesk import ZendeskConfig
+
+    return ZendeskConfig(
+        tenant_id=tenant_id,
+        subdomain=(body.subdomain or (existing.subdomain if existing else "")).strip(),
+        email=(body.email or (existing.email if existing else "")).strip(),
+        status=(existing.status if existing else "inactive"),
+    )
+
+
+@app.get("/api/integrations/zendesk")
+def zendesk_status(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    """Connection status for the caller's tenant. Never returns the token."""
+    tid = _caller_tenant(c, tenant_id)
+    from interpreter.zendesk import load_channel
+
+    ch = load_channel(tid, _service)
+    if not ch:
+        return {"tenant_id": tid, "configured": False, "status": "none"}
+    return {"tenant_id": tid, **ch.public_status()}
+
+
+@app.put("/api/integrations/zendesk")
+def zendesk_configure(body: ZendeskConnectionIn, c: Caller = Depends(caller)) -> dict:
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    rate_limit(c.user_id, "integration", 30)
+    from interpreter.zendesk import load_channel, save_channel
+
+    existing = load_channel(tid, _service)
+    if not (body.subdomain or (existing and existing.subdomain)):
+        raise HTTPException(422, "subdomain is required")
+    if not (body.email or (existing and existing.email)):
+        raise HTTPException(422, "email is required")
+    has_token = bool(body.api_token) or bool(existing and existing.api_token)
+    if not has_token:
+        raise HTTPException(422, "api_token is required")
+
+    cfg = _zendesk_cfg_from_body(tid, body, existing)
+    cfg.status = "active"
+    save_channel(cfg, _service, api_token=body.api_token)
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid,
+                 action="zendesk_connection.configured" if existing else "zendesk_connection.connected",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="zendesk_connection", target_id=tid,
+                 summary=f"{'updated' if existing else 'connected'} the Zendesk account")
+    return zendesk_status(tenant_id=tid, c=c)
+
+
+@app.delete("/api/integrations/zendesk", status_code=204)
+def zendesk_disconnect(tenant_id: str | None = None, c: Caller = Depends(caller)) -> None:
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    from interpreter import audit
+    from interpreter.zendesk import delete_channel
+
+    delete_channel(tid, _service)
+    audit.record(_service, tenant_id=tid, action="zendesk_connection.disconnected",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="zendesk_connection", target_id=tid,
+                 summary="disconnected the Zendesk account")
+
+
+@app.post("/api/integrations/zendesk/test")
+def zendesk_test(body: ZendeskConnectionIn, c: Caller = Depends(caller)) -> dict:
+    """A lightweight authenticated read (`GET /users/me.json`) — saves
+    nothing. Uses the posted token, falling back to the stored one when
+    the field is left blank."""
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    rate_limit(c.user_id, "integration", 20)
+    from interpreter.zendesk import load_channel, test_connection
+
+    existing = load_channel(tid, _service)
+    cfg = _zendesk_cfg_from_body(tid, body, existing)
+    cfg.api_token = body.api_token or (existing.api_token if existing else "")
+    return test_connection(cfg)
+
+
+# ── Multi-provider connectors step 1: which connector is "the case
+# system" for this tenant (tenants.case_connector, migration 084) ────────
+class CaseConnectorIn(BaseModel):
+    case_connector: str
+    tenant_id: str | None = None
+
+
+@app.get("/api/tenants/case-connector")
+def get_case_connector(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    tid = _caller_tenant(c, tenant_id)
+    rows = (_service.table("tenants").select("case_connector")
+            .eq("tenant_id", tid).execute().data or [{}])
+    return {"tenant_id": tid, "case_connector": rows[0].get("case_connector") or "salesforce"}
+
+
+@app.put("/api/tenants/case-connector")
+def set_case_connector(body: CaseConnectorIn, c: Caller = Depends(caller)) -> dict:
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    value = body.case_connector.strip()
+    if not value:
+        raise HTTPException(422, "case_connector is required")
+    # a tenant created before the `tenants` table existed (P7d self-serve
+    # workspaces -- e.g. the seeded Globex demo tenant) has no row here at
+    # all, so a plain UPDATE silently matches zero rows and "succeeds"
+    # without persisting anything (found live-testing this exact
+    # endpoint). Upsert instead, using the same "workspace <id prefix>"
+    # placeholder name the web UI's own tenantLabel() fallback already
+    # uses for a nameless tenant.
+    updated = (_service.table("tenants").update({"case_connector": value})
+              .eq("tenant_id", tid).execute().data)
+    if not updated:
+        _service.table("tenants").upsert(
+            {"tenant_id": tid, "name": f"workspace {tid[:8]}", "case_connector": value},
+        ).execute()
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="tenant.case_connector_changed",
+                 actor_id=c.user_id, actor_email=c.email, target_type="tenant", target_id=tid,
+                 summary=f"case system set to {value!r}")
+    return {"tenant_id": tid, "case_connector": value}
 
 
 # ── Phase 16: policy rules ───────────────────────────────────────────

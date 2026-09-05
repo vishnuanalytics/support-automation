@@ -31,9 +31,21 @@ export default defineConfig({
   // the dev-server command, too late to affect an already-transformed
   // module) — a real gotcha, hit and fixed while building this suite.
   webServer: {
-    command: "npm run dev -- --mode e2e --port 5174 --strictPort",
+    // `--host 127.0.0.1` pins Vite's bind address to match `url` below
+    // exactly. Without it Vite binds its default "localhost", which some
+    // CI runners' network stacks resolve to IPv6 (`::1`) — the server is
+    // actually up, but Playwright's health check keeps hitting the IPv4
+    // loopback and times out waiting for a server that's really already
+    // there. (Real failure, not theoretical: this is exactly what broke
+    // CI here — passed 3/3 in this sandbox, then timed out on GitHub's
+    // runner. `stdout`/`stderr: "pipe"` added at the same time so a future
+    // webServer failure actually shows Vite's own boot log in CI instead
+    // of nothing.)
+    command: "npm run dev -- --mode e2e --host 127.0.0.1 --port 5174 --strictPort",
     url: "http://127.0.0.1:5174",
     reuseExistingServer: !process.env.CI,
-    timeout: 60_000,
+    timeout: 120_000,
+    stdout: "pipe",
+    stderr: "pipe",
   },
 });

@@ -266,6 +266,25 @@ export interface EmailChannelSave {
   active?: boolean;
 }
 
+export interface FreshchatChannel {
+  tenant_id: string;
+  configured: boolean;
+  status: "none" | "inactive" | "active" | "error";
+  domain?: string;
+  team?: string;
+  auto_send_enabled?: boolean;
+  signature_verification?: boolean;
+}
+
+export interface FreshchatChannelSave {
+  tenant_id?: string;
+  domain?: string;
+  team?: string;
+  api_token?: string;
+  webhook_public_key?: string;
+  auto_send_enabled?: boolean;
+}
+
 export interface PolicyRule {
   rule_id: string;
   tenant_id: string;
@@ -473,6 +492,26 @@ export interface SalesforceOrgSchema {
   case_fields: SalesforceCaseField[];
   queues: SalesforceQueue[];
   errors: string[];
+}
+
+export interface ZendeskConnection {
+  tenant_id: string;
+  configured: boolean;
+  status: "none" | "inactive" | "active" | "error";
+  subdomain?: string;
+  email?: string;
+}
+
+export interface ZendeskConnectionSave {
+  tenant_id?: string;
+  subdomain?: string;
+  email?: string;
+  api_token?: string;
+}
+
+export interface CaseConnector {
+  tenant_id: string;
+  case_connector: string;
 }
 
 export interface BillingUsage {

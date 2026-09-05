@@ -707,11 +707,325 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-05 — Playwright e2e on the web editor: built, live-verified in
-this sandbox, wired into CI. Closes a residual open since Phase 9. This is
-the most recent work in this file (see the top-of-file note: this doc is
-edited in place, not strictly appended to — check dates, not physical
-position).** Picked from a 3-option menu offered after Phase 29 closed
+**2026-09-05 — CI fixed (web job) + the "shared test account belongs to
+several tenants" issue closed for good (flagged, then fixed same day).
+This is the most recent work in this file.**
+
+**CI fix:** the `web` job's `npx playwright test` step failed on GitHub's
+runner (`Timed out waiting 60000ms from config.webServer`) despite 3/3
+locally — root cause: Vite's default `localhost` bind can resolve to
+IPv6 on some CI network stacks while Playwright's health check hits the
+IPv4 loopback, so the server was actually up and the check just never
+saw it. Fixed with `--host 127.0.0.1` pinned to match `playwright.config.ts`'s
+`url` exactly; also bumped the timeout to 120s and piped `stdout`/`stderr`
+so a future webServer failure shows Vite's own boot log instead of
+nothing. Confirmed green on a real GitHub Actions run after the fix.
+
+**The tenant-ambiguity issue, actually fixed this time (user chose
+"update the tests" over "clean up the shared account"):** the CI run also
+surfaced the `integration` job failing 20 tests + 2 errors — the same
+"globex-owner@example.test now owns >1 tenant" issue flagged (but
+deliberately left unfixed) earlier the same session. Went through every
+failure and fixed the ones that were genuinely about a missing/omitted
+`tenant_id`: added it explicitly wherever an endpoint accepts one
+(connections, salesforce/slack meta, mermaid import, assist, flows,
+members, invitations, kb collections/entries, policy rules, email/
+Zendesk channel tests). Two tests had no `tenant_id` param to add at all
+(`/api/flows`, `/api/tenants` — both return everything RLS lets the
+caller see, across every membership) — fixed by asserting "Globex is
+among the results" instead of "the results are only Globex", which is
+what these tests should have asserted all along once an account can
+genuinely belong to >1 tenant. `test_create_flow_infers_the_tenant_when_
+omitted`'s actual subject (single-membership inference) is honestly
+untestable with this permanently-multi-tenant shared account — passes
+`tenant_id` explicitly now, with a docstring explaining why, rather than
+pretending the omission path is still being exercised.
+
+**Two remaining failures are genuinely unrelated, not touched:**
+`test_kb_entry_roundtrip_embeds_and_scopes` (a live semantic-retrieval
+top-k miss — `_kb_name`'s own lookup is RLS-scoped with no tenant_id
+param, so this isn't the same bug at all; smells like embedding/ranking
+non-determinism, not investigated further since it's out of scope for
+today's fix) and `test_multitenant_concurrency.py::test_concurrent_runs_
+do_not_corrupt_the_shared_salesforce_client_cache` (a `KeyError:
+'SF_USERNAME'` — this environment has real `SF_*` creds so it passes
+here; GitHub CI's `integration` job apparently doesn't have `SF_*`
+secrets configured, so this test needs a `pytest.skip` guard like
+`test_salesforce_connect_introspect_disconnect_roundtrip` already has,
+not a tenant_id fix — noted, not built, since it's a different category
+of gap). `test_multiflow.py`'s 2 real-Groq draft-content failures from
+the original CI log are the same documented shared-quota flakiness noted
+elsewhere in this file, also untouched.
+
+**Verify:** 38/39 of `test_api.py`'s `-m integration` tests pass locally
+against the real Supabase project (the 1 failure is the unrelated
+retrieval one above); 737 offline tests unaffected (only integration-
+marked tests were touched).
+
+**Old step-2 note, superseded by the above as "most recent," kept for
+its own history:**
+
+**2026-09-05 — Multi-provider connectors, ALL 3 STEPS NOW BUILT (FR-51).
+Step 2 (Zendesk) landed today, plus the case_connector picker UI that
+closes step 1's last open residual. This is the most recent work in this
+file (see the top-of-file note: this doc is edited in place, not strictly
+appended to — check dates, not physical position).**
+
+**Step 2 — Zendesk, a real second case-system connector.** New
+`interpreter/zendesk.py` implements the full `connectors.CASE_ACTIONS`
+contract (8 actions) against Zendesk's real REST API (Basic auth
+`{email}/token`:`{api_token}`), matching every return-dict shape
+`salesforce.py`'s equivalents use exactly — that shape is what
+`registry.py`'s node handlers actually read (`result["dry_run"]`,
+`sender["match"]`, ...), so matching it is what makes this a drop-in, not
+just an API wrapper. **Honest about where Zendesk's data model doesn't
+map 1:1 onto Salesforce's** (documented in the module's own docstring,
+not glossed over): no Contact/Account/Lead split (Zendesk has Users +
+Organizations); `ensure_case`'s thread-reuse can't match Salesforce's
+exact Message-ID matching (reuses the requester's most recent *open*
+ticket instead — looser, intentional, not a bug); `log_email_message` is
+a deliberate no-op (a Zendesk ticket's comment thread already *is* the
+email log — Salesforce needs a separate object, Zendesk doesn't);
+`update_fields` only maps `Status` (translated to Zendesk's own values) —
+every other Salesforce-shaped field name (`Routed_Team__c`,
+`AI_Confidence__c`, ...) is reported in `skipped`, not silently dropped;
+`append` becomes a private ticket comment instead of a field append (the
+closest real Zendesk equivalent). Registered as a `zendesk` builtin in
+`connectors.py`, reusing the *exact same* `ActionSpec` param shapes as
+Salesforce's action descriptors (no `_ORG_PARAM` — Zendesk isn't
+multi-org like Salesforce).
+
+**Proven as a genuinely working second implementation, not just the
+step-1 test-only dummy:** `tests/test_sf_handlers_use_connectors.py::
+test_a_tenant_on_zendesk_routes_ask_human_to_zendesk_not_salesforce`
+drives the real, unmocked `h_ask_human` through a tenant configured for
+`case_connector="zendesk"` and confirms real (mocked-HTTP) Zendesk calls
+land on `/tickets/1.json` and `/groups.json` while `salesforce.post_chatter`/
+`assign_case` are asserted never called.
+
+**Connect-account API + web UI, same day (closing step 1's residual
+too):** `GET/PUT/DELETE /api/integrations/zendesk` + `.../test`, mirroring
+email/Freshchat's exact Vault-backed pattern. New `ConnectionsView.tsx`
+pieces: a `CaseConnectorPicker` (hardcoded to the two real slugs,
+`salesforce`/`zendesk` — deliberately not a free-text box, since a
+typo'd connector slug would silently escalate every case rather than
+error, per `resolve_case_connector`'s own fail-safe design) + a
+`ZendeskPanel`. New Playwright spec `web/e2e/connections.spec.ts` (pick
+Zendesk as the case connector, connect an account, save) — 3/3 stable
+reruns; caught and fixed a real, unrelated pre-existing crash along the
+way (`AiModelsPanel`, which also renders on this tab, threw on a
+malformed mock response shape — nothing to do with this chunk, just
+surfaced by exercising the page for real).
+
+**A real bug found and fixed while live-testing, not caused by the
+connector itself:** the new `PUT /api/tenants/case-connector` endpoint
+did a plain `UPDATE`, which silently no-ops for a tenant that predates
+the `tenants` table (P7d, self-serve workspaces) — the seeded Globex demo
+tenant turned out to be exactly such a case, confirmed live
+(`select * from tenants where tenant_id = <globex>` returned **zero
+rows**, despite Globex being a real, long-used demo tenant with
+`tenant_members`/`tenant_integrations` rows). Fixed with an upsert
+fallback (using the same "workspace `<id prefix>`" placeholder name the
+web UI's own `tenantLabel()` already falls back to for a nameless
+tenant). **A genuine positive side effect, not just a workaround:**
+Globex now has a real `tenants` row it never had before — a pre-existing
+gap closed as a side effect of testing this live, not left for someone
+else to trip over later.
+
+737 offline pytest green (was 661 at the start of this session's
+multi-provider-connectors thread: +7 step 1, +31 Freshchat backend, +5
+Freshchat connect-UI, +31 Zendesk + connect-UI + case-connector-picker
+tests) + 9 new **live** integration tests against the real Supabase
+project (Zendesk connect/test/owner-gating, case-connector get/set/
+owner-gating — real Vault, real RLS, real owner-gating, not mocked) +
+3 stable Playwright specs (flow editor, Channels/Freshchat,
+Connections/Zendesk).
+
+**Not yet done:** live verification against a real Zendesk account (same
+"flag it, don't spend it" pattern as Freshchat — Zendesk also has a free
+trial if useful alongside Freshchat's). **Multi-provider connectors: all
+3 steps built. FR-51 is functionally complete pending live verification
+of steps 2 and 3.**
+
+**Old Freshchat-setup note, superseded by the above as "most recent,"
+kept for its own history:** connect-a-channel API + web UI
+(FR-51/FR-20). The user doesn't have real
+Freshchat credentials yet ("in the meantime I will try to get the keys")
+— this closes the one piece of step 3 that didn't need them: a tenant can
+now actually save/test/disconnect a Freshchat channel from the web UI,
+same as email. `GET/PUT/DELETE /api/integrations/freshchat` +
+`POST /api/integrations/freshchat/test` (a lightweight authenticated
+`GET /v2/agents` read — **not live-verified against a real account**,
+flagged in the function's own docstring so a wrong endpoint guess is easy
+to isolate later) + `GET /api/integrations/freshchat/webhook-url`, all
+mirroring the email channel's exact owner-gated/Vault-backed pattern. Web:
+`ChannelsView.tsx` gains a second panel (`FreshchatPanel`, alongside the
+existing `EmailPanel` — the file was already named "Channels", plural, for
+exactly this). New Playwright spec (`web/e2e/channels.spec.ts`) drives the
+real form in a real Chromium — fill domain/token, Save, assert the PUT
+body, confirm the webhook URL for this tenant renders, Test connection —
+3/3 stable reruns. 5 new offline pytest (704 total) + 4 new **live**
+integration tests against the real Supabase project (real Vault
+encryption, real RLS, real owner-gating — not mocked).
+
+**A real, pre-existing issue found while live-testing, not caused by this
+chunk:** the shared integration-test account (`globex-owner@example.test`)
+now belongs to **several** tenants — `_caller_tenant` correctly 400s
+without an explicit `tenant_id` in that case, which is exactly what
+happened, breaking **18 pre-existing integration tests** across the file
+(confirmed via `git stash`-style isolation: the *email* channel's own
+equivalent test fails the identical way, unrelated to anything built
+today). This session's new Freshchat tests pass because they pass
+`tenant_id` explicitly; the 18 pre-existing ones don't and are just
+broken until someone either cleans up that account's extra
+`tenant_members` rows or the tests are updated to pass an explicit
+tenant_id too. **Not fixed here** — real, but unrelated cleanup, flagged
+for whoever picks it up rather than silently repaired mid-chunk.
+
+**Not yet done:** live verification (needs the user's real Freshchat API
+token + webhook public key — they're getting a developer account); the
+`test_connection` endpoint's choice of `/v2/agents` as the "prove the
+token works" probe is a reasonable guess, not confirmed.
+
+**Old step-3 note, superseded by the above as "most recent," kept for its
+own history:** Freshchat, the first
+pluggable chat/call channel (FR-51/FR-20). The user
+picked step 3 directly (skipping step 2/Zendesk for now — the two are
+independent, step 3 doesn't need step 1's Zendesk to exist first). Built
++ offline-verified, **not yet live-verified** (needs the user's own real
+Freshchat account — API token, webhook public key, a real conversation —
+same "flagged, not spent" pattern as every other live-verification
+residual in this project).
+
+**What actually got built, end to end:** `interpreter/freshchat.py`
+(`FreshchatConfig`, Vault-backed credentials via the existing
+`vault_secrets.py`, pure `verify_signature` — real RSA/SHA256 against a
+tenant's own webhook public key, not a mock — and pure
+`parse_webhook_message`, defensive about the vendor's own documented
+payload-shape variance). A new public `POST /webhooks/freshchat/{tenant_id}`
+in `api/main.py` — verifies the signature before trusting the body at
+all, filters out agent/bot echoes (would otherwise loop on the bot's own
+reply re-arriving as a "new message"), enqueues a `run_flow` job.
+**Deliberately NOT built on the generic Case-less webhook-trigger
+machinery** (`/t/{token}`, P6a) despite that being the original framing
+when this was scoped — a Freshchat message needs to flow through the real
+case-touching pipeline (`identify`/`sf_case`/...), which reads
+`state.case`, not `state.context`; the "reuse the generic trigger" idea
+turned out to be a real mismatch once actually worked through, corrected
+here rather than built wrong. New migration `085` (`channel_threads`: a
+generic `(tenant, channel, thread_key) -> case_ref` mapping, deliberately
+connector-agnostic — not Freshchat- or Salesforce-specific, so any future
+chat channel reuses it) so a long-lived conversation attaches to the same
+case instead of creating a new one per message. New `api/worker.py::
+_freshchat_post_run` (mirrors the existing `_email_post_run`, reuses the
+same genuinely channel-agnostic `emailer.decide()` rather than
+reimplementing the auto-send decision matrix) delivers the customer-facing
+reply via `freshchat.send_message` and keeps `channel_threads` fresh
+regardless of delivery outcome (even an `ask_human` run that sends
+nothing still needs the mapping current).
+
+**A real bug found and fixed before calling this done, not theoretical:**
+the idempotency-key fallback (for when Freshchat's payload doesn't carry
+its own message id — genuinely uncertain, not confirmed against a real
+account) used Python's builtin `hash()`, which is randomized per process
+(`PYTHONHASHSEED`) — would have silently stopped deduping the same retried
+webhook delivery across a worker restart. Replaced with a stable
+`hashlib.sha256` digest.
+
+31 new offline tests (`tests/test_freshchat.py` — config model, Vault
+storage, real-keypair signature verification incl. tamper/wrong-key
+rejection, webhook parsing incl. shape-variance tolerance; `tests/
+test_freshchat_worker.py` — the post-run delivery guard, mirroring
+`test_emailer.py`'s coverage of `_email_post_run`; 4 in `tests/
+test_api.py` — the webhook endpoint's auth/happy-path/skip behavior).
+699 offline tests green, migration/schema-drift checks clean.
+
+**Not yet done, deliberately not built now:** no API endpoints or web UI
+to actually connect a Freshchat account (credentials only reach Vault via
+test fixtures / direct DB access right now) — the natural next piece,
+mirroring `/api/integrations/email`; no live verification; step 2
+(Zendesk) still not started, independent of this.
+
+**Old step-1 note, superseded by the above as "most recent," kept for its
+own history:** the "case system" is
+selectable, not hardcoded (FR-51). Prompted by the
+user's own business (UrbanPiper) — real support orgs mix Salesforce/
+Zendesk/HubSpot for tickets with a separate tool for chat/calls, and the
+platform needs to let a tenant pick, not assume Salesforce. Scoped as a
+3-step roadmap: **1. make the connector selectable** (done) → **2. add
+Zendesk as a second real implementation** (not started) → **3. add
+Freshchat as the first pluggable chat/call channel**, building
+on the existing generic webhook trigger + connector framework rather than
+a bespoke poller (not started — supersedes the older 2026-08-30
+"Freshworks chat via a bespoke channel module" architecture memory, now
+that the generic webhook-trigger/connector machinery exists to build it
+on instead).
+
+Every case-touching handler in `registry.py` (`sf_case`/`sf_writeback`/
+`notify`/`ask_human`/`handover`/`identify`/`clarify`) plus `alert.
+alert_human` (behind `notify_human`) called `connectors.invoke(tenant_id,
+"salesforce", <action>, ...)` with **the connector name as a literal
+string** — 15+ call sites, all hardcoded, even though `connectors.invoke`
+itself (built last session, FR-47) was already generic. Migration `084`
+adds `tenants.case_connector` (free text, default `'salesforce'`,
+deliberately **no CHECK constraint** — same "connectors are data, not an
+enum" principle CLAUDE.md already applies to `flow_nodes.type`). New
+`connectors.resolve_case_connector(tenant_id, config)` + a `registry.
+_case_conn(state, config)` wrapper: an explicit per-node `config.connector`
+override (the same field the generic `connector_action` node already
+uses) beats the tenant's `case_connector` default, which beats
+`"salesforce"` — every existing flow/tenant with neither set is
+byte-for-byte unchanged. `connectors.CASE_ACTIONS` now documents the exact
+8-action contract (`update_fields`/`post_note`/`add_comment`/
+`assign_owner`/`ensure_case`/`log_email_message`/`identify_sender`/
+`send_case_reply`) a future connector must implement.
+
+**A real regression found and fixed before calling this done, not
+theoretical:** the naive resolver did a live Supabase read on every single
+call — previously impossible (the connector was a literal), now a real
+per-node-invocation network dependency that would have made every
+case-touching offline test quietly reach for a live DB connection. Fixed
+with the exact pattern `routing.py`'s `_fetch_rows` already established
+for this same problem: skip the read and return the default when running
+under pytest with no `sb` explicitly passed (a test that wants to exercise
+the real lookup still can, by passing a fake `sb`). Verified by diffing
+against the pre-change run, not assumed — timing was noise either way,
+but the guard is correct regardless and matches the codebase's own
+convention.
+
+**Proven as a real seam, not just a resolver returning a string:**
+`tests/test_sf_handlers_use_connectors.py::test_a_second_connector_
+genuinely_receives_the_call` registers a second, throwaway connector
+implementing the full `CASE_ACTIONS` contract, points a fake tenant's
+`case_connector` at it, and drives the real (unmocked) `h_ask_human`
+through it — asserting `salesforce.post_chatter`/`assign_case` are never
+called and the dummy connector genuinely receives `post_note`/
+`assign_owner`/`update_fields`. 668 offline tests green (7 new: 6 for
+`resolve_case_connector` itself, 1 for the end-to-end swap).
+
+**A real design question surfaced, not resolved:** several call sites
+(`h_ask_human`'s `add_comment`, others) have no try/except around
+`connectors.invoke` — unreachable before this chunk (`"salesforce"` always
+implemented every action any handler could call), now reachable if a
+tenant's `case_connector` names a connector that only partially
+implements `CASE_ACTIONS`. Arguably correct fail-loud behavior for a
+misconfigured tenant, not obviously a bug worth silently swallowing — a
+live question for whoever builds the next real connector (step 2), not
+resolved here either way.
+
+**Not yet done, deliberately not built now:** no second real connector
+(step 2, Zendesk) — this chunk proves the seam is real, not that there's
+an actual alternative yet; no web UI to pick `case_connector` (nothing
+meaningful to choose between until step 2 exists); `_TYPE_DOC` (the AI
+Flow Copilot's node docs) deliberately NOT updated with the new
+`config.connector` field — with only one working value, documenting it
+risks the model inventing a connector slug that doesn't exist (the exact
+19e/19f lesson), worth revisiting once Zendesk is real.
+
+**Old Playwright note, superseded by the above as "most recent," kept for
+its own history:** e2e on the web editor: built, live-verified in
+this sandbox, wired into CI. Closes a residual open since Phase 9. Picked
+from a 3-option menu offered after Phase 29 closed
 (the other two — a second real connector, CI/eval hardening — not started).
 `web/e2e/flow-editor.spec.ts` (Playwright, `@playwright/test` added as a
 devDependency) drives the real app in a real Chromium: stubbed auth → load
