@@ -707,10 +707,91 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-05 — Freshchat setup completed: connect-a-channel API + web UI
-(FR-51/FR-20). This is the most recent work in this file (see the
-top-of-file note: this doc is edited in place, not strictly appended to —
-check dates, not physical position).** The user doesn't have real
+**2026-09-05 — Multi-provider connectors, ALL 3 STEPS NOW BUILT (FR-51).
+Step 2 (Zendesk) landed today, plus the case_connector picker UI that
+closes step 1's last open residual. This is the most recent work in this
+file (see the top-of-file note: this doc is edited in place, not strictly
+appended to — check dates, not physical position).**
+
+**Step 2 — Zendesk, a real second case-system connector.** New
+`interpreter/zendesk.py` implements the full `connectors.CASE_ACTIONS`
+contract (8 actions) against Zendesk's real REST API (Basic auth
+`{email}/token`:`{api_token}`), matching every return-dict shape
+`salesforce.py`'s equivalents use exactly — that shape is what
+`registry.py`'s node handlers actually read (`result["dry_run"]`,
+`sender["match"]`, ...), so matching it is what makes this a drop-in, not
+just an API wrapper. **Honest about where Zendesk's data model doesn't
+map 1:1 onto Salesforce's** (documented in the module's own docstring,
+not glossed over): no Contact/Account/Lead split (Zendesk has Users +
+Organizations); `ensure_case`'s thread-reuse can't match Salesforce's
+exact Message-ID matching (reuses the requester's most recent *open*
+ticket instead — looser, intentional, not a bug); `log_email_message` is
+a deliberate no-op (a Zendesk ticket's comment thread already *is* the
+email log — Salesforce needs a separate object, Zendesk doesn't);
+`update_fields` only maps `Status` (translated to Zendesk's own values) —
+every other Salesforce-shaped field name (`Routed_Team__c`,
+`AI_Confidence__c`, ...) is reported in `skipped`, not silently dropped;
+`append` becomes a private ticket comment instead of a field append (the
+closest real Zendesk equivalent). Registered as a `zendesk` builtin in
+`connectors.py`, reusing the *exact same* `ActionSpec` param shapes as
+Salesforce's action descriptors (no `_ORG_PARAM` — Zendesk isn't
+multi-org like Salesforce).
+
+**Proven as a genuinely working second implementation, not just the
+step-1 test-only dummy:** `tests/test_sf_handlers_use_connectors.py::
+test_a_tenant_on_zendesk_routes_ask_human_to_zendesk_not_salesforce`
+drives the real, unmocked `h_ask_human` through a tenant configured for
+`case_connector="zendesk"` and confirms real (mocked-HTTP) Zendesk calls
+land on `/tickets/1.json` and `/groups.json` while `salesforce.post_chatter`/
+`assign_case` are asserted never called.
+
+**Connect-account API + web UI, same day (closing step 1's residual
+too):** `GET/PUT/DELETE /api/integrations/zendesk` + `.../test`, mirroring
+email/Freshchat's exact Vault-backed pattern. New `ConnectionsView.tsx`
+pieces: a `CaseConnectorPicker` (hardcoded to the two real slugs,
+`salesforce`/`zendesk` — deliberately not a free-text box, since a
+typo'd connector slug would silently escalate every case rather than
+error, per `resolve_case_connector`'s own fail-safe design) + a
+`ZendeskPanel`. New Playwright spec `web/e2e/connections.spec.ts` (pick
+Zendesk as the case connector, connect an account, save) — 3/3 stable
+reruns; caught and fixed a real, unrelated pre-existing crash along the
+way (`AiModelsPanel`, which also renders on this tab, threw on a
+malformed mock response shape — nothing to do with this chunk, just
+surfaced by exercising the page for real).
+
+**A real bug found and fixed while live-testing, not caused by the
+connector itself:** the new `PUT /api/tenants/case-connector` endpoint
+did a plain `UPDATE`, which silently no-ops for a tenant that predates
+the `tenants` table (P7d, self-serve workspaces) — the seeded Globex demo
+tenant turned out to be exactly such a case, confirmed live
+(`select * from tenants where tenant_id = <globex>` returned **zero
+rows**, despite Globex being a real, long-used demo tenant with
+`tenant_members`/`tenant_integrations` rows). Fixed with an upsert
+fallback (using the same "workspace `<id prefix>`" placeholder name the
+web UI's own `tenantLabel()` already falls back to for a nameless
+tenant). **A genuine positive side effect, not just a workaround:**
+Globex now has a real `tenants` row it never had before — a pre-existing
+gap closed as a side effect of testing this live, not left for someone
+else to trip over later.
+
+737 offline pytest green (was 661 at the start of this session's
+multi-provider-connectors thread: +7 step 1, +31 Freshchat backend, +5
+Freshchat connect-UI, +31 Zendesk + connect-UI + case-connector-picker
+tests) + 9 new **live** integration tests against the real Supabase
+project (Zendesk connect/test/owner-gating, case-connector get/set/
+owner-gating — real Vault, real RLS, real owner-gating, not mocked) +
+3 stable Playwright specs (flow editor, Channels/Freshchat,
+Connections/Zendesk).
+
+**Not yet done:** live verification against a real Zendesk account (same
+"flag it, don't spend it" pattern as Freshchat — Zendesk also has a free
+trial if useful alongside Freshchat's). **Multi-provider connectors: all
+3 steps built. FR-51 is functionally complete pending live verification
+of steps 2 and 3.**
+
+**Old Freshchat-setup note, superseded by the above as "most recent,"
+kept for its own history:** connect-a-channel API + web UI
+(FR-51/FR-20). The user doesn't have real
 Freshchat credentials yet ("in the meantime I will try to get the keys")
 — this closes the one piece of step 3 that didn't need them: a tenant can
 now actually save/test/disconnect a Freshchat channel from the web UI,

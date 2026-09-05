@@ -2737,6 +2737,139 @@ def salesforce_oauth_callback(code: str = "", state: str = "", error: str = "") 
     return page(f"Salesforce org {org_label!r} connected. You can close this window.")
 
 
+# ── Multi-provider connectors step 2: connect a Zendesk account ──────────
+class ZendeskConnectionIn(BaseModel):
+    subdomain: str | None = None
+    email: str | None = None
+    api_token: str | None = None       # write-only, never returned; Vault-backed
+    tenant_id: str | None = None
+
+
+def _zendesk_cfg_from_body(tenant_id: str, body: "ZendeskConnectionIn", existing):
+    from interpreter.zendesk import ZendeskConfig
+
+    return ZendeskConfig(
+        tenant_id=tenant_id,
+        subdomain=(body.subdomain or (existing.subdomain if existing else "")).strip(),
+        email=(body.email or (existing.email if existing else "")).strip(),
+        status=(existing.status if existing else "inactive"),
+    )
+
+
+@app.get("/api/integrations/zendesk")
+def zendesk_status(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    """Connection status for the caller's tenant. Never returns the token."""
+    tid = _caller_tenant(c, tenant_id)
+    from interpreter.zendesk import load_channel
+
+    ch = load_channel(tid, _service)
+    if not ch:
+        return {"tenant_id": tid, "configured": False, "status": "none"}
+    return {"tenant_id": tid, **ch.public_status()}
+
+
+@app.put("/api/integrations/zendesk")
+def zendesk_configure(body: ZendeskConnectionIn, c: Caller = Depends(caller)) -> dict:
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    rate_limit(c.user_id, "integration", 30)
+    from interpreter.zendesk import load_channel, save_channel
+
+    existing = load_channel(tid, _service)
+    if not (body.subdomain or (existing and existing.subdomain)):
+        raise HTTPException(422, "subdomain is required")
+    if not (body.email or (existing and existing.email)):
+        raise HTTPException(422, "email is required")
+    has_token = bool(body.api_token) or bool(existing and existing.api_token)
+    if not has_token:
+        raise HTTPException(422, "api_token is required")
+
+    cfg = _zendesk_cfg_from_body(tid, body, existing)
+    cfg.status = "active"
+    save_channel(cfg, _service, api_token=body.api_token)
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid,
+                 action="zendesk_connection.configured" if existing else "zendesk_connection.connected",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="zendesk_connection", target_id=tid,
+                 summary=f"{'updated' if existing else 'connected'} the Zendesk account")
+    return zendesk_status(tenant_id=tid, c=c)
+
+
+@app.delete("/api/integrations/zendesk", status_code=204)
+def zendesk_disconnect(tenant_id: str | None = None, c: Caller = Depends(caller)) -> None:
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    from interpreter import audit
+    from interpreter.zendesk import delete_channel
+
+    delete_channel(tid, _service)
+    audit.record(_service, tenant_id=tid, action="zendesk_connection.disconnected",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="zendesk_connection", target_id=tid,
+                 summary="disconnected the Zendesk account")
+
+
+@app.post("/api/integrations/zendesk/test")
+def zendesk_test(body: ZendeskConnectionIn, c: Caller = Depends(caller)) -> dict:
+    """A lightweight authenticated read (`GET /users/me.json`) — saves
+    nothing. Uses the posted token, falling back to the stored one when
+    the field is left blank."""
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    rate_limit(c.user_id, "integration", 20)
+    from interpreter.zendesk import load_channel, test_connection
+
+    existing = load_channel(tid, _service)
+    cfg = _zendesk_cfg_from_body(tid, body, existing)
+    cfg.api_token = body.api_token or (existing.api_token if existing else "")
+    return test_connection(cfg)
+
+
+# ── Multi-provider connectors step 1: which connector is "the case
+# system" for this tenant (tenants.case_connector, migration 084) ────────
+class CaseConnectorIn(BaseModel):
+    case_connector: str
+    tenant_id: str | None = None
+
+
+@app.get("/api/tenants/case-connector")
+def get_case_connector(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    tid = _caller_tenant(c, tenant_id)
+    rows = (_service.table("tenants").select("case_connector")
+            .eq("tenant_id", tid).execute().data or [{}])
+    return {"tenant_id": tid, "case_connector": rows[0].get("case_connector") or "salesforce"}
+
+
+@app.put("/api/tenants/case-connector")
+def set_case_connector(body: CaseConnectorIn, c: Caller = Depends(caller)) -> dict:
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    value = body.case_connector.strip()
+    if not value:
+        raise HTTPException(422, "case_connector is required")
+    # a tenant created before the `tenants` table existed (P7d self-serve
+    # workspaces -- e.g. the seeded Globex demo tenant) has no row here at
+    # all, so a plain UPDATE silently matches zero rows and "succeeds"
+    # without persisting anything (found live-testing this exact
+    # endpoint). Upsert instead, using the same "workspace <id prefix>"
+    # placeholder name the web UI's own tenantLabel() fallback already
+    # uses for a nameless tenant.
+    updated = (_service.table("tenants").update({"case_connector": value})
+              .eq("tenant_id", tid).execute().data)
+    if not updated:
+        _service.table("tenants").upsert(
+            {"tenant_id": tid, "name": f"workspace {tid[:8]}", "case_connector": value},
+        ).execute()
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="tenant.case_connector_changed",
+                 actor_id=c.user_id, actor_email=c.email, target_type="tenant", target_id=tid,
+                 summary=f"case system set to {value!r}")
+    return {"tenant_id": tid, "case_connector": value}
+
+
 # ── Phase 16: policy rules ───────────────────────────────────────────
 class RuleIn(BaseModel):
     team: str

@@ -494,6 +494,26 @@ export interface SalesforceOrgSchema {
   errors: string[];
 }
 
+export interface ZendeskConnection {
+  tenant_id: string;
+  configured: boolean;
+  status: "none" | "inactive" | "active" | "error";
+  subdomain?: string;
+  email?: string;
+}
+
+export interface ZendeskConnectionSave {
+  tenant_id?: string;
+  subdomain?: string;
+  email?: string;
+  api_token?: string;
+}
+
+export interface CaseConnector {
+  tenant_id: string;
+  case_connector: string;
+}
+
 export interface BillingUsage {
   period_label: string;                 // "2026-09"
   period: { start: string; end: string };

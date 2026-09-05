@@ -447,6 +447,18 @@ def test_freshchat_channel_endpoints_need_a_token():
     assert client.get("/api/integrations/freshchat/webhook-url").status_code == 401
 
 
+def test_zendesk_connection_endpoints_need_a_token():
+    assert client.get("/api/integrations/zendesk").status_code == 401
+    assert client.put("/api/integrations/zendesk", json={"subdomain": "x"}).status_code == 401
+    assert client.post("/api/integrations/zendesk/test", json={"subdomain": "x"}).status_code == 401
+    assert client.delete("/api/integrations/zendesk").status_code == 401
+
+
+def test_case_connector_endpoints_need_a_token():
+    assert client.get("/api/tenants/case-connector").status_code == 401
+    assert client.put("/api/tenants/case-connector", json={"case_connector": "zendesk"}).status_code == 401
+
+
 def test_salesforce_case_hook_needs_the_shared_secret():
     # no X-SF-Hook-Secret header -> 401, never reaches flow resolution
     r = client.post("/api/hooks/salesforce/case", json={"case_id": "500xx"})
@@ -817,6 +829,81 @@ def test_freshchat_channel_write_is_owner_only(globex_as_viewer, auth_headers):
     ):
         r = call()
         assert r.status_code == 403, r.text
+
+
+@pytest.mark.integration
+def test_zendesk_connection_configure_status_and_disconnect(auth_headers):
+    body = {"subdomain": "acme", "email": "bot@acme.com", "api_token": "fake-token-secret",
+           "tenant_id": GLOBEX_TENANT}
+    try:
+        r = client.put("/api/integrations/zendesk", headers=auth_headers, json=body)
+        assert r.status_code == 200, r.text
+        got = client.get("/api/integrations/zendesk", headers=auth_headers,
+                         params={"tenant_id": GLOBEX_TENANT}).json()
+        assert got["configured"] is True and got["subdomain"] == "acme"
+        assert got["email"] == "bot@acme.com" and got["status"] == "active"
+        assert "fake-token-secret" not in str(got) and "api_token" not in got
+    finally:
+        client.delete("/api/integrations/zendesk", headers=auth_headers,
+                      params={"tenant_id": GLOBEX_TENANT})
+    gone = client.get("/api/integrations/zendesk", headers=auth_headers,
+                      params={"tenant_id": GLOBEX_TENANT}).json()
+    assert gone["configured"] is False and gone["status"] == "none"
+
+
+@pytest.mark.integration
+def test_zendesk_connection_test_connection_reports_failure_cleanly(auth_headers):
+    r = client.post("/api/integrations/zendesk/test", headers=auth_headers, json={
+        "subdomain": "nope-invalid-test", "email": "x@y.test", "api_token": "bad",
+        "tenant_id": GLOBEX_TENANT,
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False and body["error"]
+
+
+@pytest.mark.integration
+def test_zendesk_connection_write_is_owner_only(globex_as_viewer, auth_headers):
+    assert client.get("/api/integrations/zendesk", headers=auth_headers,
+                      params={"tenant_id": GLOBEX_TENANT}).status_code == 200
+    for call in (
+        lambda: client.put("/api/integrations/zendesk", headers=auth_headers,
+                           json={"subdomain": "h", "email": "e", "api_token": "t",
+                                 "tenant_id": GLOBEX_TENANT}),
+        lambda: client.post("/api/integrations/zendesk/test", headers=auth_headers,
+                            json={"subdomain": "h", "email": "e", "api_token": "t",
+                                  "tenant_id": GLOBEX_TENANT}),
+        lambda: client.delete("/api/integrations/zendesk", headers=auth_headers,
+                              params={"tenant_id": GLOBEX_TENANT}),
+    ):
+        r = call()
+        assert r.status_code == 403, r.text
+
+
+@pytest.mark.integration
+def test_case_connector_get_defaults_and_set_round_trip(auth_headers):
+    got = client.get("/api/tenants/case-connector", headers=auth_headers,
+                     params={"tenant_id": GLOBEX_TENANT}).json()
+    original = got["case_connector"]
+    try:
+        r = client.put("/api/tenants/case-connector", headers=auth_headers,
+                       json={"case_connector": "zendesk", "tenant_id": GLOBEX_TENANT})
+        assert r.status_code == 200 and r.json()["case_connector"] == "zendesk"
+        got2 = client.get("/api/tenants/case-connector", headers=auth_headers,
+                          params={"tenant_id": GLOBEX_TENANT}).json()
+        assert got2["case_connector"] == "zendesk"
+    finally:
+        client.put("/api/tenants/case-connector", headers=auth_headers,
+                  json={"case_connector": original, "tenant_id": GLOBEX_TENANT})
+
+
+@pytest.mark.integration
+def test_case_connector_write_is_owner_only(globex_as_viewer, auth_headers):
+    assert client.get("/api/tenants/case-connector", headers=auth_headers,
+                      params={"tenant_id": GLOBEX_TENANT}).status_code == 200
+    r = client.put("/api/tenants/case-connector", headers=auth_headers,
+                  json={"case_connector": "zendesk", "tenant_id": GLOBEX_TENANT})
+    assert r.status_code == 403
 
 
 @pytest.mark.integration

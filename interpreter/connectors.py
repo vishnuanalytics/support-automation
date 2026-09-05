@@ -288,6 +288,143 @@ register_builtin(ConnectorSpec(
     },
 ))
 
+
+# --------------------------------------------------------------------------
+# Multi-provider connectors step 2 (2026-09-05) — Zendesk, a second real
+# `CASE_ACTIONS` implementation (see interpreter/zendesk.py for the mapping
+# notes / honest gaps vs. Salesforce's data model). No `_ORG_PARAM` here —
+# Zendesk isn't multi-org like Salesforce, so showing that field in the
+# generic connector_action editor form would be actively misleading.
+# --------------------------------------------------------------------------
+def _zd_update_fields(tenant_id: str | None, org_label: str | None, params: dict) -> dict:
+    from . import zendesk
+    return zendesk.update_case_fields(
+        params["case_id"], dict(params.get("fields") or {}),
+        append=dict(params.get("append") or {}), tenant_id=tenant_id,
+    )
+
+
+def _zd_post_note(tenant_id: str | None, org_label: str | None, params: dict) -> dict:
+    from . import zendesk
+    return zendesk.post_note(params["case_id"], params.get("body", ""),
+                             mention_id=params.get("mention_id"), tenant_id=tenant_id)
+
+
+def _zd_add_comment(tenant_id: str | None, org_label: str | None, params: dict) -> dict:
+    from . import zendesk
+    return zendesk.add_case_comment(params["case_id"], params.get("body", ""),
+                                    published=bool(params.get("published", False)), tenant_id=tenant_id)
+
+
+def _zd_assign_owner(tenant_id: str | None, org_label: str | None, params: dict) -> dict:
+    from . import zendesk
+    return zendesk.assign_case(params["case_id"], queue=params.get("queue"),
+                               user_id=params.get("user_id"), tenant_id=tenant_id)
+
+
+def _zd_ensure_case(tenant_id: str | None, org_label: str | None, params: dict) -> dict:
+    from . import zendesk
+    return zendesk.ensure_case(
+        dict(params.get("case") or {}), dict(params.get("sender") or {}),
+        origin=params.get("origin", "Email"), status=params.get("status", "New"),
+        create_contact=_as_bool(params.get("create_contact"), True),
+        create_account=_as_bool(params.get("create_account"), True),
+        reuse=str(params.get("reuse", "thread")), tenant_id=tenant_id,
+    )
+
+
+def _zd_log_email_message(tenant_id: str | None, org_label: str | None, params: dict) -> dict:
+    from . import zendesk
+    return zendesk.log_email_message(
+        params["case_id"], incoming=_as_bool(params.get("incoming"), True),
+        from_addr=params.get("from_addr", ""), to_addrs=params.get("to_addrs", ""),
+        subject=params.get("subject", ""), body=params.get("body", ""),
+        message_id=params.get("message_id", ""), tenant_id=tenant_id,
+    )
+
+
+def _zd_identify_sender(tenant_id: str | None, org_label: str | None, params: dict) -> dict:
+    from . import zendesk
+    return zendesk.identify_sender(
+        params["email"], free_domains=params.get("free_domains"),
+        domain_match=_as_bool(params.get("domain_match"), True),
+        create_lead=_as_bool(params.get("create_lead"), False), tenant_id=tenant_id,
+    )
+
+
+def _zd_send_case_reply(tenant_id: str | None, org_label: str | None, params: dict) -> dict:
+    from . import zendesk
+    return zendesk.send_case_reply(
+        params["case_id"], params.get("body", ""),
+        to_email=params.get("to_email"), subject=params.get("subject"), tenant_id=tenant_id,
+    )
+
+
+register_builtin(ConnectorSpec(
+    slug="zendesk", label="Zendesk", auth="apikey",
+    actions={
+        "update_fields": ActionSpec(
+            "update_fields", "Update fields on a ticket (Status only, mapped; everything else is skipped)",
+            params=[{"key": "case_id", "label": "Ticket Id", "type": "template", "required": True},
+                    {"key": "fields", "label": "Fields (JSON)", "type": "json", "required": True},
+                    {"key": "append", "label": "Append (JSON: field -> text) -> a private comment",
+                     "type": "json", "required": False}],
+            impl=_zd_update_fields),
+        "post_note": ActionSpec(
+            "post_note", "Add a private (internal) ticket comment",
+            params=[{"key": "case_id", "label": "Ticket Id", "type": "template", "required": True},
+                    {"key": "body", "label": "Note", "type": "template", "required": True},
+                    {"key": "mention_id", "label": "cc (agent id/name)", "type": "template", "required": False}],
+            impl=_zd_post_note),
+        "add_comment": ActionSpec(
+            "add_comment", "Add a ticket comment",
+            params=[{"key": "case_id", "label": "Ticket Id", "type": "template", "required": True},
+                    {"key": "body", "label": "Comment", "type": "template", "required": True}],
+            impl=_zd_add_comment),
+        "assign_owner": ActionSpec(
+            "assign_owner", "Route a ticket to a group (queue) or an agent",
+            params=[{"key": "case_id", "label": "Ticket Id", "type": "template", "required": True},
+                    {"key": "queue", "label": "Group name", "type": "string", "required": False},
+                    {"key": "user_id", "label": "Agent Id", "type": "string", "required": False}],
+            impl=_zd_assign_owner),
+        "ensure_case": ActionSpec(
+            "ensure_case", "Resolve/create a ticket (+ User/Organization) for an inbound message",
+            params=[{"key": "case", "label": "Case (JSON)", "type": "json", "required": True},
+                    {"key": "sender", "label": "Sender (JSON)", "type": "json", "required": False},
+                    {"key": "origin", "label": "Origin", "type": "string", "required": False},
+                    {"key": "status", "label": "Status", "type": "string", "required": False},
+                    {"key": "reuse", "label": "Reuse", "type": "select", "required": False,
+                     "options": ["thread", "never"]}],
+            impl=_zd_ensure_case),
+        "log_email_message": ActionSpec(
+            "log_email_message", "No-op — a Zendesk ticket's comment thread is already the email log",
+            params=[{"key": "case_id", "label": "Ticket Id", "type": "template", "required": True},
+                    {"key": "incoming", "label": "Incoming", "type": "select", "required": False,
+                     "options": ["true", "false"]},
+                    {"key": "from_addr", "label": "From", "type": "template", "required": False},
+                    {"key": "to_addrs", "label": "To", "type": "template", "required": False},
+                    {"key": "subject", "label": "Subject", "type": "template", "required": False},
+                    {"key": "body", "label": "Body", "type": "template", "required": False},
+                    {"key": "message_id", "label": "Message-Id", "type": "template", "required": False}],
+            impl=_zd_log_email_message),
+        "identify_sender": ActionSpec(
+            "identify_sender", "Resolve a sender email to a User/Organization",
+            params=[{"key": "email", "label": "Email", "type": "template", "required": True},
+                    {"key": "domain_match", "label": "Domain match", "type": "select", "required": False,
+                     "options": ["true", "false"]},
+                    {"key": "create_lead", "label": "Create a user if missing", "type": "select",
+                     "required": False, "options": ["true", "false"]}],
+            impl=_zd_identify_sender),
+        "send_case_reply": ActionSpec(
+            "send_case_reply", "Send a customer-facing (public) reply on a ticket",
+            params=[{"key": "case_id", "label": "Ticket Id", "type": "template", "required": True},
+                    {"key": "body", "label": "Body", "type": "template", "required": True},
+                    {"key": "to_email", "label": "To", "type": "template", "required": False},
+                    {"key": "subject", "label": "Subject", "type": "template", "required": False}],
+            impl=_zd_send_case_reply),
+    },
+))
+
 register_builtin(ConnectorSpec(
     slug="slack", label="Slack", auth="builtin",
     actions={

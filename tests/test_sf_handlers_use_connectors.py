@@ -238,3 +238,53 @@ def test_a_second_connector_genuinely_receives_the_call(monkeypatch, dummy_case_
     )
     kinds = {k for k, _ in dummy_case_connector}
     assert {"post_note", "assign_owner"} <= kinds
+
+
+# ── 2026-09-05: Zendesk (step 2) is a real second implementation, not just
+# a test-only dummy — the same tenant-connector swap, but landing on real
+# (mocked-HTTP) Zendesk API calls.
+def test_a_tenant_on_zendesk_routes_ask_human_to_zendesk_not_salesforce(monkeypatch):
+    class _TenantSB:
+        def table(self, name):
+            assert name == "tenants"
+            return self
+
+        def select(self, *_a):
+            return self
+
+        def eq(self, *_a):
+            return self
+
+        def execute(self):
+            return type("R", (), {"data": [{"case_connector": "zendesk"}]})()
+
+    def boom(*_a, **_k):
+        raise AssertionError("salesforce.py must not be called — this tenant is on zendesk")
+    monkeypatch.setattr(salesforce, "post_chatter", boom)
+    monkeypatch.setattr(salesforce, "assign_case", boom)
+
+    import requests
+
+    from interpreter import zendesk
+    monkeypatch.setattr(zendesk, "_creds", lambda tenant_id, sb=None: {
+        "subdomain": "acme", "email": "bot@acme.com", "api_token": "tok"})
+
+    http_calls = []
+
+    def fake_request(method, url, *, auth=None, json=None, params=None, timeout=None):
+        http_calls.append((method, url, json))
+        if method == "GET" and "/groups.json" in url:
+            return type("R", (), {"status_code": 200, "content": b"1",
+                                  "raise_for_status": lambda self: None,
+                                  "json": lambda self: {"groups": [{"id": 7, "name": "Team_Support"}]}})()
+        return type("R", (), {"status_code": 200, "content": b"1",
+                              "raise_for_status": lambda self: None, "json": lambda self: {}})()
+    monkeypatch.setattr(requests, "request", fake_request)
+
+    h_ask_human(
+        {"case": {"sf_id": "1"}, "draft": "hi", "confidence": 0.2, "tenant_id": "t"},
+        {"_node_id": "n", "queue": "Team_Support", "_sb": _TenantSB()},
+    )
+    paths_hit = {url for _m, url, _j in http_calls}
+    assert any("/tickets/1.json" in u for u in paths_hit)   # post_note landed
+    assert any("/groups.json" in u for u in paths_hit)       # assign_owner resolved the queue

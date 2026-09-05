@@ -1,6 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
-import type { Connection, ConnectionAction, SalesforceOrg, SalesforceOrgSchema } from "../types";
+import type {
+  Connection, ConnectionAction, SalesforceOrg, SalesforceOrgSchema,
+  ZendeskConnection, ZendeskConnectionSave,
+} from "../types";
 
 const AUTH_TYPES = ["none", "bearer", "header", "basic"] as const;
 
@@ -178,8 +181,150 @@ export function ConnectionsView({ tenantId }: { tenantId: string }) {
         </div>
       </div>
 
+      <CaseConnectorPicker tenantId={tenantId} />
       <SalesforceOrgsPanel tenantId={tenantId} />
+      <ZendeskPanel tenantId={tenantId} />
       <AiModelsPanel tenantId={tenantId} />
+    </div>
+  );
+}
+
+/** Multi-provider connectors step 1 (FR-51) — which connected system this
+ * tenant's case-touching nodes (sf_case/sf_writeback/ask_human/handover/
+ * identify/clarify/notify_human) write to by default. Hardcoded to the two
+ * REAL implementations that exist (`salesforce`, `zendesk`) rather than a
+ * free-text box — a typo'd connector slug here would silently escalate
+ * every case (connectors.resolve_case_connector falls back to Salesforce
+ * only when the row is *missing*, not when it names something that
+ * doesn't implement the CASE_ACTIONS contract). A per-node `connector`
+ * override (in that node's own JSON config) still beats this default. */
+function CaseConnectorPicker({ tenantId }: { tenantId: string }) {
+  const [value, setValue] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.caseConnector.get(tenantId).then((r) => setValue(r.case_connector)).catch(() => setValue("salesforce"));
+  }, [tenantId]);
+
+  const save = async (next: string) => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await api.caseConnector.set(next, tenantId);
+      setValue(next);
+      setMsg("saved");
+    } catch (e) {
+      setMsg(`✗ ${(e as ApiError).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (value === null) return null;
+  return (
+    <div className="col" style={{ gap: 8, borderTop: "1px solid var(--hair,#ddd)", paddingTop: 16 }}>
+      <h3 style={{ margin: 0 }}>Case system</h3>
+      <p style={{ margin: 0, color: "var(--muted, #667)" }}>
+        Which connected system your case-touching flow nodes (routing, notes, assignment,
+        replies) write to by default. Connect it below before switching to it.
+      </p>
+      <div className="row" style={{ gap: 8, alignItems: "center" }}>
+        <select value={value} disabled={busy} onChange={(e) => save(e.target.value)}>
+          <option value="salesforce">Salesforce</option>
+          <option value="zendesk">Zendesk</option>
+        </select>
+        {msg && <span className="muted" style={{ fontSize: 12 }}>{msg}</span>}
+      </div>
+    </div>
+  );
+}
+
+/** Multi-provider connectors step 2 — Zendesk as a second real case system
+ * (see interpreter/zendesk.py for the mapping notes / honest gaps vs.
+ * Salesforce's data model). One connection per tenant (unlike Salesforce,
+ * Zendesk isn't multi-org here), same shape as the email/Freshchat panels. */
+function ZendeskPanel({ tenantId }: { tenantId: string }) {
+  const [ch, setCh] = useState<ZendeskConnection | null>(null);
+  const [f, setF] = useState({ subdomain: "", email: "", api_token: "" });
+  const [err, setErr] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = () => {
+    api.zendesk
+      .status(tenantId)
+      .then((s) => {
+        setCh(s);
+        if (s.configured) setF((p) => ({ ...p, subdomain: s.subdomain ?? "", email: s.email ?? "" }));
+      })
+      .catch((e: ApiError) => setErr(e.message));
+  };
+  useEffect(load, [tenantId]);
+
+  const payload = useMemo<ZendeskConnectionSave>(() => ({
+    tenant_id: tenantId, subdomain: f.subdomain.trim(), email: f.email.trim(),
+    api_token: f.api_token || undefined,
+  }), [f, tenantId]);
+
+  async function run<T>(fn: () => Promise<T>, ok: string) {
+    setBusy(true); setErr(null); setMsg(null);
+    try {
+      await fn();
+      setMsg(ok);
+      load();
+      setF((p) => ({ ...p, api_token: "" }));
+    } catch (e) {
+      setErr((e as ApiError).message);
+    }
+    setBusy(false);
+  }
+
+  const testConn = () =>
+    run(async () => {
+      const r = await api.zendesk.test(payload);
+      if (!r.ok) throw new ApiError(0, r.error || "connection failed");
+    }, "connection ok");
+
+  return (
+    <div className="col" style={{ gap: 8, borderTop: "1px solid var(--hair,#ddd)", paddingTop: 16 }}>
+      <h3 style={{ margin: 0 }}>Zendesk</h3>
+      <p style={{ margin: 0, color: "var(--muted, #667)" }}>
+        Connect a Zendesk account to use it as this tenant's case system (pick it above once
+        connected). Ticket comments/status/assignment map onto Zendesk's own model — see the
+        Zendesk connector's own notes for where that mapping is intentionally partial.
+      </p>
+      {ch?.configured && (
+        <div className={`banner ${ch.status === "error" ? "err" : "ok"}`}>status: <strong>{ch.status}</strong></div>
+      )}
+      <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+        <input placeholder="subdomain (yourcompany)" value={f.subdomain}
+          onChange={(e) => setF({ ...f, subdomain: e.target.value })} />
+        <input placeholder="agent email (bot@yourcompany.com)" value={f.email}
+          style={{ minWidth: 220 }} onChange={(e) => setF({ ...f, email: e.target.value })} />
+        <input type="password" placeholder={ch?.configured ? "API token (leave blank to keep)" : "API token"}
+          value={f.api_token} onChange={(e) => setF({ ...f, api_token: e.target.value })} />
+      </div>
+      <span className="muted" style={{ fontSize: 12 }}>
+        Zendesk admin console → Apps and integrations → APIs → API tokens.
+      </span>
+
+      {err && <div className="banner err">{err}</div>}
+      {msg && <div className="banner ok">{msg}</div>}
+
+      <div className="row" style={{ gap: 6 }}>
+        <button onClick={testConn} disabled={busy || !f.subdomain || !f.email}>Test connection</button>
+        <button className="primary" disabled={busy || !f.subdomain || !f.email}
+          onClick={() => run(() => api.zendesk.save(payload), "saved")}>
+          Save
+        </button>
+        {ch?.configured && (
+          <button className="err" disabled={busy}
+            onClick={() => confirm("Disconnect Zendesk?") && run(() => api.zendesk.remove(tenantId), "disconnected")}>
+            Disconnect
+          </button>
+        )}
+      </div>
     </div>
   );
 }

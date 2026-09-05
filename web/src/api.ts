@@ -40,6 +40,9 @@ import type {
   SalesforceOrg,
   SalesforceOrgSchema,
   TemplateMeta,
+  ZendeskConnection,
+  ZendeskConnectionSave,
+  CaseConnector,
 } from "./types";
 
 const BASE = (import.meta.env.VITE_API_BASE as string) || ""; // "" -> vite proxy
@@ -184,6 +187,29 @@ export const api = {
       return req<{ url: string }>(`/integrations/salesforce/oauth/authorize?${p.toString()}`);
     },
   },
+
+  zendesk: {
+    status: (tenantId?: string) =>
+      req<ZendeskConnection>(`/integrations/zendesk${tenantId ? `?tenant_id=${tenantId}` : ""}`),
+    save: (b: ZendeskConnectionSave) =>
+      req<ZendeskConnection>("/integrations/zendesk", { method: "PUT", body: JSON.stringify(b) }),
+    remove: (tenantId?: string) =>
+      req<void>(`/integrations/zendesk${tenantId ? `?tenant_id=${tenantId}` : ""}`, { method: "DELETE" }),
+    test: (b: ZendeskConnectionSave) =>
+      req<{ ok: boolean; error: string | null }>(
+        "/integrations/zendesk/test", { method: "POST", body: JSON.stringify(b) },
+      ),
+  },
+
+  caseConnector: {
+    get: (tenantId?: string) =>
+      req<CaseConnector>(`/tenants/case-connector${tenantId ? `?tenant_id=${tenantId}` : ""}`),
+    set: (caseConnector: string, tenantId?: string) =>
+      req<CaseConnector>("/tenants/case-connector", {
+        method: "PUT", body: JSON.stringify({ case_connector: caseConnector, tenant_id: tenantId }),
+      }),
+  },
+
   rollbackFlow: (id: string, version: number) =>
     req<{ published_version: number }>(`/flows/${id}/rollback`, {
       method: "POST",
