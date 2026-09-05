@@ -8,6 +8,8 @@ import type {
   Flow,
   FlowCandidate,
   FlowMeta,
+  FreshchatChannel,
+  FreshchatChannelSave,
   FlowVersion,
   FlowTrigger,
   Connection,
@@ -274,6 +276,21 @@ export const api = {
       ),
     googleAuthorize: (tenantId?: string) =>
       req<{ url: string }>(`/integrations/email/google/authorize${tenantId ? `?tenant_id=${tenantId}` : ""}`),
+  },
+
+  freshchat: {
+    status: (tenantId?: string) =>
+      req<FreshchatChannel>(`/integrations/freshchat${tenantId ? `?tenant_id=${tenantId}` : ""}`),
+    save: (b: FreshchatChannelSave) =>
+      req<FreshchatChannel>("/integrations/freshchat", { method: "PUT", body: JSON.stringify(b) }),
+    remove: (tenantId?: string) =>
+      req<void>(`/integrations/freshchat${tenantId ? `?tenant_id=${tenantId}` : ""}`, { method: "DELETE" }),
+    test: (b: FreshchatChannelSave) =>
+      req<{ ok: boolean; error: string | null }>(
+        "/integrations/freshchat/test", { method: "POST", body: JSON.stringify(b) },
+      ),
+    webhookUrl: (tenantId?: string) =>
+      req<{ url: string }>(`/integrations/freshchat/webhook-url${tenantId ? `?tenant_id=${tenantId}` : ""}`),
   },
 
   salesforce: {

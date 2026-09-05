@@ -439,6 +439,14 @@ def test_email_channel_endpoints_need_a_token():
     assert r.status_code == 200 and "failed" in r.text
 
 
+def test_freshchat_channel_endpoints_need_a_token():
+    assert client.get("/api/integrations/freshchat").status_code == 401
+    assert client.put("/api/integrations/freshchat", json={"domain": "x"}).status_code == 401
+    assert client.post("/api/integrations/freshchat/test", json={"domain": "x"}).status_code == 401
+    assert client.delete("/api/integrations/freshchat").status_code == 401
+    assert client.get("/api/integrations/freshchat/webhook-url").status_code == 401
+
+
 def test_salesforce_case_hook_needs_the_shared_secret():
     # no X-SF-Hook-Secret header -> 401, never reaches flow resolution
     r = client.post("/api/hooks/salesforce/case", json={"case_id": "500xx"})
@@ -739,6 +747,76 @@ def test_email_channel_test_connection_reports_failure_cleanly(auth_headers):
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is False and body["error"]
+
+
+@pytest.mark.integration
+def test_freshchat_channel_configure_status_and_disconnect(auth_headers):
+    # explicit tenant_id -- this test account belongs to several tenants (a
+    # pre-existing condition, same as test_email_channel_configure_status_
+    # and_disconnect above hits without one; not something to fix here)
+    body = {"domain": "acme.freshchat.com", "team": "support",
+           "api_token": "fake-token-secret", "webhook_public_key": "-----BEGIN PUBLIC KEY-----fake",
+           "auto_send_enabled": False, "tenant_id": GLOBEX_TENANT}
+    try:
+        r = client.put("/api/integrations/freshchat", headers=auth_headers, json=body)
+        assert r.status_code == 200, r.text
+        got = client.get("/api/integrations/freshchat", headers=auth_headers,
+                         params={"tenant_id": GLOBEX_TENANT}).json()
+        assert got["configured"] is True and got["domain"] == "acme.freshchat.com"
+        assert got["status"] == "active" and got["auto_send_enabled"] is False
+        assert got["signature_verification"] is True
+        assert "fake-token-secret" not in str(got) and "api_token" not in got
+        # flip the master switch without re-sending the token
+        r2 = client.put("/api/integrations/freshchat", headers=auth_headers,
+                        json={"domain": "acme.freshchat.com", "auto_send_enabled": True,
+                              "tenant_id": GLOBEX_TENANT})
+        assert r2.status_code == 200
+        got2 = client.get("/api/integrations/freshchat", headers=auth_headers,
+                          params={"tenant_id": GLOBEX_TENANT}).json()
+        assert got2["auto_send_enabled"] is True
+        # the webhook URL includes this tenant's id
+        wh = client.get("/api/integrations/freshchat/webhook-url", headers=auth_headers,
+                        params={"tenant_id": GLOBEX_TENANT}).json()
+        assert wh["url"].endswith("/webhooks/freshchat/" + GLOBEX_TENANT)
+    finally:
+        client.delete("/api/integrations/freshchat", headers=auth_headers,
+                      params={"tenant_id": GLOBEX_TENANT})
+    gone = client.get("/api/integrations/freshchat", headers=auth_headers,
+                      params={"tenant_id": GLOBEX_TENANT}).json()
+    assert gone["configured"] is False and gone["status"] == "none"
+
+
+@pytest.mark.integration
+def test_freshchat_channel_test_connection_reports_failure_cleanly(auth_headers):
+    r = client.post("/api/integrations/freshchat/test", headers=auth_headers, json={
+        "domain": "nope.invalid.test", "api_token": "bad", "tenant_id": GLOBEX_TENANT,
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False and body["error"]
+
+
+@pytest.mark.integration
+def test_freshchat_channel_requires_domain_and_token(auth_headers):
+    r = client.put("/api/integrations/freshchat", headers=auth_headers,
+                   json={"team": "support", "tenant_id": GLOBEX_TENANT})
+    assert r.status_code == 422
+
+
+@pytest.mark.integration
+def test_freshchat_channel_write_is_owner_only(globex_as_viewer, auth_headers):
+    assert client.get("/api/integrations/freshchat", headers=auth_headers,
+                      params={"tenant_id": GLOBEX_TENANT}).status_code == 200
+    for call in (
+        lambda: client.put("/api/integrations/freshchat", headers=auth_headers,
+                           json={"domain": "h", "api_token": "t", "tenant_id": GLOBEX_TENANT}),
+        lambda: client.post("/api/integrations/freshchat/test", headers=auth_headers,
+                            json={"domain": "h", "api_token": "t", "tenant_id": GLOBEX_TENANT}),
+        lambda: client.delete("/api/integrations/freshchat", headers=auth_headers,
+                              params={"tenant_id": GLOBEX_TENANT}),
+    ):
+        r = call()
+        assert r.status_code == 403, r.text
 
 
 @pytest.mark.integration

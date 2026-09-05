@@ -707,10 +707,50 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-05 — Multi-provider connectors, step 3: Freshchat, the first
-pluggable chat/call channel (FR-51/FR-20). This is the most recent work in
-this file (see the top-of-file note: this doc is edited in place, not
-strictly appended to — check dates, not physical position).** The user
+**2026-09-05 — Freshchat setup completed: connect-a-channel API + web UI
+(FR-51/FR-20). This is the most recent work in this file (see the
+top-of-file note: this doc is edited in place, not strictly appended to —
+check dates, not physical position).** The user doesn't have real
+Freshchat credentials yet ("in the meantime I will try to get the keys")
+— this closes the one piece of step 3 that didn't need them: a tenant can
+now actually save/test/disconnect a Freshchat channel from the web UI,
+same as email. `GET/PUT/DELETE /api/integrations/freshchat` +
+`POST /api/integrations/freshchat/test` (a lightweight authenticated
+`GET /v2/agents` read — **not live-verified against a real account**,
+flagged in the function's own docstring so a wrong endpoint guess is easy
+to isolate later) + `GET /api/integrations/freshchat/webhook-url`, all
+mirroring the email channel's exact owner-gated/Vault-backed pattern. Web:
+`ChannelsView.tsx` gains a second panel (`FreshchatPanel`, alongside the
+existing `EmailPanel` — the file was already named "Channels", plural, for
+exactly this). New Playwright spec (`web/e2e/channels.spec.ts`) drives the
+real form in a real Chromium — fill domain/token, Save, assert the PUT
+body, confirm the webhook URL for this tenant renders, Test connection —
+3/3 stable reruns. 5 new offline pytest (704 total) + 4 new **live**
+integration tests against the real Supabase project (real Vault
+encryption, real RLS, real owner-gating — not mocked).
+
+**A real, pre-existing issue found while live-testing, not caused by this
+chunk:** the shared integration-test account (`globex-owner@example.test`)
+now belongs to **several** tenants — `_caller_tenant` correctly 400s
+without an explicit `tenant_id` in that case, which is exactly what
+happened, breaking **18 pre-existing integration tests** across the file
+(confirmed via `git stash`-style isolation: the *email* channel's own
+equivalent test fails the identical way, unrelated to anything built
+today). This session's new Freshchat tests pass because they pass
+`tenant_id` explicitly; the 18 pre-existing ones don't and are just
+broken until someone either cleans up that account's extra
+`tenant_members` rows or the tests are updated to pass an explicit
+tenant_id too. **Not fixed here** — real, but unrelated cleanup, flagged
+for whoever picks it up rather than silently repaired mid-chunk.
+
+**Not yet done:** live verification (needs the user's real Freshchat API
+token + webhook public key — they're getting a developer account); the
+`test_connection` endpoint's choice of `/v2/agents` as the "prove the
+token works" probe is a reasonable guess, not confirmed.
+
+**Old step-3 note, superseded by the above as "most recent," kept for its
+own history:** Freshchat, the first
+pluggable chat/call channel (FR-51/FR-20). The user
 picked step 3 directly (skipping step 2/Zendesk for now — the two are
 independent, step 3 doesn't need step 1's Zendesk to exist first). Built
 + offline-verified, **not yet live-verified** (needs the user's own real

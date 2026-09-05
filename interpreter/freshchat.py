@@ -238,3 +238,32 @@ def send_message(cfg: "FreshchatConfig", conversation_id: str, text: str) -> dic
     except Exception as e:  # noqa: BLE001
         log.warning("freshchat send_message(%s): %s", conversation_id, e)
         return {"sent": False, "dry_run": False, "error": str(e)[:300]}
+
+
+def test_connection(cfg: "FreshchatConfig") -> dict[str, Any]:
+    """A lightweight authenticated read — proves the API token + domain
+    actually work, without sending anything or needing a webhook. Never
+    raises. Uses `GET /v2/agents` (every account has at least one — the
+    owner — so this doesn't depend on any conversation/contact existing
+    yet); **not live-verified against a real account** (no credentials in
+    this environment) — if this endpoint turns out wrong for a real
+    account, the fix is isolated to this one function."""
+    if not (cfg.domain and cfg.api_token):
+        return {"ok": False, "error": "domain and api_token are required"}
+    if not cfg.base_url:
+        return {"ok": False, "error": "invalid domain"}
+    import requests
+
+    try:
+        r = requests.get(
+            f"{cfg.base_url}/agents",
+            headers={"Authorization": f"Bearer {cfg.api_token}"},
+            params={"items_per_page": 1},
+            timeout=15,
+        )
+        if r.status_code in (401, 403):
+            return {"ok": False, "error": f"authentication failed ({r.status_code})"}
+        r.raise_for_status()
+        return {"ok": True, "error": None}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)[:300]}

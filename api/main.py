@@ -2380,6 +2380,105 @@ def email_google_callback(code: str = "", state: str = "", error: str = "") -> H
     return page("Gmail connected. You can close this window.")
 
 
+# ── Multi-provider connectors step 3: connect a Freshchat account ────────
+class FreshchatChannelIn(BaseModel):
+    domain: str | None = None              # "yourcompany.freshchat.com"
+    team: str = "support"
+    api_token: str | None = None           # write-only, never returned; Vault-backed
+    webhook_public_key: str | None = None  # write-only PEM, never returned
+    auto_send_enabled: bool = False
+    tenant_id: str | None = None
+
+
+def _freshchat_cfg_from_body(tenant_id: str, body: "FreshchatChannelIn", existing):
+    from interpreter.freshchat import FreshchatConfig
+
+    return FreshchatConfig(
+        tenant_id=tenant_id,
+        domain=(body.domain or (existing.domain if existing else "")).strip(),
+        team=body.team or (existing.team if existing else "support"),
+        auto_send_enabled=bool(body.auto_send_enabled),
+        status=(existing.status if existing else "inactive"),
+    )
+
+
+@app.get("/api/integrations/freshchat")
+def freshchat_status(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    """Channel status for the caller's tenant. Never returns the token/key."""
+    tid = _caller_tenant(c, tenant_id)
+    from interpreter.freshchat import load_channel
+
+    ch = load_channel(tid, _service)
+    if not ch:
+        return {"tenant_id": tid, "configured": False, "status": "none"}
+    return {"tenant_id": tid, **ch.public_status()}
+
+
+@app.put("/api/integrations/freshchat")
+def freshchat_configure(body: FreshchatChannelIn, c: Caller = Depends(caller)) -> dict:
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    rate_limit(c.user_id, "integration", 30)
+    from interpreter.freshchat import load_channel, save_channel
+
+    existing = load_channel(tid, _service)
+    if not (body.domain or (existing and existing.domain)):
+        raise HTTPException(422, "domain is required")
+    has_token = bool(body.api_token) or bool(existing and existing.api_token)
+    if not has_token:
+        raise HTTPException(422, "api_token is required")
+
+    cfg = _freshchat_cfg_from_body(tid, body, existing)
+    cfg.status = "active"
+    save_channel(cfg, _service, api_token=body.api_token,
+                webhook_public_key=body.webhook_public_key)
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid,
+                 action="freshchat_channel.configured" if existing else "freshchat_channel.connected",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="freshchat_channel", target_id=tid,
+                 summary=f"{'updated' if existing else 'connected'} the Freshchat channel")
+    return freshchat_status(tenant_id=tid, c=c)
+
+
+@app.delete("/api/integrations/freshchat", status_code=204)
+def freshchat_disconnect(tenant_id: str | None = None, c: Caller = Depends(caller)) -> None:
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    from interpreter import audit
+    from interpreter.freshchat import delete_channel
+
+    delete_channel(tid, _service)
+    audit.record(_service, tenant_id=tid, action="freshchat_channel.disconnected",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="freshchat_channel", target_id=tid,
+                 summary="disconnected the Freshchat channel")
+
+
+@app.post("/api/integrations/freshchat/test")
+def freshchat_test(body: FreshchatChannelIn, c: Caller = Depends(caller)) -> dict:
+    """A lightweight authenticated read — saves nothing. Uses the posted
+    token, falling back to the stored one when the field is left blank."""
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    rate_limit(c.user_id, "integration", 20)
+    from interpreter.freshchat import load_channel, test_connection
+
+    existing = load_channel(tid, _service)
+    cfg = _freshchat_cfg_from_body(tid, body, existing)
+    cfg.api_token = body.api_token or (existing.api_token if existing else "")
+    return test_connection(cfg)
+
+
+@app.get("/api/integrations/freshchat/webhook-url")
+def freshchat_webhook_url(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    """The URL to paste into Freshchat's own webhook settings for this
+    tenant — a thin convenience so the web UI doesn't hardcode _public_base()."""
+    tid = _caller_tenant(c, tenant_id)
+    return {"url": f"{_public_base()}/webhooks/freshchat/{tid}"}
+
+
 # ── BYOK: self-serve LLM provider keys + model roster (chunk 3 of the
 #    2026-09-04 onboarding/robustness work) ─────────────────────────────
 _LLM_PROVIDERS = ("groq", "anthropic", "openrouter")

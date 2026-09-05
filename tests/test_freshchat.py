@@ -258,3 +258,54 @@ def test_send_message_dry_runs_without_credentials():
 
     out = send_message(FreshchatConfig(tenant_id="t"), "c1", "hello")
     assert out == {"sent": False, "dry_run": True, "reason": "freshchat not connected"}
+
+
+# ── test_connection ───────────────────────────────────────────────────────
+def test_test_connection_requires_domain_and_token():
+    from interpreter.freshchat import test_connection
+
+    assert test_connection(FreshchatConfig(tenant_id="t"))["ok"] is False
+    assert test_connection(FreshchatConfig(tenant_id="t", api_token="tok"))["ok"] is False
+
+
+def test_test_connection_succeeds(monkeypatch):
+    from interpreter import freshchat
+
+    class _Resp:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+
+    import requests as _requests
+    monkeypatch.setattr(_requests, "get", lambda *a, **k: _Resp())
+
+    cfg = FreshchatConfig(tenant_id="t", domain="acme.freshchat.com", api_token="tok")
+    out = freshchat.test_connection(cfg)
+    assert out == {"ok": True, "error": None}
+
+
+def test_test_connection_reports_bad_auth(monkeypatch):
+    from interpreter import freshchat
+    import requests as _requests
+
+    class _Resp:
+        status_code = 401
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(_requests, "get", lambda *a, **k: _Resp())
+    cfg = FreshchatConfig(tenant_id="t", domain="acme.freshchat.com", api_token="bad")
+    out = freshchat.test_connection(cfg)
+    assert out["ok"] is False and "401" in out["error"]
+
+
+def test_test_connection_never_raises_on_network_error(monkeypatch):
+    from interpreter import freshchat
+    import requests as _requests
+
+    def boom(*a, **k):
+        raise ConnectionError("dns failure")
+    monkeypatch.setattr(_requests, "get", boom)
+    cfg = FreshchatConfig(tenant_id="t", domain="acme.freshchat.com", api_token="tok")
+    out = freshchat.test_connection(cfg)
+    assert out["ok"] is False and "dns failure" in out["error"]
