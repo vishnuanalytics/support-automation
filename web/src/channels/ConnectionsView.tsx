@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
 import type {
-  Connection, ConnectionAction, SalesforceOrg, SalesforceOrgSchema,
+  CaseTaxonomy, Connection, ConnectionAction, SalesforceOrg, SalesforceOrgSchema,
   ZendeskConnection, ZendeskConnectionSave,
 } from "../types";
 
@@ -182,6 +182,7 @@ export function ConnectionsView({ tenantId }: { tenantId: string }) {
       </div>
 
       <CaseConnectorPicker tenantId={tenantId} />
+      <CaseTaxonomyPanel tenantId={tenantId} />
       <SalesforceOrgsPanel tenantId={tenantId} />
       <ZendeskPanel tenantId={tenantId} />
       <AiModelsPanel tenantId={tenantId} />
@@ -236,6 +237,105 @@ function CaseConnectorPicker({ tenantId }: { tenantId: string }) {
         </select>
         {msg && <span className="muted" style={{ fontSize: 12 }}>{msg}</span>}
       </div>
+    </div>
+  );
+}
+
+/** Per-tenant case-taxonomy config (migration 086) — overrides for the
+ * module/submodule/region/case-type keyword rules `map_case_fields`/
+ * `map_case_type` use to fill Case.Module__c/SubModule__c/Region__c/Type.
+ * Edited as raw JSON (same "form later, JSON now" pattern as RulesView's
+ * when/then editor) rather than a dedicated rule-builder UI — the nested
+ * keyword-list shape doesn't fit a simple form and a tenant overriding
+ * this at all is expected to be rare. A tenant with no override (the
+ * default) sees `{}` here and gets the built-in defaults, shown alongside
+ * for reference. */
+function CaseTaxonomyPanel({ tenantId }: { tenantId: string }) {
+  const [tax, setTax] = useState<CaseTaxonomy | null>(null);
+  const [raw, setRaw] = useState("{}");
+  const [showDefaults, setShowDefaults] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const load = () => {
+    api.caseTaxonomy.get(tenantId).then((t) => {
+      setTax(t);
+      setRaw(JSON.stringify(t.config, null, 2));
+    }).catch(() => {});
+  };
+  useEffect(load, [tenantId]);
+
+  const parsed = useMemo(() => {
+    try {
+      return { ok: true as const, value: JSON.parse(raw) };
+    } catch (e) {
+      return { ok: false as const, msg: (e as Error).message };
+    }
+  }, [raw]);
+
+  async function save() {
+    if (!parsed.ok) return;
+    setBusy(true);
+    setMsg(null);
+    try {
+      await api.caseTaxonomy.set(parsed.value, tenantId);
+      setMsg("saved");
+      load();
+    } catch (e) {
+      setMsg(`✗ ${(e as ApiError).message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reset() {
+    if (!confirm("Reset to the built-in default taxonomy? Any override is discarded.")) return;
+    setBusy(true);
+    setMsg(null);
+    try {
+      await api.caseTaxonomy.reset(tenantId);
+      setMsg("reset to defaults");
+      load();
+    } catch (e) {
+      setMsg(`✗ ${(e as ApiError).message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!tax) return null;
+  return (
+    <div className="col" style={{ gap: 8, borderTop: "1px solid var(--hair,#ddd)", paddingTop: 16 }}>
+      <h3 style={{ margin: 0 }}>Case taxonomy</h3>
+      <p style={{ margin: 0, color: "var(--muted, #667)" }}>
+        Which keywords map a case to Module / Sub-module / Region / Type. Only the keys you
+        include here override the built-in default — an empty <code>{"{}"}</code> uses it as-is.
+      </p>
+      <textarea
+        rows={10}
+        value={raw}
+        onChange={(e) => setRaw(e.target.value)}
+        style={{ fontFamily: "ui-monospace, monospace", fontSize: 12 }}
+      />
+      {!parsed.ok && <div className="err" style={{ fontSize: 11 }}>{parsed.msg}</div>}
+      <div className="row" style={{ gap: 8, alignItems: "center" }}>
+        <button className="primary" disabled={busy || !parsed.ok} onClick={save}>save</button>
+        <button disabled={busy} onClick={reset}>reset to defaults</button>
+        <button onClick={() => setShowDefaults(!showDefaults)}>
+          {showDefaults ? "hide" : "show"} built-in defaults
+        </button>
+        {msg && <span className="muted" style={{ fontSize: 12 }}>{msg}</span>}
+        {tax.updated_at && (
+          <span className="muted" style={{ fontSize: 11 }}>
+            last changed {new Date(tax.updated_at).toLocaleString()}
+          </span>
+        )}
+      </div>
+      {showDefaults && (
+        <pre style={{ fontSize: 11, maxHeight: 240, overflow: "auto", background: "var(--bg-2,#f6f6f6)", padding: 8 }}>
+          {JSON.stringify(tax.defaults, null, 2)}
+        </pre>
+      )}
     </div>
   );
 }

@@ -514,6 +514,27 @@ export interface CaseConnector {
   case_connector: string;
 }
 
+export interface CaseTaxonomyRule {
+  keywords: string[];
+  module?: string;
+  submodule?: string;
+  case_type?: string;
+}
+
+export interface CaseTaxonomyConfig {
+  module_rules?: CaseTaxonomyRule[];
+  submodule_rules?: Record<string, CaseTaxonomyRule[]>;
+  region_by_country?: Record<string, string>;
+  case_type_rules?: CaseTaxonomyRule[];
+}
+
+export interface CaseTaxonomy {
+  tenant_id: string;
+  config: CaseTaxonomyConfig;
+  updated_at: string | null;
+  defaults: Required<CaseTaxonomyConfig>;
+}
+
 export interface BillingUsage {
   period_label: string;                 // "2026-09"
   period: { start: string; end: string };

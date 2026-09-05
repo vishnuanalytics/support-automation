@@ -707,9 +707,40 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-05 — per-tenant case-taxonomy config built (see "Per-tenant
+case-taxonomy config — BUILT" above for the full writeup). This is the
+most recent work in this file.** PR open on `browser-verified-picker-
+fixes` (started for the SF-cache-skip fix below, same branch now also
+carries this). **Not yet confirmed:** a real GitHub Actions run of this
+branch (both this change and the SF-cache-skip fix below) — check CI,
+and specifically watch the `web` job for the new `case-taxonomy` mock in
+`connections.spec.ts` (untested locally, see that section for why).
+**Also still open:** live verification of the Zendesk/Freshchat
+connectors (FR-51) against real accounts — blocked on the user obtaining
+credentials, unrelated to this work.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-05 — the `test_multitenant_concurrency.py` SF-creds gap noted
+below is now closed.**
+
+`test_concurrent_runs_do_not_corrupt_the_shared_salesforce_client_cache`
+now self-skips (like `test_salesforce_connect_introspect_disconnect_
+roundtrip` already does) when `client_for()` can't resolve creds for
+either tenant, instead of raising `KeyError('SF_USERNAME')` on GitHub
+CI's `integration` job (no `SF_*` secrets there). The probe discards
+whatever it caches in the process so the actual stress test below it
+still starts from a cold cache. Verified locally against real `SF_*`
+creds: both tests in the file pass (2 passed in ~8m). Not yet confirmed
+on a real GitHub Actions run — that's the next thing to check if CI is
+still red on this file.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
 **2026-09-05 — CI fixed (web job) + the "shared test account belongs to
-several tenants" issue closed for good (flagged, then fixed same day).
-This is the most recent work in this file.**
+several tenants" issue closed for good (flagged, then fixed same day).**
 
 **CI fix:** the `web` job's `npx playwright test` step failed on GitHub's
 runner (`Timed out waiting 60000ms from config.webServer`) despite 3/3
@@ -750,10 +781,9 @@ today's fix) and `test_multitenant_concurrency.py::test_concurrent_runs_
 do_not_corrupt_the_shared_salesforce_client_cache` (a `KeyError:
 'SF_USERNAME'` — this environment has real `SF_*` creds so it passes
 here; GitHub CI's `integration` job apparently doesn't have `SF_*`
-secrets configured, so this test needs a `pytest.skip` guard like
-`test_salesforce_connect_introspect_disconnect_roundtrip` already has,
-not a tenant_id fix — noted, not built, since it's a different category
-of gap). `test_multiflow.py`'s 2 real-Groq draft-content failures from
+secrets configured — **now fixed with a `pytest.skip` guard, see the
+"Immediate next step" entry above**). `test_multiflow.py`'s 2 real-Groq
+draft-content failures from
 the original CI log are the same documented shared-quota flakiness noted
 elsewhere in this file, also untouched.
 
@@ -2738,17 +2768,85 @@ root cause (reranking/embedding also draws on the shared provider
 pool), not a regression from this chunk (nothing here touches
 retrieval).
 
-### Scoped, not built: per-tenant case-taxonomy config
+### Per-tenant case-taxonomy config — BUILT (2026-09-05)
 
-Move `map_case_fields`'s module/region/case-type mapping from a global
-hardcoded dict into a per-tenant table (same shape as `policy_rules` —
-RLS-scoped, editable via the web), with `scripts/sf_support_setup.py`
-reading from that same table instead of carrying its own separate
-hardcoded picklist list. Removes the two-sources-of-truth bug class
-migration 079 already hit once. Medium-sized: new table + rewritten
-mapping function (with a fallback default for tenants that never
-configure it, so existing behavior doesn't regress) + setup-script
-rework + a web admin surface to edit it.
+Was: "Scoped, not built" (see the old note below, kept for history).
+`map_case_fields`'s module/region/case-type mapping is no longer a single
+global hardcoded dict.
+
+**New module `interpreter/case_taxonomy.py`** — `DEFAULT_TAXONOMY` (the
+original hardcoded rules, byte-identical), `load(tenant_id, sb)` (tenant
+override merged over the default, TTL-cached like `routing.py`'s
+notify-target cache, `invalidate()` on write), `map_case_fields`/
+`map_case_type`/`normalize_case_type` (now tenant-aware — `normalize_
+case_type`'s canonical-list match now uses the tenant's own `valid_
+values()`; its keyword-heuristic fallback stays a fixed global safety net,
+deliberately not per-tenant, since `case_type_rules` already covers
+per-tenant keyword matching for `map_case_type`), and `valid_values()`
+(the distinct picklist values *derived from* a tenant's actual rules —
+what closes the two-sources-of-truth gap). `interpreter/salesforce.py`
+re-exports the three public functions unchanged (`salesforce.map_case_
+fields is case_taxonomy.map_case_fields`, etc.) so every existing caller
+is unaffected; its own hardcoded copies of the rule dicts are gone.
+**Migration 086** (`case_taxonomy`: one row per tenant, `config` jsonb,
+same single-row-per-tenant RLS shape as `tenants`) — a tenant with no row
+(every tenant that existed before this) gets `DEFAULT_TAXONOMY`
+unchanged; a stored `config` only needs the keys it overrides. Applied to
+the real Supabase project; `test_verify_migrations.py`'s live drift check
+confirms zero drift.
+
+**All 7 registry.py call sites now thread `tenant_id`/`sb` through**
+(`h_classify`'s `normalize_case_type`+`map_case_type`, `h_sf_writeback`'s
+`map_case_fields`+`map_case_type`, the case-lookup module resolver, the
+confidence-gate escalation checks ×2, `h_notify`'s label/routing lookup) —
+this was built to actually take effect end-to-end, not just plumbed in
+one place and left dead everywhere else.
+
+**API:** `GET/PUT/DELETE /api/tenants/case-taxonomy` (owner-gated writes,
+same pattern as `case-connector`; `PUT` runs `case_taxonomy.validate_
+config()` first — a malformed override 422s at save time instead of
+failing silently deep inside `map_case_fields` at triage time; `DELETE`
+resets to defaults). **Web:** a `CaseTaxonomyPanel` on the Connections tab
+(next to `CaseConnectorPicker`) — deliberately a raw-JSON editor (same
+"form later" pattern as `RulesView`'s when/then editor), not a rule
+builder: the nested keyword-list shape doesn't fit a simple form and
+overriding this at all is expected to be rare. Shows the built-in
+defaults alongside for reference; save / reset-to-defaults buttons.
+
+**`scripts/sf_support_setup.py --tenant-id <id>`** (new, optional flag —
+the no-flag default path is untouched, confirmed byte-identical dry-run
+output before/after) pulls `CASE_TYPE_VALUES`/`MODULE_VALUES`/`REGION_
+VALUES`/`SUBMODULE_BY_MODULE` from `case_taxonomy.valid_values(tenant_id)`
+instead of the script's own separate hardcoded lists — the actual fix for
+the two-sources-of-truth bug class (this script and `salesforce.py` had
+*two separate, independently hardcoded* copies of `CASE_TYPE_VALUES`
+before this).
+
+**Verify:** 21 new offline tests (`tests/test_case_taxonomy.py` — load/
+merge/cache/invalidate, default-behavior parity with the pre-refactor
+tests, tenant-override actually changes matching, `valid_values()`,
+`validate_config()`); 759 offline tests green total (was 758). 5 new live
+integration tests against the real Supabase project (`test_api.py`) —
+get-defaults/set/reset round-trip, malformed-config 422, owner-gating on
+both PUT and DELETE. `sf_support_setup.py --dry-run --only types/fields
+--tenant-id <globex>` run for real against the live org + live Supabase
+project — works end-to-end. **Not run locally:** the web e2e suite
+(`connections.spec.ts`, updated with a `case-taxonomy` mock) — this
+sandbox's Chromium is missing a system library (`libnspr4.so`, no root to
+fix it); `tsc -b && vite build` and the vitest unit tests are clean, and
+CI's `web` job installs Playwright's system deps itself
+(`--with-deps`), so this should be validated there instead.
+
+**Old note, superseded by the above, kept for history:** Move `map_case_
+fields`'s module/region/case-type mapping from a global hardcoded dict
+into a per-tenant table (same shape as `policy_rules` — RLS-scoped,
+editable via the web), with `scripts/sf_support_setup.py` reading from
+that same table instead of carrying its own separate hardcoded picklist
+list. Removes the two-sources-of-truth bug class migration 079 already
+hit once. Medium-sized: new table + rewritten mapping function (with a
+fallback default for tenants that never configure it, so existing
+behavior doesn't regress) + setup-script rework + a web admin surface to
+edit it.
 
 ### Scoped, not built: Google Calendar meeting scheduling
 

@@ -464,6 +464,12 @@ def test_case_connector_endpoints_need_a_token():
     assert client.put("/api/tenants/case-connector", json={"case_connector": "zendesk"}).status_code == 401
 
 
+def test_case_taxonomy_endpoints_need_a_token():
+    assert client.get("/api/tenants/case-taxonomy").status_code == 401
+    assert client.put("/api/tenants/case-taxonomy", json={"config": {}}).status_code == 401
+    assert client.delete("/api/tenants/case-taxonomy").status_code == 401
+
+
 def test_salesforce_case_hook_needs_the_shared_secret():
     # no X-SF-Hook-Secret header -> 401, never reaches flow resolution
     r = client.post("/api/hooks/salesforce/case", json={"case_id": "500xx"})
@@ -941,6 +947,48 @@ def test_case_connector_write_is_owner_only(globex_as_viewer, auth_headers):
                       params={"tenant_id": GLOBEX_TENANT}).status_code == 200
     r = client.put("/api/tenants/case-connector", headers=auth_headers,
                   json={"case_connector": "zendesk", "tenant_id": GLOBEX_TENANT})
+    assert r.status_code == 403
+
+
+@pytest.mark.integration
+def test_case_taxonomy_get_defaults_set_and_reset_round_trip(auth_headers):
+    got = client.get("/api/tenants/case-taxonomy", headers=auth_headers,
+                     params={"tenant_id": GLOBEX_TENANT}).json()
+    assert got["tenant_id"] == GLOBEX_TENANT
+    assert "module_rules" in got["defaults"]
+    try:
+        override = {"region_by_country": {"wakanda": "AFRICA"}}
+        r = client.put("/api/tenants/case-taxonomy", headers=auth_headers,
+                       json={"config": override, "tenant_id": GLOBEX_TENANT})
+        assert r.status_code == 200 and r.json()["config"] == override
+        got2 = client.get("/api/tenants/case-taxonomy", headers=auth_headers,
+                          params={"tenant_id": GLOBEX_TENANT}).json()
+        assert got2["config"] == override
+    finally:
+        r = client.delete("/api/tenants/case-taxonomy", headers=auth_headers,
+                          params={"tenant_id": GLOBEX_TENANT})
+        assert r.status_code == 204
+    got3 = client.get("/api/tenants/case-taxonomy", headers=auth_headers,
+                      params={"tenant_id": GLOBEX_TENANT}).json()
+    assert got3["config"] == {}
+
+
+@pytest.mark.integration
+def test_case_taxonomy_rejects_a_malformed_config(auth_headers):
+    r = client.put("/api/tenants/case-taxonomy", headers=auth_headers,
+                   json={"config": {"module_rules": "not-a-list"}, "tenant_id": GLOBEX_TENANT})
+    assert r.status_code == 422
+
+
+@pytest.mark.integration
+def test_case_taxonomy_write_is_owner_only(globex_as_viewer, auth_headers):
+    assert client.get("/api/tenants/case-taxonomy", headers=auth_headers,
+                      params={"tenant_id": GLOBEX_TENANT}).status_code == 200
+    r = client.put("/api/tenants/case-taxonomy", headers=auth_headers,
+                  json={"config": {}, "tenant_id": GLOBEX_TENANT})
+    assert r.status_code == 403
+    r = client.delete("/api/tenants/case-taxonomy", headers=auth_headers,
+                      params={"tenant_id": GLOBEX_TENANT})
     assert r.status_code == 403
 
 
