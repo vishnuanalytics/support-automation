@@ -707,8 +707,55 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-05 — root-caused and fixed why Neo4j's `DUPLICATE_OF` edges never
+fire (this is the most recent work in this file).** `docs/MULTI_SYSTEM_
+ARCHITECTURE.md` flagged this as "not investigated further yet" (0
+`DUPLICATE_OF` edges despite 232 `SIMILAR_TO`, suspected `account_id` never
+set on Salesforce-sourced cases). Investigated and confirmed, live: exactly
+232 `SIMILAR_TO` / 0 `DUPLICATE_OF` (Neo4j, direct driver query, no MCP
+server needed for this). Worse than suspected — 20 real case pairs score
+>= the 0.92 dup threshold, including a 6-case cluster (00001130-00001138,
+all the same recurring proxy-timeout error from `SupportAutomationHook`)
+and a 2-case renewal duplicate, both **confirmed same Salesforce AccountId**
+via a live SF query — real duplicate tickets, currently invisible to
+duplicate detection.
+
+**Root cause, precisely isolated (more general than the doc's guess):**
+neither `case_memory_sync.py` row producer (`_row_from_run` for the default
+`runs`-sourced path, `_from_salesforce` for `--from-salesforce`) ever sets
+`account_id` — it's populated *only* by `_enrich_from_sf`'s Salesforce
+round-trip. But `_enrich_from_sf`'s selection filter (`want`) only checked
+whether `case_type` was missing, not `account_id` — so any row that
+already had `case_type` (from `sf_writeback`, or from `_from_salesforce`'s
+own SOQL, which always includes `Type`) was wrongly treated as "already
+enriched" and skipped, silently starving it of `account_id` specifically.
+Since `same_account` (in `_sync_rows`) needs a non-empty `account_id` on
+both sides of a candidate pair, this made `DUPLICATE_OF`'s same-account
+gate false for effectively every real row.
+
+**Fix, two small changes in `ingestion/case_memory_sync.py`:** (1)
+`_enrich_from_sf`'s `want` filter now also re-queries a row missing
+`account_id` even when `case_type` is present — closes the gap for both
+sources without touching anything else. (2) `_from_salesforce`'s own SOQL
+now selects `AccountId` directly and sets it on the row it builds — avoids
+needing the enrichment round-trip at all for that path's common case (a
+real compute-cost win, not just correctness). 4 new offline tests
+(`tests/test_case_memory_sync.py` — this ingestion module had zero
+coverage before). 778 offline tests green (was 774).
+
+**Not done in this chunk, deliberately:** re-running the actual sync
+against live data (`python -m ingestion.case_memory_sync --from-salesforce`
+/ default `runs` mode) to make the fix produce real `DUPLICATE_OF` edges
+for the existing 141 Case nodes — that's a live write to production
+Neo4j/Supabase, left for the user (or an explicit follow-up) rather than
+run autonomously here. The code fix is correct and tested either way; this
+is "will it actually create the edges when re-run," not "is the fix right."
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
 **2026-09-05 — `h_draft` collapsed to one `integrity.check` call instead of
-two (this is the most recent work in this file).** The last item from this
+two.** The last item from this
 session's architecture/compute audit: `h_draft` ran `integrity.check()`
 twice per invocation (`kind="draft"` on the reply, `kind="inbound"` on the
 customer's text) against the *same* `icontexts` — two separate Groq

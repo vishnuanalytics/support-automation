@@ -129,11 +129,16 @@ cleanly.
   compliance/support-debugging tradeoff call, not a technical one).
 - Whether a natural-language-to-Cypher "ask the graph anything" tool
   (discussed as the leaner alternative to building N bespoke reports) is
-  the next Neo4j-facing feature to build, versus fixing the
-  `DUPLICATE_OF`-never-fires gap first (0 edges exist today despite 232
-  `SIMILAR_TO` edges — see `case_memory_sync.py`; likely `account_id`
-  never being set on Salesforce-sourced cases, not investigated further
-  yet).
+  the next Neo4j-facing feature to build, versus the `DUPLICATE_OF`-never-
+  fires gap — **root-caused and fixed 2026-09-05, see `PROJECT_SCOPE.md`'s
+  "Immediate next step"**: `account_id` was never set because
+  `_enrich_from_sf`'s selection filter only checked `case_type`, not
+  `account_id`, so a row that already had one (nearly every real row) was
+  wrongly skipped for the other. Confirmed live: 20 case pairs score above
+  the dup threshold, including a 6-case cluster sharing one real Salesforce
+  AccountId, currently invisible to duplicate detection. Fix is in;
+  re-running the sync against live data to actually populate the edges for
+  the existing 141 Case nodes is not done yet.
 - Whether the product-analytics connector is worth building before or
   after the reporting/exposure layer above — they're independent, but a
   tenant would only value one once the other exists.

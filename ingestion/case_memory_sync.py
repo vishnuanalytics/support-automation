@@ -98,14 +98,25 @@ def _iter_runs(sb, since_iso: str, limit: int):
 
 
 def _enrich_from_sf(rows: list[dict]) -> None:
-    """Fill case_number / case_type / module / tier from Salesforce for rows
-    whose `case_sf_id` is a real Id (the `runs` backfill often lacks them)."""
+    """Fill case_number / case_type / module / tier / account_id from
+    Salesforce for rows whose `case_sf_id` is a real Id (the `runs` backfill
+    often lacks them).
+
+    The `want` filter used to check only `case_type` — meaning a row that
+    already had `case_type` (from `sf_writeback`, or from `_from_salesforce`'s
+    own direct SOQL) was treated as "already enriched" and skipped entirely,
+    silently starving it of `account_id` even though that field was never
+    set anywhere else. Root cause of a real bug (found while investigating
+    why Neo4j's DUPLICATE_OF edges never fire): `same_account` in
+    `_sync_rows` needs a non-empty `account_id` on both sides, so every row
+    that hit this path came out with `account_id` unset -> DUPLICATE_OF's
+    same-account gate was always False. Checking `account_id` too closes it."""
     from interpreter import salesforce
     if not salesforce.available():
         return
     want = {r["case_sf_id"] for r in rows
             if isinstance(r["case_sf_id"], str) and len(r["case_sf_id"]) in (15, 18)
-            and not r.get("case_type")}
+            and (not r.get("case_type") or not r.get("account_id"))}
     if not want:
         return
     try:
@@ -192,7 +203,7 @@ def _from_salesforce(since_iso: str, limit: int) -> list[dict]:
     lit = salesforce._soql_lit(since_iso)
     cases = sf.query(
         "SELECT Id, CaseNumber, Subject, Description, Type, Module__c, Region__c, "
-        "ClosedDate, Account.Tier__c FROM Case "
+        "AccountId, ClosedDate, Account.Tier__c FROM Case "
         f"WHERE IsClosed = true AND ClosedDate >= {lit} ORDER BY ClosedDate DESC "
         f"LIMIT {int(limit)}"
     ).get("records", [])
@@ -211,7 +222,7 @@ def _from_salesforce(since_iso: str, limit: int) -> list[dict]:
             "case_number": c.get("CaseNumber"), "subject": c.get("Subject"),
             "body_summary": c.get("Description") or c.get("Subject") or "",
             "case_type": c.get("Type"), "module": c.get("Module__c"),
-            "region": c.get("Region__c"),
+            "region": c.get("Region__c"), "account_id": c.get("AccountId"),
             "tier": (c.get("Account") or {}).get("Tier__c"),
             "resolution_kind": case_memory.classify_resolution_kind(None, reply),
             "resolution_text": reply,
