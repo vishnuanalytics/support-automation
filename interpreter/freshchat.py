@@ -36,6 +36,34 @@ the vendor's own docs, not guessed:
     public key (a PEM string, pasted in when a tenant connects).
   * outbound reply: `POST {domain}/v2/conversations/{id}/messages`,
     `Authorization: Bearer <api_token>`.
+
+OAuth (2026-09-05 addition) — a second, per-tenant auth mode alongside the
+static `api_token` above, for a tenant whose only credential is a
+"Developer Profile > Connectivity" client_id/client_secret (an account-
+level OAuth client Freshworks issues directly — not a published Custom/
+External App, no separate app-registration/publish step). Confirmed two
+ways: Freshworks' own developer docs, and — because those docs turned out
+inconsistent about the URL shape (one section omitted the `/org/` segment
+a worked example included) — a real third-party integration (n8n's
+Freshworks OAuth2 node, per a Freshworks Developer Community thread) using
+the exact same Developer Profile credential type against a live account:
+  * authorize: `GET https://{oauth_domain}/org/oauth/v2/authorize?
+    response_type=code&client_id=...&redirect_uri=...&state=...&scope=...`
+    — `/org/` is a **literal path segment**, not a placeholder for
+    anything account-specific; the org identity is already carried by
+    `oauth_domain` itself.
+  * token exchange / refresh: `POST https://{oauth_domain}/org/oauth/v2/token`,
+    `Authorization: Basic base64(client_id:client_secret)`, form body
+    `grant_type=authorization_code&code=...&redirect_uri=...` (or
+    `grant_type=refresh_token&refresh_token=...`).
+  * access token lives 30 minutes; refresh token lives 365 days — so only
+    the refresh_token is persisted (in Vault, alongside client_id/secret),
+    and a fresh access token is minted on demand for every real API call
+    rather than cached, same "don't persist what expires in minutes"
+    choice `gdrive.py` makes for Google's access tokens.
+  * `oauth_domain` is the Freshworks org host (e.g. a `.myfreshworks.com`
+    account); defaults to `domain` when left blank. `scope` is still
+    unconfirmed (no working example needed one) — left blank by default.
 """
 
 from __future__ import annotations
@@ -47,6 +75,18 @@ from typing import Any
 
 KIND = "freshchat"
 log = logging.getLogger("interpreter.freshchat")
+_OAUTH_TOKEN_PATH = "/org/oauth/v2/token"
+_OAUTH_AUTHORIZE_PATH = "/org/oauth/v2/authorize"
+# Freshworks rejects an authorize request with no scope at all ("The
+# requested scope is invalid or not applicable to your account") —
+# confirmed live 2026-09-05. These three are Freshworks' own documented
+# worked example (developers.freshworks.com, oauth-in-external-apps) —
+# read-only ("view"). No confirmed scope exists yet for *sending* a
+# message or listing agents (what test_connection/send_message need) —
+# real gap, not silently assumed covered.
+_DEFAULT_OAUTH_SCOPE = ("freshchat.conversation.view "
+                       "freshchat.conversation.properties.view "
+                       "freshchat.conversation.messages.view")
 
 
 def _sb():
@@ -63,11 +103,18 @@ class FreshchatConfig:
     status: str = "inactive"
     api_token: str = ""
     webhook_public_key: str = ""  # PEM
+    # OAuth mode (alongside the static api_token above) — a tenant whose
+    # account only exposes a Custom/External App uses this instead.
+    oauth_domain: str = ""        # the Freshworks org host the app was registered under
+    client_id: str = ""
+    client_secret: str = ""
+    refresh_token: str = ""       # 365-day; access tokens are minted on demand, never stored
 
-    def __repr__(self) -> str:    # never leak the token/key in a log/trace
+    def __repr__(self) -> str:    # never leak secrets in a log/trace
         return (f"FreshchatConfig(tenant_id={self.tenant_id!r}, domain={self.domain!r}, "
                 f"team={self.team!r}, status={self.status!r}, "
-                f"configured={bool(self.api_token)})")
+                f"configured={bool(self.api_token or self.refresh_token)}, "
+                f"oauth={bool(self.refresh_token)})")
 
     @classmethod
     def from_row(cls, tenant_id: str, config: dict | None, status: str | None,
@@ -82,19 +129,27 @@ class FreshchatConfig:
             status=status or "inactive",
             api_token=s.get("api_token", ""),
             webhook_public_key=s.get("webhook_public_key", ""),
+            oauth_domain=c.get("oauth_domain", ""),
+            client_id=s.get("client_id", ""),
+            client_secret=s.get("client_secret", ""),
+            refresh_token=s.get("refresh_token", ""),
         )
 
     def to_config(self) -> dict:
         """The non-secret jsonb stored on the row."""
         return {"domain": self.domain, "team": self.team,
-                "auto_send_enabled": self.auto_send_enabled}
+                "auto_send_enabled": self.auto_send_enabled,
+                "oauth_domain": self.oauth_domain}
 
     def public_status(self) -> dict:
         """What the API returns to the browser — never the secret."""
         return {
-            "configured": bool(self.api_token), "domain": self.domain, "team": self.team,
+            "configured": bool(self.api_token or self.refresh_token),
+            "domain": self.domain, "team": self.team,
             "auto_send_enabled": self.auto_send_enabled, "status": self.status,
             "signature_verification": bool(self.webhook_public_key),
+            "oauth": bool(self.refresh_token),
+            "oauth_client_configured": bool(self.client_id and self.client_secret),
         }
 
     @property
@@ -102,9 +157,16 @@ class FreshchatConfig:
         d = self.domain.strip().removeprefix("https://").removeprefix("http://").rstrip("/")
         return f"https://{d}/v2" if d else ""
 
+    @property
+    def effective_oauth_domain(self) -> str:
+        d = (self.oauth_domain or self.domain).strip()
+        return d.removeprefix("https://").removeprefix("http://").rstrip("/")
+
 
 def available(cfg: "FreshchatConfig | None") -> bool:
-    return bool(cfg and cfg.api_token and cfg.base_url)
+    if not (cfg and cfg.base_url):
+        return False
+    return bool(cfg.api_token or (cfg.refresh_token and cfg.client_id and cfg.client_secret))
 
 
 # ── storage (service-role Supabase client) ──────────────────────────────
@@ -120,19 +182,22 @@ def load_channel(tenant_id: str, sb) -> "FreshchatConfig | None":
 
 
 def save_channel(cfg: "FreshchatConfig", sb, *, api_token: str | None = None,
-                 webhook_public_key: str | None = None) -> None:
-    """Persist `cfg`'s non-secret fields; `api_token`/`webhook_public_key`
-    (only passed when the caller is actually changing one) get merged into
-    whatever's already in Vault, so re-saving team/auto_send_enabled alone
-    doesn't require re-pasting the token."""
+                 webhook_public_key: str | None = None, client_id: str | None = None,
+                 client_secret: str | None = None, refresh_token: str | None = None) -> None:
+    """Persist `cfg`'s non-secret fields; each secret kwarg (only passed
+    when the caller is actually changing it) gets merged into whatever's
+    already in Vault, so re-saving team/auto_send_enabled alone doesn't
+    require re-pasting every secret."""
     from . import vault_secrets
 
-    if api_token is not None or webhook_public_key is not None:
+    changed = {"api_token": api_token, "webhook_public_key": webhook_public_key,
+               "client_id": client_id, "client_secret": client_secret,
+               "refresh_token": refresh_token}
+    if any(v is not None for v in changed.values()):
         secret = vault_secrets.get(cfg.tenant_id, KIND, sb=sb)
-        if api_token is not None:
-            secret["api_token"] = api_token
-        if webhook_public_key is not None:
-            secret["webhook_public_key"] = webhook_public_key
+        for k, v in changed.items():
+            if v is not None:
+                secret[k] = v
         vault_secrets.put(cfg.tenant_id, KIND, secret, sb=sb)
 
     row = {
@@ -150,6 +215,84 @@ def delete_channel(tenant_id: str, sb) -> None:
     from . import vault_secrets
     vault_secrets.delete(tenant_id, KIND, sb=sb)
     sb.table("tenant_integrations").delete().eq("tenant_id", tenant_id).eq("kind", KIND).execute()
+
+
+# ── OAuth (per-tenant Custom/External App — see module docstring) ──────────
+def oauth_authorize_url(oauth_domain: str, client_id: str, redirect_uri: str,
+                        state: str, scope: str = _DEFAULT_OAUTH_SCOPE) -> str:
+    from urllib.parse import urlencode
+
+    d = oauth_domain.strip().removeprefix("https://").removeprefix("http://").rstrip("/")
+    params = {"response_type": "code", "client_id": client_id,
+              "redirect_uri": redirect_uri, "state": state}
+    if scope:
+        params["scope"] = scope
+    return f"https://{d}{_OAUTH_AUTHORIZE_PATH}?" + urlencode(params)
+
+
+def _oauth_token_request(oauth_domain: str, client_id: str, client_secret: str,
+                         **form: str) -> dict[str, Any]:
+    import base64 as _b64
+
+    import requests
+
+    d = oauth_domain.strip().removeprefix("https://").removeprefix("http://").rstrip("/")
+    basic = _b64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+    r = requests.post(
+        f"https://{d}{_OAUTH_TOKEN_PATH}",
+        headers={"Authorization": f"Basic {basic}",
+                 "Content-Type": "application/x-www-form-urlencoded"},
+        data=form, timeout=15,
+    )
+    r.raise_for_status()
+    body = r.json()
+    if not body.get("access_token"):
+        raise RuntimeError(f"Freshchat OAuth token request returned no access_token: {body}")
+    return body
+
+
+def oauth_exchange_code(oauth_domain: str, client_id: str, client_secret: str,
+                        code: str, redirect_uri: str) -> dict[str, Any]:
+    """Authorization code -> `{access_token, refresh_token, expires_in}`.
+    Raises on failure — the caller (the OAuth callback handler) decides how
+    to show that to the user."""
+    return _oauth_token_request(
+        oauth_domain, client_id, client_secret,
+        grant_type="authorization_code", code=code, redirect_uri=redirect_uri,
+    )
+
+
+def oauth_refresh_access_token(oauth_domain: str, client_id: str, client_secret: str,
+                               refresh_token: str) -> dict[str, Any]:
+    """Refresh token -> a fresh `{access_token, refresh_token, expires_in}`.
+    Freshworks may rotate the refresh_token on any call — the caller must
+    persist the returned one if it differs from what it passed in."""
+    return _oauth_token_request(
+        oauth_domain, client_id, client_secret,
+        grant_type="refresh_token", refresh_token=refresh_token,
+    )
+
+
+def _bearer_token(cfg: "FreshchatConfig", sb=None) -> str:
+    """The token to send as `Authorization: Bearer <...>` for a real API
+    call — the static `api_token` when the tenant is in that mode, or a
+    freshly-minted access token (via the stored refresh_token) in OAuth
+    mode. A rotated refresh_token is persisted back to Vault when `sb` is
+    given; without `sb` the rotation is used for this call only and the
+    next call re-derives from the (now stale) stored refresh_token, which
+    still works unless Freshworks has already invalidated it — callers
+    that can pass `sb` should."""
+    if cfg.api_token:
+        return cfg.api_token
+    if not (cfg.refresh_token and cfg.client_id and cfg.client_secret):
+        raise RuntimeError("freshchat: no api_token and no complete OAuth credentials")
+    tok = oauth_refresh_access_token(
+        cfg.effective_oauth_domain, cfg.client_id, cfg.client_secret, cfg.refresh_token)
+    new_rt = tok.get("refresh_token")
+    if sb is not None and new_rt and new_rt != cfg.refresh_token:
+        save_channel(cfg, sb, refresh_token=new_rt)
+        cfg.refresh_token = new_rt
+    return tok["access_token"]
 
 
 # ── pure webhook parsing (no network) ───────────────────────────────────
@@ -218,17 +361,21 @@ def parse_webhook_message(body: dict[str, Any]) -> dict[str, Any] | None:
 
 
 # ── outbound (real HTTP) ────────────────────────────────────────────────
-def send_message(cfg: "FreshchatConfig", conversation_id: str, text: str) -> dict[str, Any]:
+def send_message(cfg: "FreshchatConfig", conversation_id: str, text: str, sb=None) -> dict[str, Any]:
     """Reply into an existing conversation. Dry-run (no creds), never
-    raises — matches emailer.send_reply / slack.post_message's convention."""
+    raises — matches emailer.send_reply / slack.post_message's convention.
+    `sb` (optional) lets OAuth-mode token minting persist a rotated
+    refresh_token; omit it and the call still works, just without that
+    persistence."""
     if not available(cfg):
         return {"sent": False, "dry_run": True, "reason": "freshchat not connected"}
     import requests
 
     try:
+        token = _bearer_token(cfg, sb)
         r = requests.post(
             f"{cfg.base_url}/conversations/{conversation_id}/messages",
-            headers={"Authorization": f"Bearer {cfg.api_token}",
+            headers={"Authorization": f"Bearer {token}",
                      "Content-Type": "application/json"},
             json={"message_parts": [{"text": {"content": text}}], "actor_type": "agent"},
             timeout=15,
@@ -240,24 +387,25 @@ def send_message(cfg: "FreshchatConfig", conversation_id: str, text: str) -> dic
         return {"sent": False, "dry_run": False, "error": str(e)[:300]}
 
 
-def test_connection(cfg: "FreshchatConfig") -> dict[str, Any]:
-    """A lightweight authenticated read — proves the API token + domain
+def test_connection(cfg: "FreshchatConfig", sb=None) -> dict[str, Any]:
+    """A lightweight authenticated read — proves the credentials + domain
     actually work, without sending anything or needing a webhook. Never
     raises. Uses `GET /v2/agents` (every account has at least one — the
     owner — so this doesn't depend on any conversation/contact existing
     yet); **not live-verified against a real account** (no credentials in
     this environment) — if this endpoint turns out wrong for a real
     account, the fix is isolated to this one function."""
-    if not (cfg.domain and cfg.api_token):
-        return {"ok": False, "error": "domain and api_token are required"}
     if not cfg.base_url:
-        return {"ok": False, "error": "invalid domain"}
+        return {"ok": False, "error": "invalid or missing domain"}
+    if not available(cfg):
+        return {"ok": False, "error": "api_token, or a complete OAuth client + refresh_token, is required"}
     import requests
 
     try:
+        token = _bearer_token(cfg, sb)
         r = requests.get(
             f"{cfg.base_url}/agents",
-            headers={"Authorization": f"Bearer {cfg.api_token}"},
+            headers={"Authorization": f"Bearer {token}"},
             params={"items_per_page": 1},
             timeout=15,
         )

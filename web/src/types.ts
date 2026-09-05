@@ -274,6 +274,8 @@ export interface FreshchatChannel {
   team?: string;
   auto_send_enabled?: boolean;
   signature_verification?: boolean;
+  oauth?: boolean;
+  oauth_client_configured?: boolean;
 }
 
 export interface FreshchatChannelSave {
@@ -283,6 +285,9 @@ export interface FreshchatChannelSave {
   api_token?: string;
   webhook_public_key?: string;
   auto_send_enabled?: boolean;
+  oauth_domain?: string;
+  client_id?: string;
+  client_secret?: string;
 }
 
 export interface PolicyRule {

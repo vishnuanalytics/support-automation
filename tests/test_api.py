@@ -450,6 +450,10 @@ def test_freshchat_channel_endpoints_need_a_token():
     assert client.post("/api/integrations/freshchat/test", json={"domain": "x"}).status_code == 401
     assert client.delete("/api/integrations/freshchat").status_code == 401
     assert client.get("/api/integrations/freshchat/webhook-url").status_code == 401
+    assert client.get("/api/integrations/freshchat/oauth/authorize").status_code == 401
+    # the OAuth callback is public (browser follows a Freshchat redirect)
+    r = client.get("/api/integrations/freshchat/oauth/callback?error=access_denied")
+    assert r.status_code == 200 and "failed" in r.text
 
 
 def test_zendesk_connection_endpoints_need_a_token():
@@ -870,9 +874,58 @@ def test_freshchat_channel_write_is_owner_only(globex_as_viewer, auth_headers):
                             json={"domain": "h", "api_token": "t", "tenant_id": GLOBEX_TENANT}),
         lambda: client.delete("/api/integrations/freshchat", headers=auth_headers,
                               params={"tenant_id": GLOBEX_TENANT}),
+        lambda: client.get("/api/integrations/freshchat/oauth/authorize", headers=auth_headers,
+                           params={"tenant_id": GLOBEX_TENANT}),
     ):
         r = call()
         assert r.status_code == 403, r.text
+
+
+@pytest.mark.integration
+def test_freshchat_channel_configure_with_oauth_client_only(auth_headers):
+    """A tenant can save just client_id/client_secret (no api_token yet) —
+    the browser round-trip to actually mint a refresh_token is a separate,
+    human-driven step (/oauth/authorize), not exercised here."""
+    body = {"domain": "acme.freshchat.com", "oauth_domain": "acme.myfreshworks.com",
+           "client_id": "fw_ext_fake", "client_secret": "fake-secret",
+           "tenant_id": GLOBEX_TENANT}
+    try:
+        r = client.put("/api/integrations/freshchat", headers=auth_headers, json=body)
+        assert r.status_code == 200, r.text
+        got = r.json()
+        assert got["configured"] is False    # no api_token, no refresh_token yet
+        assert got["oauth"] is False
+        assert got["oauth_client_configured"] is True
+        assert "client_secret" not in str(got)
+    finally:
+        client.delete("/api/integrations/freshchat", headers=auth_headers,
+                      params={"tenant_id": GLOBEX_TENANT})
+
+
+@pytest.mark.integration
+def test_freshchat_oauth_authorize_requires_a_saved_client(auth_headers):
+    r = client.get("/api/integrations/freshchat/oauth/authorize", headers=auth_headers,
+                   params={"tenant_id": GLOBEX_TENANT})
+    assert r.status_code == 422
+
+
+@pytest.mark.integration
+def test_freshchat_oauth_authorize_builds_a_real_url(auth_headers):
+    body = {"domain": "acme.freshchat.com", "oauth_domain": "acme.myfreshworks.com",
+           "client_id": "fw_ext_fake", "client_secret": "fake-secret",
+           "tenant_id": GLOBEX_TENANT}
+    try:
+        assert client.put("/api/integrations/freshchat", headers=auth_headers,
+                          json=body).status_code == 200
+        r = client.get("/api/integrations/freshchat/oauth/authorize", headers=auth_headers,
+                       params={"tenant_id": GLOBEX_TENANT})
+        assert r.status_code == 200, r.text
+        url = r.json()["url"]
+        assert url.startswith("https://acme.myfreshworks.com/org/oauth/v2/authorize?")
+        assert "client_id=fw_ext_fake" in url
+    finally:
+        client.delete("/api/integrations/freshchat", headers=auth_headers,
+                      params={"tenant_id": GLOBEX_TENANT})
 
 
 @pytest.mark.integration

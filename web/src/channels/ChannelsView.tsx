@@ -272,10 +272,14 @@ type FreshchatForm = {
   api_token: string;
   webhook_public_key: string;
   auto_send_enabled: boolean;
+  oauth_domain: string;
+  client_id: string;
+  client_secret: string;
 };
 
 const FRESHCHAT_BLANK: FreshchatForm = {
   domain: "", team: "support", api_token: "", webhook_public_key: "", auto_send_enabled: false,
+  oauth_domain: "", client_id: "", client_secret: "",
 };
 
 function fromFreshchatChannel(ch: FreshchatChannel): FreshchatForm {
@@ -315,6 +319,9 @@ function FreshchatPanel({ tenantId }: { tenantId: string }) {
     auto_send_enabled: f.auto_send_enabled,
     api_token: f.api_token || undefined,
     webhook_public_key: f.webhook_public_key || undefined,
+    oauth_domain: f.oauth_domain.trim() || undefined,
+    client_id: f.client_id || undefined,
+    client_secret: f.client_secret || undefined,
   }), [f, tenantId]);
 
   async function run<T>(fn: () => Promise<T>, ok: string) {
@@ -323,7 +330,7 @@ function FreshchatPanel({ tenantId }: { tenantId: string }) {
       await fn();
       setMsg(ok);
       load();
-      setF((p) => ({ ...p, api_token: "", webhook_public_key: "" }));
+      setF((p) => ({ ...p, api_token: "", webhook_public_key: "", client_id: "", client_secret: "" }));
     } catch (e) {
       setErr((e as ApiError).message);
     }
@@ -335,6 +342,27 @@ function FreshchatPanel({ tenantId }: { tenantId: string }) {
       const r = await api.freshchat.test(payload);
       if (!r.ok) throw new ApiError(0, r.error || "connection failed");
     }, "connection ok");
+
+  async function connectOAuth() {
+    setBusy(true); setErr(null); setMsg(null);
+    try {
+      if (f.client_id || f.client_secret || !ch?.oauth_client_configured) {
+        await api.freshchat.save(payload);   // persist a freshly-typed client before authorizing
+      }
+      const { url } = await api.freshchat.oauthAuthorize(tenantId);
+      const w = window.open(url, "freshchat-oauth", "width=520,height=720");
+      const t = setInterval(() => {
+        if (w?.closed) {
+          clearInterval(t);
+          load();
+        }
+      }, 800);
+      setF((p) => ({ ...p, client_id: "", client_secret: "" }));
+    } catch (e) {
+      setErr((e as ApiError).message);
+    }
+    setBusy(false);
+  }
 
   return (
     <div className="pane" style={{ overflow: "auto", padding: 16, maxWidth: 640 }}>
@@ -374,8 +402,46 @@ function FreshchatPanel({ tenantId }: { tenantId: string }) {
         <input type="password" value={f.api_token}
           onChange={(e) => set("api_token", e.target.value)} placeholder="••••••••••••" />
         <span className="muted" style={{ fontSize: 12 }}>
-          Freshchat admin console → Settings → API tokens (Admin API scope).
+          Freshchat admin console → Settings → API tokens (Admin API scope). Skip this if your
+          account only has a Custom/External App — use OAuth below instead.
         </span>
+      </div>
+
+      <div className="col" style={{ gap: 8, borderTop: "1px solid var(--hair,#ddd)", paddingTop: 12, marginTop: 4 }}>
+        <strong style={{ fontSize: 13 }}>Or connect via OAuth</strong>
+        <p className="muted" style={{ fontSize: 12, margin: 0 }}>
+          For an account whose only credential is a Custom/External App (client_id + client_secret,
+          not a per-agent API token). Save the client below, then authorize in a popup.
+        </p>
+        <div className="row" style={{ gap: 6 }}>
+          <div className="field" style={{ flex: 2 }}>
+            <label>OAuth domain (if different from above)</label>
+            <input value={f.oauth_domain} onChange={(e) => set("oauth_domain", e.target.value)}
+              placeholder="yourcompany.myfreshworks.com" />
+          </div>
+        </div>
+        <div className="row" style={{ gap: 6 }}>
+          <div className="field" style={{ flex: 1 }}>
+            <label>Client ID {ch?.oauth_client_configured && <span className="muted">(leave blank to keep)</span>}</label>
+            <input value={f.client_id} onChange={(e) => set("client_id", e.target.value)}
+              placeholder="fw_ext_..." />
+          </div>
+          <div className="field" style={{ flex: 1 }}>
+            <label>Client secret {ch?.oauth_client_configured && <span className="muted">(leave blank to keep)</span>}</label>
+            <input type="password" value={f.client_secret}
+              onChange={(e) => set("client_secret", e.target.value)} placeholder="••••••••••••" />
+          </div>
+        </div>
+        <div className="row" style={{ gap: 8, alignItems: "center" }}>
+          <button disabled={busy || (!f.client_id && !ch?.oauth_client_configured)}
+            onClick={connectOAuth}>
+            Connect via OAuth
+          </button>
+          {ch?.oauth && <span className="muted" style={{ fontSize: 12 }}>authorized ✓</span>}
+          {ch?.oauth_client_configured && !ch?.oauth && (
+            <span className="muted" style={{ fontSize: 12 }}>client saved, not yet authorized</span>
+          )}
+        </div>
       </div>
 
       <div className="field">

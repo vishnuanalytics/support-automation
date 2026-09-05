@@ -330,6 +330,10 @@ export const api = {
       ),
     webhookUrl: (tenantId?: string) =>
       req<{ url: string }>(`/integrations/freshchat/webhook-url${tenantId ? `?tenant_id=${tenantId}` : ""}`),
+    oauthAuthorize: (tenantId?: string) =>
+      req<{ url: string }>(
+        `/integrations/freshchat/oauth/authorize${tenantId ? `?tenant_id=${tenantId}` : ""}`,
+      ),
   },
 
   salesforce: {

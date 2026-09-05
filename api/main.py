@@ -2381,6 +2381,12 @@ def email_google_callback(code: str = "", state: str = "", error: str = "") -> H
 
 
 # ── Multi-provider connectors step 3: connect a Freshchat account ────────
+FRESHCHAT_OAUTH_REDIRECT_URI = os.environ.get(
+    "FRESHCHAT_OAUTH_REDIRECT_URI",
+    "http://localhost:8000/api/integrations/freshchat/oauth/callback",
+)
+
+
 class FreshchatChannelIn(BaseModel):
     domain: str | None = None              # "yourcompany.freshchat.com"
     team: str = "support"
@@ -2388,6 +2394,12 @@ class FreshchatChannelIn(BaseModel):
     webhook_public_key: str | None = None  # write-only PEM, never returned
     auto_send_enabled: bool = False
     tenant_id: str | None = None
+    # OAuth mode (a Custom/External App's credentials) — see
+    # interpreter/freshchat.py's module docstring for why this exists
+    # alongside api_token.
+    oauth_domain: str | None = None
+    client_id: str | None = None           # write-only, never returned; Vault-backed
+    client_secret: str | None = None       # write-only, never returned; Vault-backed
 
 
 def _freshchat_cfg_from_body(tenant_id: str, body: "FreshchatChannelIn", existing):
@@ -2399,6 +2411,7 @@ def _freshchat_cfg_from_body(tenant_id: str, body: "FreshchatChannelIn", existin
         team=body.team or (existing.team if existing else "support"),
         auto_send_enabled=bool(body.auto_send_enabled),
         status=(existing.status if existing else "inactive"),
+        oauth_domain=(body.oauth_domain or (existing.oauth_domain if existing else "")).strip(),
     )
 
 
@@ -2424,14 +2437,19 @@ def freshchat_configure(body: FreshchatChannelIn, c: Caller = Depends(caller)) -
     existing = load_channel(tid, _service)
     if not (body.domain or (existing and existing.domain)):
         raise HTTPException(422, "domain is required")
+    # either auth mode is enough to save (a tenant may save client_id/secret
+    # first, then complete the OAuth browser round-trip in a second step —
+    # see /oauth/authorize below — before a token of either kind exists)
     has_token = bool(body.api_token) or bool(existing and existing.api_token)
-    if not has_token:
-        raise HTTPException(422, "api_token is required")
+    has_oauth_client = bool(body.client_id) or bool(existing and existing.client_id)
+    if not (has_token or has_oauth_client):
+        raise HTTPException(422, "api_token, or an OAuth client_id/client_secret, is required")
 
     cfg = _freshchat_cfg_from_body(tid, body, existing)
     cfg.status = "active"
     save_channel(cfg, _service, api_token=body.api_token,
-                webhook_public_key=body.webhook_public_key)
+                webhook_public_key=body.webhook_public_key,
+                client_id=body.client_id, client_secret=body.client_secret)
 
     from interpreter import audit
     audit.record(_service, tenant_id=tid,
@@ -2440,6 +2458,60 @@ def freshchat_configure(body: FreshchatChannelIn, c: Caller = Depends(caller)) -
                  target_type="freshchat_channel", target_id=tid,
                  summary=f"{'updated' if existing else 'connected'} the Freshchat channel")
     return freshchat_status(tenant_id=tid, c=c)
+
+
+@app.get("/api/integrations/freshchat/oauth/authorize")
+def freshchat_oauth_authorize(tenant_id: str | None = None, scope: str | None = None,
+                              c: Caller = Depends(caller)) -> dict:
+    """Start the OAuth round-trip for a tenant's Freshchat Developer-Profile
+    OAuth client — save client_id/client_secret via PUT first. `scope`
+    lets the caller override `oauth_authorize_url`'s default (Freshworks'
+    own documented read-only example — no confirmed scope exists yet for
+    sending a message or listing agents, see interpreter/freshchat.py)."""
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    from interpreter.freshchat import load_channel, oauth_authorize_url
+
+    cfg = load_channel(tid, _service)
+    if not (cfg and cfg.client_id and cfg.client_secret):
+        raise HTTPException(422, "save a client_id/client_secret before authorizing")
+    if not cfg.effective_oauth_domain:
+        raise HTTPException(422, "domain (or oauth_domain) is required")
+    nonce = secrets.token_urlsafe(24)
+    _oauth_state[nonce] = (time.time() + 600, c.user_id, tid)
+    kwargs = {"scope": scope} if scope is not None else {}
+    return {"url": oauth_authorize_url(cfg.effective_oauth_domain, cfg.client_id,
+                                       FRESHCHAT_OAUTH_REDIRECT_URI, nonce, **kwargs)}
+
+
+@app.get("/api/integrations/freshchat/oauth/callback")
+def freshchat_oauth_callback(code: str = "", state: str = "", error: str = "") -> HTMLResponse:
+    def page(msg: str) -> HTMLResponse:
+        return HTMLResponse(f"<!doctype html><meta charset=utf-8><p>{msg}</p>"
+                            "<script>setTimeout(()=>window.close(),1500)</script>")
+    if error:
+        return page(f"Freshchat authorisation failed: {error}")
+    hit = _oauth_state.pop(state, None)
+    if not hit or hit[0] < time.time():
+        return page("This authorisation link has expired — try again.")
+    _, _uid, tid = hit
+    from interpreter.freshchat import load_channel, oauth_exchange_code, save_channel
+
+    cfg = load_channel(tid, _service)
+    if not (cfg and cfg.client_id and cfg.client_secret):
+        return page("Freshchat client_id/client_secret are no longer saved for this workspace.")
+    try:
+        tok = oauth_exchange_code(cfg.effective_oauth_domain, cfg.client_id, cfg.client_secret,
+                                  code, FRESHCHAT_OAUTH_REDIRECT_URI)
+    except Exception as e:  # noqa: BLE001
+        return page(f"Could not complete Freshchat OAuth: {e}")
+    save_channel(cfg, _service, refresh_token=tok["refresh_token"])
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="freshchat_channel.oauth_connected",
+                 target_type="freshchat_channel", target_id=tid,
+                 summary="completed the Freshchat OAuth authorization")
+    return page("Freshchat connected. You can close this window.")
 
 
 @app.delete("/api/integrations/freshchat", status_code=204)
@@ -2468,7 +2540,10 @@ def freshchat_test(body: FreshchatChannelIn, c: Caller = Depends(caller)) -> dic
     existing = load_channel(tid, _service)
     cfg = _freshchat_cfg_from_body(tid, body, existing)
     cfg.api_token = body.api_token or (existing.api_token if existing else "")
-    return test_connection(cfg)
+    cfg.client_id = body.client_id or (existing.client_id if existing else "")
+    cfg.client_secret = body.client_secret or (existing.client_secret if existing else "")
+    cfg.refresh_token = existing.refresh_token if existing else ""
+    return test_connection(cfg, sb=_service)
 
 
 @app.get("/api/integrations/freshchat/webhook-url")
