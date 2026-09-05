@@ -1110,6 +1110,75 @@ def fire_webhook(token: str, body: dict[str, Any],
     return {"job_id": job_id, "deduped": job_id is None}
 
 
+# ── Multi-provider connectors, step 3: the Freshchat channel ─────────────
+@app.post("/webhooks/freshchat/{tenant_id}", status_code=202)
+async def freshchat_webhook(tenant_id: str, request: Request) -> dict:
+    """Public webhook (no bearer auth — the tenant_id in the URL plus a
+    valid `X-Freshchat-Signature` from THAT tenant's own stored webhook
+    public key are the credential, verified before the body is trusted at
+    all). Turns a customer `message_create` event into a case-shaped
+    `run_flow` job, reusing the same case across a conversation via
+    `channel_threads` (migration 085) — the same "produce a case dict,
+    enqueue run_flow" shape the email channel uses, not the generic
+    Case-less webhook-trigger machinery (`/t/{token}`), since this needs to
+    flow through the real case-touching pipeline (`identify`/`sf_case`/...).
+    """
+    from interpreter import channel_threads, freshchat
+
+    raw = await request.body()
+    rate_limit(tenant_id, "freshchat_webhook", 300)
+
+    try:
+        cfg = freshchat.load_channel(tenant_id, _service)
+    except Exception:  # noqa: BLE001 — can't verify the tenant -> reject (matches /t/{token})
+        cfg = None
+    if not cfg or not cfg.webhook_public_key:
+        raise HTTPException(404, "freshchat not connected for this tenant")
+    if not freshchat.verify_signature(
+        cfg.webhook_public_key, raw, request.headers.get("X-Freshchat-Signature"),
+    ):
+        raise HTTPException(401, "bad freshchat signature")
+
+    import json as _json
+    try:
+        body = _json.loads(raw.decode())
+    except Exception:  # noqa: BLE001
+        raise HTTPException(400, "invalid JSON")
+
+    parsed = freshchat.parse_webhook_message(body)
+    if not parsed:
+        return {"ok": True, "skipped": "not a new customer message"}
+
+    conv_id = parsed["conversation_id"]
+    existing = channel_threads.get_case_ref(tenant_id, freshchat.KIND, conv_id, sb=_service)
+    case: dict[str, Any] = {
+        "tenant_id": tenant_id, "team": cfg.team, "channel": freshchat.KIND,
+        "conversation_id": conv_id, "case_id": f"freshchat:{conv_id}",
+        "subject": parsed["text"][:120], "body": parsed["text"],
+        "from": parsed.get("actor_id") or "",
+    }
+    if existing:
+        case["sf_id"] = existing["case_ref"]
+        case["case_number"] = existing.get("case_number")
+
+    try:
+        flow = load_flow(tenant_id=tenant_id, team=cfg.team, status="published", sb=_service)
+    except (FlowNotFound, FlowInvalid):
+        raise HTTPException(404, f"no published '{cfg.team}' flow for this tenant")
+
+    # Python's builtin hash() is randomized per-process (PYTHONHASHSEED) --
+    # useless as a dedupe key across a worker restart. A stable digest is
+    # the fallback when Freshchat's payload doesn't carry its own message id
+    # (see freshchat.parse_webhook_message's docstring on that uncertainty).
+    fallback_id = hashlib.sha256(f"{conv_id}:{parsed['text']}".encode()).hexdigest()[:16]
+    idem = f"freshchat:{parsed.get('message_id') or fallback_id}"
+    job_id = jobs.enqueue(
+        "run_flow", {"flow_id": flow["flow_id"], "case": case, "idempotency_key": idem},
+        dedupe_key=idem, sb=_service,
+    )
+    return {"job_id": job_id, "deduped": job_id is None}
+
+
 # ── P6c: per-tenant HTTP connections for the `http_request` node ─────
 class ConnectionIn(BaseModel):
     slug: str

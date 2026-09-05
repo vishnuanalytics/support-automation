@@ -82,6 +82,8 @@ def _run_flow(payload: dict, sb) -> dict:
     out = {"run_id": run_id, "outcome": (final.get("outcome") or {}).get("action")}
     if run_case.get("channel") == "email":
         out["email"] = _email_post_run(final, run_case, flow, sb)
+    elif run_case.get("channel") == "freshchat":
+        out["freshchat"] = _freshchat_post_run(final, run_case, flow, sb)
     return out
 
 
@@ -149,6 +151,43 @@ def _email_post_run(final: dict, case: dict, flow: dict, sb) -> dict:
         return {"decision": "noop", "reason": meta.get("reason")}
     except Exception as e:  # noqa: BLE001
         log.warning("email post-run failed: %s", e)
+        return {"error": str(e)}
+
+
+def _freshchat_post_run(final: dict, case: dict, flow: dict, sb) -> dict:
+    """Multi-provider connectors step 3 — mirrors `_email_post_run`'s guard
+    (reuses `emailer.decide`, which is genuinely channel-agnostic: it only
+    reads `outcome`/`cfg.auto_send_enabled`/`clarification`), delivering
+    into the Freshchat conversation instead of over SMTP. Also keeps
+    `channel_threads` (migration 085) fresh regardless of delivery outcome,
+    so the next message on this conversation still attaches to the same
+    case even on a run that didn't send anything (e.g. `ask_human`). Never
+    raises — a delivery failure must not fail/retry the flow run."""
+    from interpreter import channel_threads, emailer, freshchat
+
+    try:
+        cfg = freshchat.load_channel(flow["tenant_id"], sb)
+        if not cfg:
+            return {"skipped": "no freshchat channel"}
+        conv_id = case.get("conversation_id")
+        sf_id = case.get("sf_id") or case.get("id")
+        if conv_id and sf_id:
+            channel_threads.link(flow["tenant_id"], freshchat.KIND, conv_id,
+                                 case_ref=sf_id, case_number=case.get("case_number"), sb=sb)
+        if not conv_id:
+            return {"decision": "noop", "reason": "no conversation_id on case"}
+
+        outcome = final.get("outcome") or {}
+        kind, meta = emailer.decide(outcome, cfg, final.get("clarification"))
+        if kind == "send_reply":
+            return {"decision": kind, "delivery": freshchat.send_message(cfg, conv_id, meta["body"])}
+        if kind == "send_questions":
+            numbered = "\n".join(f"{i + 1}. {q}" for i, q in enumerate(meta["questions"]))
+            body = f"To help you with this, could you share:\n\n{numbered}\n\nOnce we have that we'll follow up."
+            return {"decision": kind, "delivery": freshchat.send_message(cfg, conv_id, body)}
+        return {"decision": kind, "reason": meta.get("reason")}
+    except Exception as e:  # noqa: BLE001
+        log.warning("freshchat post-run failed: %s", e)
         return {"error": str(e)}
 
 

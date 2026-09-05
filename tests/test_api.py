@@ -73,6 +73,72 @@ def test_flow_trigger_mgmt_needs_a_token_but_public_webhook_404s_on_a_bad_token(
     assert r.status_code == 404
 
 
+# ── multi-provider connectors step 3: the Freshchat webhook ─────────────
+def test_freshchat_webhook_404s_for_an_unconnected_tenant():
+    # no channel configured -> load_channel finds nothing (or, offline, the
+    # dummy Supabase URL fails the read -- either way this must 404 cleanly,
+    # not 500, matching /t/{token}'s "can't verify -> reject" precedent.
+    r = client.post("/webhooks/freshchat/no-such-tenant", json={"hello": 1})
+    assert r.status_code == 404
+
+
+def test_freshchat_webhook_401s_on_a_bad_signature(monkeypatch):
+    from interpreter import freshchat
+
+    monkeypatch.setattr(freshchat, "load_channel", lambda *a, **k: freshchat.FreshchatConfig(
+        tenant_id="t", domain="acme.freshchat.com", api_token="tok", webhook_public_key="pem"))
+    monkeypatch.setattr(freshchat, "verify_signature", lambda *a, **k: False)
+    r = client.post("/webhooks/freshchat/t", json={"hello": 1})
+    assert r.status_code == 401
+
+
+def test_freshchat_webhook_happy_path_enqueues_a_run_flow_job(monkeypatch):
+    from interpreter import channel_threads, freshchat, jobs
+    import api.main as main
+
+    cfg = freshchat.FreshchatConfig(tenant_id="t", domain="acme.freshchat.com", team="support",
+                                    api_token="tok", webhook_public_key="pem")
+    monkeypatch.setattr(freshchat, "load_channel", lambda *a, **k: cfg)
+    monkeypatch.setattr(freshchat, "verify_signature", lambda *a, **k: True)
+    monkeypatch.setattr(channel_threads, "get_case_ref", lambda *a, **k: None)
+    monkeypatch.setattr(main, "load_flow", lambda **k: {"flow_id": "f1", "tenant_id": "t"})
+
+    enqueued = []
+    monkeypatch.setattr(jobs, "enqueue", lambda kind, payload, **k: enqueued.append(
+        (kind, payload, k)) or "job1")
+
+    r = client.post("/webhooks/freshchat/t", json={
+        "actor": {"actor_type": "user", "actor_id": "u1"},
+        "data": {"message": {"conversation_id": "c1",
+                             "message_parts": [{"text": {"content": "help please"}}]}},
+    })
+    assert r.status_code == 202, r.text
+    assert r.json()["job_id"] == "job1"
+    assert len(enqueued) == 1
+    kind, payload, kw = enqueued[0]
+    assert kind == "run_flow" and payload["flow_id"] == "f1"
+    case = payload["case"]
+    assert case["channel"] == "freshchat" and case["conversation_id"] == "c1"
+    assert case["body"] == "help please" and "sf_id" not in case
+    assert kw["dedupe_key"].startswith("freshchat:")
+
+
+def test_freshchat_webhook_skips_a_non_customer_message(monkeypatch):
+    from interpreter import freshchat, jobs
+
+    monkeypatch.setattr(freshchat, "load_channel", lambda *a, **k: freshchat.FreshchatConfig(
+        tenant_id="t", domain="acme.freshchat.com", api_token="tok", webhook_public_key="pem"))
+    monkeypatch.setattr(freshchat, "verify_signature", lambda *a, **k: True)
+    monkeypatch.setattr(jobs, "enqueue", lambda *a, **k: pytest.fail("must not enqueue"))
+
+    r = client.post("/webhooks/freshchat/t", json={
+        "actor": {"actor_type": "agent"},
+        "data": {"message": {"conversation_id": "c1",
+                             "message_parts": [{"text": {"content": "the bot's own reply"}}]}},
+    })
+    assert r.status_code == 202 and r.json()["skipped"]
+
+
 def test_connections_need_a_token_and_http_request_is_a_node_type():
     assert client.get("/api/connections").status_code == 401
     assert client.post("/api/connections", json={"slug": "x", "base_url": "https://y"}).status_code == 401

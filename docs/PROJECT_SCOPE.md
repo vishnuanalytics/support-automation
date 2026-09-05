@@ -707,16 +707,75 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-05 — Multi-provider connectors, step 1: the "case system" is
-selectable, not hardcoded (FR-51). This is the most recent work in this
-file (see the top-of-file note: this doc is edited in place, not strictly
-appended to — check dates, not physical position).** Prompted by the
+**2026-09-05 — Multi-provider connectors, step 3: Freshchat, the first
+pluggable chat/call channel (FR-51/FR-20). This is the most recent work in
+this file (see the top-of-file note: this doc is edited in place, not
+strictly appended to — check dates, not physical position).** The user
+picked step 3 directly (skipping step 2/Zendesk for now — the two are
+independent, step 3 doesn't need step 1's Zendesk to exist first). Built
++ offline-verified, **not yet live-verified** (needs the user's own real
+Freshchat account — API token, webhook public key, a real conversation —
+same "flagged, not spent" pattern as every other live-verification
+residual in this project).
+
+**What actually got built, end to end:** `interpreter/freshchat.py`
+(`FreshchatConfig`, Vault-backed credentials via the existing
+`vault_secrets.py`, pure `verify_signature` — real RSA/SHA256 against a
+tenant's own webhook public key, not a mock — and pure
+`parse_webhook_message`, defensive about the vendor's own documented
+payload-shape variance). A new public `POST /webhooks/freshchat/{tenant_id}`
+in `api/main.py` — verifies the signature before trusting the body at
+all, filters out agent/bot echoes (would otherwise loop on the bot's own
+reply re-arriving as a "new message"), enqueues a `run_flow` job.
+**Deliberately NOT built on the generic Case-less webhook-trigger
+machinery** (`/t/{token}`, P6a) despite that being the original framing
+when this was scoped — a Freshchat message needs to flow through the real
+case-touching pipeline (`identify`/`sf_case`/...), which reads
+`state.case`, not `state.context`; the "reuse the generic trigger" idea
+turned out to be a real mismatch once actually worked through, corrected
+here rather than built wrong. New migration `085` (`channel_threads`: a
+generic `(tenant, channel, thread_key) -> case_ref` mapping, deliberately
+connector-agnostic — not Freshchat- or Salesforce-specific, so any future
+chat channel reuses it) so a long-lived conversation attaches to the same
+case instead of creating a new one per message. New `api/worker.py::
+_freshchat_post_run` (mirrors the existing `_email_post_run`, reuses the
+same genuinely channel-agnostic `emailer.decide()` rather than
+reimplementing the auto-send decision matrix) delivers the customer-facing
+reply via `freshchat.send_message` and keeps `channel_threads` fresh
+regardless of delivery outcome (even an `ask_human` run that sends
+nothing still needs the mapping current).
+
+**A real bug found and fixed before calling this done, not theoretical:**
+the idempotency-key fallback (for when Freshchat's payload doesn't carry
+its own message id — genuinely uncertain, not confirmed against a real
+account) used Python's builtin `hash()`, which is randomized per process
+(`PYTHONHASHSEED`) — would have silently stopped deduping the same retried
+webhook delivery across a worker restart. Replaced with a stable
+`hashlib.sha256` digest.
+
+31 new offline tests (`tests/test_freshchat.py` — config model, Vault
+storage, real-keypair signature verification incl. tamper/wrong-key
+rejection, webhook parsing incl. shape-variance tolerance; `tests/
+test_freshchat_worker.py` — the post-run delivery guard, mirroring
+`test_emailer.py`'s coverage of `_email_post_run`; 4 in `tests/
+test_api.py` — the webhook endpoint's auth/happy-path/skip behavior).
+699 offline tests green, migration/schema-drift checks clean.
+
+**Not yet done, deliberately not built now:** no API endpoints or web UI
+to actually connect a Freshchat account (credentials only reach Vault via
+test fixtures / direct DB access right now) — the natural next piece,
+mirroring `/api/integrations/email`; no live verification; step 2
+(Zendesk) still not started, independent of this.
+
+**Old step-1 note, superseded by the above as "most recent," kept for its
+own history:** the "case system" is
+selectable, not hardcoded (FR-51). Prompted by the
 user's own business (UrbanPiper) — real support orgs mix Salesforce/
 Zendesk/HubSpot for tickets with a separate tool for chat/calls, and the
 platform needs to let a tenant pick, not assume Salesforce. Scoped as a
-3-step roadmap (this session): **1. make the connector selectable** (this
-chunk) → **2. add Zendesk as a second real implementation** (not started)
-→ **3. add Freshchat as the first pluggable chat/call channel**, building
+3-step roadmap: **1. make the connector selectable** (done) → **2. add
+Zendesk as a second real implementation** (not started) → **3. add
+Freshchat as the first pluggable chat/call channel**, building
 on the existing generic webhook trigger + connector framework rather than
 a bespoke poller (not started — supersedes the older 2026-08-30
 "Freshworks chat via a bespoke channel module" architecture memory, now
