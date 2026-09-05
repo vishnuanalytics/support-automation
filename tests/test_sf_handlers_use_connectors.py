@@ -24,7 +24,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from interpreter import alert, connectors
+from interpreter import alert, connectors, salesforce
 from interpreter.registry import (
     _cp_write, h_ask_human, h_clarify, h_handover, h_identify, h_notify, h_sf_case, h_sf_writeback,
 )
@@ -156,3 +156,85 @@ def test_alert_human_uses_slack_post_message_and_sf_post_note(calls):
     assert ("slack", "post_message") in names
     assert ("salesforce", "post_note") in names
     del out
+
+
+# ── 2026-09-05: the seam actually generalizes, not just resolves ─────────
+# The tests above monkeypatch connectors.invoke itself -- proof of *which*
+# connector slug a handler asks for, not that a *different* real connector
+# genuinely receives the call. This registers a second, throwaway connector
+# (not salesforce) implementing the full CASE_ACTIONS contract, points a fake
+# tenant's `case_connector` at it, and drives a real handler through the
+# real (unmocked) connectors.invoke -- proving migration 084 + step 1's
+# refactor actually route elsewhere, not just resolve a string in isolation.
+#
+# **A real finding, surfaced not fixed here:** `h_ask_human`'s `add_comment`
+# call (and several others) have no try/except around `connectors.invoke` --
+# unlike `_cp_write`'s `update_fields` call, which already degrades on any
+# exception. That was never reachable before this chunk (`"salesforce"` was
+# a hardcoded literal, always fully implementing every action any handler
+# could ask for) -- it only becomes reachable now that a *misconfigured*
+# `case_connector` (a typo, or a genuinely partial connector) is possible.
+# The dummy connector below therefore implements the FULL contract, same as
+# any real connector (Zendesk, when it lands) would need to -- a partial
+# connector's crash-on-missing-action is arguably correct fail-loud
+# behavior, not a bug, but it's a real design question for whoever builds
+# the next real connector, not something to silently paper over here.
+@pytest.fixture
+def dummy_case_connector():
+    from interpreter.connectors import CASE_ACTIONS, ActionSpec, ConnectorSpec, register_builtin, _BUILTINS
+
+    seen: list[tuple[str, dict]] = []
+
+    _RESULTS = {
+        "update_fields": {"written": {}, "skipped": {}, "dry_run": False},
+        "post_note": {"posted": True, "dry_run": False},
+        "add_comment": {"created": True},
+        "assign_owner": {"assigned": True, "owner_type": "queue"},
+        "ensure_case": {"sf_id": "DUMMY-1", "dry_run": False},
+        "log_email_message": {"created": True},
+        "identify_sender": {"match": "none", "account_matched": False},
+        "send_case_reply": {"sent": True, "dry_run": False},
+    }
+
+    def _impl(action_name):
+        def impl(tenant_id, org_label, params):
+            seen.append((action_name, dict(params)))
+            return dict(_RESULTS[action_name])
+        return impl
+
+    register_builtin(ConnectorSpec(
+        slug="dummy_case_system", label="Dummy", auth="none",
+        actions={name: ActionSpec(name, "", params=[], impl=_impl(name)) for name in CASE_ACTIONS},
+    ))
+    try:
+        yield seen
+    finally:
+        _BUILTINS.pop("dummy_case_system", None)
+
+
+def test_a_second_connector_genuinely_receives_the_call(monkeypatch, dummy_case_connector):
+    class _TenantSB:
+        def table(self, name):
+            assert name == "tenants"
+            return self
+
+        def select(self, *_a):
+            return self
+
+        def eq(self, *_a):
+            return self
+
+        def execute(self):
+            return type("R", (), {"data": [{"case_connector": "dummy_case_system"}]})()
+
+    def boom(*_a, **_k):
+        raise AssertionError("salesforce.py must not be called — the tenant is on a different connector")
+    monkeypatch.setattr(salesforce, "post_chatter", boom)
+    monkeypatch.setattr(salesforce, "assign_case", boom)
+
+    h_ask_human(
+        {"case": {"sf_id": "500X"}, "draft": "hi", "confidence": 0.2, "tenant_id": "t"},
+        {"_node_id": "n", "queue": "Team_Support", "_sb": _TenantSB()},
+    )
+    kinds = {k for k, _ in dummy_case_connector}
+    assert {"post_note", "assign_owner"} <= kinds

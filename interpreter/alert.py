@@ -132,8 +132,9 @@ def alert_human(state: dict, config: dict) -> dict[str, Any]:
                 f"{' in Slack' if out.get('reasoning_session') else ''}. "
                 f"It has **not** replied to the customer — we'll reason through "
                 f"the response together before anything is sent.")
+        conn = connectors.resolve_case_connector(tenant_id, config, sb=config.get("_sb"))
         out["chatter"] = connectors.invoke(
-            tenant_id, "salesforce", "post_note",
+            tenant_id, conn, "post_note",
             {"case_id": sf_id, "body": body, "mention_id": mid}, org_label=org_label,
         )
 

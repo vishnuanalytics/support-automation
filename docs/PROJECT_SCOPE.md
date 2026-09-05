@@ -707,11 +707,87 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-05 — Playwright e2e on the web editor: built, live-verified in
-this sandbox, wired into CI. Closes a residual open since Phase 9. This is
-the most recent work in this file (see the top-of-file note: this doc is
-edited in place, not strictly appended to — check dates, not physical
-position).** Picked from a 3-option menu offered after Phase 29 closed
+**2026-09-05 — Multi-provider connectors, step 1: the "case system" is
+selectable, not hardcoded (FR-51). This is the most recent work in this
+file (see the top-of-file note: this doc is edited in place, not strictly
+appended to — check dates, not physical position).** Prompted by the
+user's own business (UrbanPiper) — real support orgs mix Salesforce/
+Zendesk/HubSpot for tickets with a separate tool for chat/calls, and the
+platform needs to let a tenant pick, not assume Salesforce. Scoped as a
+3-step roadmap (this session): **1. make the connector selectable** (this
+chunk) → **2. add Zendesk as a second real implementation** (not started)
+→ **3. add Freshchat as the first pluggable chat/call channel**, building
+on the existing generic webhook trigger + connector framework rather than
+a bespoke poller (not started — supersedes the older 2026-08-30
+"Freshworks chat via a bespoke channel module" architecture memory, now
+that the generic webhook-trigger/connector machinery exists to build it
+on instead).
+
+Every case-touching handler in `registry.py` (`sf_case`/`sf_writeback`/
+`notify`/`ask_human`/`handover`/`identify`/`clarify`) plus `alert.
+alert_human` (behind `notify_human`) called `connectors.invoke(tenant_id,
+"salesforce", <action>, ...)` with **the connector name as a literal
+string** — 15+ call sites, all hardcoded, even though `connectors.invoke`
+itself (built last session, FR-47) was already generic. Migration `084`
+adds `tenants.case_connector` (free text, default `'salesforce'`,
+deliberately **no CHECK constraint** — same "connectors are data, not an
+enum" principle CLAUDE.md already applies to `flow_nodes.type`). New
+`connectors.resolve_case_connector(tenant_id, config)` + a `registry.
+_case_conn(state, config)` wrapper: an explicit per-node `config.connector`
+override (the same field the generic `connector_action` node already
+uses) beats the tenant's `case_connector` default, which beats
+`"salesforce"` — every existing flow/tenant with neither set is
+byte-for-byte unchanged. `connectors.CASE_ACTIONS` now documents the exact
+8-action contract (`update_fields`/`post_note`/`add_comment`/
+`assign_owner`/`ensure_case`/`log_email_message`/`identify_sender`/
+`send_case_reply`) a future connector must implement.
+
+**A real regression found and fixed before calling this done, not
+theoretical:** the naive resolver did a live Supabase read on every single
+call — previously impossible (the connector was a literal), now a real
+per-node-invocation network dependency that would have made every
+case-touching offline test quietly reach for a live DB connection. Fixed
+with the exact pattern `routing.py`'s `_fetch_rows` already established
+for this same problem: skip the read and return the default when running
+under pytest with no `sb` explicitly passed (a test that wants to exercise
+the real lookup still can, by passing a fake `sb`). Verified by diffing
+against the pre-change run, not assumed — timing was noise either way,
+but the guard is correct regardless and matches the codebase's own
+convention.
+
+**Proven as a real seam, not just a resolver returning a string:**
+`tests/test_sf_handlers_use_connectors.py::test_a_second_connector_
+genuinely_receives_the_call` registers a second, throwaway connector
+implementing the full `CASE_ACTIONS` contract, points a fake tenant's
+`case_connector` at it, and drives the real (unmocked) `h_ask_human`
+through it — asserting `salesforce.post_chatter`/`assign_case` are never
+called and the dummy connector genuinely receives `post_note`/
+`assign_owner`/`update_fields`. 668 offline tests green (7 new: 6 for
+`resolve_case_connector` itself, 1 for the end-to-end swap).
+
+**A real design question surfaced, not resolved:** several call sites
+(`h_ask_human`'s `add_comment`, others) have no try/except around
+`connectors.invoke` — unreachable before this chunk (`"salesforce"` always
+implemented every action any handler could call), now reachable if a
+tenant's `case_connector` names a connector that only partially
+implements `CASE_ACTIONS`. Arguably correct fail-loud behavior for a
+misconfigured tenant, not obviously a bug worth silently swallowing — a
+live question for whoever builds the next real connector (step 2), not
+resolved here either way.
+
+**Not yet done, deliberately not built now:** no second real connector
+(step 2, Zendesk) — this chunk proves the seam is real, not that there's
+an actual alternative yet; no web UI to pick `case_connector` (nothing
+meaningful to choose between until step 2 exists); `_TYPE_DOC` (the AI
+Flow Copilot's node docs) deliberately NOT updated with the new
+`config.connector` field — with only one working value, documenting it
+risks the model inventing a connector slug that doesn't exist (the exact
+19e/19f lesson), worth revisiting once Zendesk is real.
+
+**Old Playwright note, superseded by the above as "most recent," kept for
+its own history:** e2e on the web editor: built, live-verified in
+this sandbox, wired into CI. Closes a residual open since Phase 9. Picked
+from a 3-option menu offered after Phase 29 closed
 (the other two — a second real connector, CI/eval hardening — not started).
 `web/e2e/flow-editor.spec.ts` (Playwright, `@playwright/test` added as a
 devDependency) drives the real app in a real Chromium: stubbed auth → load

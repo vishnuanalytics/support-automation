@@ -30,6 +30,69 @@ def test_builtins_are_registered():
     assert {"salesforce", "slack"} <= slugs
 
 
+# ── multi-provider connectors step 1: resolve_case_connector (migration 084) ──
+class _TenantSB:
+    """.table('tenants').select('case_connector').eq('tenant_id', x).execute()"""
+    def __init__(self, row: dict | None = None, *, raises: bool = False):
+        self._row = row
+        self._raises = raises
+
+    def table(self, name):
+        assert name == "tenants"
+        return self
+
+    def select(self, *_a):
+        return self
+
+    def eq(self, *_a):
+        return self
+
+    def execute(self):
+        if self._raises:
+            raise RuntimeError("boom")
+        return type("R", (), {"data": [self._row] if self._row else []})()
+
+
+def test_resolve_case_connector_no_tenant_defaults_salesforce():
+    assert connectors.resolve_case_connector(None, {}) == "salesforce"
+
+
+def test_resolve_case_connector_config_override_wins_over_everything():
+    sb = _TenantSB({"case_connector": "zendesk"})
+    assert connectors.resolve_case_connector("t", {"connector": "custom"}, sb=sb) == "custom"
+
+
+def test_resolve_case_connector_reads_the_tenant_default():
+    sb = _TenantSB({"case_connector": "zendesk"})
+    assert connectors.resolve_case_connector("t", {}, sb=sb) == "zendesk"
+
+
+def test_resolve_case_connector_falls_back_when_tenant_row_missing():
+    sb = _TenantSB(None)
+    assert connectors.resolve_case_connector("t", {}, sb=sb) == "salesforce"
+
+
+def test_resolve_case_connector_falls_back_on_fetch_error():
+    sb = _TenantSB(raises=True)
+    assert connectors.resolve_case_connector("t", {}, sb=sb) == "salesforce"
+
+
+def test_resolve_case_connector_never_hits_network_offline_with_no_sb():
+    """Under pytest, with no `sb` passed and no override, this must not reach
+    for a real Supabase client (matches routing.py's `_fetch_rows` — see
+    `PYTEST_CURRENT_TEST` guard) -- proven by monkeypatching connectors._sb
+    to blow up if it's ever called."""
+    def boom():
+        raise AssertionError("should not construct a real Supabase client offline")
+    import interpreter.connectors as _c
+    orig = _c._sb
+    _c._sb = boom
+    try:
+        assert connectors.resolve_case_connector("t", {}) == "salesforce"
+    finally:
+        _c._sb = orig
+
+
 def test_get_action_unknown_connector_raises_keyerror(monkeypatch):
     monkeypatch.setattr(connections, "resolve", lambda *a, **k: None)  # stay offline
     with pytest.raises(KeyError):

@@ -35,6 +35,7 @@ without forcing it.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -64,6 +65,54 @@ _BUILTINS: dict[str, ConnectorSpec] = {}
 
 def register_builtin(spec: ConnectorSpec) -> None:
     _BUILTINS[spec.slug] = spec
+
+
+# --------------------------------------------------------------------------
+# Multi-provider connectors, step 1 (2026-09-05) — which connector is "the
+# case system" for a tenant is now data (migration 084: tenants.case_connector),
+# not a literal `"salesforce"` hardcoded at 15+ call sites in registry.py /
+# alert.py. `salesforce` is still the only real implementation; this is the
+# seam a future Zendesk/HubSpot connector plugs into by registering a
+# builtin with these exact action names — the contract every case-touching
+# node handler (sf_case/sf_writeback/notify/ask_human/handover/identify/
+# clarify/notify_human) actually calls.
+# --------------------------------------------------------------------------
+CASE_ACTIONS = (
+    "update_fields", "post_note", "add_comment", "assign_owner",
+    "ensure_case", "log_email_message", "identify_sender", "send_case_reply",
+)
+
+
+def _sb():
+    from ingestion.scraper import get_supabase
+    return get_supabase()
+
+
+def resolve_case_connector(tenant_id: str | None, config: dict[str, Any] | None,
+                          *, sb=None) -> str:
+    """Which connector slug a case-touching node handler should invoke this
+    call — resolved fresh each time (no caching), matching this module's
+    existing per-call-read style (`connections.resolve`, `vault_secrets.get`).
+
+    Precedence: an explicit per-node `config["connector"]` override (the
+    same field the generic `connector_action` node already uses) >
+    `tenants.case_connector` (this tenant's default) > `"salesforce"` — so
+    a flow/tenant with neither set behaves exactly as before this existed.
+    """
+    override = (config or {}).get("connector")
+    if override:
+        return str(override)
+    if not tenant_id:
+        return "salesforce"
+    if sb is None and "PYTEST_CURRENT_TEST" in os.environ:
+        return "salesforce"           # offline tests monkeypatch this or pass sb (matches routing.py)
+    try:
+        rows = ((sb or _sb()).table("tenants").select("case_connector")
+                .eq("tenant_id", tenant_id).execute().data or [])
+        return (rows[0].get("case_connector") if rows else None) or "salesforce"
+    except Exception as e:  # noqa: BLE001
+        log.warning("resolve_case_connector(%s): %s", tenant_id, e)
+        return "salesforce"
 
 
 _ORG_PARAM = {"key": "org", "label": "Salesforce org (blank = default)",
