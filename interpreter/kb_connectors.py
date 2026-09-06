@@ -230,6 +230,25 @@ def _as_yes(v: Any, default: bool = True) -> bool:
     return str(v).strip().lower() not in ("no", "false", "0", "off", "")
 
 
+def _clamp_int(v: Any, default: int, lo: int, hi: int) -> int:
+    try:
+        return max(lo, min(int(v), hi))
+    except (TypeError, ValueError):
+        return default
+
+
+# A per-connector cap on how many items one sync pulls — a huge Drive folder
+# or Linear workspace would otherwise blow JOB_TIMEOUT and enqueue hundreds
+# of embed jobs in one go. When a sync is capped it reports `exhaustive=False`
+# so the driver won't archive the items it didn't see (same guard the crawl's
+# `max_pages` uses).
+_MAX_ITEMS_FIELD = {
+    "key": "max_items", "label": "Max items per sync", "type": "number",
+    "required": False, "placeholder": "300",
+    "help": "Cap on documents/issues/posts pulled in one run.",
+}
+
+
 def _norm_gdocs(raw: dict[str, Any]) -> dict[str, Any]:
     from interpreter import gdrive
 
@@ -267,6 +286,8 @@ def _norm_gdocs(raw: dict[str, Any]) -> dict[str, Any]:
         if repo.count("/") != 1 or not all(repo.split("/")):
             raise ValueError("github_repo must be 'owner/name' when the bot opens review issues")
         cfg["github_repo"] = repo
+    if cfg.get("folder_id"):
+        cfg["max_items"] = _clamp_int(raw.get("max_items"), 300, 1, 2000)
     return cfg
 
 
@@ -295,12 +316,14 @@ def _sync_gdocs(config: dict, watermark: "dict | None", ctx: SyncCtx) -> KBSyncR
     # folder. (Fetches every Doc each run; `changes.list` incremental is a
     # later optimization — same note the design doc makes.)
     if config.get("folder_id"):
-        docs = gdrive.list_folder_docs(ctx.tenant_id, config["folder_id"], ctx.sb,
-                                       recursive=bool(config.get("recursive")))
+        cap = int(config.get("max_items") or 300)
+        found = gdrive.list_folder_docs(ctx.tenant_id, config["folder_id"], ctx.sb,
+                                        recursive=bool(config.get("recursive")))
+        docs = found[:cap]
         out = [_gdoc_kbdoc(gdrive.fetch_doc(ctx.tenant_id, d["id"], ctx.sb), d["id"], None)
                for d in docs]
         latest = max((d.get("modified_time") or "" for d in docs), default=None)
-        return KBSyncResult(documents=out, exhaustive=True,
+        return KBSyncResult(documents=out, exhaustive=len(found) <= cap,
                             watermark={"modified_time": latest, "count": len(out)})
 
     doc_id = config["doc_id"]
@@ -336,6 +359,7 @@ def _norm_linear(raw: dict[str, Any]) -> dict[str, Any]:
     tk = (raw.get("team_key") or "").strip()
     if tk:
         cfg["team_key"] = tk
+    cfg["max_items"] = _clamp_int(raw.get("max_items"), 300, 1, 2000)
     return cfg
 
 
@@ -344,10 +368,11 @@ def _sync_linear(config: dict, watermark: "dict | None", ctx: SyncCtx) -> KBSync
 
     inc = config.get("include", "both")
     team_key = (config.get("team_key") or "").strip() or None
+    cap = int(config.get("max_items") or 300)
     docs: list[KBDocument] = []
 
     if inc in ("documents", "both"):
-        for d in linear.fetch_documents(ctx.tenant_id, ctx.sb):
+        for d in linear.fetch_documents(ctx.tenant_id, ctx.sb, limit=cap):
             body = (d.get("content") or "").strip()
             if not body:
                 continue
@@ -356,7 +381,8 @@ def _sync_linear(config: dict, watermark: "dict | None", ctx: SyncCtx) -> KBSync
                                 updated_at=d.get("updatedAt"), quality="official"))
 
     if inc in ("issues", "both"):
-        for it in linear.fetch_resolved_issues(ctx.tenant_id, ctx.sb, team_key=team_key):
+        for it in linear.fetch_resolved_issues(ctx.tenant_id, ctx.sb,
+                                               team_key=team_key, limit=cap):
             desc = (it.get("description") or "").strip()
             comments = [c for c in ((it.get("comments") or {}).get("nodes") or [])
                         if (c.get("body") or "").strip()]
@@ -371,7 +397,9 @@ def _sync_linear(config: dict, watermark: "dict | None", ctx: SyncCtx) -> KBSync
                                 origin="linear", url=it.get("url", ""),
                                 updated_at=it.get("updatedAt"), quality="community_resolved"))
 
-    return KBSyncResult(documents=docs, exhaustive=True, watermark={"count": len(docs)})
+    cap = int(config.get("max_items") or 300)
+    return KBSyncResult(documents=docs, exhaustive=len(docs) < cap,
+                        watermark={"count": len(docs)})
 
 
 register(KBConnectorSpec(
@@ -386,6 +414,7 @@ register(KBConnectorSpec(
                            "documents": "Documents only", "issues": "Resolved issues only"}},
         {"key": "team_key", "label": "Team key (optional — limits issues to one team)",
          "type": "string", "required": False, "placeholder": "ENG"},
+        _MAX_ITEMS_FIELD,
     ],
     normalize=_norm_linear, available=_linear_available,
     sync=_sync_linear,
@@ -397,14 +426,15 @@ def _norm_nolt(raw: dict[str, Any]) -> dict[str, Any]:
     bid = (raw.get("board_id") or "").strip()
     if not bid:
         raise ValueError("board_id is required (Nolt board admin → API)")
-    return {"board_id": bid}
+    return {"board_id": bid, "max_items": _clamp_int(raw.get("max_items"), 500, 1, 2000)}
 
 
 def _sync_nolt(config: dict, watermark: "dict | None", ctx: SyncCtx) -> KBSyncResult:
     from interpreter import nolt
 
+    cap = int(config.get("max_items") or 500)
     docs: list[KBDocument] = []
-    for p in nolt.fetch_resolved_posts(ctx.tenant_id, ctx.sb, config["board_id"]):
+    for p in nolt.fetch_resolved_posts(ctx.tenant_id, ctx.sb, config["board_id"], max_posts=cap):
         parts = [f"# {p.get('title', '')}".strip()]
         if (p.get("description") or "").strip():
             parts.append(p["description"].strip())
@@ -417,7 +447,8 @@ def _sync_nolt(config: dict, watermark: "dict | None", ctx: SyncCtx) -> KBSyncRe
                             "\n\n".join(parts), origin="nolt", url=p.get("url", ""),
                             updated_at=p.get("updatedAt") or p.get("updated_at"),
                             quality="community_resolved"))
-    return KBSyncResult(documents=docs, exhaustive=True, watermark={"count": len(docs)})
+    return KBSyncResult(documents=docs, exhaustive=len(docs) < cap,
+                        watermark={"count": len(docs)})
 
 
 register(KBConnectorSpec(
@@ -428,6 +459,7 @@ register(KBConnectorSpec(
          "help": "Nolt board admin → API. Leave blank to reuse a saved key."},
         {"key": "board_id", "label": "Board id", "type": "string", "required": True,
          "help": "Also from the board admin → API panel (not the board URL slug)."},
+        _MAX_ITEMS_FIELD,
     ],
     normalize=_norm_nolt, available=_nolt_available,
     sync=_sync_nolt,
@@ -441,6 +473,9 @@ register(KBConnectorSpec(
          "required": True, "placeholder": "https://docs.google.com/document/d/…  or  /drive/folders/…"},
         {"key": "recursive", "label": "If a folder: include subfolders",
          "type": "select", "required": False, "options": ["no", "yes"]},
+        {"key": "max_items", "label": "If a folder: max Docs per sync", "type": "number",
+         "required": False, "placeholder": "300",
+         "help": "Ignored for a single Doc."},
         {"key": "index", "label": "Read this doc into the knowledge base",
          "type": "select", "required": False, "options": ["yes", "no"],
          "option_labels": {

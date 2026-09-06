@@ -83,24 +83,27 @@ query Issues($after: String, $filter: IssueFilter) {
 }"""
 
 
-def _page(tenant_id, sb, query, key, variables):
+def _page(tenant_id, sb, query, key, variables, *, limit: int | None = None):
     out, after = [], None
     while True:
         v = dict(variables or {})
         v["after"] = after
         conn = _gql(tenant_id, sb, query, v)[key]
         out.extend(conn.get("nodes") or [])
+        if limit and len(out) >= limit:
+            return out[:limit]
         if not (conn.get("pageInfo") or {}).get("hasNextPage"):
             return out
         after = conn["pageInfo"]["endCursor"]
 
 
-def fetch_documents(tenant_id: str, sb) -> list[dict]:
-    return _page(tenant_id, sb, _DOCS_Q, "documents", {})
+def fetch_documents(tenant_id: str, sb, *, limit: int | None = None) -> list[dict]:
+    return _page(tenant_id, sb, _DOCS_Q, "documents", {}, limit=limit)
 
 
-def fetch_resolved_issues(tenant_id: str, sb, *, team_key: str | None = None) -> list[dict]:
+def fetch_resolved_issues(tenant_id: str, sb, *, team_key: str | None = None,
+                          limit: int | None = None) -> list[dict]:
     filt: dict = {"state": {"type": {"eq": "completed"}}}
     if team_key:
         filt["team"] = {"key": {"eq": team_key}}
-    return _page(tenant_id, sb, _ISSUES_Q, "issues", {"filter": filt})
+    return _page(tenant_id, sb, _ISSUES_Q, "issues", {"filter": filt}, limit=limit)

@@ -35,16 +35,19 @@ def test_nolt_available_reflects_a_stored_key(monkeypatch):
 # ── normalize ────────────────────────────────────────────────────────────
 def test_norm_linear():
     spec = kb_connectors.get_kb_connector("linear")
-    assert spec.normalize_config({}) == {"include": "both"}
-    assert spec.normalize_config({"include": "issues", "team_key": "ENG"}) == {
-        "include": "issues", "team_key": "ENG"}
+    assert spec.normalize_config({}) == {"include": "both", "max_items": 300}
+    assert spec.normalize_config({"include": "issues", "team_key": "ENG", "max_items": 50}) == {
+        "include": "issues", "team_key": "ENG", "max_items": 50}
+    # out-of-range / garbage clamps to the default range
+    assert spec.normalize_config({"max_items": 99999})["max_items"] == 2000
+    assert spec.normalize_config({"max_items": "abc"})["max_items"] == 300
     with pytest.raises(ValueError):
         spec.normalize_config({"include": "bogus"})
 
 
 def test_norm_nolt_requires_board_id():
     spec = kb_connectors.get_kb_connector("nolt")
-    assert spec.normalize_config({"board_id": " b123 "}) == {"board_id": "b123"}
+    assert spec.normalize_config({"board_id": " b123 "}) == {"board_id": "b123", "max_items": 500}
     with pytest.raises(ValueError):
         spec.normalize_config({})
 
@@ -57,18 +60,18 @@ def test_apikey_fields_are_marked_secret():
 
 # ── _sync_linear ─────────────────────────────────────────────────────────
 def test_sync_linear_both_documents_and_resolved_issues(monkeypatch):
-    monkeypatch.setattr(linear, "fetch_documents", lambda t, s: [
+    monkeypatch.setattr(linear, "fetch_documents", lambda t, s, *, limit=None: [
         {"id": "D1", "title": "Runbook", "content": "# Runbook\nsteps", "updatedAt": "u", "url": "http://l/d1"},
         {"id": "D2", "title": "Empty", "content": "   ", "updatedAt": "u", "url": "x"},  # skipped
     ])
-    monkeypatch.setattr(linear, "fetch_resolved_issues", lambda t, s, *, team_key=None: [
+    monkeypatch.setattr(linear, "fetch_resolved_issues", lambda t, s, *, team_key=None, limit=None: [
         {"id": "I1", "identifier": "ENG-1", "title": "Proxy timeout", "description": "root cause: pool",
          "url": "http://l/i1", "updatedAt": "u",
          "comments": {"nodes": [{"body": "fixed by raising the pool", "user": {"name": "Ana"}}]}},
         {"id": "I2", "identifier": "ENG-2", "title": "wontfix", "description": "",
          "url": "x", "updatedAt": "u", "comments": {"nodes": []}},   # skipped: no body
     ])
-    res = kb_connectors._sync_linear({"include": "both"}, None, _ctx())
+    res = kb_connectors._sync_linear({"include": "both", "max_items": 300}, None, _ctx())
     ids = [d.external_id for d in res.documents]
     assert ids == ["doc:D1", "issue:I1"]
     assert res.documents[0].origin == "linear" and res.documents[0].quality == "official"
@@ -78,13 +81,39 @@ def test_sync_linear_both_documents_and_resolved_issues(monkeypatch):
 
 
 def test_sync_linear_include_documents_only(monkeypatch):
-    monkeypatch.setattr(linear, "fetch_documents", lambda t, s: [
+    monkeypatch.setattr(linear, "fetch_documents", lambda t, s, *, limit=None: [
         {"id": "D1", "title": "R", "content": "x", "updatedAt": "u", "url": ""}])
     called = []
     monkeypatch.setattr(linear, "fetch_resolved_issues",
                         lambda *a, **k: called.append(1) or [])
     res = kb_connectors._sync_linear({"include": "documents"}, None, _ctx())
     assert [d.external_id for d in res.documents] == ["doc:D1"] and called == []
+
+
+def test_sync_linear_max_items_is_passed_down_and_marks_not_exhaustive(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(linear, "fetch_documents",
+                        lambda t, s, *, limit=None: seen.__setitem__("docs_limit", limit) or
+                        [{"id": f"D{i}", "title": "d", "content": "x", "url": ""} for i in range(2)])
+    monkeypatch.setattr(linear, "fetch_resolved_issues",
+                        lambda t, s, *, team_key=None, limit=None:
+                        seen.__setitem__("iss_limit", limit) or [])
+    res = kb_connectors._sync_linear({"include": "both", "max_items": 2}, None, _ctx())
+    assert seen["docs_limit"] == 2 and seen["iss_limit"] == 2
+    assert len(res.documents) == 2 and res.exhaustive is False   # hit the cap
+
+
+def test_linear_page_stops_at_the_limit(monkeypatch):
+    pages = [
+        {"nodes": [{"id": "1"}, {"id": "2"}], "pageInfo": {"hasNextPage": True, "endCursor": "c1"}},
+        {"nodes": [{"id": "3"}, {"id": "4"}], "pageInfo": {"hasNextPage": True, "endCursor": "c2"}},
+    ]
+    calls = []
+    monkeypatch.setattr(linear, "_gql",
+                        lambda t, s, q, v: calls.append(1) or {"k": pages[len(calls) - 1]})
+    out = linear._page("t", None, "q", "k", {}, limit=3)
+    assert [n["id"] for n in out] == ["1", "2", "3"]
+    assert len(calls) == 2   # stopped after the 2nd page, didn't fetch a 3rd
 
 
 # ── nolt ─────────────────────────────────────────────────────────────────

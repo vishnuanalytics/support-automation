@@ -365,6 +365,18 @@ def test_gdocs_sync_folder_makes_one_document_per_doc(monkeypatch):
     assert res.exhaustive is True and res.watermark["count"] == 2
 
 
+def test_gdocs_sync_folder_honours_max_items(monkeypatch):
+    monkeypatch.setattr("interpreter.gdrive.list_folder_docs",
+                        lambda *a, **k: [{"id": f"d{i}", "name": "x", "modified_time": "M"}
+                                         for i in range(5)])
+    monkeypatch.setattr("interpreter.gdrive.fetch_doc",
+                        lambda tid, did, sb: {"title": did, "markdown": "b", "modified_time": "M"})
+    ctx = kb_connectors.SyncCtx(tenant_id="t", sb=None, collection_name="c")
+    res = kb_connectors._sync_gdocs({"folder_id": "F", "index": True, "max_items": 2}, None, ctx)
+    assert [d.external_id for d in res.documents] == ["d0", "d1"]
+    assert res.exhaustive is False   # 5 found, capped at 2 -> don't archive the rest
+
+
 # ── watch_doc_writebacks (chunk 2: close the loop) ───────────────────────
 def _wb_row(**over):
     r = {"id": "wb1", "tenant_id": "t", "connection_id": "c1", "status": "applied",
