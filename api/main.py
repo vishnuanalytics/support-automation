@@ -3490,6 +3490,7 @@ class ZendeskConnectionIn(BaseModel):
     subdomain: str | None = None
     email: str | None = None
     api_token: str | None = None       # write-only, never returned; Vault-backed
+    auto_send_enabled: bool | None = None
     tenant_id: str | None = None
 
 
@@ -3501,6 +3502,8 @@ def _zendesk_cfg_from_body(tenant_id: str, body: "ZendeskConnectionIn", existing
         subdomain=(body.subdomain or (existing.subdomain if existing else "")).strip(),
         email=(body.email or (existing.email if existing else "")).strip(),
         status=(existing.status if existing else "inactive"),
+        auto_send_enabled=(body.auto_send_enabled if body.auto_send_enabled is not None
+                           else (existing.auto_send_enabled if existing else False)),
     )
 
 

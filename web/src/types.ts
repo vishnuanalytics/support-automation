@@ -670,6 +670,7 @@ export interface ZendeskConnection {
   status: "none" | "inactive" | "active" | "error";
   subdomain?: string;
   email?: string;
+  auto_send_enabled?: boolean;
 }
 
 export interface ZendeskConnectionSave {
@@ -677,6 +678,7 @@ export interface ZendeskConnectionSave {
   subdomain?: string;
   email?: string;
   api_token?: string;
+  auto_send_enabled?: boolean;
 }
 
 export interface CaseConnector {

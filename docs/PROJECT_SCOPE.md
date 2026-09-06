@@ -707,8 +707,37 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-06 (Phase 31 — Zendesk parity, chunk 1: the inbound ticket
-watcher). This is the most recent work in this file.**
+**2026-09-06 (Phase 31 — Zendesk parity, chunk 2: `auto_reply` delivery
+for a `channel=zendesk` run). This is the most recent work in this file.**
+
+Chunk 1 made a Zendesk tenant's bot *fire*; this makes its confident
+reply actually *go out*. `_run_flow`'s post-run auto-send hook only
+handled `email` / `freshchat` — a `channel=zendesk` run recorded an
+`auto_reply` outcome but delivered nothing.
+
+- **`api/worker.py::_zendesk_post_run`** — mirrors `_freshchat_post_run`:
+  `emailer.decide(outcome, cfg, clarification)` (already channel-agnostic —
+  reads only `outcome` / `cfg.auto_send_enabled` / `clarification`) →
+  `zendesk.send_case_reply(ticket_id, body, to_email=case["from"], …)` as a
+  public ticket comment for `send_reply` / `send_questions`, else flag for
+  a human. Wired into the `run_case.get("channel")` dispatch. Never raises.
+- **`ZendeskConfig.auto_send_enabled`** (default `False`, stored in
+  `tenant_integrations.config`) — the same master switch email/freshchat
+  have; `from_row` / `to_config` / `public_status` carry it. Off → every
+  `auto_reply` is flagged for a human.
+- **`PUT /api/integrations/zendesk`** accepts `auto_send_enabled`; the
+  `ZendeskPanel` gets an "Auto-send confident replies…" checkbox.
+- `tests/test_zendesk_worker.py` new (8), `test_zendesk.py` +1 assertion.
+  **992 offline green**; tsc + build + vitest + 3 Playwright specs clean.
+  No migration. End-to-end still needs a real Zendesk account.
+- **Still deferred:** `case_graph_sync` / `case_memory_sync` parity for a
+  Zendesk tenant (Neo4j case graph + resolution memory + duplicate
+  detection + `(:Contact)` for product signals).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (Phase 31 chunk 1: the inbound ticket watcher).**
 
 Context: the Zendesk **connector** was already built 2026-09-05
 (`interpreter/zendesk.py`, all 8 `CASE_ACTIONS`, 30 unit + 9 live tests,

@@ -308,7 +308,8 @@ def test_save_and_delete_channel_round_trip():
     save_channel(cfg, sb, api_token="tok1")
     import json
     assert json.loads(sb._vault["zendesk"]) == {"api_token": "tok1"}
-    assert sb.upserts[-1]["config"] == {"subdomain": "acme", "email": "bot@acme.com"}
+    assert sb.upserts[-1]["config"] == {"subdomain": "acme", "email": "bot@acme.com",
+                                        "auto_send_enabled": False}
 
     delete_channel("t", sb)
     assert "zendesk" not in sb._vault

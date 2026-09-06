@@ -136,10 +136,15 @@ class ZendeskConfig:
     email: str = ""
     status: str = "inactive"
     api_token: str = ""
+    # master switch for customer-facing auto-send on a `channel=zendesk` run
+    # (mirrors email/freshchat `auto_send_enabled`; `emailer.decide` reads it).
+    # Off -> an `auto_reply` outcome is flagged for a human, nothing is sent.
+    auto_send_enabled: bool = False
 
     def __repr__(self) -> str:   # never leak the token in a log/trace
         return (f"ZendeskConfig(tenant_id={self.tenant_id!r}, subdomain={self.subdomain!r}, "
-                f"email={self.email!r}, status={self.status!r}, configured={bool(self.api_token)})")
+                f"email={self.email!r}, status={self.status!r}, "
+                f"auto_send={self.auto_send_enabled}, configured={bool(self.api_token)})")
 
     @classmethod
     def from_row(cls, tenant_id: str, config: dict | None, status: str | None,
@@ -147,14 +152,17 @@ class ZendeskConfig:
         c = dict(config or {})
         return cls(tenant_id=str(tenant_id), subdomain=c.get("subdomain", ""),
                   email=c.get("email", ""), status=status or "inactive",
+                  auto_send_enabled=bool(c.get("auto_send_enabled", False)),
                   api_token=(secret or {}).get("api_token", ""))
 
     def to_config(self) -> dict:
-        return {"subdomain": self.subdomain, "email": self.email}
+        return {"subdomain": self.subdomain, "email": self.email,
+                "auto_send_enabled": self.auto_send_enabled}
 
     def public_status(self) -> dict:
         return {"configured": bool(self.api_token), "subdomain": self.subdomain,
-                "email": self.email, "status": self.status}
+                "email": self.email, "status": self.status,
+                "auto_send_enabled": self.auto_send_enabled}
 
 
 def load_channel(tenant_id: str, sb) -> "ZendeskConfig | None":
