@@ -342,3 +342,60 @@ def test_test_connection_reports_bad_auth(monkeypatch):
     cfg = ZendeskConfig(tenant_id="t", subdomain="acme", email="bot@acme.com", api_token="bad")
     out = zendesk.test_connection(cfg)
     assert out["ok"] is False and "401" in out["error"]
+
+
+# --------------------------------------------------------------------------
+# Phase 31 chunk 1 — the inbound ticket poller helpers
+# --------------------------------------------------------------------------
+def test_list_new_tickets_without_creds_is_empty(monkeypatch):
+    monkeypatch.setattr(zendesk, "_creds", lambda tenant_id, sb=None: None)
+    assert zendesk.list_new_tickets("t") == []
+
+
+def test_list_new_tickets_filters_by_lookback(configured, monkeypatch):
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc)
+    fresh = (now - _dt.timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+    stale = (now - _dt.timedelta(hours=9)).isoformat().replace("+00:00", "Z")
+    _record(monkeypatch, [("GET", "/search.json", {"results": [
+        {"id": 1, "subject": "fresh", "updated_at": fresh},
+        {"id": 2, "subject": "stale", "updated_at": stale},
+    ]})])
+    got = zendesk.list_new_tickets("t", lookback_min=120)
+    assert [t["id"] for t in got] == [1]
+
+
+def test_list_new_tickets_query_is_status_new(configured, monkeypatch):
+    calls = _record(monkeypatch, [("GET", "/search.json", {"results": []})])
+    zendesk.list_new_tickets("t")
+    _m, _url, _json, params = calls[0]
+    assert params["query"] == "type:ticket status:new"
+    assert params["sort_by"] == "updated_at"
+
+
+def test_list_new_tickets_swallows_an_api_error(configured, monkeypatch):
+    import requests
+
+    def boom(*a, **k):
+        raise RuntimeError("zendesk 500")
+
+    monkeypatch.setattr(requests, "request", boom)
+    assert zendesk.list_new_tickets("t") == []
+
+
+def test_ticket_as_case_normalises_and_resolves_requester(configured, monkeypatch):
+    _record(monkeypatch, [("GET", "/users/55.json",
+                           {"user": {"email": "dana@acme.com", "name": "Dana"}})])
+    case = zendesk.ticket_as_case(
+        {"id": 42, "subject": "Login broken", "description": "can't sign in",
+         "requester_id": 55, "status": "new"}, "t")
+    assert case["sf_id"] == "42" and case["id"] == "42" and case["case_number"] == "42"
+    assert case["subject"] == "Login broken" and case["body"] == "can't sign in"
+    assert case["channel"] == "zendesk" and case["status"] == "new"
+    assert case["from"] == "dana@acme.com" and case["from_name"] == "Dana"
+
+
+def test_ticket_as_case_tolerates_missing_requester(configured, monkeypatch):
+    _record(monkeypatch, [])
+    case = zendesk.ticket_as_case({"id": 7, "subject": "x"}, "t")
+    assert case["sf_id"] == "7" and case["body"] == "" and "from" not in case

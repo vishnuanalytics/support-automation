@@ -707,9 +707,50 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-06 (Phase 30 — Product-analytics connector, chunk 5: the
-`product_signal` flow node — PHASE 30 COMPLETE). This is the most recent
-work in this file.**
+**2026-09-06 (Phase 31 — Zendesk parity, chunk 1: the inbound ticket
+watcher). This is the most recent work in this file.**
+
+Context: the Zendesk **connector** was already built 2026-09-05
+(`interpreter/zendesk.py`, all 8 `CASE_ACTIONS`, 30 unit + 9 live tests,
+web `ZendeskPanel` + the case-connector picker). But there was **no
+Zendesk equivalent of `sf_case_watch.py`** — a `case_connector=zendesk`
+tenant could *act* on tickets but nothing *triggered* a run from an
+inbound one. This closes that gap; the rest of Salesforce parity
+(`case_graph_sync` / `case_memory_sync` for Zendesk, and verifying that a
+flow's `auto_reply` terminal actually delivers via `zendesk.
+send_case_reply` the way email's post-run hook does) is deferred.
+
+- **`interpreter/zendesk.py`** gains `list_new_tickets(tenant_id, sb,
+  lookback_min=120)` (Search API `type:ticket status:new`, client-side
+  lookback filter, best-effort → `[]`) and `ticket_as_case(ticket,
+  tenant_id, sb)` (normalise to the interpreter's `case` shape —
+  `sf_id`/`id`/`case_number` = the ticket id per the seam's convention,
+  `subject`/`body`/`status`, one `/users/<id>` call for `from`/`from_name`,
+  `channel="zendesk"`).
+- **`ingestion/zendesk_ticket_watch.py`** (new) — per tenant with
+  `tenants.case_connector='zendesk'` AND an active `zendesk` integration:
+  resolve the flow (`flows.sf_entry` marked, else the sole published one,
+  else skip), poll, and `jobs.enqueue("run_flow", …, dedupe_key=
+  f"zd:{tid}:{ticket_id}", tenant_id=tid)`. No watermark (job dedupe
+  handles overlap), same as `sf_case_watch`. `--once`/`--tenant`/`--flow`/
+  `--lookback` CLI.
+- **`.github/workflows/email-automation.yml`** — a `zendesk_ticket_watch
+  --once` step before the queue drain (the 5-min cron already drives email
+  the same way; no always-on worker host).
+- `_run_flow` needs no change — the watcher enqueues a fully hydrated
+  case, so the Salesforce-only "bare id → `salesforce.get_case`" hydration
+  branch is skipped.
+- `tests/test_zendesk.py` +6, `tests/test_zendesk_ticket_watch.py` new
+  (9). **984 offline green.** No migration. Live-verified only that
+  `--once` runs against the real project and no-ops cleanly (no
+  zendesk-connector tenant exists); end-to-end needs a real Zendesk
+  account (same residual as the connector).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (Phase 30 chunk 5: the `product_signal` flow node — PHASE 30
+COMPLETE).**
 
 - **`registry.h_product_signal`** (`@register("product_signal")`) —
   resolves the filer's email (`sender.email` → `case.contact.email` →
