@@ -484,7 +484,8 @@ def case_memory_sync(sb, *, dry_run: bool | None = None) -> dict:
 
     dry = _dry() if dry_run is None else dry_run
     tail = (["--dry-run"] if dry else [])
-    for argv in (["--once", *tail], ["--from-salesforce", "--once", *tail]):
+    for argv in (["--once", *tail], ["--from-salesforce", "--once", *tail],
+                 ["--from-zendesk", "--once", *tail]):
         try:
             _cms.main(argv)
         except SystemExit:

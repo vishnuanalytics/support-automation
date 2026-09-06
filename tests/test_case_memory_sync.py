@@ -148,3 +148,82 @@ def test_from_salesforce_includes_account_id_directly(monkeypatch):
     assert len(out) == 1
     assert out[0]["account_id"] == "001XX7"
     assert out[0]["source"] == "salesforce"
+
+
+# --------------------------------------------------------------------------
+# Phase 31 chunk 4 — resolved Zendesk tickets -> case_memory rows
+# --------------------------------------------------------------------------
+class _FakeZC:
+    def __init__(self, *, pages, comments, users=None):
+        self._pages = list(pages)
+        self._comments = comments
+        self._users = users or {}
+
+    def request(self, method, path, *, json=None, params=None):
+        if path == "/incremental/tickets.json":
+            return self._pages.pop(0) if self._pages else {"tickets": [], "end_of_stream": True}
+        if path.startswith("/tickets/") and path.endswith("/comments.json"):
+            return {"comments": self._comments.get(int(path.split("/")[2]), [])}
+        if path.startswith("/users/"):
+            return {"user": self._users.get(int(path.split("/")[2].split(".")[0]), {})}
+        return {}
+
+
+def _zendesk_patch(monkeypatch, zc, tenants=("T1",)):
+    from interpreter import zendesk
+    monkeypatch.setattr(zendesk, "active_connector_tenants", lambda sb, only=None: list(tenants))
+    monkeypatch.setattr(zendesk, "_client", lambda tid, sb=None: zc)
+    monkeypatch.setattr(cms, "get_supabase", lambda: object())
+
+
+def test_from_zendesk_only_takes_solved_tickets_with_an_agent_reply(monkeypatch):
+    zc = _FakeZC(
+        pages=[{"tickets": [
+            {"id": 1, "subject": "solved one", "status": "solved", "type": "question",
+             "requester_id": 5, "organization_id": 9, "updated_at": "2026-09-02T00:00:00Z",
+             "description": "how do I export?"},
+            {"id": 2, "subject": "still open", "status": "open", "requester_id": 5,
+             "updated_at": "2026-09-02T00:00:00Z"},
+            {"id": 3, "subject": "solved, no agent reply", "status": "closed",
+             "requester_id": 5, "updated_at": "2026-09-02T00:00:00Z"},
+        ], "end_of_stream": True}],
+        comments={
+            1: [
+                {"id": 10, "author_id": 5, "public": True, "body": "how do I export?"},
+                {"id": 11, "author_id": 8, "public": False, "body": "internal"},
+                {"id": 12, "author_id": 8, "public": True,
+                 "body": "Go to Settings > Export and click Start. That resolves it."},
+            ],
+            3: [{"id": 30, "author_id": 5, "public": True, "body": "still stuck"}],
+        },
+        users={8: {"role": "agent"}})
+    _zendesk_patch(monkeypatch, zc)
+
+    rows = cms._from_zendesk("2026-08-01T00:00:00Z", 100)
+    assert [r["case_sf_id"] for r in rows] == ["1"]
+    r = rows[0]
+    assert r["resolution_text"].startswith("Go to Settings > Export")
+    assert r["source"] == "zendesk" and r["case_type"] == "question"
+    assert r["account_id"] == "9" and r["agent_user_id"] == "8"
+    assert r["case_number"] == "1" and r["module"] is None
+    assert r["resolution_kind"] in ("agent_reply", "workaround", "known_issue")
+
+
+def test_from_zendesk_skips_a_reply_from_an_end_user(monkeypatch):
+    zc = _FakeZC(
+        pages=[{"tickets": [{"id": 1, "status": "solved", "requester_id": 5,
+                             "updated_at": "2026-09-02T00:00:00Z"}], "end_of_stream": True}],
+        comments={1: [
+            {"id": 10, "author_id": 5, "public": True, "body": "the customer's own last word"},
+            {"id": 11, "author_id": 77, "public": True, "body": "a colleague, still an end-user"},
+        ]},
+        users={77: {"role": "end-user"}})
+    _zendesk_patch(monkeypatch, zc)
+    assert cms._from_zendesk("2026-08-01T00:00:00Z", 100) == []
+
+
+def test_from_zendesk_no_tenants_is_empty(monkeypatch):
+    from interpreter import zendesk
+    monkeypatch.setattr(zendesk, "active_connector_tenants", lambda sb, only=None: [])
+    monkeypatch.setattr(cms, "get_supabase", lambda: object())
+    assert cms._from_zendesk("2026-08-01T00:00:00Z", 100) == []

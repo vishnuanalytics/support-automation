@@ -707,8 +707,45 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-06 (Phase 31 — Zendesk parity, chunk 3: the case-lifecycle
-graph sync). This is the most recent work in this file.**
+**2026-09-06 (Phase 31 — Zendesk parity, chunk 4: the resolution-memory
+sync — PHASE 31 COMPLETE). This is the most recent work in this file.**
+
+The last gap: `case_memory_sync` (the pgvector resolution memory that
+feeds `draft` / `case_lookup`, plus the `RESOLVED_BY` / `SIMILAR_TO` /
+`DUPLICATE_OF` graph edges) was runs-and-Salesforce only.
+
+- **`ingestion/case_memory_sync.py`** gains a `--from-zendesk` mode
+  (`main()` is a 3-way if/elif on the source flag). `_from_zendesk(since,
+  limit)` — for every `case_connector=zendesk` tenant, walk **solved /
+  closed** tickets (reusing `zendesk_case_graph_sync`'s Incremental Export
+  + `_Cache`), take the **last public non-requester / non-end-user
+  comment** as the resolution text, and emit the same `case_memory` row
+  shape `_from_salesforce` does (`resolution_kind` via
+  `case_memory.classify_resolution_kind`, `case_type` from ticket `type`,
+  `account_id` from `organization_id`, `agent_user_id` from the comment
+  author). The shared `_sync_rows` then embeds, upserts, runs the
+  `match_case_memory` kNN for `SIMILAR_TO` / same-account `DUPLICATE_OF`,
+  and calls `case_memory.sync_graph` — no Zendesk-specific code past the
+  row builder.
+- **`sweeps.case_memory_sync`** runs the third path too; `daily-sync.yml`
+  gets a `--from-zendesk --once` line.
+- `tests/test_case_memory_sync.py` +3. **1008 offline green.** No
+  migration, no web change. Live: `--from-zendesk --once --dry-run`
+  no-ops cleanly against the real project.
+
+**Phase 31 is complete** (chunks 1–4): the inbound ticket watcher,
+`auto_reply` delivery, the case-lifecycle graph, and the resolution
+memory. A `case_connector=zendesk` tenant now has **full parity** with a
+Salesforce tenant — fires on inbound tickets, replies (opt-in), builds
+the Neo4j case graph + `(:Contact)` + product-signal join, and feeds
+`draft` from past Zendesk resolutions with duplicate detection. Residual
+(as with every connector): end-to-end verification needs a real Zendesk
+account.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (Phase 31 chunk 3: the case-lifecycle graph sync).**
 
 `ingestion/case_graph_sync.py` is Salesforce-only (SOQL), so a
 `case_connector=zendesk` tenant got no Neo4j case graph — no "answer from
