@@ -13,9 +13,11 @@ explicitly says already exists.
 and a unified **"Connected sources"** panel in `KnowledgeView.tsx` (add /
 re-sync / pause / disconnect, one registry-driven form for every connector).
 Three connectors are registered behind it: `public_url` (§1), `gsheets` (§3),
-`gdocs` (§2). Linear (§4), forums (§5) and Nolt (§6) are **not built** — each
-is now just "register a `KBConnectorSpec` + a `sync()`", no new
-worker/endpoint/UI code.
+`gdocs` (§2, now including **Drive-folder scope** — one entry per Doc in a
+folder), **`linear`** (§4) and **`nolt`** (§6). Forums (§5) are **not
+built**. Adding one is just "register a `KBConnectorSpec` + a `sync()`" — no
+new worker/endpoint/UI code (an `apikey` connector's key field is marked
+`"secret": true` and `api/main.py::_kb_add_connection` routes it to Vault).
 
 ## The actual insight: this is not five problems
 
@@ -193,7 +195,17 @@ sheet/tab. This is the one connector where "reuse the existing crawler"
 would be actively wrong — flag it as its own extraction path, not a
 `webcrawl.py` variant.
 
-### 4. Linear — not built
+### 4. Linear — built 2026-09-06
+`interpreter/linear.py` + the `linear` connector (`auth="apikey"`). Personal
+API key → Vault (kind='linear'), GraphQL at `api.linear.app/graphql`.
+`_sync_linear` pulls **Documents** (`content` markdown, `quality="official"`)
+and **resolved issues** (`state.type == "completed"`, optional `team_key`
+filter) with their comment thread (`quality="community_resolved"`); an issue
+with no description *and* no comment is skipped. `external_id` is
+`doc:<id>` / `issue:<id>`, `origin="linear"`. OAuth (vs. the personal key)
+is still the "later" option.
+
+Original design notes:
 Linear's GraphQL API (issues, comments, project **Documents** — Linear's
 own wiki-like docs, distinct from issues) is the source. Two content types
 worth treating differently:
@@ -222,7 +234,17 @@ with no API (custom-built, gated) falls back to the existing crawler as a
 worse-than-ideal but functional default — don't block the whole feature on
 building N bespoke forum-software connectors up front.
 
-### 6. Nolt — not built; a feedback/roadmap board, same shape as a forum
+### 6. Nolt — built 2026-09-06
+`interpreter/nolt.py` + the `nolt` connector (`auth="apikey"`). Board API key
+→ Vault (kind='nolt'), REST at `api.nolt.io`. `_sync_nolt` pages
+`/v1/boards/{board_id}/posts`, keeps only a post whose `status.title` is
+one of done/complete/completed/shipped/released/live, attaches up to 10
+comments from `/v1/posts/{id}/comments`, emits `origin="nolt"`,
+`quality="community_resolved"`, `external_id="post:<id>"`. `board_id` (not
+the URL slug — the id from the board admin's API panel) is a required
+config field.
+
+Original design notes:
 Nolt (nolt.io — like Canny/Featurebase) is a hosted feedback board: users post
 requests/bugs, others vote and comment, and an admin marks a post's status
 (`planned` / `in progress` / `complete` / `declined`). It has a REST API

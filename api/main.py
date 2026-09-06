@@ -2052,14 +2052,31 @@ def _kb_add_connection(c: Caller, col: dict, connector: str, raw_config: dict,
         spec = get_kb_connector(connector)
     except KeyError:
         raise HTTPException(422, f"unknown connector {connector!r}")
-    ok, reason = spec.is_available(col["tenant_id"], _service)
-    if not ok:
-        raise HTTPException(400, reason or f"{spec.label} is not available")
+    raw_config = dict(raw_config or {})
     # gdocs inherits the tenant's org-level default for any knob the caller
     # didn't set explicitly (the "+ add source" form pre-fills from it, so
     # this is the backstop for API callers / form gaps).
     if connector == "gdocs":
-        raw_config = {**_kb_doc_defaults(col["tenant_id"]), **(raw_config or {})}
+        raw_config = {**_kb_doc_defaults(col["tenant_id"]), **raw_config}
+
+    # `secret: true` config fields (an API key for an apikey connector) go to
+    # Supabase Vault under the connector's kind — never into the row, which is
+    # returned to the browser. Merged with any prior key so a blank field on a
+    # 2nd source reuses the saved one.
+    from interpreter import vault_secrets
+    secrets = {f["key"]: str(raw_config.pop(f["key"], "")).strip()
+               for f in spec.config_fields if f.get("secret")}
+    secrets = {k: v for k, v in secrets.items() if v}
+    if secrets:
+        prior = vault_secrets.get(col["tenant_id"], connector, sb=_service)
+        vault_secrets.put(col["tenant_id"], connector, {**prior, **secrets}, sb=_service)
+        _service.table("tenant_integrations").upsert(
+            {"tenant_id": col["tenant_id"], "kind": connector,
+             "secret": {"has_credentials": True}}).execute()
+
+    ok, reason = spec.is_available(col["tenant_id"], _service)
+    if not ok:
+        raise HTTPException(400, reason or f"{spec.label} is not available")
     try:
         config = spec.normalize_config(raw_config)
     except ValueError as e:

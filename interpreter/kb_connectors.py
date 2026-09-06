@@ -310,6 +310,130 @@ def _sync_gdocs(config: dict, watermark: "dict | None", ctx: SyncCtx) -> KBSyncR
                         watermark={"modified_time": fetched.get("modified_time")})
 
 
+def _kb_doc(external_id: str, title: str, body_md: str, *, origin: str, url: str = "",
+           updated_at: str | None = None, quality: str = "unverified") -> "KBDocument":
+    body = f"<!-- {url} -->\n\n{body_md}" if url else body_md
+    return KBDocument(external_id=external_id, title=title or origin, body_md=body,
+                      origin=origin, updated_at=updated_at, quality=quality)
+
+
+# ---- 4. linear — Documents + resolved issues (interpreter/linear.py) -----
+def _linear_available(t: "str | None", s: Any) -> "tuple[bool, str | None]":
+    from interpreter import linear
+    return linear.available(t, s)
+
+
+def _nolt_available(t: "str | None", s: Any) -> "tuple[bool, str | None]":
+    from interpreter import nolt
+    return nolt.available(t, s)
+
+
+def _norm_linear(raw: dict[str, Any]) -> dict[str, Any]:
+    inc = (raw.get("include") or "both").strip()
+    if inc not in ("documents", "issues", "both"):
+        raise ValueError("include must be 'documents', 'issues' or 'both'")
+    cfg: dict[str, Any] = {"include": inc}
+    tk = (raw.get("team_key") or "").strip()
+    if tk:
+        cfg["team_key"] = tk
+    return cfg
+
+
+def _sync_linear(config: dict, watermark: "dict | None", ctx: SyncCtx) -> KBSyncResult:
+    from interpreter import linear
+
+    inc = config.get("include", "both")
+    team_key = (config.get("team_key") or "").strip() or None
+    docs: list[KBDocument] = []
+
+    if inc in ("documents", "both"):
+        for d in linear.fetch_documents(ctx.tenant_id, ctx.sb):
+            body = (d.get("content") or "").strip()
+            if not body:
+                continue
+            docs.append(_kb_doc(f"doc:{d['id']}", d.get("title") or "Linear document",
+                                body, origin="linear", url=d.get("url", ""),
+                                updated_at=d.get("updatedAt"), quality="official"))
+
+    if inc in ("issues", "both"):
+        for it in linear.fetch_resolved_issues(ctx.tenant_id, ctx.sb, team_key=team_key):
+            desc = (it.get("description") or "").strip()
+            comments = [c for c in ((it.get("comments") or {}).get("nodes") or [])
+                        if (c.get("body") or "").strip()]
+            if not desc and not comments:
+                continue                       # a bare "done" issue is not knowledge
+            head = f"{it.get('identifier', '')} {it.get('title', '')}".strip()
+            parts = [f"# {head}"] + ([desc] if desc else [])
+            for c in comments:
+                who = (c.get("user") or {}).get("name") or "someone"
+                parts.append(f"**{who}:** {c['body'].strip()}")
+            docs.append(_kb_doc(f"issue:{it['id']}", head, "\n\n".join(parts),
+                                origin="linear", url=it.get("url", ""),
+                                updated_at=it.get("updatedAt"), quality="community_resolved"))
+
+    return KBSyncResult(documents=docs, exhaustive=True, watermark={"count": len(docs)})
+
+
+register(KBConnectorSpec(
+    slug="linear", label="Linear", auth="apikey",
+    config_fields=[
+        {"key": "api_key", "label": "Linear API key", "type": "string", "required": False,
+         "secret": True, "placeholder": "lin_api_…",
+         "help": "Settings → API → Personal API keys. Leave blank to reuse a saved key."},
+        {"key": "include", "label": "What to pull", "type": "select", "required": False,
+         "options": ["both", "documents", "issues"],
+         "option_labels": {"both": "Documents + resolved issues",
+                           "documents": "Documents only", "issues": "Resolved issues only"}},
+        {"key": "team_key", "label": "Team key (optional — limits issues to one team)",
+         "type": "string", "required": False, "placeholder": "ENG"},
+    ],
+    normalize=_norm_linear, available=_linear_available,
+    sync=_sync_linear,
+))
+
+
+# ---- 5. nolt — resolved feedback-board posts (interpreter/nolt.py) ------
+def _norm_nolt(raw: dict[str, Any]) -> dict[str, Any]:
+    bid = (raw.get("board_id") or "").strip()
+    if not bid:
+        raise ValueError("board_id is required (Nolt board admin → API)")
+    return {"board_id": bid}
+
+
+def _sync_nolt(config: dict, watermark: "dict | None", ctx: SyncCtx) -> KBSyncResult:
+    from interpreter import nolt
+
+    docs: list[KBDocument] = []
+    for p in nolt.fetch_resolved_posts(ctx.tenant_id, ctx.sb, config["board_id"]):
+        parts = [f"# {p.get('title', '')}".strip()]
+        if (p.get("description") or "").strip():
+            parts.append(p["description"].strip())
+        for c in (p.get("_comments") or []):
+            who = (c.get("author") or {}).get("name") or (c.get("user") or {}).get("name") or "someone"
+            body = (c.get("body") or c.get("content") or "").strip()
+            if body:
+                parts.append(f"**{who}:** {body}")
+        docs.append(_kb_doc(f"post:{p['id']}", p.get("title") or "Nolt post",
+                            "\n\n".join(parts), origin="nolt", url=p.get("url", ""),
+                            updated_at=p.get("updatedAt") or p.get("updated_at"),
+                            quality="community_resolved"))
+    return KBSyncResult(documents=docs, exhaustive=True, watermark={"count": len(docs)})
+
+
+register(KBConnectorSpec(
+    slug="nolt", label="Nolt (feedback board)", auth="apikey",
+    config_fields=[
+        {"key": "api_key", "label": "Nolt board API key", "type": "string", "required": False,
+         "secret": True,
+         "help": "Nolt board admin → API. Leave blank to reuse a saved key."},
+        {"key": "board_id", "label": "Board id", "type": "string", "required": True,
+         "help": "Also from the board admin → API panel (not the board URL slug)."},
+    ],
+    normalize=_norm_nolt, available=_nolt_available,
+    sync=_sync_nolt,
+))
+
+
 register(KBConnectorSpec(
     slug="gdocs", label="Google Doc or Drive folder", auth="oauth2", writable=True,
     config_fields=[

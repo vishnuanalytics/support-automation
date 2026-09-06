@@ -761,12 +761,17 @@ function AddSourceForm({
       <div className="field">
         <label>source type</label>
         <select value={slug} onChange={(e) => { setSlug(e.target.value); setValues({}); }}>
-          {catalogue.map((c) => (
-            <option key={c.slug} value={c.slug} disabled={!c.available}>
-              {c.label}
-              {!c.available && c.reason ? ` — ${c.reason}` : ""}
-            </option>
-          ))}
+          {catalogue.map((c) => {
+            // an apikey connector stays pickable even with no key yet — you
+            // enter it in the form; oauth2 ones need the OAuth done first.
+            const pickable = c.available || c.auth === "apikey";
+            return (
+              <option key={c.slug} value={c.slug} disabled={!pickable}>
+                {c.label}
+                {!c.available && c.reason ? ` — ${c.reason}` : ""}
+              </option>
+            );
+          })}
         </select>
       </div>
 
@@ -793,7 +798,8 @@ function AddSourceForm({
               </select>
             ) : (
               <input
-                type={f.type === "number" ? "number" : "text"}
+                type={f.secret ? "password" : f.type === "number" ? "number" : "text"}
+                autoComplete={f.secret ? "off" : undefined}
                 placeholder={f.placeholder}
                 value={values[f.key] ?? ""}
                 onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}

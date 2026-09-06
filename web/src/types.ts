@@ -205,7 +205,16 @@ export interface KbEntryRow {
   embedded_at: string | null;
   updated_at: string;
   updated_by: string | null;
-  origin?: "manual" | "gdoc" | "gsheet" | "file" | "crawl" | "import" | "review_writeback";
+  origin?:
+    | "manual"
+    | "gdoc"
+    | "gsheet"
+    | "file"
+    | "crawl"
+    | "import"
+    | "review_writeback"
+    | "linear"
+    | "nolt";
   gdoc_url?: string | null;
   gsheet_id?: string | null;
   gsheet_range?: string | null;
@@ -231,6 +240,7 @@ export interface KbConnectorField {
   options?: string[];
   option_labels?: Record<string, string>; // raw value -> human label (select fields)
   help?: string; // one-line explanation shown under the field
+  secret?: boolean; // stored in the vault, rendered as a password input
   show_if?: { key: string; eq?: string; ne?: string; in?: string[] };
 }
 

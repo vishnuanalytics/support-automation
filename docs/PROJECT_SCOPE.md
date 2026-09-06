@@ -707,8 +707,60 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-06 (chunk 6) — the KB write-back audit is now in the review UI
-(this is the most recent work in this file).** The `kb_doc_writebacks` rows
+**2026-09-06 (chunk 7) — three more KB source connectors: Google Docs
+folder scope, Linear, Nolt (this is the most recent work in this file).**
+All three land the same way — register a `KBConnectorSpec` + a `sync()`; no
+new worker, endpoint, or migration. `ingestion/kb_recrawl.py` already
+iterates every active `kb_source_connections` row, so all three sync daily
+via `daily-sync.yml` with zero workflow change.
+
+- **gdocs folder scope** (`4f7dfa4`) — a gdocs connection's URL can be a
+  `/drive/folders/<id>` link; `gdrive.list_folder_docs()` +
+  `_sync_gdocs` emit one `KBDocument` per Doc (recursive optional).
+  `on_correction ≠ off` is rejected for a folder.
+- **`interpreter/linear.py` + `linear` connector** (`auth="apikey"`) —
+  personal API key → Vault (kind='linear'); GraphQL. `_sync_linear` pulls
+  **Documents** (`quality="official"`) and **resolved issues**
+  (`state.type=="completed"`, optional `team_key`) + comment thread
+  (`quality="community_resolved"`); a bodyless/commentless issue is
+  skipped. `origin="linear"`, `external_id` `doc:<id>` / `issue:<id>`.
+- **`interpreter/nolt.py` + `nolt` connector** (`auth="apikey"`) — board
+  API key → Vault (kind='nolt'); REST. `_sync_nolt` keeps only
+  done/shipped-status posts + their comments, `origin="nolt"`,
+  `quality="community_resolved"`, `external_id="post:<id>"`. `board_id` is
+  a required field.
+- **Secret plumbing** — a `config_fields` entry with `"secret": true` (the
+  `api_key` on an apikey connector) is popped by
+  `api/main.py::_kb_add_connection` into Vault under the connector kind
+  (merged with any prior key so a blank field on a 2nd source reuses it) +
+  a `tenant_integrations` upsert; it never enters the row returned to the
+  browser. Web: apikey connectors stay pickable in the "+ add source"
+  `<select>` even with no key yet; `secret` fields render as password
+  inputs. `KbEntryRow.origin` gains `linear` / `nolt` (no CHECK on the
+  column; no migration).
+
+**Verify:** `tests/test_kb_linear_nolt.py` (10 — availability from a stored
+key, `_norm_*`, the `sync()` producers + their resolved/bodyless filters,
+`nolt._is_resolved`) + folder-scope tests in
+`tests/test_kb_doc_writeback.py`. **860 offline tests green (was 848).**
+`tsc -b` clean. No migration. **Live-checked against the real Supabase
+project**: `_kb_add_connection` for `linear` with an `api_key` in the body ⇒
+key in Vault (kind='linear'), **not** in `kb_source_connections.config`,
+`tenant_integrations` row upserted; a 2nd linear source with a blank key
+reused the saved one. Rows + test creds deleted. **Not live-verifiable**:
+no real Linear/Nolt account in this sandbox, so the GraphQL/REST `sync()`
+calls are covered offline only (same residual class as the OAuth-gated
+connectors).
+
+**Still open:** forums (§5 — Discourse etc.), the onboarding-wizard "pick
+your sources" step, a Slack "send to GitHub before applying" button,
+structural section replacement, and true `changes.list` incremental for the
+gdocs folder (fetches every Doc each run today).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (chunk 6) — the KB write-back audit is now in the review UI.** The `kb_doc_writebacks` rows
 only showed per-collection in the "Connected sources" panel; a manager
 living in `ReviewView` had no tenant-wide view of "which approved
 corrections turned into doc edits, and which are still waiting on someone
