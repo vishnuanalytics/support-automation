@@ -707,9 +707,43 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-06 (Phase 30 — Product-analytics connector, chunk 1: design
+doc). This is the most recent work in this file.** Picked from a
+next-phase menu: correlate what a customer's users actually did in the
+product with why they file support cases — the second half of the
+"combination beats any single tool" pitch (the first half being KIL).
+
+- **`docs/PRODUCT_ANALYTICS_CONNECTOR.md`** (new) — the decision record.
+  Provider: **PostHog** first (API-key auth, HogQL query API, `email` a
+  first-class person prop, free tier); Mixpanel documented (§7) not built.
+- **Key design calls:** Neo4j holds a *correlation layer*, not an event
+  store — `(:Contact {email, tenant_id})` rollup props + a bounded
+  `(:Contact)-[:DID]->(:Feature)` from the tenant's configured milestone
+  list + `(:Contact)-[:AT_ACCOUNT]->(:Account)`. **Not** one node per raw
+  event (that's a warehouse copy, violates Rule 1). Identity resolution is
+  the flagged hard problem: every Contact carries an `identity_match`
+  (`email` / `domain` / `none`) and a per-tenant **coverage %** is shown
+  on the connector card; the payoff node degrades cleanly when there's no
+  match. A `(:Contact)` node does not exist in the graph yet — this phase
+  introduces it, co-owned by `case_graph_sync` (identity + `[:FILED_BY]`)
+  and the analytics sync (activity rollups).
+- **Payoff (chunk 5):** a `product_signal` flow node — at triage/draft
+  time, enrich `state` with the filer's recent product activity so the
+  draft and routing are grounded in what the user did. Same "consulted
+  only when the run reaches it" model as `kb_lookup`; never blocks a run.
+- **Chunk plan:** 1 design doc ✅ · 2 connector + `/api/integrations/
+  posthog` · 3 `(:Contact)` + `[:FILED_BY]` in `case_graph_sync` +
+  constraint + migration · 4 `product_analytics_sync` job/sweep + identity
+  resolution + account rollup · 5 the `product_signal` node.
+
+No code, no migration in this chunk — design only.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
 **2026-09-06 (chunk 14) — per-tenant failed-jobs visibility (migration
-`099`). This is the most recent work in this file.** Completes the
-tenant-observability work: `/api/health/tenant` and the Approvals/Review
+`099`).** Completes the tenant-observability work: `/api/health/tenant`
+and the Approvals/Review
 "Bot health" strip could show a KIL backlog and stuck reasoning but never
 "N of your jobs failed permanently" — because `jobs` (013) is
 service-role infra with no `tenant_id`.
