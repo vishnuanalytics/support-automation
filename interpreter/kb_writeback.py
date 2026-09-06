@@ -315,8 +315,7 @@ def _graph_supersede(new_id: str, old_id: str | None, tenant_id: str, title: str
             cy += ("WITH k MERGE (o:KBArticle {entry_id: $old}) "
                    "SET o.status = 'superseded' MERGE (k)-[:SUPERSEDES]->(o)")
             params["old"] = old_id
-        driver.execute_query(cy, database_=db, **params)
-        driver.close()
+        driver.execute_query(cy, database_=db, **params)   # cached singleton — no close
     except Exception as e:  # noqa: BLE001
         log.warning("kb_writeback._graph_supersede: %s", e)
 

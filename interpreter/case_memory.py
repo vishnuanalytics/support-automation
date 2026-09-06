@@ -189,11 +189,6 @@ def sync_graph(row: dict[str, Any], similar: list[dict] | None = None) -> bool:
     except Exception as e:  # noqa: BLE001
         log.warning("case_memory.sync_graph(%s): %s", row.get("case_sf_id"), e)
         return False
-    finally:
-        try:
-            driver.close()
-        except Exception:  # noqa: BLE001
-            pass
 
 
 _LIFECYCLE_CYPHER = """
@@ -260,11 +255,6 @@ def sync_case_lifecycle(case: dict[str, Any], messages: list[dict] | None = None
     except Exception as e:  # noqa: BLE001
         log.warning("case_memory.sync_case_lifecycle(%s): %s", case.get("sf_id"), e)
         return False
-    finally:
-        try:
-            driver.close()
-        except Exception:  # noqa: BLE001
-            pass
 
 
 def _graph_duplicates(sf_ids: list[str], *, tenant_id: str | None = None) -> set[str]:
@@ -293,11 +283,6 @@ def _graph_duplicates(sf_ids: list[str], *, tenant_id: str | None = None) -> set
     except Exception as e:  # noqa: BLE001
         log.warning("case_memory._graph_duplicates: %s", e)
         return set()
-    finally:
-        try:
-            driver.close()
-        except Exception:  # noqa: BLE001
-            pass
 
 
 # ── write / read ──────────────────────────────────────────────────────────

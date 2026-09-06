@@ -145,3 +145,59 @@ def test_sync_dry_run_needs_no_neo4j(monkeypatch):
                         lambda: (_ for _ in ()).throw(RuntimeError("no neo4j")))
     rc = cgs.sync(since="1970-01-01", limit=10, one_id=None, dry=True)
     assert rc == 0
+
+
+# ── neo4j driver singleton (infra: 2026-09-06) ──────────────────────────
+def test_get_neo4j_driver_is_a_cached_singleton(monkeypatch):
+    from ingestion import neo4j_sync
+
+    monkeypatch.setenv = None  # noqa
+    monkeypatch.setattr(neo4j_sync.os, "environ", {
+        "NEO4J_URI": "bolt://x", "NEO4J_USERNAME": "u", "NEO4J_PASSWORD": "p",
+    })
+    built = []
+
+    class _D:
+        def verify_connectivity(self):
+            pass
+
+        def close(self):
+            built.append("closed")
+
+    monkeypatch.setattr(neo4j_sync.GraphDatabase, "driver", lambda *a, **k: built.append("built") or _D())
+    neo4j_sync._driver = None
+    try:
+        d1 = neo4j_sync.get_neo4j_driver()
+        d2 = neo4j_sync.get_neo4j_driver()
+        assert d1 is d2
+        assert built.count("built") == 1          # constructed once, reused
+        neo4j_sync.close_neo4j_driver()
+        assert "closed" in built and neo4j_sync._driver is None
+        neo4j_sync.get_neo4j_driver()
+        assert built.count("built") == 2          # rebuilds after an explicit close
+    finally:
+        neo4j_sync._driver = None
+
+
+def test_get_neo4j_driver_does_not_cache_an_unreachable_graph(monkeypatch):
+    from ingestion import neo4j_sync
+
+    monkeypatch.setattr(neo4j_sync.os, "environ", {
+        "NEO4J_URI": "bolt://x", "NEO4J_USERNAME": "u", "NEO4J_PASSWORD": "p",
+    })
+
+    class _Bad:
+        def verify_connectivity(self):
+            raise RuntimeError("unreachable")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(neo4j_sync.GraphDatabase, "driver", lambda *a, **k: _Bad())
+    neo4j_sync._driver = None
+    try:
+        with pytest.raises(RuntimeError):
+            neo4j_sync.get_neo4j_driver()
+        assert neo4j_sync._driver is None          # a bad driver is not cached
+    finally:
+        neo4j_sync._driver = None

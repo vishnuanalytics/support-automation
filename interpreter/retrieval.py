@@ -160,24 +160,21 @@ def graph_expand(
     try:
         from ingestion.neo4j_sync import get_neo4j_driver
 
-        driver = get_neo4j_driver()
+        driver = get_neo4j_driver()   # cached singleton — do NOT close here
         db = os.environ.get("NEO4J_DATABASE", "neo4j")
-        try:
-            recs = driver.execute_query(
-                """
-                MATCH (d:Doc)-[:LINKS_TO]->(n:Doc)
-                WHERE d.url IN $urls AND NOT n.url IN $urls
-                  AND coalesce(n.status, 'active') <> 'deleted'
-                RETURN n.url AS url, count(*) AS w
-                ORDER BY w DESC
-                LIMIT $lim
-                """,
-                urls=seed_doc_urls,
-                lim=max_neighbours,
-                database_=db,
-            ).records
-        finally:
-            driver.close()
+        recs = driver.execute_query(
+            """
+            MATCH (d:Doc)-[:LINKS_TO]->(n:Doc)
+            WHERE d.url IN $urls AND NOT n.url IN $urls
+              AND coalesce(n.status, 'active') <> 'deleted'
+            RETURN n.url AS url, count(*) AS w
+            ORDER BY w DESC
+            LIMIT $lim
+            """,
+            urls=seed_doc_urls,
+            lim=max_neighbours,
+            database_=db,
+        ).records
     except Exception as e:  # noqa: BLE001 -- graph expansion is optional
         print(f"  [retrieval] graph-expansion skipped: {e}", file=sys.stderr)
         return []

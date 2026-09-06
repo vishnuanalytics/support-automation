@@ -30,6 +30,8 @@ Env vars required (put in .env):
 import os
 import sys
 import logging
+import atexit
+import threading
 from urllib.parse import urlparse
 
 from neo4j import GraphDatabase
@@ -51,11 +53,55 @@ def get_supabase():
     return create_client(url, key)
 
 
+_driver = None
+_driver_lock = threading.Lock()
+
+
 def get_neo4j_driver():
-    return GraphDatabase.driver(
-        os.environ["NEO4J_URI"],
-        auth=(os.environ["NEO4J_USERNAME"], os.environ["NEO4J_PASSWORD"]),
-    )
+    """A **process-wide singleton** driver. A Neo4j `Driver` owns a
+    connection pool and is meant to be built once and shared for the
+    process's life — the old create-and-`close()`-per-operation pattern
+    paid a fresh TCP + auth handshake on every `case_memory` match and
+    every `retrieve` node's graph-expand. Thread-safe (the driver itself
+    is; the lock only guards construction). Config is overridable via
+    `NEO4J_*` env vars for Aura tuning; `verify_connectivity()` on first
+    build so an unreachable graph fails fast (and isn't cached — the next
+    call retries)."""
+    global _driver
+    if _driver is not None:
+        return _driver
+    with _driver_lock:
+        if _driver is None:
+            d = GraphDatabase.driver(
+                os.environ["NEO4J_URI"],
+                auth=(os.environ["NEO4J_USERNAME"], os.environ["NEO4J_PASSWORD"]),
+                max_connection_pool_size=int(os.environ.get("NEO4J_POOL_SIZE", "20")),
+                connection_timeout=float(os.environ.get("NEO4J_CONNECT_TIMEOUT", "15")),
+                connection_acquisition_timeout=float(
+                    os.environ.get("NEO4J_ACQUIRE_TIMEOUT", "30")),
+                max_connection_lifetime=int(os.environ.get("NEO4J_MAX_CONN_LIFETIME", "1800")),
+                keep_alive=True,
+            )
+            try:
+                d.verify_connectivity()
+            except Exception:
+                d.close()
+                raise
+            _driver = d
+            atexit.register(close_neo4j_driver)
+    return _driver
+
+
+def close_neo4j_driver() -> None:
+    """Explicit shutdown for batch scripts; also runs at interpreter exit."""
+    global _driver
+    with _driver_lock:
+        if _driver is not None:
+            try:
+                _driver.close()
+            except Exception:  # noqa: BLE001
+                pass
+            _driver = None
 
 
 def fetch_docs(sb) -> list[dict]:
@@ -243,15 +289,14 @@ def run():
         return
     links = fetch_links(sb)
 
-    driver = get_neo4j_driver()
+    driver = get_neo4j_driver()   # verify_connectivity() runs inside on first build
     try:
-        driver.verify_connectivity()
         ensure_constraints(driver)
         sync_doc_nodes(driver, docs)
         sync_sections(driver, docs)
         sync_links(driver, links)
     finally:
-        driver.close()
+        close_neo4j_driver()      # batch job — explicit shutdown at the end
     log.info("Neo4j sync complete.")
     try:  # audit NEO-2 — a heartbeat health_check can watch for staleness
         from interpreter.health import beat
