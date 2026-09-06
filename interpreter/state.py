@@ -98,6 +98,11 @@ class CaseState(TypedDict, total=False):
     # lead, cases: {open,total,recent}, account_team}
     sf_context: dict[str, Any]
 
+    # Phase 30 — product_signal node: the filer's recent product activity
+    # from the analytics graph. {available: bool, identity_match, events_30d,
+    # active_days_30d, usage_trend, recent_features: [...], account: {...}|None}
+    product_signal: dict[str, Any]
+
     # Phase 25 — every `ai_prompt` node writes {output_key: value} in here
     # (a declared channel so a dynamic key isn't dropped by the graph merge).
     # Edges / templates read `ai.<output_key>...`.

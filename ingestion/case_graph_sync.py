@@ -52,7 +52,7 @@ _BOT_DRAFT_MARKERS = ("[bot draft", "[draft", "suggested draft", "review before 
 _CASE_SOQL = (
     "SELECT Id, CaseNumber, Subject, Description, Status, Type, Reason, Priority, "
     "Origin, IsClosed, CreatedDate, ClosedDate, LastModifiedDate, OwnerId, AccountId, "
-    "ContactId, Contact.Email, Module__c, Routed_Team__c, Account.Tier__c, "
+    "ContactId, Contact.Email, Module__c, Routed_Team__c, Account.Tier__c, Account.Website, "
     "(SELECT Id, CommentBody, CreatedById, CreatedDate, IsPublished FROM CaseComments), "
     "(SELECT Id, Incoming, FromAddress, ToAddress, TextBody, MessageDate, CreatedById "
     " FROM EmailMessages) "
@@ -101,6 +101,20 @@ def _messages(case: dict) -> list[dict]:
     return out
 
 
+def _domain_from_website(website: str | None) -> str | None:
+    """`https://www.Acme.com/support` -> `acme.com`. Bare `acme.com` too.
+    Anything that doesn't look like a hostname -> None (chunk-4 domain
+    matching just skips that account)."""
+    w = (website or "").strip().lower()
+    if not w:
+        return None
+    if "://" not in w:
+        w = "http://" + w
+    from urllib.parse import urlparse
+    host = (urlparse(w).netloc or "").split("@")[-1].split(":")[0].removeprefix("www.")
+    return host if ("." in host and " " not in host) else None
+
+
 def _case_row(case: dict) -> dict:
     return {
         "sf_id": case["Id"],
@@ -117,6 +131,8 @@ def _case_row(case: dict) -> dict:
         "module": case.get("Module__c"),
         "case_type": case.get("Type"),
         "account_id": case.get("AccountId"),
+        "account_domain": _domain_from_website((case.get("Account") or {}).get("Website")),
+        "contact_email": ((case.get("Contact") or {}).get("Email") or "").strip().lower() or None,
     }
 
 

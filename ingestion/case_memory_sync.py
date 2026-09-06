@@ -256,12 +256,71 @@ def _from_salesforce(since_iso: str, limit: int) -> list[dict]:
     return out
 
 
+def _from_zendesk(since_iso: str, limit: int) -> list[dict]:
+    """Phase 31 chunk 4 — resolved Zendesk tickets, for every
+    `case_connector=zendesk` tenant. The resolution text is the **last
+    public non-requester comment** on a solved/closed ticket. Reuses the
+    ticket-graph sync's Incremental Export + per-run cache helpers."""
+    from interpreter import case_memory, zendesk
+    from ingestion.zendesk_case_graph_sync import _Cache, _incremental_tickets, _iso_to_unix
+
+    sb = get_supabase()
+    start_unix = _iso_to_unix(since_iso)
+    out: list[dict] = []
+    for tid in zendesk.active_connector_tenants(sb):
+        zc = zendesk._client(tid, sb)
+        if zc is None:
+            continue
+        cache = _Cache(zc)
+        for t in _incremental_tickets(zc, start_unix, limit):
+            if (t.get("status") or "").lower() not in ("solved", "closed"):
+                continue
+            reply, agent_id = _zendesk_resolution(zc, t, cache)
+            if not reply:
+                continue
+            org_id = t.get("organization_id")
+            out.append({
+                "case_sf_id": str(t["id"]), "tenant_id": tid,
+                "case_number": str(t["id"]), "subject": t.get("subject"),
+                "body_summary": t.get("description") or t.get("subject") or "",
+                "case_type": t.get("type"), "module": None, "region": None,
+                "account_id": str(org_id) if org_id else None, "tier": None,
+                "resolution_kind": case_memory.classify_resolution_kind(None, reply),
+                "resolution_text": reply,
+                "generalizable": not case_memory.looks_specific(reply),
+                "agent_user_id": str(agent_id) if agent_id else None,
+                "resolved_at": t.get("updated_at"), "source": "zendesk",
+            })
+    return out
+
+
+def _zendesk_resolution(zc, ticket: dict, cache) -> tuple[str, object | None]:
+    tid, req = ticket["id"], ticket.get("requester_id")
+    try:
+        comments = (zc.request("GET", f"/tickets/{tid}/comments.json")
+                    .get("comments") or [])
+    except Exception as e:  # noqa: BLE001
+        log.warning("zendesk ticket %s comments: %s", tid, e)
+        return "", None
+    for c in reversed(comments):
+        if not c.get("public", True):
+            continue
+        aid = c.get("author_id")
+        if aid == req or (cache.user(aid).get("role") or "") == "end-user":
+            continue
+        body = (c.get("body") or c.get("plain_body") or "").strip()
+        if body:
+            return body, aid
+    return "", None
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="ingestion.case_memory_sync")
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--since", default=None, help="ISO date; default = 90 days ago")
     ap.add_argument("--limit", type=int, default=2000)
     ap.add_argument("--from-salesforce", action="store_true")
+    ap.add_argument("--from-zendesk", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--reindex-stale", type=int, metavar="DAYS", default=0,
                     help="mark case_memory rows older than DAYS as status='stale' and exit")
@@ -277,7 +336,9 @@ def main(argv: list[str] | None = None) -> int:
     since = args.since or (datetime.now(timezone.utc) - timedelta(days=90)).date().isoformat()
     since_iso = since if "T" in since else f"{since}T00:00:00Z"
 
-    if args.from_salesforce:
+    if args.from_zendesk:
+        rows = _from_zendesk(since_iso, args.limit)
+    elif args.from_salesforce:
         rows = [r for r in (
             {**c, **{}} for c in _from_salesforce(since_iso, args.limit)) if r]
     else:

@@ -217,15 +217,73 @@ tenants with an active `posthog` integration.
    guard; 945 offline green; tsc + build clean. Not live-verified (no
    PostHog project wired in this sandbox — `test_connection` is the live
    check when a key exists).
-3. **`(:Contact)` in the graph** — `case_graph_sync` MERGEs
-   `(:Contact {email})` + `[:FILED_BY]`; the `(email, tenant_id)`
-   constraint; migration for `graph_sync_state.coverage_pct` and the
-   optional `account_domain`. Backfill note.
-4. **`product_analytics_sync` job + sweep** — the rollup MERGE, identity
-   resolution, account rollup pass, `daily-sync.yml` step, coverage
-   number on the connector card.
-5. **`product_signal` node** — registry handler, `h_draft` fold-in,
-   `builder._context` key, palette + Inspector, a seed flow wiring it.
+3. **`(:Contact)` in the graph.** ✅ (2026-09-06) `case_graph_sync._case_row`
+   now carries `contact_email` (from `Contact.Email`) and `account_domain`
+   (parsed from `Account.Website` — `_domain_from_website`; SOQL gained
+   `Account.Website`). `case_memory._LIFECYCLE_CYPHER` MERGEs
+   `(:Contact {email, tenant_id})` + `(c)-[:FILED_BY]->(ct)` when an email
+   is present, sets `Account.domain` when a domain is present, and — when a
+   Case names **both** a contact and an account — MERGEs
+   `(ct)-[:AT_ACCOUNT]->(a)` (Salesforce's own ground truth, stronger than
+   chunk 4's email-domain guess). `neo4j_sync.ensure_constraints` gains
+   `contact_email_tenant` uniqueness on `(email, tenant_id)`. No Supabase
+   migration — all Neo4j; `graph_sync_state.coverage_pct` moves to chunk 4
+   where it's written. Live-verified: the lifecycle Cypher EXPLAINs clean,
+   the constraint is created, and a real MERGE produced the
+   `Case-[:FILED_BY]->Contact-[:AT_ACCOUNT]->Account` chain (smoke nodes
+   cleaned up). `tests/test_case_graph_sync.py` +5. **Backfill:** the next
+   scheduled `case_graph_sync` re-MERGEs every Case in its window, so
+   Contact nodes appear as cases are re-synced — no separate backfill job.
+4. **`product_analytics_sync` job + sweep.** ✅ (2026-09-06)
+   `ingestion/product_analytics_sync.py` — per tenant with an active
+   `posthog` integration: `fetch_person_rollups(since=<watermark>)` →
+   `_ROLLUP_CYPHER` MERGEs `(:Contact {email, tenant_id})` + rollup props +
+   `(:Contact)-[:DID {last_ts,count}]->(:Feature)` per milestone →
+   `_IDENTITY_CYPHER` sets `identity_match` (`email` if an inbound
+   `[:FILED_BY]` exists; `domain` if the email domain matches **exactly
+   one** `(:Account {domain})` → MERGE `[:AT_ACCOUNT]`; else `none`) →
+   `_ACCOUNT_ROLLUP_CYPHER` rolls each account's `pa_active_users_30d` /
+   `pa_contacts` / `pa_events_30d` / `pa_usage_trend` from its
+   `[:AT_ACCOUNT]` contacts. `graph_sync_state` (`scope =
+   'product_analytics:<tenant>'`, migration `100` adds `contacts_synced` +
+   `coverage_pct`). Sweep `sweeps.product_analytics_sync` (12h), worker
+   `HANDLERS` entry, `daily-sync.yml` step, `--once`/`--dry-run`/`--tenant`
+   CLI. `GET /api/integrations/posthog` returns `coverage_pct` /
+   `contacts_synced` / `last_synced_at`; the card shows "N contacts · X%
+   matched" + a warning banner under 40%. Best-effort — a failing tenant
+   is logged and skipped. Live-verified: all 3 Cypher passes EXPLAIN clean
+   and a real end-to-end run produced `email` / `domain` / `none` matches
+   + the `[:AT_ACCOUNT]` edge + the account rollup (smoke nodes cleaned
+   up). `tests/test_product_analytics_sync.py` (10); 961 offline green.
+5. **`product_signal` node.** ✅ (2026-09-06) `registry.h_product_signal`
+   (`@register("product_signal")`) — resolves the filer's email
+   (`sender.email` → `case.contact.email` → `case.from`), one tenant-scoped
+   Cypher read (`_PRODUCT_SIGNAL_CYPHER`) for the `(:Contact)`'s rollup +
+   `[:DID]` features + `[:AT_ACCOUNT]` account rollup, writes
+   `state.product_signal = {available, identity_match, last_seen_at,
+   events_30d, active_days_30d, usage_trend, recent_features[], account}`.
+   Any miss (no email / PostHog not connected / no `NEO4J_URI` / graph
+   down / no rollup for this person) → `{available: false, reason}` and the
+   flow proceeds unchanged — **never blocks a run**. `state.py` gains the
+   `product_signal` key (LangGraph drops undeclared keys); `builder.
+   _context` exposes it so edges can branch on `product_signal.available`
+   / `.usage_trend` / `.account.usage_trend`; `h_draft` folds a compact
+   rendering into the prompt under "Product activity for this user
+   (background — do not quote as policy)" — context, **not** a grounding
+   source. `NODE_DEFAULTS` + the flow-copilot `_TYPE_DOC` + the web
+   `NODE_HELP` gain entries; the palette is auto-driven by `known_types()`.
+   **Not done (deliberate):** wiring it into a published seed flow — with
+   no PostHog integration in this environment it would only ever be a
+   `{available:false}` no-op, and it would bump a demo flow's version for
+   nothing. A tenant drops it from the palette after connecting PostHog.
+   `tests/test_product_signal.py` (11); live-verified against the real
+   Neo4j (a seeded Contact + feature + account rollup produced the full
+   payload; smoke nodes cleaned up). 972 offline green.
+
+**Phase 30 complete** (chunks 1–5). Follow-ons noted but not built:
+Mixpanel (§7), extending `interpreter/graph_query.py`'s allow-lists with
+Event-derived dimensions, and a per-account "product health" tile in the
+Review/insights area.
 
 ## §7 — Mixpanel (documented, not built)
 

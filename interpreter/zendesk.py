@@ -124,6 +124,23 @@ def available(tenant_id: str | None, sb=None) -> bool:
     return _creds(tenant_id, sb) is not None
 
 
+def active_connector_tenants(sb, only: str | None = None) -> list[str]:
+    """Tenant ids with `tenants.case_connector = 'zendesk'` AND an active
+    `zendesk` integration — the set the ticket watcher and the case-graph
+    sync both iterate. Best-effort: a read failure -> []."""
+    try:
+        trows = (sb.table("tenants").select("tenant_id")
+                 .eq("case_connector", KIND).execute().data or [])
+        irows = (sb.table("tenant_integrations").select("tenant_id")
+                 .eq("kind", KIND).eq("status", "active").execute().data or [])
+    except Exception as e:  # noqa: BLE001
+        log.warning("active_connector_tenants: %s", e)
+        return []
+    active = ({r["tenant_id"] for r in trows if r.get("tenant_id")}
+              & {r["tenant_id"] for r in irows if r.get("tenant_id")})
+    return [t for t in active if (only is None or t == only)]
+
+
 # --------------------------------------------------------------------------
 # connect-account: config model + storage + a lightweight connection test —
 # same shape as `interpreter/freshchat.py`'s (subdomain/email non-secret in
@@ -136,10 +153,15 @@ class ZendeskConfig:
     email: str = ""
     status: str = "inactive"
     api_token: str = ""
+    # master switch for customer-facing auto-send on a `channel=zendesk` run
+    # (mirrors email/freshchat `auto_send_enabled`; `emailer.decide` reads it).
+    # Off -> an `auto_reply` outcome is flagged for a human, nothing is sent.
+    auto_send_enabled: bool = False
 
     def __repr__(self) -> str:   # never leak the token in a log/trace
         return (f"ZendeskConfig(tenant_id={self.tenant_id!r}, subdomain={self.subdomain!r}, "
-                f"email={self.email!r}, status={self.status!r}, configured={bool(self.api_token)})")
+                f"email={self.email!r}, status={self.status!r}, "
+                f"auto_send={self.auto_send_enabled}, configured={bool(self.api_token)})")
 
     @classmethod
     def from_row(cls, tenant_id: str, config: dict | None, status: str | None,
@@ -147,14 +169,17 @@ class ZendeskConfig:
         c = dict(config or {})
         return cls(tenant_id=str(tenant_id), subdomain=c.get("subdomain", ""),
                   email=c.get("email", ""), status=status or "inactive",
+                  auto_send_enabled=bool(c.get("auto_send_enabled", False)),
                   api_token=(secret or {}).get("api_token", ""))
 
     def to_config(self) -> dict:
-        return {"subdomain": self.subdomain, "email": self.email}
+        return {"subdomain": self.subdomain, "email": self.email,
+                "auto_send_enabled": self.auto_send_enabled}
 
     def public_status(self) -> dict:
         return {"configured": bool(self.api_token), "subdomain": self.subdomain,
-                "email": self.email, "status": self.status}
+                "email": self.email, "status": self.status,
+                "auto_send_enabled": self.auto_send_enabled}
 
 
 def load_channel(tenant_id: str, sb) -> "ZendeskConfig | None":
@@ -503,3 +528,77 @@ def send_case_reply(case_id: str, body: str, *, to_email: str | None = None,
     except Exception as e:  # noqa: BLE001
         log.warning("zendesk send_case_reply(%s): %s", case_id, e)
         return {"sent": False, "dry_run": False, "via": "error", "error": str(e)}
+
+
+# --------------------------------------------------------------------------
+# ingestion — poll new tickets so a `case_connector=zendesk` tenant's bot
+# actually fires on inbound tickets (Phase 31 chunk 1; mirrors
+# ingestion/sf_case_watch.py, which is Salesforce-only).
+# --------------------------------------------------------------------------
+def list_new_tickets(tenant_id: str | None, sb=None, *, lookback_min: int = 120,
+                     limit: int = 200) -> list[dict[str, Any]]:
+    """New tickets updated in the last `lookback_min`, newest first. Uses
+    the Search API (`status:new`). Best-effort: no creds / an API error ->
+    `[]` (never raises into a cron)."""
+    zc = _client(tenant_id, sb)
+    if zc is None:
+        return []
+    import datetime as _dt
+    cutoff = (_dt.datetime.now(_dt.timezone.utc)
+              - _dt.timedelta(minutes=max(lookback_min, 1)))
+    try:
+        res = zc.request("GET", "/search.json", params={
+            "query": "type:ticket status:new",
+            "sort_by": "updated_at", "sort_order": "desc",
+        }).get("results") or []
+    except Exception as e:  # noqa: BLE001
+        log.warning("zendesk list_new_tickets(%s): %s", tenant_id, e)
+        return []
+    out: list[dict[str, Any]] = []
+    for t in res:
+        upd = _parse_ts(t.get("updated_at") or t.get("created_at"))
+        if upd is None or upd >= cutoff:
+            out.append(t)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _parse_ts(s: str | None):
+    if not s:
+        return None
+    import datetime as _dt
+    try:
+        return _dt.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def ticket_as_case(ticket: dict[str, Any], tenant_id: str | None = None,
+                   sb=None) -> dict[str, Any]:
+    """Normalise a Zendesk ticket into the interpreter's `case` shape (the
+    same keys `initial_state` + the node handlers read). `sf_id` carries the
+    ticket id — the seam's convention for "the case system's case id" (see
+    ensure_case). One extra call to resolve the requester's email."""
+    tid = ticket.get("id")
+    case: dict[str, Any] = {
+        "sf_id": str(tid) if tid is not None else None,
+        "id": str(tid) if tid is not None else None,
+        "case_number": str(tid) if tid is not None else None,
+        "subject": ticket.get("subject") or "(no subject)",
+        "body": ticket.get("description") or "",
+        "channel": "zendesk",
+        "status": ticket.get("status"),
+    }
+    req_id = ticket.get("requester_id")
+    zc = _client(tenant_id, sb)
+    if zc is not None and req_id:
+        try:
+            u = zc.request("GET", f"/users/{req_id}.json").get("user") or {}
+            if u.get("email"):
+                case["from"] = u["email"]
+            if u.get("name"):
+                case["from_name"] = u["name"]
+        except Exception as e:  # noqa: BLE001
+            log.warning("zendesk ticket_as_case user %s: %s", req_id, e)
+    return case

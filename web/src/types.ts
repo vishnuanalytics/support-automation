@@ -417,6 +417,9 @@ export interface PostHogStatus {
   project_id?: string;
   milestone_events?: string[];
   has_credentials?: boolean;
+  coverage_pct?: number | null;
+  contacts_synced?: number | null;
+  last_synced_at?: string | null;
 }
 
 export interface PostHogSave {
@@ -667,6 +670,7 @@ export interface ZendeskConnection {
   status: "none" | "inactive" | "active" | "error";
   subdomain?: string;
   email?: string;
+  auto_send_enabled?: boolean;
 }
 
 export interface ZendeskConnectionSave {
@@ -674,6 +678,7 @@ export interface ZendeskConnectionSave {
   subdomain?: string;
   email?: string;
   api_token?: string;
+  auto_send_enabled?: boolean;
 }
 
 export interface CaseConnector {

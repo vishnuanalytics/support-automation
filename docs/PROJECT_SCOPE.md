@@ -707,8 +707,259 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-06 (Phase 30 — Product-analytics connector, chunk 2: the PostHog
-connector). This is the most recent work in this file.**
+**2026-09-06 (Phase 31 — Zendesk parity, chunk 4: the resolution-memory
+sync — PHASE 31 COMPLETE). This is the most recent work in this file.**
+
+The last gap: `case_memory_sync` (the pgvector resolution memory that
+feeds `draft` / `case_lookup`, plus the `RESOLVED_BY` / `SIMILAR_TO` /
+`DUPLICATE_OF` graph edges) was runs-and-Salesforce only.
+
+- **`ingestion/case_memory_sync.py`** gains a `--from-zendesk` mode
+  (`main()` is a 3-way if/elif on the source flag). `_from_zendesk(since,
+  limit)` — for every `case_connector=zendesk` tenant, walk **solved /
+  closed** tickets (reusing `zendesk_case_graph_sync`'s Incremental Export
+  + `_Cache`), take the **last public non-requester / non-end-user
+  comment** as the resolution text, and emit the same `case_memory` row
+  shape `_from_salesforce` does (`resolution_kind` via
+  `case_memory.classify_resolution_kind`, `case_type` from ticket `type`,
+  `account_id` from `organization_id`, `agent_user_id` from the comment
+  author). The shared `_sync_rows` then embeds, upserts, runs the
+  `match_case_memory` kNN for `SIMILAR_TO` / same-account `DUPLICATE_OF`,
+  and calls `case_memory.sync_graph` — no Zendesk-specific code past the
+  row builder.
+- **`sweeps.case_memory_sync`** runs the third path too; `daily-sync.yml`
+  gets a `--from-zendesk --once` line.
+- `tests/test_case_memory_sync.py` +3. **1008 offline green.** No
+  migration, no web change. Live: `--from-zendesk --once --dry-run`
+  no-ops cleanly against the real project.
+
+**Phase 31 is complete** (chunks 1–4): the inbound ticket watcher,
+`auto_reply` delivery, the case-lifecycle graph, and the resolution
+memory. A `case_connector=zendesk` tenant now has **full parity** with a
+Salesforce tenant — fires on inbound tickets, replies (opt-in), builds
+the Neo4j case graph + `(:Contact)` + product-signal join, and feeds
+`draft` from past Zendesk resolutions with duplicate detection. Residual
+(as with every connector): end-to-end verification needs a real Zendesk
+account.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (Phase 31 chunk 3: the case-lifecycle graph sync).**
+
+`ingestion/case_graph_sync.py` is Salesforce-only (SOQL), so a
+`case_connector=zendesk` tenant got no Neo4j case graph — no "answer from
+past resolutions", no duplicate detection, no `(:Contact)` for Phase-30
+product signals. This closes that.
+
+- **`ingestion/zendesk_case_graph_sync.py`** (new) — for every tenant with
+  `case_connector='zendesk'` + an active `zendesk` integration: walk
+  tickets via Zendesk's **Incremental Export** API
+  (`/incremental/tickets.json?start_time=<unix>`, paged to
+  `end_of_stream`), and MERGE via the **same connector-agnostic
+  `case_memory.sync_case_lifecycle`** the Salesforce sync uses — so a
+  Zendesk tenant gets the identical graph: `(:Case)-[:HAS_MESSAGE]->
+  (:Message)`, `-[:OF_TYPE]->(:CaseType)`, `-[:FOR_ACCOUNT]->(:Account)`,
+  `-[:FILED_BY]->(:Contact)`, `(:Contact)-[:AT_ACCOUNT]->(:Account)`,
+  `Account.domain`. Per-turn `(:Message)` from ticket **comments** (the
+  Zendesk thread *is* the whole conversation): requester / `end-user`
+  role → `inbound`/`customer`; public agent → `agent_reply`; private →
+  `agent_note`; a `[bot draft…]`-marked private comment → `draft`/`bot`
+  (same `_BOT_DRAFT_MARKERS` as the SF sync). A per-run `_Cache` fetches
+  each requester / org / group once.
+- **Mapping choices** (following `interpreter/zendesk.py`'s "honest where
+  it doesn't map" ethos): `type` → `case_type`, `module=None`; `group`
+  name → `routed_team`; `organization` → `Account`; no first-class
+  `closed_at`, so `updated_at` stands in once solved/closed; `tier=None`.
+- Resumable per tenant: `graph_sync_state` scope
+  `case_graph:zendesk:<tenant>`, `last_modified` = the `updated_at`
+  high-water mark; checkpoints every 50; idempotent MERGE.
+- **Sweep** `sweeps.zendesk_case_graph_sync` (60 min) + `HANDLERS` entry +
+  a `daily-sync.yml` step. `--once`/`--tenant`/`--since`/`--backfill`/
+  `--dry-run` CLI. Shared `zendesk.active_connector_tenants(sb)` helper
+  (the ticket watcher now uses it too).
+- `tests/test_zendesk_case_graph_sync.py` new (13). **1005 offline
+  green.** No migration. Live: `--once` no-ops cleanly against the real
+  project; the MERGE Cypher itself was live-verified in Phase 30 chunk 3.
+- **Still deferred:** `case_memory_sync` parity for Zendesk (the pgvector
+  resolution memory + `DUPLICATE_OF` scoring that feeds `draft` /
+  `case_lookup`). The **graph** is now at parity; the **memory** store
+  isn't.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (Phase 31 chunk 2: `auto_reply` delivery for a
+`channel=zendesk` run).**
+
+Chunk 1 made a Zendesk tenant's bot *fire*; this makes its confident
+reply actually *go out*. `_run_flow`'s post-run auto-send hook only
+handled `email` / `freshchat` — a `channel=zendesk` run recorded an
+`auto_reply` outcome but delivered nothing.
+
+- **`api/worker.py::_zendesk_post_run`** — mirrors `_freshchat_post_run`:
+  `emailer.decide(outcome, cfg, clarification)` (already channel-agnostic —
+  reads only `outcome` / `cfg.auto_send_enabled` / `clarification`) →
+  `zendesk.send_case_reply(ticket_id, body, to_email=case["from"], …)` as a
+  public ticket comment for `send_reply` / `send_questions`, else flag for
+  a human. Wired into the `run_case.get("channel")` dispatch. Never raises.
+- **`ZendeskConfig.auto_send_enabled`** (default `False`, stored in
+  `tenant_integrations.config`) — the same master switch email/freshchat
+  have; `from_row` / `to_config` / `public_status` carry it. Off → every
+  `auto_reply` is flagged for a human.
+- **`PUT /api/integrations/zendesk`** accepts `auto_send_enabled`; the
+  `ZendeskPanel` gets an "Auto-send confident replies…" checkbox.
+- `tests/test_zendesk_worker.py` new (8), `test_zendesk.py` +1 assertion.
+  **992 offline green**; tsc + build + vitest + 3 Playwright specs clean.
+  No migration. End-to-end still needs a real Zendesk account.
+- **Still deferred:** `case_graph_sync` / `case_memory_sync` parity for a
+  Zendesk tenant (Neo4j case graph + resolution memory + duplicate
+  detection + `(:Contact)` for product signals).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (Phase 31 chunk 1: the inbound ticket watcher).**
+
+Context: the Zendesk **connector** was already built 2026-09-05
+(`interpreter/zendesk.py`, all 8 `CASE_ACTIONS`, 30 unit + 9 live tests,
+web `ZendeskPanel` + the case-connector picker). But there was **no
+Zendesk equivalent of `sf_case_watch.py`** — a `case_connector=zendesk`
+tenant could *act* on tickets but nothing *triggered* a run from an
+inbound one. This closes that gap; the rest of Salesforce parity
+(`case_graph_sync` / `case_memory_sync` for Zendesk, and verifying that a
+flow's `auto_reply` terminal actually delivers via `zendesk.
+send_case_reply` the way email's post-run hook does) is deferred.
+
+- **`interpreter/zendesk.py`** gains `list_new_tickets(tenant_id, sb,
+  lookback_min=120)` (Search API `type:ticket status:new`, client-side
+  lookback filter, best-effort → `[]`) and `ticket_as_case(ticket,
+  tenant_id, sb)` (normalise to the interpreter's `case` shape —
+  `sf_id`/`id`/`case_number` = the ticket id per the seam's convention,
+  `subject`/`body`/`status`, one `/users/<id>` call for `from`/`from_name`,
+  `channel="zendesk"`).
+- **`ingestion/zendesk_ticket_watch.py`** (new) — per tenant with
+  `tenants.case_connector='zendesk'` AND an active `zendesk` integration:
+  resolve the flow (`flows.sf_entry` marked, else the sole published one,
+  else skip), poll, and `jobs.enqueue("run_flow", …, dedupe_key=
+  f"zd:{tid}:{ticket_id}", tenant_id=tid)`. No watermark (job dedupe
+  handles overlap), same as `sf_case_watch`. `--once`/`--tenant`/`--flow`/
+  `--lookback` CLI.
+- **`.github/workflows/email-automation.yml`** — a `zendesk_ticket_watch
+  --once` step before the queue drain (the 5-min cron already drives email
+  the same way; no always-on worker host).
+- `_run_flow` needs no change — the watcher enqueues a fully hydrated
+  case, so the Salesforce-only "bare id → `salesforce.get_case`" hydration
+  branch is skipped.
+- `tests/test_zendesk.py` +6, `tests/test_zendesk_ticket_watch.py` new
+  (9). **984 offline green.** No migration. Live-verified only that
+  `--once` runs against the real project and no-ops cleanly (no
+  zendesk-connector tenant exists); end-to-end needs a real Zendesk
+  account (same residual as the connector).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (Phase 30 chunk 5: the `product_signal` flow node — PHASE 30
+COMPLETE).**
+
+- **`registry.h_product_signal`** (`@register("product_signal")`) —
+  resolves the filer's email (`sender.email` → `case.contact.email` →
+  `case.from`), one tenant-scoped Cypher read for the `(:Contact)` rollup
+  + `[:DID]` features + `[:AT_ACCOUNT]` account rollup, writes
+  `state.product_signal = {available, identity_match, last_seen_at,
+  events_30d, active_days_30d, usage_trend, recent_features[], account}`.
+  Any miss (no email / PostHog not connected / graph down / no rollup) →
+  `{available: false, reason}`; **never blocks a run**.
+- **`state.py`** gains the `product_signal` key; **`builder._context`**
+  exposes it (edges can branch on `product_signal.available` /
+  `.usage_trend` / `.account.usage_trend`); **`h_draft`** folds a compact
+  rendering into the prompt as *background context, not a grounding
+  source*.
+- **`NODE_DEFAULTS`** + flow-copilot **`_TYPE_DOC`** + web **`NODE_HELP`**
+  entries; palette is auto-driven by `known_types()`. No migration.
+- **Not wired into a seed flow** (deliberate) — with no PostHog in this
+  env it would be a permanent `{available:false}` no-op and would bump a
+  demo flow version for nothing.
+- **Live-verified** against the real Neo4j: a seeded Contact + feature +
+  account rollup produced the full payload (smoke nodes cleaned up).
+  `tests/test_product_signal.py` (11); **972 offline green**; tsc + `vite
+  build` clean.
+
+**Phase 30 is complete** (chunks 1–5): the PostHog connector, `(:Contact)`
+in the graph, the `product_analytics_sync` job with identity resolution,
+and the `product_signal` node. Follow-ons noted, not built: Mixpanel
+(§7 of the design doc), Event-derived dims in `interpreter/graph_query.py`,
+a per-account "product health" tile.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (Phase 30 chunk 4: the `product_analytics_sync` job).**
+
+- **`ingestion/product_analytics_sync.py`** — per tenant with an active
+  `posthog` integration: `posthog.fetch_person_rollups(since=<watermark>)`
+  → MERGE `(:Contact {email, tenant_id})` + rollup props +
+  `(:Contact)-[:DID {last_ts,count}]->(:Feature)` per milestone → identity
+  resolution (`email` if an inbound `[:FILED_BY]` exists; `domain` if the
+  email domain matches **exactly one** `(:Account {domain})` → MERGE
+  `[:AT_ACCOUNT]`; else `none`) → an account rollup pass
+  (`pa_active_users_30d` / `pa_contacts` / `pa_events_30d` /
+  `pa_usage_trend`). `--once` / `--dry-run` / `--tenant` CLI.
+- **Migration `100`** — `graph_sync_state` gains `contacts_synced` +
+  `coverage_pct`; the sync uses `scope = 'product_analytics:<tenant>'`
+  with `last_modified` as the `last_seen_at` high-water mark.
+- **`sweeps.product_analytics_sync`** (12h in `_SWEEP_EVERY_MIN`) +
+  `api/worker.HANDLERS` entry + a `daily-sync.yml` step.
+- **`GET /api/integrations/posthog`** now also returns `coverage_pct` /
+  `contacts_synced` / `last_synced_at`; the ChannelsView card shows
+  "N contacts · X% matched" and a warning banner under 40%.
+- **Live-verified** on the real Neo4j: all 3 Cypher passes EXPLAIN clean;
+  a real end-to-end run produced `email` / `domain` / `none` matches, the
+  `[:AT_ACCOUNT]` edge, and the account rollup (smoke nodes cleaned up).
+  `tests/test_product_analytics_sync.py` (10); **961 offline green**;
+  `100` applied live, drift clean; tsc + `vite build` clean.
+- **Next: chunk 5** (the last) — a `product_signal` flow node: registry
+  handler that reads the filer's `(:Contact)` rollup + `[:DID]` features +
+  account rollup at triage/draft time, `h_draft` folds it in as context,
+  `builder._context` exposes it for edge conditions, palette + Inspector,
+  a seed flow wiring it. Degrades to `{available:false}` with no match —
+  never blocks a run.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (Phase 30 chunk 3: `(:Contact)` in the graph).**
+
+- **`ingestion/case_graph_sync.py`** — `_case_row` now carries
+  `contact_email` (from `Contact.Email`) and `account_domain`
+  (`_domain_from_website`, parsing the new `Account.Website` SOQL field).
+- **`interpreter/case_memory._LIFECYCLE_CYPHER`** — MERGEs
+  `(:Contact {email, tenant_id})` + `(c)-[:FILED_BY]->(ct)` when an email
+  is present; sets `Account.domain`; and when a Case names **both** a
+  contact and an account, MERGEs `(ct)-[:AT_ACCOUNT]->(a)` (SF ground
+  truth — stronger than chunk 4's domain guess). All FOREACH-guarded on a
+  NULL param, so the Cypher is static.
+- **`ingestion/neo4j_sync.ensure_constraints`** — `contact_email_tenant`
+  uniqueness on `(:Contact) (email, tenant_id)`.
+- **No Supabase migration** — all Neo4j. `graph_sync_state.coverage_pct`
+  deferred to chunk 4 (where it's written).
+- **Live-verified** on the real Neo4j: lifecycle Cypher EXPLAINs clean,
+  the constraint is created, a real MERGE produced the
+  `Case-[:FILED_BY]->Contact-[:AT_ACCOUNT]->Account` chain (smoke nodes
+  cleaned up). `tests/test_case_graph_sync.py` +5; **954 offline green**.
+- **Backfill:** the next scheduled `case_graph_sync` re-MERGEs every Case
+  in its window — Contact nodes appear as cases re-sync, no separate job.
+- **Next: chunk 4** — the `product_analytics_sync` job + sweep: MERGE the
+  PostHog rollups onto Contacts, identity resolution (`email` /
+  `domain` / `none`), the account rollup pass, `graph_sync_state.
+  coverage_pct` (migration), the `daily-sync.yml` step, and the coverage %
+  on the connector card.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (Phase 30 chunk 2: the PostHog connector).**
 
 - **`interpreter/posthog.py`** — `PostHogConfig`, Vault-brokered API key,
   `load`/`save`/`delete`/`available`, `_query` (one HogQL POST), `test_

@@ -446,6 +446,36 @@ def case_graph_sync(sb, *, dry_run: bool | None = None) -> dict:
     return {"ok": True, "dry_run": dry}
 
 
+def zendesk_case_graph_sync(sb, *, dry_run: bool | None = None) -> dict:
+    """Phase 31 — the Zendesk equivalent of `case_graph_sync`: keep the
+    Neo4j case-lifecycle graph current for every `case_connector=zendesk`
+    tenant. A no-op when no tenant has one, or Zendesk/Neo4j are down."""
+    from ingestion import zendesk_case_graph_sync as _zcgs
+
+    dry = _dry() if dry_run is None else dry_run
+    try:
+        _zcgs.sync(limit=500, dry=dry)     # small batch — the worker caps a
+    except Exception as e:  # noqa: BLE001  handler at JOB_TIMEOUT; it checkpoints
+        log.warning("zendesk_case_graph_sync sweep: %s", e)
+        return {"error": str(e)[:200]}
+    return {"ok": True, "dry_run": dry}
+
+
+def product_analytics_sync(sb, *, dry_run: bool | None = None) -> dict:
+    """Phase 30 — pull PostHog person rollups into Neo4j + resolve identity,
+    for every tenant with an active `posthog` integration. A no-op when no
+    tenant has one, or PostHog / Neo4j are unreachable."""
+    from ingestion import product_analytics_sync as _pas
+
+    dry = _dry() if dry_run is None else dry_run
+    try:
+        results = _pas.sync(dry=dry)
+    except Exception as e:  # noqa: BLE001
+        log.warning("product_analytics_sync sweep: %s", e)
+        return {"error": str(e)[:200]}
+    return {"tenants": len(results), "results": results, "dry_run": dry}
+
+
 def case_memory_sync(sb, *, dry_run: bool | None = None) -> dict:
     """P1a (FR-40) — refresh the pgvector resolution memory that feeds `draft`.
     `case_memory_sync.main` is if/else on `--from-salesforce`, so run it twice:
@@ -454,7 +484,8 @@ def case_memory_sync(sb, *, dry_run: bool | None = None) -> dict:
 
     dry = _dry() if dry_run is None else dry_run
     tail = (["--dry-run"] if dry else [])
-    for argv in (["--once", *tail], ["--from-salesforce", "--once", *tail]):
+    for argv in (["--once", *tail], ["--from-salesforce", "--once", *tail],
+                 ["--from-zendesk", "--once", *tail]):
         try:
             _cms.main(argv)
         except SystemExit:

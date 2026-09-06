@@ -84,6 +84,8 @@ def _run_flow(payload: dict, sb) -> dict:
         out["email"] = _email_post_run(final, run_case, flow, sb)
     elif run_case.get("channel") == "freshchat":
         out["freshchat"] = _freshchat_post_run(final, run_case, flow, sb)
+    elif run_case.get("channel") == "zendesk":
+        out["zendesk"] = _zendesk_post_run(final, run_case, flow, sb)
     return out
 
 
@@ -188,6 +190,42 @@ def _freshchat_post_run(final: dict, case: dict, flow: dict, sb) -> dict:
         return {"decision": kind, "reason": meta.get("reason")}
     except Exception as e:  # noqa: BLE001
         log.warning("freshchat post-run failed: %s", e)
+        return {"error": str(e)}
+
+
+def _zendesk_post_run(final: dict, case: dict, flow: dict, sb) -> dict:
+    """Phase 31 chunk 2 — deliver a `channel=zendesk` run's outcome as a
+    public ticket comment, mirroring `_freshchat_post_run`. `emailer.decide`
+    is channel-agnostic (reads only `outcome` / `cfg.auto_send_enabled` /
+    `clarification`), so an `auto_reply` only sends when the tenant has
+    turned auto-send on for the Zendesk connection; otherwise it's flagged
+    for a human. Never raises."""
+    from interpreter import emailer, zendesk
+
+    try:
+        cfg = zendesk.load_channel(flow["tenant_id"], sb)
+        if not cfg:
+            return {"skipped": "no zendesk connection"}
+        ticket_id = case.get("sf_id") or case.get("id")
+        if not ticket_id:
+            return {"decision": "noop", "reason": "no ticket id on case"}
+
+        outcome = final.get("outcome") or {}
+        kind, meta = emailer.decide(outcome, cfg, final.get("clarification"))
+        recipient = case.get("from")
+        if kind == "send_reply":
+            return {"decision": kind, "delivery": zendesk.send_case_reply(
+                ticket_id, meta["body"], to_email=recipient,
+                tenant_id=flow["tenant_id"], sb=sb)}
+        if kind == "send_questions":
+            numbered = "\n".join(f"{i + 1}. {q}" for i, q in enumerate(meta["questions"]))
+            body = (f"To help you with this, could you share:\n\n{numbered}\n\n"
+                    "Once we have that we'll follow up.")
+            return {"decision": kind, "delivery": zendesk.send_case_reply(
+                ticket_id, body, to_email=recipient, tenant_id=flow["tenant_id"], sb=sb)}
+        return {"decision": kind, "reason": meta.get("reason")}
+    except Exception as e:  # noqa: BLE001
+        log.warning("zendesk post-run failed: %s", e)
         return {"error": str(e)}
 
 
@@ -694,7 +732,8 @@ def _apply_kb_change(payload: dict, sb) -> dict:
 _SWEEP_EVERY_MIN = {"queue_sweep": 5, "cdc_reconcile": 60, "reasoning_ttl": 5,
                     "handoff_watch": 5, "kb_promote": 360,
                     "case_graph_sync": 60, "case_memory_sync": 60,
-                    "fire_schedules": 1, "kil_digest": 30, "failed_jobs_sweep": 10}
+                    "fire_schedules": 1, "kil_digest": 30, "failed_jobs_sweep": 10,
+                    "product_analytics_sync": 720, "zendesk_case_graph_sync": 60}
 
 
 def _reschedule(kind: str, sb) -> None:
@@ -733,6 +772,8 @@ HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
             "kb_promote": _sweep_handler("kb_promote"),
             "case_graph_sync": _sweep_handler("case_graph_sync"),
             "case_memory_sync": _sweep_handler("case_memory_sync"),
+            "zendesk_case_graph_sync": _sweep_handler("zendesk_case_graph_sync"),
+            "product_analytics_sync": _sweep_handler("product_analytics_sync"),
             "fire_schedules": _sweep_handler("fire_schedules"),
             "kil_digest": _sweep_handler("kil_digest"),
             "failed_jobs_sweep": _sweep_handler("failed_jobs_sweep")}

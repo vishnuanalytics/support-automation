@@ -117,6 +117,9 @@ NODE_DEFAULTS: dict[str, dict[str, Any]] = {
                     "skip_signatures": True, "min_image_px": 350,
                     "video": False, "video_frames": 4, "video_max_seconds": 300},
     "sf_context": {"want": ["account", "contacts", "leads", "cases", "team"]},
+    # Phase 30 — the filer's recent product activity from the analytics graph
+    # (needs a connected PostHog integration + the product_analytics_sync run).
+    "product_signal": {"email_field": "contact.email", "out_key": "product_signal"},
     "ai_prompt": {
         "system": "You are a support triage assistant.",
         "user": "Case: {case.subject}\n{case.body}\n\nAccount: {sf_context.account.name} "
@@ -3153,13 +3156,21 @@ def _posthog_cfg_from_body(tid: str, body: PostHogIn, existing) -> "object":
 
 @app.get("/api/integrations/posthog")
 def posthog_status(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
-    """PostHog connection status for the caller's tenant. Never returns the key."""
+    """PostHog connection status for the caller's tenant. Never returns the
+    key. `coverage_pct` / `contacts_synced` / `last_synced_at` come from the
+    last `product_analytics_sync` run (graph_sync_state)."""
     tid = _caller_tenant(c, tenant_id)
     from interpreter.posthog import load
     cfg = load(tid, _service)
     if not cfg:
         return {"tenant_id": tid, "configured": False, "status": "none"}
-    return {"tenant_id": tid, **cfg.public_status()}
+    sync = (_service.table("graph_sync_state")
+            .select("coverage_pct, contacts_synced, last_run_at")
+            .eq("scope", f"product_analytics:{tid}").limit(1).execute().data or [{}])[0]
+    return {"tenant_id": tid, **cfg.public_status(),
+            "coverage_pct": sync.get("coverage_pct"),
+            "contacts_synced": sync.get("contacts_synced"),
+            "last_synced_at": sync.get("last_run_at")}
 
 
 @app.put("/api/integrations/posthog")
@@ -3479,6 +3490,7 @@ class ZendeskConnectionIn(BaseModel):
     subdomain: str | None = None
     email: str | None = None
     api_token: str | None = None       # write-only, never returned; Vault-backed
+    auto_send_enabled: bool | None = None
     tenant_id: str | None = None
 
 
@@ -3490,6 +3502,8 @@ def _zendesk_cfg_from_body(tenant_id: str, body: "ZendeskConnectionIn", existing
         subdomain=(body.subdomain or (existing.subdomain if existing else "")).strip(),
         email=(body.email or (existing.email if existing else "")).strip(),
         status=(existing.status if existing else "inactive"),
+        auto_send_enabled=(body.auto_send_enabled if body.auto_send_enabled is not None
+                           else (existing.auto_send_enabled if existing else False)),
     )
 
 

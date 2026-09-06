@@ -24,6 +24,7 @@ const NODE_HELP: Record<string, string> = {
   identify: "Resolves who's contacting you — an exact CRM contact/lead by email, else the sender's email domain against an Account — before anything Salesforce-specific runs.",
   sf_case: "Resolves the inbound message to a real Salesforce Case: creates one (or reuses an open thread) so every downstream Salesforce node has an sf_id to act on.",
   sf_context: "Pulls the surrounding Salesforce picture — Account, Contact, case history, account team — into state for the classifier and gate to use. Put it after identify.",
+  product_signal: "Enriches state.product_signal with what the filer actually did in your product (events, usage trend, recent notable events, account rollup), pulled from the analytics graph. draft folds it in as context; edges can branch on product_signal.available / .usage_trend. Does nothing unless PostHog is connected and the sender matches a known contact — never blocks a run. Put it after identify, before draft.",
   attachments: "Pulls image/video attachments off the Case or inbound email and OCRs/transcribes them so classify and draft can reference what's actually attached.",
   classify: "AI triage: topic, type, urgency, and answer mode (informational / diagnostic / action / status). Everything downstream branches on this.",
   extract: "Pulls named fields out of the case text with AI (e.g. an account ID mentioned in the message) so policy rules can key on them.",

@@ -56,6 +56,26 @@ def test_case_row_normalises_fields():
     assert r["tier"] == "premium" and r["routed_team"] == "tier2"
     assert r["module"] == "API & Webhooks" and r["case_type"] == "Problem"
     assert r["account_id"] == "001XX000003DfgAAA"
+    assert r["contact_email"] == "rose@edge.com"       # Phase 30: the join target
+    assert r["account_domain"] is None                 # _CASE has no Account.Website
+
+
+def test_case_row_derives_account_domain_from_website():
+    case = {**_CASE, "Account": {"Tier__c": "premium", "Website": "https://www.Edge.com/support"}}
+    assert cgs._case_row(case)["account_domain"] == "edge.com"
+
+
+@pytest.mark.parametrize("website,expected", [
+    ("acme.io", "acme.io"),
+    ("http://foo.example.co.uk/x", "foo.example.co.uk"),
+    ("www.Bar.COM", "bar.com"),
+    ("not a url", None),
+    ("", None),
+    (None, None),
+    ("localhost", None),
+])
+def test_domain_from_website(website, expected):
+    assert cgs._domain_from_website(website) == expected
 
 
 def test_messages_roles_authors_and_order():
@@ -122,6 +142,29 @@ def test_sync_case_lifecycle_builds_the_expected_cypher_params(monkeypatch):
     assert "MERGE (a:Account {sf_id: $account_id, tenant_id: $tenant_id})" in captured["cypher"]
     assert "MERGE (mm:Message {id: msg.id, tenant_id: $tenant_id})" in captured["cypher"]
     assert "MERGE (c)-[:HAS_MESSAGE]->(mm)" in captured["cypher"]
+    # Phase 30 — the Contact join target + the SF-ground-truth [:AT_ACCOUNT]
+    assert p["contact_email"] == "rose@edge.com"
+    assert "MERGE (ct:Contact {email: $contact_email, tenant_id: $tenant_id})" in captured["cypher"]
+    assert "MERGE (c)-[:FILED_BY]->(ct)" in captured["cypher"]
+    assert "MERGE (ct)-[:AT_ACCOUNT]->(a)" in captured["cypher"]
+
+
+def test_sync_case_lifecycle_omits_contact_when_no_email(monkeypatch):
+    captured = {}
+
+    class _FakeDriver:
+        def execute_query(self, cypher, **params):
+            captured["params"] = params
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(case_memory, "_driver_or_none", lambda: _FakeDriver())
+    row = {**cgs._case_row(_CASE), "contact_email": None, "account_domain": None}
+    case_memory.sync_case_lifecycle(row, [])
+    # the FOREACH guards on a NULL param — the Cypher is static, the value drives it
+    assert captured["params"]["contact_email"] is None
+    assert captured["params"]["account_domain"] is None
 
 
 def test_sync_case_lifecycle_no_driver_is_a_soft_false(monkeypatch):

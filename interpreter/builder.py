@@ -65,6 +65,7 @@ def _context(state: CaseState) -> dict[str, Any]:
         # Phase 25 — enrichment nodes; edges can branch on `sf_context.*`,
         # `ai.<key>.*`, `attachments`.
         "sf_context": state.get("sf_context") or {},
+        "product_signal": state.get("product_signal") or {},
         "ai": state.get("ai") or {},
         "attachments": state.get("attachments") or [],
     }

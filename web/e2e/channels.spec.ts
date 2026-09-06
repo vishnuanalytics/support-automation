@@ -67,7 +67,7 @@ test("connect a Freshchat channel from the Channels tab", async ({ page }) => {
   await expect(panel).toBeVisible();
 
   await panel.getByPlaceholder("yourcompany.freshchat.com").fill("acme.freshchat.com");
-  await panel.getByPlaceholder("••••••••••••").fill("test-api-token");
+  await panel.getByPlaceholder("API token", { exact: true }).fill("test-api-token");
   await panel.getByRole("button", { name: "Save" }).click();
 
   await expect(panel.getByText("saved", { exact: true })).toBeVisible();

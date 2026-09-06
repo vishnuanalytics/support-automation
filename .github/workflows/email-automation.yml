@@ -59,6 +59,10 @@ jobs:
       - name: Poll mailboxes -> enqueue run_flow jobs
         run: python -m ingestion.email_watch --once
 
+      - name: Poll Zendesk -> enqueue run_flow jobs (case_connector=zendesk tenants)
+        continue-on-error: true
+        run: python -m ingestion.zendesk_ticket_watch --once
+
       - name: Drain the job queue (run flows, send / flag)
         if: always()            # still drain any jobs from a previous tick
         run: python -m api.worker --once

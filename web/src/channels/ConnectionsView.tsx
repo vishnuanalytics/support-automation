@@ -346,7 +346,7 @@ function CaseTaxonomyPanel({ tenantId }: { tenantId: string }) {
  * Zendesk isn't multi-org here), same shape as the email/Freshchat panels. */
 function ZendeskPanel({ tenantId }: { tenantId: string }) {
   const [ch, setCh] = useState<ZendeskConnection | null>(null);
-  const [f, setF] = useState({ subdomain: "", email: "", api_token: "" });
+  const [f, setF] = useState({ subdomain: "", email: "", api_token: "", auto_send_enabled: false });
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -356,7 +356,11 @@ function ZendeskPanel({ tenantId }: { tenantId: string }) {
       .status(tenantId)
       .then((s) => {
         setCh(s);
-        if (s.configured) setF((p) => ({ ...p, subdomain: s.subdomain ?? "", email: s.email ?? "" }));
+        if (s.configured)
+          setF((p) => ({
+            ...p, subdomain: s.subdomain ?? "", email: s.email ?? "",
+            auto_send_enabled: s.auto_send_enabled ?? false,
+          }));
       })
       .catch((e: ApiError) => setErr(e.message));
   };
@@ -365,6 +369,7 @@ function ZendeskPanel({ tenantId }: { tenantId: string }) {
   const payload = useMemo<ZendeskConnectionSave>(() => ({
     tenant_id: tenantId, subdomain: f.subdomain.trim(), email: f.email.trim(),
     api_token: f.api_token || undefined,
+    auto_send_enabled: f.auto_send_enabled,
   }), [f, tenantId]);
 
   async function run<T>(fn: () => Promise<T>, ok: string) {
@@ -408,6 +413,13 @@ function ZendeskPanel({ tenantId }: { tenantId: string }) {
       <span className="muted" style={{ fontSize: 12 }}>
         Zendesk admin console → Apps and integrations → APIs → API tokens.
       </span>
+
+      <label className="row" style={{ gap: 6, fontSize: 13, alignItems: "center" }}>
+        <input type="checkbox" checked={f.auto_send_enabled}
+          onChange={(e) => setF({ ...f, auto_send_enabled: e.target.checked })} />
+        Auto-send confident replies as a public ticket comment (off = every reply is
+        flagged for a human first)
+      </label>
 
       {err && <div className="banner err">{err}</div>}
       {msg && <div className="banner ok">{msg}</div>}
