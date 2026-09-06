@@ -135,6 +135,18 @@ def test_writeback_enqueued_for_a_write_back_gdocs_connection(monkeypatch):
     assert p["old_modified"] == "2026-01-01T00:00:00Z"
 
 
+def test_writeback_enqueued_for_a_suggest_connection_with_mode_in_payload(monkeypatch):
+    sb = _SB(kb_entries=[_entry_row()],
+             kb_source_connections=[_conn_row(config={"doc_id": "d1", "access": "suggest",
+                                                      "github_repo": "acme/kb"})])
+    calls = _enq_capture(monkeypatch)
+    kb_writeback._maybe_enqueue_doc_writeback(
+        sb, old_id="old1", tenant_id="t", new_body_md="new para",
+        approver="mgr", review_task_id="rt1")
+    assert [k for k, _ in calls] == ["gdoc_writeback"]
+    assert calls[0][1]["mode"] == "suggest"
+
+
 def test_writeback_not_enqueued_when_read_only(monkeypatch):
     sb = _SB(kb_entries=[_entry_row()],
              kb_source_connections=[_conn_row(config={"doc_id": "d1", "access": "read_only"})])
@@ -169,8 +181,9 @@ def _wire_gdrive_github(monkeypatch, *, modified="M1", replace_returns=1, fetch_
         return {"title": "Billing SOP", "markdown": "# Billing SOP\n\nbody", "modified_time": modified}
 
     monkeypatch.setattr("interpreter.gdrive.fetch_doc", fetch_doc)
+    replaced = []
     monkeypatch.setattr("interpreter.gdrive.replace_passage",
-                        lambda tid, did, old, new, sb: replace_returns)
+                        lambda tid, did, old, new, sb: replaced.append((old, new)) or replace_returns)
     commented = []
     monkeypatch.setattr("interpreter.gdrive.comment",
                         lambda tid, did, text, sb: commented.append(text) or "cmt1")
@@ -182,7 +195,7 @@ def _wire_gdrive_github(monkeypatch, *, modified="M1", replace_returns=1, fetch_
     enq = []
     monkeypatch.setattr("interpreter.jobs.enqueue",
                         lambda kind, payload, **kw: enq.append((kind, payload)) or "j1")
-    return {"commented": commented, "issues": issues, "enq": enq}
+    return {"commented": commented, "issues": issues, "enq": enq, "replaced": replaced}
 
 
 def _payload(**over):
@@ -207,6 +220,24 @@ def test_gdoc_writeback_applied(monkeypatch):
     assert seen["issues"] and seen["issues"][0][0] == "acme/kb"
     assert seen["commented"]
     assert ("kb_sync", {"connection_id": "c1"}) in seen["enq"]
+
+
+def test_gdoc_writeback_suggest_opens_an_issue_but_never_edits_the_doc(monkeypatch):
+    sb = _SB(kb_source_connections=[_conn_row(config={"doc_id": "d1", "doc_url": "u",
+                                                     "access": "suggest",
+                                                     "github_repo": "acme/kb"})])
+    seen = _wire_gdrive_github(monkeypatch, replace_returns=1)
+    out = worker._gdoc_writeback(_payload(mode="suggest"), sb)
+
+    assert out["status"] == "suggested" and out["mode"] == "suggest"
+    assert seen["replaced"] == []                      # the doc was NOT touched
+    row = sb.table("kb_doc_writebacks").rows[0]
+    assert row["status"] == "suggested"
+    assert row["blocks"][0]["applied"] is False
+    assert row["github_issue_url"].endswith("/issues/7")
+    assert seen["issues"] and "correction to apply" in seen["issues"][0][1]["title"]
+    assert seen["commented"] and "proposed" in seen["commented"][0]
+    assert ("kb_sync", {"connection_id": "c1"}) not in seen["enq"]   # nothing changed yet
 
 
 def test_gdoc_writeback_partial_when_a_block_does_not_match(monkeypatch):
@@ -262,6 +293,18 @@ def test_gdocs_normalize_write_back_requires_a_valid_repo():
                    "access": "write_back", "github_repo": "acme/support-kb"}
     with pytest.raises(ValueError):
         spec.normalize_config({"doc_url": url, "access": "write_back", "github_repo": "not-a-repo"})
+
+
+def test_gdocs_normalize_suggest_also_needs_a_repo():
+    spec = kb_connectors.get_kb_connector("gdocs")
+    url = "https://docs.google.com/document/d/ABCdef123456789012345/edit"
+    cfg = spec.normalize_config({"doc_url": url, "access": "suggest",
+                                 "github_repo": "acme/kb"})
+    assert cfg["access"] == "suggest" and cfg["github_repo"] == "acme/kb"
+    with pytest.raises(ValueError):
+        spec.normalize_config({"doc_url": url, "access": "suggest"})
+    with pytest.raises(ValueError):
+        spec.normalize_config({"doc_url": url, "access": "bogus"})
 
 
 # ── watch_doc_writebacks (chunk 2: close the loop) ───────────────────────
@@ -363,6 +406,25 @@ def test_watch_only_looks_at_open_writeback_statuses(monkeypatch):
     _wire_watch(monkeypatch, state="closed")
     res = kb_writeback.watch_doc_writebacks(sb)
     assert res["checked"] == 0
+
+
+def test_watch_suggested_row_closed_verifies_and_resyncs(monkeypatch):
+    sb = _SB(kb_doc_writebacks=[_wb_row(status="suggested", connection_id="c9")])
+    seen = _wire_watch(monkeypatch, state="closed")
+    res = kb_writeback.watch_doc_writebacks(sb)
+    assert res["verified"] == 1 and res["reverted"] == 0
+    assert sb.table("kb_doc_writebacks").rows[0]["status"] == "verified"
+    # a suggest-mode close means a human edited the doc -> re-sync the mirror now
+    assert ("kb_sync", {"connection_id": "c9"}) in seen["enq"]
+
+
+def test_watch_suggested_row_still_open_is_untouched(monkeypatch):
+    sb = _SB(kb_doc_writebacks=[_wb_row(status="suggested", connection_id="c9")])
+    seen = _wire_watch(monkeypatch, state="open")
+    res = kb_writeback.watch_doc_writebacks(sb)
+    assert res["verified"] == 0
+    assert sb.table("kb_doc_writebacks").rows[0]["status"] == "suggested"
+    assert seen["enq"] == []
 
 
 def test_watch_revert_survives_a_row_with_no_connection(monkeypatch):

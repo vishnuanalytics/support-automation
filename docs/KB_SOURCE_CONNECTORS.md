@@ -94,13 +94,26 @@ incremental sync after — same resumable-watermark discipline
 `graph_sync_state` already established for `case_graph_sync.py`, not a new
 pattern.
 
-#### Write-back — built 2026-09-06 (chunk 1 of 2)
+#### Write-back — built 2026-09-06
 
-A gdocs connection can opt into `config.access = "write_back"` (default
-`"read_only"`; picked in the "+ add source" form, `KBConnectorSpec.writable`
-= True for gdocs only). When the Knowledge Integrity Loop's manager review
+A gdocs connection's `config.access` is a **three-way** choice (picked in the
+"+ add source" form; `KBConnectorSpec.writable` = True for gdocs only):
+
+| mode | on an approved KIL correction for a doc-backed entry |
+|---|---|
+| `read_only` *(default)* | only the internal `kb_entries` mirror is updated — the doc is never touched |
+| **`suggest`** *(recommended when a tenant wants doc corrections)* | open a GitHub issue with the old→new diff + a doc link; **the bot does not edit the doc**. A human applies it and closes the issue; the mirror re-syncs on close. Needs `config.github_repo` but **not** the write OAuth scopes. |
+| `write_back` | the bot rewrites the passage in place, opens the issue for the human to verify / `/revert`, re-syncs the mirror. Needs `config.github_repo` **and** the read-write `documents`/`drive` scopes. |
+
+`suggest` and `write_back` share the same `gdoc_writeback` job, the same
+`kb_doc_writebacks` tracking row, and the same watch (below). The rest of
+this section describes `write_back`; `suggest` is the same minus the
+`replace_passage` calls, with `status='suggested'` and no immediate
+`kb_sync` (the watch enqueues one when the issue closes).
+
+When the Knowledge Integrity Loop's manager review
 approves a correction (`interpreter/kb_writeback.py::apply_kb_change`) for an
-entry on such a connection:
+entry on a `suggest` / `write_back` connection:
 
 - `_doc_change_blocks()` paragraph-diffs the old vs. new entry markdown into
   `{old, new}` passages;
@@ -125,16 +138,18 @@ failure until they re-consent. Google has no API for tracked "suggestions",
 so verification is against the issue diff + the live doc, not Docs suggestion
 mode.
 
-**Chunk 2 — built 2026-09-06.** `interpreter/kb_writeback.py::
-watch_doc_writebacks()` polls every open (`applied`/`partial`/`conflict`)
-`kb_doc_writebacks` row's GitHub issue (`github.get_issue` /
-`list_issue_comments`): issue **closed** ⇒ `status='verified'` +
-`verified_at`; a **`/revert`** comment (on an `applied`/`partial` row) ⇒
-`gdrive.replace_passage` reverses each applied block (`new` → `old`),
-`status='reverted'`, a confirming issue comment, and the connection is
-re-`kb_sync`'d. Runs from `ingestion/kb_writeback_watch.py` (wired into
-`daily-sync.yml`), same "no always-on worker host" pattern as
-`ingestion/kb_recrawl.py`. **Still not built:** a "Doc write-backs" view in
+**The watch (close the loop).** `interpreter/kb_writeback.py::
+watch_doc_writebacks()` polls every open
+(`suggested`/`applied`/`partial`/`conflict`) `kb_doc_writebacks` row's
+GitHub issue (`github.get_issue` / `list_issue_comments`): issue **closed**
+⇒ `status='verified'` + `verified_at` (and, for a `suggested` row, a
+`kb_sync` — the human just edited the doc); a **`/revert`** comment (on an
+`applied`/`partial` row only) ⇒ `gdrive.replace_passage` reverses each
+applied block (`new` → `old`), `status='reverted'`, a confirming issue
+comment, connection re-`kb_sync`'d. Runs from
+`ingestion/kb_writeback_watch.py` (wired into `daily-sync.yml`), same "no
+always-on worker host" pattern as `ingestion/kb_recrawl.py`. **Still not
+built:** a "Doc write-backs" view in
 `ReviewView.tsx` (the list is in the "Connected sources" panel for now), a
 Slack "send to GitHub before applying" button, and true index-range
 structural section replacement (vs. today's `replaceAllText` find/replace).

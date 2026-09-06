@@ -418,8 +418,11 @@ function ConnectedSources({
     void load();
   }, [load]);
 
-  const isWriteBack = (c: KbConnection) =>
-    c.connector === "gdocs" && (c.config as { access?: string }).access === "write_back";
+  const docMode = (c: KbConnection): "suggest" | "write_back" | null => {
+    if (c.connector !== "gdocs") return null;
+    const a = (c.config as { access?: string }).access;
+    return a === "suggest" || a === "write_back" ? a : null;
+  };
 
   async function sync(cid: string) {
     try {
@@ -515,15 +518,20 @@ function ConnectedSources({
               <tr key={c.connection_id}>
                 <td style={{ maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis" }}>
                   {c.label}
-                  {isWriteBack(c) && (
+                  {docMode(c) && (
                     <span
-                      title="An approved KIL correction is written back into this doc, then opens a GitHub issue for review"
+                      title={
+                        docMode(c) === "suggest"
+                          ? "An approved KB correction opens a GitHub issue with the diff — a human applies it to the doc"
+                          : "An approved KB correction is written into the doc, then a GitHub issue opens for verification"
+                      }
                       style={{
                         fontSize: 11, marginLeft: 6, padding: "1px 6px", borderRadius: 8,
-                        background: "#5a3a8a", color: "#fff", whiteSpace: "nowrap",
+                        background: docMode(c) === "suggest" ? "#33608a" : "#5a3a8a",
+                        color: "#fff", whiteSpace: "nowrap",
                       }}
                     >
-                      write-back
+                      {docMode(c) === "suggest" ? "suggests edits" : "write-back"}
                     </span>
                   )}
                 </td>
@@ -579,11 +587,13 @@ function ConnectedSources({
                           background:
                             w.status === "applied" || w.status === "verified"
                               ? "#2b6a2b"
-                              : w.status === "partial"
-                                ? "#8a5a00"
-                                : w.status === "reverted"
-                                  ? "#555"
-                                  : "#9b2c2c",
+                              : w.status === "suggested"
+                                ? "#33608a"
+                                : w.status === "partial"
+                                  ? "#8a5a00"
+                                  : w.status === "reverted"
+                                    ? "#555"
+                                    : "#9b2c2c",
                         }}
                       >
                         {w.status}
@@ -657,15 +667,23 @@ function AddSourceForm({
 
   const spec = catalogue.find((c) => c.slug === slug);
 
+  const fieldVisible = (f: KbConnector["config_fields"][number]) => {
+    const s = f.show_if;
+    if (!s) return true;
+    const v = values[s.key] ?? "";
+    if (s.eq !== undefined) return v === s.eq;
+    if (s.ne !== undefined) return v !== s.ne;
+    if (s.in !== undefined) return s.in.includes(v);
+    return true;
+  };
+
   async function submit() {
     if (!spec) return;
     setBusy(true);
     setErr(null);
-    const visible = (f: KbConnector["config_fields"][number]) =>
-      !f.show_if || values[f.show_if.key] === f.show_if.eq;
     const config: Record<string, unknown> = {};
     for (const f of spec.config_fields) {
-      if (!visible(f)) continue;
+      if (!fieldVisible(f)) continue;
       const raw = (values[f.key] ?? "").trim();
       if (!raw) {
         if (f.required) {
@@ -707,7 +725,7 @@ function AddSourceForm({
       )}
 
       {spec?.config_fields
-        .filter((f) => !f.show_if || values[f.show_if.key] === f.show_if.eq)
+        .filter(fieldVisible)
         .map((f) => (
           <div className="field" key={f.key}>
             <label>

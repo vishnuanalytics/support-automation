@@ -285,7 +285,8 @@ def _maybe_enqueue_doc_writeback(sb, *, old_id: str, tenant_id: Any, new_body_md
     if not conn:
         return
     cfg = conn[0].get("config") or {}
-    if conn[0]["connector"] != "gdocs" or cfg.get("access") != "write_back":
+    mode = cfg.get("access")
+    if conn[0]["connector"] != "gdocs" or mode not in ("suggest", "write_back"):
         return
     blocks = _doc_change_blocks(old.get("body_md") or "", new_body_md or "")
     if not blocks:
@@ -293,7 +294,7 @@ def _maybe_enqueue_doc_writeback(sb, *, old_id: str, tenant_id: Any, new_body_md
     from interpreter import jobs
     jobs.enqueue("gdoc_writeback", {
         "connection_id": conn[0]["connection_id"], "entry_id": old_id,
-        "tenant_id": str(tenant_id), "approver": approver,
+        "tenant_id": str(tenant_id), "approver": approver, "mode": mode,
         "review_task_id": review_task_id, "blocks": blocks,
         "old_modified": old.get("gdoc_modified"), "github_repo": cfg.get("github_repo"),
     }, dedupe_key=f"gdocwb:{old_id}")
@@ -448,7 +449,7 @@ def promote_provisional(sb, *, dry_run: bool = False) -> int:
 # A `/revert` comment    -> undo each applied block in the doc and mark the
 # row `reverted`. Runs from `ingestion/kb_writeback_watch.py` (daily), same
 # "no always-on worker host" pattern as `ingestion/kb_recrawl.py`.
-_WATCHED_STATUSES = ("applied", "partial", "conflict")
+_WATCHED_STATUSES = ("suggested", "applied", "partial", "conflict")
 
 
 def _revert_requested(body: str) -> bool:
@@ -508,7 +509,8 @@ def watch_doc_writebacks(sb, *, dry_run: bool = False) -> dict:
             log.warning("watch_doc_writebacks %s#%s: %s", repo, number, e)
             continue
 
-        wants_revert = (r["status"] in ("applied", "partial")
+        was = r["status"]
+        wants_revert = (was in ("applied", "partial")
                         and any(_revert_requested(c.get("body", "")) for c in comments))
         if wants_revert:
             reverted += 1
@@ -519,5 +521,11 @@ def watch_doc_writebacks(sb, *, dry_run: bool = False) -> dict:
             if not dry_run:
                 sb.table("kb_doc_writebacks").update(
                     {"status": "verified", "verified_at": "now()"}).eq("id", r["id"]).execute()
+                # a `suggest`-mode issue closing means a human just edited the
+                # doc — re-sync now instead of waiting for the daily crawl.
+                if was == "suggested" and r.get("connection_id"):
+                    from interpreter import jobs
+                    jobs.enqueue("kb_sync", {"connection_id": r["connection_id"]},
+                                 dedupe_key=f"kb_sync:{r['connection_id']}")
     return {"checked": checked, "verified": verified, "reverted": reverted,
             "errors": errors, "dry_run": dry_run}

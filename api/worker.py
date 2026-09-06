@@ -476,31 +476,45 @@ def _sync_gsheet(payload: dict, sb) -> dict:
 
 
 def _writeback_issue_body(doc_url: str, blocks: list[dict], task: str | None,
-                          approver: str, conflict: bool) -> str:
-    lines = [f"Automated KB write-back to [the Google Doc]({doc_url}).", ""]
+                          approver: str, conflict: bool, mode: str) -> str:
+    suggest = mode == "suggest"
+    verb = "correction to apply" if suggest else "write-back"
+    lines = [f"KB {verb} for [the Google Doc]({doc_url}).", ""]
     if task:
         lines.append(f"Source review task: `{task}`")
     lines += [f"Approved by: {approver}", ""]
-    if conflict:
+    if conflict and not suggest:
         lines += ["> ⚠️ The doc changed since this correction was drafted — "
                   "**no edit was applied**. Reconcile the blocks below by hand.", ""]
+    elif suggest:
+        lines += ["The bot did **not** edit the doc. Apply the change below, then "
+                  "**close this issue** — the KB mirror re-syncs from the doc on close.", ""]
     for i, b in enumerate(blocks, 1):
-        state = "applied" if b.get("applied") else "NOT applied — needs a manual edit"
+        if suggest:
+            state = "apply this"
+        else:
+            state = "applied" if b.get("applied") else "NOT applied — needs a manual edit"
         lines += [f"### Block {i} — {state}", "", "**Was:**", "```",
                   (b.get("old") or "(new paragraph — nothing to match)"), "```",
                   "**Now:**", "```", (b.get("new") or "(removed)"), "```", ""]
-    lines.append("_Verify the doc, then **close this issue** to confirm. "
-                 "Comment `/revert` to request a rollback._")
+    if not suggest:
+        lines.append("_Verify the doc, then **close this issue** to confirm. "
+                     "Comment `/revert` to request a rollback._")
     return "\n".join(lines)
 
 
 def _gdoc_writeback(payload: dict, sb) -> dict:
     """KB write-back (docs/KB_SOURCE_CONNECTORS.md §2). A KIL correction was
-    approved for an entry on a `write_back` gdocs connection: rewrite the
-    changed passage in the doc in place, open a GitHub issue carrying the
-    old→new diff for a human to verify and close, drop a Drive comment, and
-    re-sync the KB mirror. All steps are best-effort and recorded on a
-    `kb_doc_writebacks` row."""
+    approved for an entry on a gdocs connection whose `config.access` is:
+
+      * "suggest"    — open a GitHub issue with the old→new diff + a doc link;
+                       the bot does NOT touch the doc, a human applies it and
+                       closes the issue (the mirror re-syncs on close). Default
+                       for a tenant that wants doc corrections.
+      * "write_back" — the bot rewrites the passage in place, opens the issue
+                       for the human to verify / `/revert`, re-syncs the mirror.
+
+    All steps best-effort, recorded on a `kb_doc_writebacks` row."""
     from interpreter import gdrive, github as gh
 
     cid, tid = payload["connection_id"], payload["tenant_id"]
@@ -509,6 +523,8 @@ def _gdoc_writeback(payload: dict, sb) -> dict:
     if not rows:
         return {"connection_id": cid, "skipped": "connection gone"}
     cfg = rows[0].get("config") or {}
+    mode = payload.get("mode") or cfg.get("access") or "write_back"
+    suggest = mode == "suggest"
     doc_id = cfg.get("doc_id")
     doc_url = cfg.get("doc_url") or f"https://docs.google.com/document/d/{doc_id}/edit"
     repo = payload.get("github_repo") or cfg.get("github_repo")
@@ -530,11 +546,14 @@ def _gdoc_writeback(payload: dict, sb) -> dict:
     conflict = bool(payload.get("old_modified")
                     and fetched.get("modified_time") != payload["old_modified"])
 
-    applied: list[dict] = []
-    if conflict:
+    if suggest:
+        applied = [{**b, "applied": False} for b in blocks]
+        status = "suggested"
+    elif conflict:
         applied = [{**b, "applied": False} for b in blocks]
         status = "conflict"
     else:
+        applied = []
         for b in blocks:
             n = 0
             if (b.get("old") or "").strip():
@@ -553,16 +572,22 @@ def _gdoc_writeback(payload: dict, sb) -> dict:
         try:
             issue = gh.create_issue(
                 gh.token_for(tid, sb), repo,
-                title=f"KB write-back: {fetched.get('title') or doc_id}",
-                body=_writeback_issue_body(doc_url, applied, task, approver, conflict),
+                title=f"KB {'correction to apply' if suggest else 'write-back'}: "
+                      f"{fetched.get('title') or doc_id}",
+                body=_writeback_issue_body(doc_url, applied, task, approver, conflict, mode),
                 labels=["kb-writeback"])
             track["github_issue_number"] = issue["number"]
             track["github_issue_url"] = issue["html_url"]
         except Exception as e:  # noqa: BLE001
             log.warning("gdoc_writeback github issue: %s", e)
 
-    if status in ("applied", "partial"):
-        where = issue["html_url"] if issue else "(no GitHub repo configured)"
+    where = issue["html_url"] if issue else "(no GitHub repo configured)"
+    if suggest:
+        gdrive.comment(tid, doc_id,
+                       f"A KB correction is proposed for this doc"
+                       f"{f' (review {task})' if task else ''}, approved by {approver} — "
+                       f"see {where}. Apply it and close the issue.", sb)
+    elif status in ("applied", "partial"):
         gdrive.comment(tid, doc_id,
                        f"Automated KB write-back applied from a support resolution"
                        f"{f' (review {task})' if task else ''}, approved by {approver}. "
@@ -570,7 +595,7 @@ def _gdoc_writeback(payload: dict, sb) -> dict:
         jobs.enqueue("kb_sync", {"connection_id": cid}, dedupe_key=f"kb_sync:{cid}", sb=sb)
 
     sb.table("kb_doc_writebacks").insert(track).execute()
-    return {"connection_id": cid, "status": status, "blocks": len(applied),
+    return {"connection_id": cid, "status": status, "mode": mode, "blocks": len(applied),
             "issue": issue["html_url"] if issue else None}
 
 

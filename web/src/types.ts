@@ -229,7 +229,7 @@ export interface KbConnectorField {
   required?: boolean;
   placeholder?: string;
   options?: string[];
-  show_if?: { key: string; eq: string };
+  show_if?: { key: string; eq?: string; ne?: string; in?: string[] };
 }
 
 export interface KbConnector {
@@ -250,7 +250,7 @@ export interface KbDocWriteback {
   github_repo: string | null;
   github_issue_number: number | null;
   github_issue_url: string | null;
-  status: "applied" | "partial" | "conflict" | "verified" | "reverted" | "error";
+  status: "suggested" | "applied" | "partial" | "conflict" | "verified" | "reverted" | "error";
   blocks: { old: string; new: string; applied?: boolean }[];
   error: string | null;
   applied_at: string;

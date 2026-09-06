@@ -707,8 +707,58 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-06 (chunk 2) — KB write-back: close the loop (this is the most
-recent work in this file).** Chunk 1 wrote the doc + opened a GitHub issue;
+**2026-09-06 (chunk 3) — KB write-back gains a `suggest` mode, now the
+recommended one (this is the most recent work in this file).** A design
+check ("is the bot writing the customer's doc even a good idea?") landed on:
+make "human applies, bot just proposes" a first-class option, not the thing
+we skipped. `kb_source_connections.config.access` for a gdocs connection is
+now **three-way**:
+
+- `read_only` (default) — only the internal `kb_entries` mirror is updated;
+- **`suggest`** (recommended) — a `gdoc_writeback` job opens a GitHub issue
+  with the old→new diff + a doc link and drops a Drive comment, but
+  **never calls `replace_passage`** — a human applies the change and closes
+  the issue; `watch_doc_writebacks` sees the close, marks the row
+  `verified`, and enqueues a `kb_sync` so the mirror converges. Needs
+  `config.github_repo` but **not** the read-write Google scopes.
+- `write_back` — unchanged from chunk 1/2 (bot rewrites the passage, human
+  verifies / `/revert`s).
+
+`suggest` and `write_back` share the job, the `kb_doc_writebacks` row, and
+the watch. Changes: `_norm_gdocs` accepts `"suggest"` and requires
+`github_repo` for both non-read-only modes; the `access` select is now
+`read_only|suggest|write_back` with `show_if` widened to `{key, ne}` /
+`{key, in}` (web `fieldVisible` helper); `_maybe_enqueue_doc_writeback`
+gates on `access in ("suggest","write_back")` and threads `mode` into the
+payload; `_gdoc_writeback` branches on `mode` (`suggest` ⇒
+`status='suggested'`, no doc edit, no immediate `kb_sync`, issue text says
+"correction to apply"); `watch_doc_writebacks` watches `suggested` too and
+`kb_sync`s the mirror when a `suggested` issue closes. Migration `093`
+widens the `idx_kb_doc_writebacks_open` partial index to include
+`'suggested'` (no table change — `access`/`status` have no CHECK).
+`KnowledgeView` shows a `suggests edits` vs `write-back` badge.
+
+**Verify:** `tests/test_kb_doc_writeback.py` +5 (`suggest` normalize +
+repo-required, the gate firing with `mode='suggest'`, `_gdoc_writeback`
+suggest = issue-only-never-edits, watch: `suggested`+closed ⇒ verified +
+`kb_sync`, `suggested`+open ⇒ untouched). A bug found writing it —
+`watch_doc_writebacks` checked `r["status"]` *after* the fake/real client
+had mutated the row dict in place; fixed by capturing `was = r["status"]`
+first. **844 offline tests green (was 839).** `tsc -b` + `npm run build`
+clean. Migration `093` applied live; drift clean. **Live-checked against
+the real Supabase project** (throwaway `suggest` connection): job ⇒
+`status='suggested'` with the doc untouched + an issue opened + a Drive
+comment + no `kb_sync`; then a (mocked) issue close ⇒ `verified` +
+`verified_at` + `kb_sync` enqueued; rows deleted.
+
+**Still not built (chunk 4+):** a "Doc write-backs" view in
+`ReviewView.tsx`, a Slack "send to GitHub before applying" button, and true
+index-range structural section replacement.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (chunk 2) — KB write-back: close the loop.** Chunk 1 wrote the doc + opened a GitHub issue;
 nothing watched what the human did with it. Now:
 `interpreter/kb_writeback.py::watch_doc_writebacks()` polls every open
 (`applied`/`partial`/`conflict`) `kb_doc_writebacks` row's issue via

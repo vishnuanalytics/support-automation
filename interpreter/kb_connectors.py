@@ -227,13 +227,13 @@ def _norm_gdocs(raw: dict[str, Any]) -> dict[str, Any]:
         "doc_url": doc_url,
     }
     access = (raw.get("access") or "read_only").strip()
-    if access not in ("read_only", "write_back"):
-        raise ValueError("access must be 'read_only' or 'write_back'")
+    if access not in ("read_only", "suggest", "write_back"):
+        raise ValueError("access must be 'read_only', 'suggest' or 'write_back'")
     cfg["access"] = access
-    if access == "write_back":
+    if access in ("suggest", "write_back"):
         repo = (raw.get("github_repo") or "").strip()
         if repo.count("/") != 1 or not all(repo.split("/")):
-            raise ValueError("github_repo must be 'owner/name' for write-back mode")
+            raise ValueError("github_repo must be 'owner/name' when the bot opens review issues")
         cfg["github_repo"] = repo
     return cfg
 
@@ -259,11 +259,15 @@ register(KBConnectorSpec(
     config_fields=[
         {"key": "doc_url", "label": "Google Doc URL", "type": "string", "required": True,
          "placeholder": "https://docs.google.com/document/d/…"},
-        {"key": "access", "label": "Access", "type": "select", "required": False,
-         "options": ["read_only", "write_back"]},
+        {"key": "access", "label": "When the KB is corrected", "type": "select",
+         "required": False,
+         "options": ["read_only", "suggest", "write_back"]},
+        #   read_only  — only the internal KB mirror is updated (default)
+        #   suggest    — open a GitHub issue with the diff; a human edits the doc  (recommended)
+        #   write_back — the bot rewrites the passage; a human verifies / reverts
         {"key": "github_repo", "label": "GitHub repo for review issues (owner/name)",
          "type": "string", "required": False, "placeholder": "acme/support-kb",
-         "show_if": {"key": "access", "eq": "write_back"}},
+         "show_if": {"key": "access", "ne": "read_only"}},
     ],
     normalize=_norm_gdocs, available=_google_available,
     sync=_sync_gdocs,
