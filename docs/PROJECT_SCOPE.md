@@ -707,9 +707,49 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-06 (chunk 10) — KB-connector quick-wins (this is the most recent
-work in this file).** Four small in-repo improvements from the product
-review list:
+**2026-09-06 (chunk 11) — closing KB-connector loopholes (this is the most
+recent work in this file).**
+
+- **Incremental sync via the watermark** (`8db0060`) — it was stored on
+  `kb_source_connections.watermark` and never read; every daily run
+  re-fetched everything. `SyncCtx.existing` ({external_id → stored
+  body/gdoc_modified}) is now populated by `_sync_kb_connection` before it
+  calls `sync()`. **gdocs folder**: skip `fetch_doc` when Drive's
+  `modifiedTime` matches the stored `gdoc_modified` (reuse the stored body).
+  **linear**: `fetch_documents`/`fetch_resolved_issues` take
+  `updated_after`; a run with a watermark filters `updatedAt > since`
+  server-side and reports `exhaustive=False` (won't archive what it didn't
+  fetch); `watermark.since` advances. First run stays full. nolt unchanged
+  (no verified `since` param; the `max_items` cap bounds it).
+- **`KBDocument.quality` persisted + used** (`3031d27`, migration `097`) —
+  connectors set `official` / `community_resolved` / `unverified` and it was
+  dropped. Now `kb_entries.quality`; `interpreter/retrieval._apply_quality_
+  weights` multiplies each KB chunk's fused RRF score (official ×1.15,
+  unverified ×0.9) and re-sorts, before graph-expand and the pool cut. One
+  batched lookup, best-effort, only `kb://` chunks. `KnowledgeView` shows an
+  `official` / `resolved` badge.
+- **Deploy guide** (`50a970c`) — `docs/DEPLOY_WEB_AND_API.md`: frontend +
+  public HTTPS API on an Oracle Always-Free VM at $0 (Caddy TLS, Cloudflare
+  Pages, `sslip.io`, OAuth redirect updates). Parked — needs an Oracle
+  account.
+- **Cosmetics** (`7a2abf3`) — stale `daily-sync.yml` step names/comments
+  (pre-091 wording); `_kb_pull_secrets` now stores `vault_secret_id` on the
+  `tenant_integrations` row like slack/llm do.
+
+**876 offline tests green** (was 869). `097` applied live, drift clean, tsc
+clean.
+
+**Still open** (product-review list): shared rate limiting (in-memory →
+DB), a per-tenant failed-runs view, a retrieval eval harness, knowledge-
+health per source, cost breakdown per flow/node, onboarding "skip setup"
+bypass + "send a test message" finish, and the `multiple_permissive_
+policies` RLS cleanup. Plus the always-on worker (needs a host).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (chunk 10) — KB-connector quick-wins.** Four small in-repo
+improvements from the product review list:
 
 1. **`max_items` cap** on gdocs-folder / Linear / Nolt syncs (clamped
    1..2000; gdocs 300, linear 300, nolt→existing 500). A capped run reports
