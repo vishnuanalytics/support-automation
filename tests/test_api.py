@@ -52,6 +52,16 @@ def test_kb_endpoints_need_a_token():
     assert client.post("/api/kb/collections", json={"name": "x"}).status_code == 401
 
 
+def test_kb_source_connector_endpoints_need_a_token():
+    assert client.get("/api/kb/connectors").status_code == 401
+    assert client.get("/api/kb/collections/x/connections").status_code == 401
+    assert client.post("/api/kb/collections/x/connections",
+                       json={"connector": "public_url", "config": {}}).status_code == 401
+    assert client.post("/api/kb/connections/x/sync").status_code == 401
+    assert client.patch("/api/kb/connections/x", json={"status": "paused"}).status_code == 401
+    assert client.delete("/api/kb/connections/x").status_code == 401
+
+
 def test_approvals_endpoints_need_a_token():
     assert client.get("/api/approvals").status_code == 401
     assert client.post("/api/approvals/action-requests/abc",

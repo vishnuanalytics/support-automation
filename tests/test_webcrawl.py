@@ -232,148 +232,37 @@ def test_crawl_refuses_a_private_start():
         webcrawl.crawl("http://127.0.0.1/docs")
 
 
-class _CrawlTable:
-    """A small, real (filter+insert+update) fake table -- shared across the
-    _crawl_site tests below, which exercise real chained builder calls."""
-    def __init__(self, rows):
-        self.rows = rows
-        self._filters: dict = {}
-        self._pending: tuple[str, dict] | None = None
-
-    def select(self, *_a, **_k):
-        return self
-
-    def eq(self, k, v):
-        self._filters[k] = v
-        return self
-
-    def limit(self, _n):
-        return self
-
-    def insert(self, row):
-        self._pending = ("insert", dict(row))
-        return self
-
-    def update(self, patch):
-        self._pending = ("update", dict(patch))
-        return self
-
-    def execute(self):
-        op, data = self._pending or (None, None)
-        if op == "insert":
-            new_row = {"entry_id": f"e{len(self.rows) + 1}", **data}
-            self.rows.append(new_row)
-            self._pending = None
-            self._filters = {}
-            return type("R", (), {"data": [new_row]})()
-        matches = [r for r in self.rows if all(r.get(k) == v for k, v in self._filters.items())]
-        if op == "update":
-            for r in matches:
-                r.update(data)
-            self._pending = None
-        self._filters = {}
-        return type("R", (), {"data": matches})()
+# ── interpreter/kb_connectors: the public_url connector's sync() ──────────
+# The worker-side diff/upsert/embed/archive dance moved to the generic
+# _sync_kb_connection driver (tests/test_kb_connectors.py); this connector is
+# now just a pure producer of KBDocuments.
+from interpreter import kb_connectors  # noqa: E402
 
 
-class _CrawlSB:
-    def __init__(self, sources_rows=None, kb_rows=None):
-        self._t = {"sources": _CrawlTable(sources_rows or []),
-                   "kb_entries": _CrawlTable(kb_rows or [])}
-
-    def table(self, name):
-        return self._t[name]
+def _ctx():
+    return kb_connectors.SyncCtx(tenant_id="t", sb=None, collection_name="c")
 
 
-def test_worker_crawl_site_enqueues_one_embed_per_page(monkeypatch):
-    from api import worker
-
+def test_public_url_sync_makes_one_document_per_page(monkeypatch):
     monkeypatch.setattr("ingestion.webcrawl.crawl",
-                        lambda url, **k: [{"url": "u1", "title": "P1", "markdown": "x" * 200},
-                                          {"url": "u2", "title": "P2", "markdown": "y" * 200}])
-    enq = []
-    monkeypatch.setattr("interpreter.jobs.enqueue",
-                        lambda kind, payload, **kw: enq.append((kind, payload["entry_id"])))
-
-    sb = _CrawlSB(sources_rows=[{"source_id": "s", "config": {}}])
-    out = worker._crawl_site({"source_id": "s", "tenant_id": "t", "collection_name": "c",
-                              "url": "https://x", "max_pages": 5}, sb)
-    assert out["entries"] == 2
-    assert [k for k, _ in enq] == ["embed_kb_entry", "embed_kb_entry"]
-    assert sb.table("sources").rows[0]["config"]["crawl_urls"] == ["https://x"]
+                        lambda url, **k: [{"url": "https://x/a", "title": "P1", "markdown": "x" * 50},
+                                          {"url": "https://x/b", "title": "P2", "markdown": "y" * 50}])
+    res = kb_connectors._sync_public_url({"url": "https://x", "max_pages": 20}, None, _ctx())
+    assert [d.external_id for d in res.documents] == ["P1", "P2"]
+    assert res.documents[0].body_md == "<!-- https://x/a -->\n\n" + "x" * 50
+    assert res.documents[0].origin == "crawl"
+    assert res.exhaustive is True
 
 
-def test_worker_crawl_site_skips_unchanged_pages(monkeypatch):
-    from api import worker
-
+def test_public_url_sync_not_exhaustive_when_truncated(monkeypatch):
     monkeypatch.setattr("ingestion.webcrawl.crawl",
-                        lambda url, **k: [{"url": "u1", "title": "P1", "markdown": "same content" * 10},
-                                          {"url": "u2", "title": "P2", "markdown": "new content" * 10}])
-    enq = []
-    monkeypatch.setattr("interpreter.jobs.enqueue",
-                        lambda kind, payload, **kw: enq.append((kind, payload["entry_id"])))
-
-    unchanged_body = "<!-- u1 -->\n\n" + "same content" * 10
-    sb = _CrawlSB(
-        sources_rows=[{"source_id": "s", "config": {}}],
-        kb_rows=[{"entry_id": "e_old", "title": "P1", "body_md": unchanged_body,
-                 "source_id": "s", "origin": "crawl", "status": "active"}],
-    )
-    out = worker._crawl_site({"source_id": "s", "tenant_id": "t", "collection_name": "c",
-                              "url": "https://x", "max_pages": 5}, sb)
-    assert out["unchanged"] == 1
-    assert out["entries"] == 1               # only P2 (new) got created/enqueued
-    assert len(enq) == 1
+                        lambda url, **k: [{"url": "https://x/a", "title": "P1", "markdown": "x" * 50}])
+    res = kb_connectors._sync_public_url({"url": "https://x", "max_pages": 1}, None, _ctx())
+    assert res.exhaustive is False   # pages == max_pages -> can't tell if anything is gone
 
 
-def test_worker_crawl_site_archives_a_page_that_vanished_when_not_truncated(monkeypatch):
-    from api import worker
-
-    # fewer pages than max_pages -> this run wasn't truncated, so a
-    # previously-crawled page absent from this run is safe to archive.
-    monkeypatch.setattr("ingestion.webcrawl.crawl",
-                        lambda url, **k: [{"url": "u1", "title": "P1", "markdown": "x" * 200}])
-    monkeypatch.setattr("interpreter.jobs.enqueue", lambda *a, **k: "job1")
-
-    sb = _CrawlSB(
-        sources_rows=[{"source_id": "s", "config": {}}],
-        kb_rows=[{"entry_id": "e_gone", "title": "Deleted Page", "body_md": "<!-- u2 -->\n\nold",
-                 "source_id": "s", "origin": "crawl", "status": "active"}],
-    )
-    out = worker._crawl_site({"source_id": "s", "tenant_id": "t", "collection_name": "c",
-                              "url": "https://x", "max_pages": 20}, sb)
-    assert out["archived"] == 1
-    gone = next(r for r in sb.table("kb_entries").rows if r["entry_id"] == "e_gone")
-    assert gone["status"] == "archived"        # soft-delete, not removed from the table
-
-
-def test_worker_crawl_site_does_not_archive_when_truncated(monkeypatch):
-    from api import worker
-
-    # pages == max_pages -> ambiguous whether anything is actually gone;
-    # must NOT archive on a truncated run.
-    monkeypatch.setattr("ingestion.webcrawl.crawl",
-                        lambda url, **k: [{"url": "u1", "title": "P1", "markdown": "x" * 200}])
-    monkeypatch.setattr("interpreter.jobs.enqueue", lambda *a, **k: "job1")
-
-    sb = _CrawlSB(
-        sources_rows=[{"source_id": "s", "config": {}}],
-        kb_rows=[{"entry_id": "e_maybe", "title": "Not In This Batch", "body_md": "x",
-                 "source_id": "s", "origin": "crawl", "status": "active"}],
-    )
-    out = worker._crawl_site({"source_id": "s", "tenant_id": "t", "collection_name": "c",
-                              "url": "https://x", "max_pages": 1}, sb)
-    assert out["archived"] == 0
-    still = next(r for r in sb.table("kb_entries").rows if r["entry_id"] == "e_maybe")
-    assert still["status"] == "active"
-
-
-def test_worker_crawl_site_dedups_crawl_urls_across_reruns(monkeypatch):
-    from api import worker
-
-    monkeypatch.setattr("ingestion.webcrawl.crawl", lambda url, **k: [])
-    monkeypatch.setattr("interpreter.jobs.enqueue", lambda *a, **k: "job1")
-
-    sb = _CrawlSB(sources_rows=[{"source_id": "s", "config": {"crawl_urls": ["https://x"]}}])
-    worker._crawl_site({"source_id": "s", "tenant_id": "t", "collection_name": "c",
-                        "url": "https://x", "max_pages": 5}, sb)
-    assert sb.table("sources").rows[0]["config"]["crawl_urls"] == ["https://x"]  # not duplicated
+def test_public_url_normalize_rejects_non_http_and_clamps_pages():
+    spec = kb_connectors.get_kb_connector("public_url")
+    assert spec.normalize_config({"url": "https://x", "max_pages": 999})["max_pages"] == 50
+    with pytest.raises(ValueError):
+        spec.normalize_config({"url": "ftp://x"})

@@ -1,11 +1,23 @@
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { api, ApiError } from "../api";
-import type { KbCollection, KbEntry, KbEntryRow } from "../types";
+import type {
+  KbCollection,
+  KbConnection,
+  KbConnector,
+  KbEntry,
+  KbEntryRow,
+} from "../types";
 
 /**
  * Self-serve internal knowledge base (Phase 14). Per-team collections of
  * markdown SOPs; a `kb_lookup` node in a flow consults chosen collections
  * at a checkpoint. Editors here = anyone in the tenant.
+ *
+ * A collection also has **connected sources** (docs/KB_SOURCE_CONNECTORS.md):
+ * a crawl root, a Google Sheet/Doc, later Linear/Discourse/Nolt — each a
+ * `kb_source_connections` row that produces entries automatically. Managed in
+ * the "Connected sources" panel below, one registry-driven form for all of
+ * them instead of a button per type.
  */
 export function KnowledgeView({ tenantId }: { tenantId: string }) {
   const [cols, setCols] = useState<KbCollection[]>([]);
@@ -146,46 +158,10 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
     }, 800);
   }
 
-  async function linkGdoc() {
-    const u = prompt("Google Doc URL")?.trim();
-    if (!u) return;
-    try {
-      await api.kb.linkGdoc(col.source_id, u);
-      void load();
-      onChange();
-    } catch (e) {
-      alert(e instanceof ApiError ? String(e.detail) : String(e));
-    }
-  }
-
   async function resync(entryId: string) {
     try {
       await api.kb.resyncGdoc(entryId);
-      void load();
-    } catch (e) {
-      alert(e instanceof ApiError ? String(e.detail) : String(e));
-    }
-  }
-
-  async function linkGsheet() {
-    const u = prompt("Google Sheet URL")?.trim();
-    if (!u) return;
-    const tab = prompt("Tab/sheet name (blank = first tab)")?.trim() || undefined;
-    try {
-      await api.kb.linkGsheet(col.source_id, u, tab);
-      alert("Syncing in the background — one entry per row will appear here as they're embedded.");
-      void load();
-    } catch (e) {
-      alert(e instanceof ApiError ? String(e.detail) : String(e));
-    }
-  }
-
-  async function crawlSite() {
-    const u = prompt("Docs site URL to crawl (same host + path prefix, up to ~20 pages)")?.trim();
-    if (!u) return;
-    try {
-      await api.kb.crawl(col.source_id, u);
-      alert("Crawling in the background — pages will appear here as they're embedded.");
+      alert("Re-syncing this source in the background — updated entries will appear shortly.");
       void load();
     } catch (e) {
       alert(e instanceof ApiError ? String(e.detail) : String(e));
@@ -266,7 +242,6 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
         </div>
         <div className="row">
           <button onClick={() => setOpenId("new")}>＋ entry</button>
-          <button onClick={crawlSite}>🌐 crawl a site</button>
           <label className="button" style={{ cursor: "pointer" }}>
             ⬆ upload file
             <input
@@ -280,15 +255,6 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
               }}
             />
           </label>
-          {gApi.configured &&
-            (gApi.connected ? (
-              <>
-                <button onClick={linkGdoc}>＋ Google Doc</button>
-                <button onClick={linkGsheet}>＋ Google Sheet</button>
-              </>
-            ) : (
-              <button onClick={connectGoogle}>Connect Google</button>
-            ))}
           <button onClick={exportCollection} title="download a JSON backup of this collection">
             ⬇ export
           </button>
@@ -308,6 +274,16 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
           <button className="err" onClick={removeCollection}>archive collection</button>
         </div>
       </div>
+
+      <ConnectedSources
+        col={col}
+        google={gApi}
+        onConnectGoogle={connectGoogle}
+        onChange={() => {
+          void load();
+          onChange();
+        }}
+      />
 
       {openId === "new" && (
         <EntryEditor
@@ -360,8 +336,8 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
                     : new Date(e.updated_at).toLocaleString()}
                 </td>
                 <td className="row" style={{ gap: 4 }}>
-                  {e.origin === "gdoc" && (
-                    <button onClick={() => resync(e.entry_id)} title="re-fetch from Google">
+                  {e.connection_id && (
+                    <button onClick={() => resync(e.entry_id)} title="re-sync this source">
                       re-sync
                     </button>
                   )}
@@ -393,12 +369,286 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
           {visible.length === 0 && (
             <tr>
               <td colSpan={4} className="muted">
-                no entries — add a runbook / workflow / config note
+                no entries — add a runbook / workflow / config note, or connect a source above
               </td>
             </tr>
           )}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+// ── Connected sources (docs/KB_SOURCE_CONNECTORS.md) ──────────────────────
+function ConnectedSources({
+  col,
+  google,
+  onConnectGoogle,
+  onChange,
+}: {
+  col: KbCollection;
+  google: { configured: boolean; connected: boolean };
+  onConnectGoogle: () => void;
+  onChange: () => void;
+}) {
+  const [conns, setConns] = useState<KbConnection[]>([]);
+  const [catalogue, setCatalogue] = useState<KbConnector[]>([]);
+  const [adding, setAdding] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const [cs, cat] = await Promise.all([
+        api.kb.listConnections(col.source_id),
+        api.kb.listConnectors(col.tenant_id),
+      ]);
+      setConns(cs);
+      setCatalogue(cat);
+    } catch (e) {
+      setErr(e instanceof ApiError ? String(e.detail) : String(e));
+    }
+  }, [col.source_id, col.tenant_id]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function sync(cid: string) {
+    try {
+      await api.kb.syncConnection(cid);
+      alert("Re-syncing in the background.");
+      await load();
+    } catch (e) {
+      alert(e instanceof ApiError ? String(e.detail) : String(e));
+    }
+  }
+
+  async function toggle(c: KbConnection) {
+    try {
+      await api.kb.setConnectionStatus(
+        c.connection_id,
+        c.status === "paused" ? "active" : "paused",
+      );
+      await load();
+    } catch (e) {
+      alert(e instanceof ApiError ? String(e.detail) : String(e));
+    }
+  }
+
+  async function remove(c: KbConnection) {
+    if (!confirm(`disconnect "${c.label}" and archive the entries it produced?`)) return;
+    try {
+      await api.kb.deleteConnection(c.connection_id);
+      await load();
+      onChange();
+    } catch (e) {
+      alert(e instanceof ApiError ? String(e.detail) : String(e));
+    }
+  }
+
+  const needsGoogle = catalogue.some(
+    (c) => c.auth === "oauth2" && !c.available && google.configured && !google.connected,
+  );
+
+  return (
+    <div
+      className="col"
+      style={{ gap: 8, border: "1px solid var(--border)", borderRadius: 6, padding: 12 }}
+    >
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <strong style={{ fontSize: 13 }}>Connected sources</strong>
+        <div className="row" style={{ gap: 6 }}>
+          {needsGoogle && (
+            <button onClick={onConnectGoogle} title="OAuth so Google Docs / Sheets can sync">
+              Connect Google
+            </button>
+          )}
+          <button className="primary" onClick={() => setAdding((v) => !v)}>
+            {adding ? "close" : "＋ add source"}
+          </button>
+        </div>
+      </div>
+
+      {err && <div className="err" style={{ fontSize: 12 }}>{err}</div>}
+
+      {adding && (
+        <AddSourceForm
+          collectionId={col.source_id}
+          catalogue={catalogue}
+          onDone={() => {
+            setAdding(false);
+            void load();
+            onChange();
+          }}
+        />
+      )}
+
+      {conns.length === 0 && !adding && (
+        <div className="muted" style={{ fontSize: 12 }}>
+          nothing connected — “＋ add source” to crawl a docs site or sync a Google Sheet / Doc.
+          The chat flow’s retrieval reads every connected source together.
+        </div>
+      )}
+
+      {conns.length > 0 && (
+        <table className="runs-table">
+          <thead>
+            <tr>
+              <th>source</th>
+              <th>type</th>
+              <th>status</th>
+              <th>entries</th>
+              <th>last synced</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {conns.map((c) => (
+              <tr key={c.connection_id}>
+                <td style={{ maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {c.label}
+                </td>
+                <td className="muted">{c.connector}</td>
+                <td>
+                  <ConnStatus c={c} />
+                </td>
+                <td className="muted">{c.entry_count}</td>
+                <td className="muted">
+                  {c.last_synced_at ? new Date(c.last_synced_at).toLocaleString() : "—"}
+                </td>
+                <td className="row" style={{ gap: 4 }}>
+                  <button onClick={() => sync(c.connection_id)}>re-sync</button>
+                  <button onClick={() => toggle(c)}>
+                    {c.status === "paused" ? "resume" : "pause"}
+                  </button>
+                  <button className="err" onClick={() => remove(c)}>remove</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function ConnStatus({ c }: { c: KbConnection }) {
+  const map: Record<string, string> = {
+    active: "#2b6a2b",
+    paused: "#555",
+    error: "#9b2c2c",
+    archived: "#555",
+  };
+  const title =
+    c.status === "error" ? c.last_result?.error ?? "last sync failed" : undefined;
+  return (
+    <span
+      title={title}
+      style={{
+        fontSize: 11,
+        padding: "1px 6px",
+        borderRadius: 8,
+        background: map[c.status] ?? "#555",
+        color: "#fff",
+      }}
+    >
+      {c.status}
+    </span>
+  );
+}
+
+function AddSourceForm({
+  collectionId,
+  catalogue,
+  onDone,
+}: {
+  collectionId: string;
+  catalogue: KbConnector[];
+  onDone: () => void;
+}) {
+  const [slug, setSlug] = useState(catalogue[0]?.slug ?? "");
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!slug && catalogue.length) setSlug(catalogue[0].slug);
+  }, [catalogue, slug]);
+
+  const spec = catalogue.find((c) => c.slug === slug);
+
+  async function submit() {
+    if (!spec) return;
+    setBusy(true);
+    setErr(null);
+    const config: Record<string, unknown> = {};
+    for (const f of spec.config_fields) {
+      const raw = (values[f.key] ?? "").trim();
+      if (!raw) {
+        if (f.required) {
+          setErr(`${f.label} is required`);
+          setBusy(false);
+          return;
+        }
+        continue;
+      }
+      config[f.key] = f.type === "number" ? Number(raw) : raw;
+    }
+    try {
+      await api.kb.addConnection(collectionId, { connector: slug, config });
+      alert("Syncing in the background — entries will appear as they're embedded.");
+      onDone();
+    } catch (e) {
+      setErr(e instanceof ApiError ? String(e.detail) : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="col" style={{ gap: 8, background: "var(--panel, #00000008)", padding: 10, borderRadius: 6 }}>
+      <div className="field">
+        <label>source type</label>
+        <select value={slug} onChange={(e) => { setSlug(e.target.value); setValues({}); }}>
+          {catalogue.map((c) => (
+            <option key={c.slug} value={c.slug} disabled={!c.available}>
+              {c.label}
+              {!c.available && c.reason ? ` — ${c.reason}` : ""}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {spec && !spec.available && (
+        <div className="err" style={{ fontSize: 12 }}>{spec.reason ?? "not available"}</div>
+      )}
+
+      {spec?.config_fields.map((f) => (
+        <div className="field" key={f.key}>
+          <label>
+            {f.label}
+            {f.required ? " *" : ""}
+          </label>
+          <input
+            type={f.type === "number" ? "number" : "text"}
+            placeholder={f.placeholder}
+            value={values[f.key] ?? ""}
+            onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
+          />
+        </div>
+      ))}
+
+      {err && <div className="err" style={{ fontSize: 12 }}>{err}</div>}
+
+      <div className="row">
+        <button
+          className="primary"
+          onClick={submit}
+          disabled={busy || !spec || !spec.available}
+        >
+          {busy ? "connecting…" : "connect & sync"}
+        </button>
+      </div>
     </div>
   );
 }
@@ -480,15 +730,19 @@ function EntryEditor({
     onDone();
   }
 
-  const readOnly = entry?.origin === "gdoc";
+  const readOnly = entry?.origin === "gdoc" || !!entry?.connection_id;
 
   return (
     <div className="col" style={{ gap: 8, border: "1px solid var(--border)", padding: 10, borderRadius: 6 }}>
       {readOnly && (
         <div className="muted" style={{ fontSize: 12 }}>
-          🔗 synced from{" "}
-          <a href={entry?.gdoc_url ?? "#"} target="_blank" rel="noreferrer">Google Doc</a>{" "}
-          — edit the doc, then “re-sync”. {entry?.sync_error && (
+          🔗 synced from a connected source
+          {entry?.gdoc_url && (
+            <>
+              {" "}(<a href={entry.gdoc_url} target="_blank" rel="noreferrer">Google Doc</a>)
+            </>
+          )}{" "}
+          — edit at the source, then “re-sync”. {entry?.sync_error && (
             <span className="err">last sync failed: {entry.sync_error}</span>
           )}
         </div>

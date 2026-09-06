@@ -163,151 +163,46 @@ def test_fetch_sheet_empty_sheet_yields_no_rows(monkeypatch):
     assert out["rows"] == []
 
 
-# ── api/worker.py::_sync_gsheet ──────────────────────────────────────────
-class _Table:
-    def __init__(self, rows):
-        self.rows = rows
-        self._filters: dict = {}
-        self._pending: tuple[str, dict] | None = None
-
-    def select(self, *_a, **_k):
-        return self
-
-    def eq(self, k, v):
-        self._filters[k] = v
-        return self
-
-    def limit(self, _n):
-        return self
-
-    def insert(self, row):
-        self._pending = ("insert", dict(row))
-        return self
-
-    def update(self, patch):
-        self._pending = ("update", dict(patch))
-        return self
-
-    def execute(self):
-        op, data = self._pending or (None, None)
-        if op == "insert":
-            new_row = {"entry_id": f"e{len(self.rows) + 1}", **data}
-            self.rows.append(new_row)
-            self._pending = None
-            self._filters = {}
-            return type("R", (), {"data": [new_row]})()
-        matches = [r for r in self.rows if all(r.get(k) == v for k, v in self._filters.items())]
-        if op == "update":
-            for r in matches:
-                r.update(data)
-            self._pending = None
-        self._filters = {}
-        return type("R", (), {"data": matches})()
+# ── interpreter/kb_connectors: the gsheets connector's sync() ────────────
+# The worker-side diff/upsert/embed/archive dance moved to the generic
+# _sync_kb_connection driver (tests/test_kb_connectors.py).
+from interpreter import kb_connectors  # noqa: E402
 
 
-class _SB:
-    def __init__(self, sources_rows=None, kb_rows=None):
-        self._t = {"sources": _Table(sources_rows or []), "kb_entries": _Table(kb_rows or [])}
-
-    def table(self, name):
-        return self._t[name]
+def _ctx():
+    return kb_connectors.SyncCtx(tenant_id="t1", sb=None, collection_name="c")
 
 
-def test_worker_sync_gsheet_creates_one_entry_per_row(monkeypatch):
-    from api import worker
-
+def test_gsheets_sync_makes_one_document_per_row(monkeypatch):
     monkeypatch.setattr(gsheets, "fetch_sheet", lambda tid, sid, *, sheet_name, sb: {
-        "title": "FAQ", "modified_time": "t", "tab": "Sheet1",
-        "rows": [{"row": 2, "title": "Q1", "body_md": "**Q:** Q1\n**A:** A1"},
-                {"row": 3, "title": "Q2", "body_md": "**Q:** Q2\n**A:** A2"}],
+        "title": "FAQ", "modified_time": "2026-01-01T00:00:00Z", "tab": "Sheet1",
+        "rows": [{"row": 2, "title": "Q1", "body_md": "**Q:** Q1"},
+                 {"row": 3, "title": "Q2", "body_md": "**Q:** Q2"}],
     })
-    enq = []
-    monkeypatch.setattr("interpreter.jobs.enqueue",
-                        lambda kind, payload, **kw: enq.append((kind, payload["entry_id"])))
-
-    sb = _SB(sources_rows=[{"source_id": "s", "config": {}}])
-    out = worker._sync_gsheet({"source_id": "s", "tenant_id": "t", "collection_name": "c",
-                               "sheet_id": "sheet123"}, sb)
-    assert out["entries"] == 2
-    assert [k for k, _ in enq] == ["embed_kb_entry", "embed_kb_entry"]
-    assert sb.table("sources").rows[0]["config"]["gsheets"] == [
-        {"sheet_id": "sheet123", "sheet_name": None}]
+    res = kb_connectors._sync_gsheets({"sheet_id": "sh1", "sheet_name": None}, None, _ctx())
+    assert [d.external_id for d in res.documents] == ["2", "3"]
+    assert res.documents[0].origin == "gsheet"
+    assert res.documents[0].extra == {
+        "gsheet_id": "sh1", "gsheet_range": "Sheet1", "gsheet_row": 2,
+        "gsheet_modified": "2026-01-01T00:00:00Z",
+    }
+    assert res.exhaustive is True
+    assert res.watermark == {"modified_time": "2026-01-01T00:00:00Z", "tab": "Sheet1"}
 
 
-def test_worker_sync_gsheet_skips_an_unchanged_row(monkeypatch):
-    from api import worker
-
-    monkeypatch.setattr(gsheets, "fetch_sheet", lambda tid, sid, *, sheet_name, sb: {
-        "title": "FAQ", "modified_time": "t", "tab": "Sheet1",
-        "rows": [{"row": 2, "title": "Q1", "body_md": "same body"},
-                {"row": 3, "title": "Q2", "body_md": "new body"}],
-    })
-    enq = []
-    monkeypatch.setattr("interpreter.jobs.enqueue",
-                        lambda kind, payload, **kw: enq.append(payload["entry_id"]))
-
-    sb = _SB(
-        sources_rows=[{"source_id": "s", "config": {}}],
-        kb_rows=[{"entry_id": "e_old", "gsheet_row": 2, "body_md": "same body",
-                 "source_id": "s", "origin": "gsheet", "gsheet_id": "sheet123", "status": "active"}],
-    )
-    out = worker._sync_gsheet({"source_id": "s", "tenant_id": "t", "collection_name": "c",
-                               "sheet_id": "sheet123"}, sb)
-    assert out["unchanged"] == 1
-    assert out["entries"] == 1
-    assert len(enq) == 1
-
-
-def test_worker_sync_gsheet_archives_a_row_that_vanished(monkeypatch):
-    from api import worker
-
-    # sheet now only has row 2 -- row 3 (e_gone) disappeared. always safe to
-    # archive here since fetch_sheet always reads the whole current range.
-    monkeypatch.setattr(gsheets, "fetch_sheet", lambda tid, sid, *, sheet_name, sb: {
-        "title": "FAQ", "modified_time": "t", "tab": "Sheet1",
-        "rows": [{"row": 2, "title": "Q1", "body_md": "b1"}],
-    })
-    monkeypatch.setattr("interpreter.jobs.enqueue", lambda *a, **k: "job1")
-
-    sb = _SB(
-        sources_rows=[{"source_id": "s", "config": {}}],
-        kb_rows=[
-            {"entry_id": "e_keep", "gsheet_row": 2, "body_md": "old b1",
-             "source_id": "s", "origin": "gsheet", "gsheet_id": "sheet123", "status": "active"},
-            {"entry_id": "e_gone", "gsheet_row": 3, "body_md": "b2",
-             "source_id": "s", "origin": "gsheet", "gsheet_id": "sheet123", "status": "active"},
-        ],
-    )
-    out = worker._sync_gsheet({"source_id": "s", "tenant_id": "t", "collection_name": "c",
-                               "sheet_id": "sheet123"}, sb)
-    assert out["archived"] == 1
-    gone = next(r for r in sb.table("kb_entries").rows if r["entry_id"] == "e_gone")
-    assert gone["status"] == "archived"
-    kept = next(r for r in sb.table("kb_entries").rows if r["entry_id"] == "e_keep")
-    assert kept["status"] == "active"
-
-
-def test_worker_sync_gsheet_dedups_config_across_reruns(monkeypatch):
-    from api import worker
-
-    monkeypatch.setattr(gsheets, "fetch_sheet", lambda tid, sid, *, sheet_name, sb: {
-        "title": "FAQ", "modified_time": "t", "tab": "Sheet1", "rows": [],
-    })
-    sb = _SB(sources_rows=[{"source_id": "s",
-                           "config": {"gsheets": [{"sheet_id": "sheet123", "sheet_name": None}]}}])
-    worker._sync_gsheet({"source_id": "s", "tenant_id": "t", "collection_name": "c",
-                        "sheet_id": "sheet123"}, sb)
-    assert sb.table("sources").rows[0]["config"]["gsheets"] == [
-        {"sheet_id": "sheet123", "sheet_name": None}]  # not duplicated
-
-
-def test_worker_sync_gsheet_reports_a_fetch_error_without_raising(monkeypatch):
-    from api import worker
-
+def test_gsheets_sync_propagates_a_fetch_error(monkeypatch):
     def boom(tid, sid, *, sheet_name, sb):
         raise RuntimeError("not connected")
 
     monkeypatch.setattr(gsheets, "fetch_sheet", boom)
-    out = worker._sync_gsheet({"source_id": "s", "tenant_id": "t", "collection_name": "c",
-                               "sheet_id": "sheet123"}, _SB())
-    assert "error" in out
+    with pytest.raises(RuntimeError):
+        kb_connectors._sync_gsheets({"sheet_id": "sh1"}, None, _ctx())
+
+
+def test_gsheets_normalize_parses_the_url_and_blank_tab():
+    spec = kb_connectors.get_kb_connector("gsheets")
+    cfg = spec.normalize_config({
+        "sheet_url": "https://docs.google.com/spreadsheets/d/ABC123def/edit#gid=0",
+        "sheet_name": "  ",
+    })
+    assert cfg == {"sheet_id": "ABC123def", "sheet_name": None}

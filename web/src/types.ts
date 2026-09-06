@@ -210,11 +210,53 @@ export interface KbEntryRow {
   gsheet_id?: string | null;
   gsheet_range?: string | null;
   gsheet_row?: number | null;
+  connection_id?: string | null;
+  external_id?: string | null;
   synced_at?: string | null;
   sync_error?: string | null;
   provisional_until?: string | null;
   supersedes_entry_id?: string | null;
   source_review_task?: string | null;
+}
+
+// KB source connectors (docs/KB_SOURCE_CONNECTORS.md) — a connected feed
+// (crawl root, Google Sheet/Doc, later Linear/Discourse/Nolt) and the
+// registry catalogue that drives the "+ add source" form.
+export interface KbConnectorField {
+  key: string;
+  label: string;
+  type: "string" | "number";
+  required?: boolean;
+  placeholder?: string;
+}
+
+export interface KbConnector {
+  slug: string;
+  label: string;
+  auth: "none" | "oauth2" | "apikey";
+  config_fields: KbConnectorField[];
+  available: boolean;
+  reason: string | null;
+}
+
+export interface KbConnection {
+  connection_id: string;
+  source_id: string;
+  tenant_id: string;
+  connector: string;
+  label: string;
+  config: Record<string, unknown>;
+  status: "active" | "paused" | "error" | "archived";
+  last_synced_at: string | null;
+  last_result: {
+    documents?: number;
+    entries?: number;
+    unchanged?: number;
+    archived?: number;
+    error?: string;
+  } | null;
+  entry_count: number;
+  created_at?: string;
 }
 
 export interface KbEntry extends KbEntryRow {

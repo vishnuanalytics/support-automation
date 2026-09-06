@@ -327,166 +327,152 @@ def _embed_kb_entry(payload: dict, sb) -> dict:
     return {"entry_id": eid, "chunks": n}
 
 
-def _crawl_site(payload: dict, sb) -> dict:
-    """P7c — crawl a docs site and land each page as a KB entry + embed it.
+def _sync_kb_connection(payload: dict, sb) -> dict:
+    """Generic KB-source sync driver (docs/KB_SOURCE_CONNECTORS.md).
 
-    2026-09-05: also (a) skips the update+re-embed for a page whose markdown
-    is byte-identical to what's already stored — a re-crawl of an unchanged
-    site should cost nothing beyond the fetches themselves, same
-    "don't re-spend on unchanged input" discipline as `llm.complete`'s
-    `cache=True` path; (b) records `url` onto the source's
-    `config.crawl_urls` so a scheduled re-crawl (`ingestion/kb_recrawl.py`)
-    knows what to re-fetch without a human re-clicking "crawl a site"; (c)
-    archives (soft-delete, never hard-delete) a crawl-origin entry whose
-    page no longer appeared in this run — but *only* when this run wasn't
-    truncated by `max_pages` (fewer pages than the cap means the crawl
-    actually exhausted everything reachable; hitting the cap tells you
-    nothing about whether a missing page is gone or just outside this
-    run's budget)."""
-    from ingestion.webcrawl import crawl
+    One code path for every connector: ask the `KBConnectorSpec`'s `sync()`
+    for a list of `KBDocument`s, then do the diff/upsert/embed/archive dance
+    that `_crawl_site` and `_sync_gsheet` each used to hand-roll:
 
-    sid, tid = payload["source_id"], payload["tenant_id"]
-    col_name = payload.get("collection_name", "")
-    max_pages = int(payload.get("max_pages", 20))
+      * skip the update + re-embed for a document whose `body_md` is
+        byte-identical to what's stored (a re-sync of unchanged content
+        costs only the fetch), same discipline as `llm.complete(cache=True)`;
+      * embed off this job (fastembed × N docs would blow JOB_TIMEOUT);
+      * archive (soft-delete, never hard-delete) an entry whose document
+        vanished from the source — but *only* when `res.exhaustive` (a crawl
+        truncated by `max_pages` saw only part of the source, so a missing
+        page may just be outside this run's budget);
+      * record `status` / `last_synced_at` / `last_result` / `watermark` on
+        the connection row for the UI + future incremental sync.
+
+    Adding Linear / Discourse / Nolt is a new `KBConnectorSpec` — this
+    handler doesn't change.
+    """
+    from interpreter.kb_connectors import SyncCtx, get_kb_connector
+
+    cid = payload["connection_id"]
+    rows = (sb.table("kb_source_connections").select("*")
+            .eq("connection_id", cid).execute().data or [])
+    if not rows:
+        return {"connection_id": cid, "skipped": "connection gone"}
+    conn = rows[0]
+    if conn["status"] not in ("active", "error"):
+        return {"connection_id": cid, "skipped": f"status={conn['status']}"}
+
+    sid, tid = conn["source_id"], conn["tenant_id"]
+    col_name = payload.get("collection_name") or ""
+    if not col_name:
+        s = sb.table("sources").select("name").eq("source_id", sid).limit(1).execute().data
+        col_name = (s[0]["name"] if s else "")
+
     try:
-        pages = crawl(payload["url"], max_pages=max_pages)
+        spec = get_kb_connector(conn["connector"])
+        ctx = SyncCtx(tenant_id=tid, sb=sb, collection_name=col_name)
+        res = spec.sync(conn.get("config") or {}, conn.get("watermark"), ctx)
     except Exception as e:  # noqa: BLE001
-        return {"url": payload["url"], "error": str(e)[:300]}
+        err = str(e)[:500]
+        sb.table("kb_source_connections").update({
+            "status": "error", "last_synced_at": "now()", "last_result": {"error": err},
+        }).eq("connection_id", cid).execute()
+        return {"connection_id": cid, "error": err}
 
-    try:
-        src = sb.table("sources").select("config").eq("source_id", sid).limit(1).execute().data
-        cfg = (src[0]["config"] if src else {}) or {}
-        crawl_urls = list(dict.fromkeys([*(cfg.get("crawl_urls") or []), payload["url"]]))
-        if crawl_urls != (cfg.get("crawl_urls") or []):
-            sb.table("sources").update({"config": {**cfg, "crawl_urls": crawl_urls}}) \
-                .eq("source_id", sid).execute()
-    except Exception as e:  # noqa: BLE001
-        log.warning("crawl_site: could not record crawl_urls for %s: %s", sid, e)
-
-    existing_by_title = {
-        r["title"]: r for r in (
-            sb.table("kb_entries").select("entry_id, title, body_md")
-            .eq("source_id", sid).eq("origin", "crawl").eq("status", "active")
-            .execute().data or [])
+    existing = {
+        r["external_id"]: r for r in (
+            sb.table("kb_entries").select("entry_id, external_id, body_md")
+            .eq("connection_id", cid).eq("status", "active").execute().data or [])
+        if r.get("external_id") is not None
     }
 
     made = skipped = 0
-    seen_titles: set[str] = set()
-    for pg in pages:
+    seen: set[str] = set()
+    for doc in res.documents:
         try:
-            seen_titles.add(pg["title"])
-            body_md = f"<!-- {pg['url']} -->\n\n{pg['markdown']}"
-            existing = existing_by_title.get(pg["title"])
-            if existing and existing["body_md"] == body_md:
+            seen.add(doc.external_id)
+            prev = existing.get(doc.external_id)
+            if prev and prev["body_md"] == doc.body_md:
                 skipped += 1
                 continue
-            row = {"source_id": sid, "tenant_id": tid, "title": pg["title"],
-                   "body_md": body_md, "origin": "crawl", "status": "active",
-                   "created_by": payload.get("created_by"), "updated_by": payload.get("created_by")}
-            if existing:
+            row = {
+                "source_id": sid, "tenant_id": tid, "connection_id": cid,
+                "external_id": doc.external_id, "title": doc.title, "body_md": doc.body_md,
+                "origin": doc.origin, "status": "active",
+                "created_by": conn.get("created_by"), "updated_by": conn.get("created_by"),
+                **(doc.extra or {}),
+            }
+            if prev:
                 entry = (sb.table("kb_entries").update(row)
-                         .eq("entry_id", existing["entry_id"]).execute().data[0])
+                         .eq("entry_id", prev["entry_id"]).execute().data[0])
             else:
                 entry = sb.table("kb_entries").insert(row).execute().data[0]
-            # embed off this job (fastembed × N pages would blow JOB_TIMEOUT)
             jobs.enqueue("embed_kb_entry",
                          {"entry_id": entry["entry_id"], "source_id": sid,
                           "collection_name": col_name},
                          dedupe_key=f"embed:{entry['entry_id']}", sb=sb)
             made += 1
         except Exception as e:  # noqa: BLE001
-            log.warning("crawl_site page %s: %s", pg.get("url"), e)
+            log.warning("kb_sync %s doc %s: %s", cid, doc.external_id, e)
 
     archived = 0
-    if len(pages) < max_pages:   # not truncated -- this run saw everything reachable
-        gone = [r for t, r in existing_by_title.items() if t not in seen_titles]
-        for r in gone:
+    if res.exhaustive:
+        for ext_id, r in existing.items():
+            if ext_id in seen:
+                continue
             try:
                 sb.table("kb_entries").update({"status": "archived"}) \
                     .eq("entry_id", r["entry_id"]).execute()
                 archived += 1
             except Exception as e:  # noqa: BLE001
-                log.warning("crawl_site archive %s: %s", r["entry_id"], e)
+                log.warning("kb_sync %s archive %s: %s", cid, r["entry_id"], e)
 
-    return {"url": payload["url"], "pages": len(pages), "entries": made,
-            "unchanged": skipped, "archived": archived}
+    result = {"documents": len(res.documents), "entries": made,
+              "unchanged": skipped, "archived": archived}
+    sb.table("kb_source_connections").update({
+        "status": "active", "last_synced_at": "now()", "last_result": result,
+        "watermark": res.watermark if res.watermark is not None else conn.get("watermark"),
+    }).eq("connection_id", cid).execute()
+    return {"connection_id": cid, **result}
+
+
+def _find_or_create_kb_connection(sb, *, source_id, tenant_id, connector, config,
+                                  label, created_by=None) -> dict:
+    """Back-compat glue for the deprecated `crawl_site` / `sync_gsheet` shims:
+    resolve the `kb_source_connections` row a legacy payload targets (matched
+    on the connector's identity field), creating it if the pre-091 backfill
+    didn't already."""
+    key = "url" if connector == "public_url" else "sheet_id"
+    for r in (sb.table("kb_source_connections").select("*")
+              .eq("source_id", source_id).eq("connector", connector)
+              .neq("status", "archived").execute().data or []):
+        if (r.get("config") or {}).get(key) == config.get(key):
+            return r
+    return sb.table("kb_source_connections").insert({
+        "source_id": source_id, "tenant_id": tenant_id, "connector": connector,
+        "config": config, "label": label, "created_by": created_by,
+    }).execute().data[0]
+
+
+def _crawl_site(payload: dict, sb) -> dict:
+    """Deprecated shim — `crawl_site` is now `kb_sync` over a `public_url`
+    `kb_source_connections` row. Kept so already-queued jobs and any old
+    caller keep working; remove a release after 091."""
+    conn = _find_or_create_kb_connection(
+        sb, source_id=payload["source_id"], tenant_id=payload["tenant_id"],
+        connector="public_url", label=payload["url"], created_by=payload.get("created_by"),
+        config={"url": payload["url"], "max_pages": int(payload.get("max_pages", 20))})
+    return _sync_kb_connection(
+        {"connection_id": conn["connection_id"],
+         "collection_name": payload.get("collection_name", "")}, sb)
 
 
 def _sync_gsheet(payload: dict, sb) -> dict:
-    """KB source connector #2 (docs/KB_SOURCE_CONNECTORS.md) — sync a linked
-    Google Sheet, one `kb_entries` row per data row. Same diff/archive
-    discipline as `_crawl_site`: skip the update+re-embed for a row whose
-    body is unchanged, archive (soft-delete) a row that's gone. Unlike
-    crawling, there's no page-budget ambiguity here — `fetch_sheet` always
-    reads the sheet's *entire* current range, so "not in this run" always
-    means "no longer in the sheet," safe to archive unconditionally."""
-    from interpreter import gsheets
-
-    sid, tid = payload["source_id"], payload["tenant_id"]
-    col_name = payload.get("collection_name", "")
-    sheet_id = payload["sheet_id"]
-    try:
-        fetched = gsheets.fetch_sheet(tid, sheet_id, sheet_name=payload.get("sheet_name"), sb=sb)
-    except Exception as e:  # noqa: BLE001
-        return {"sheet_id": sheet_id, "error": str(e)[:300]}
-
-    try:
-        src = sb.table("sources").select("config").eq("source_id", sid).limit(1).execute().data
-        cfg = (src[0]["config"] if src else {}) or {}
-        known = cfg.get("gsheets") or []
-        entry = {"sheet_id": sheet_id, "sheet_name": payload.get("sheet_name")}
-        if entry not in known:
-            sb.table("sources").update({"config": {**cfg, "gsheets": [*known, entry]}}) \
-                .eq("source_id", sid).execute()
-    except Exception as e:  # noqa: BLE001
-        log.warning("sync_gsheet: could not record gsheets config for %s: %s", sid, e)
-
-    existing_by_row = {
-        r["gsheet_row"]: r for r in (
-            sb.table("kb_entries").select("entry_id, gsheet_row, body_md")
-            .eq("source_id", sid).eq("origin", "gsheet").eq("gsheet_id", sheet_id)
-            .eq("status", "active").execute().data or [])
-    }
-
-    made = skipped = 0
-    seen_rows: set[int] = set()
-    for r in fetched["rows"]:
-        try:
-            seen_rows.add(r["row"])
-            existing = existing_by_row.get(r["row"])
-            if existing and existing["body_md"] == r["body_md"]:
-                skipped += 1
-                continue
-            row = {"source_id": sid, "tenant_id": tid, "title": r["title"], "body_md": r["body_md"],
-                   "origin": "gsheet", "status": "active", "gsheet_id": sheet_id,
-                   "gsheet_range": fetched["tab"], "gsheet_row": r["row"],
-                   "gsheet_modified": fetched["modified_time"],
-                   "created_by": payload.get("created_by"), "updated_by": payload.get("created_by")}
-            if existing:
-                entry = (sb.table("kb_entries").update(row)
-                         .eq("entry_id", existing["entry_id"]).execute().data[0])
-            else:
-                entry = sb.table("kb_entries").insert(row).execute().data[0]
-            jobs.enqueue("embed_kb_entry",
-                         {"entry_id": entry["entry_id"], "source_id": sid,
-                          "collection_name": col_name},
-                         dedupe_key=f"embed:{entry['entry_id']}", sb=sb)
-            made += 1
-        except Exception as e:  # noqa: BLE001
-            log.warning("sync_gsheet row %s: %s", r.get("row"), e)
-
-    archived = 0
-    for row_num, r in existing_by_row.items():
-        if row_num not in seen_rows:
-            try:
-                sb.table("kb_entries").update({"status": "archived"}) \
-                    .eq("entry_id", r["entry_id"]).execute()
-                archived += 1
-            except Exception as e:  # noqa: BLE001
-                log.warning("sync_gsheet archive %s: %s", r["entry_id"], e)
-
-    return {"sheet_id": sheet_id, "rows": len(fetched["rows"]), "entries": made,
-            "unchanged": skipped, "archived": archived}
+    """Deprecated shim — see `_crawl_site`. Now `kb_sync` over a `gsheets` row."""
+    conn = _find_or_create_kb_connection(
+        sb, source_id=payload["source_id"], tenant_id=payload["tenant_id"],
+        connector="gsheets", label=payload["sheet_id"], created_by=payload.get("created_by"),
+        config={"sheet_id": payload["sheet_id"], "sheet_name": payload.get("sheet_name")})
+    return _sync_kb_connection(
+        {"connection_id": conn["connection_id"],
+         "collection_name": payload.get("collection_name", "")}, sb)
 
 
 def _import_kb_bundle(payload: dict, sb) -> dict:
@@ -612,8 +598,8 @@ def _sweep_handler(fn):
 
 HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
             "embed_kb_entry": _embed_kb_entry, "create_github_issue": _create_github_issue,
-            "apply_kb_change": _apply_kb_change, "crawl_site": _crawl_site,
-            "sync_gsheet": _sync_gsheet,
+            "apply_kb_change": _apply_kb_change, "kb_sync": _sync_kb_connection,
+            "crawl_site": _crawl_site, "sync_gsheet": _sync_gsheet,
             "import_kb_bundle": _import_kb_bundle,
             "queue_sweep": _sweep_handler("queue_sweep"),
             "cdc_reconcile": _sweep_handler("cdc_reconcile"),

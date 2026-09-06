@@ -707,8 +707,97 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-05 — KB source connector #2 built: Google Sheets (this is the
-most recent work in this file).** Second item from `docs/KB_SOURCE_
+**2026-09-06 — KB source connectors made first-class: registry +
+`kb_source_connections` table + one generic sync driver + unified UI (this
+is the most recent work in this file).** Connectors #1 (crawl) and #2
+(Sheets) had each shipped as a one-off — a bespoke `api/worker.py` handler, a
+bespoke `POST /api/kb/collections/{sid}/{crawl,gsheet,gdoc}` endpoint, and a
+`prompt()` button in `KnowledgeView.tsx`; a "connected feed" was an array
+buried in `sources.config` with no status / last-sync / doc-count / re-sync /
+disconnect. This chunk (item 2.5 in `docs/KB_SOURCE_CONNECTORS.md`'s build
+order) fixes the structure before connector #3, exactly as that doc
+recommended.
+
+- **`interpreter/kb_connectors.py`** — new `KBConnectorSpec` registry
+  mirroring `interpreter/connectors.py`: `KBDocument` / `KBSyncResult` /
+  `SyncCtx` dataclasses, `register` / `get_kb_connector` / `list_kb_connectors`.
+  Each spec has `sync(config, watermark, ctx) -> KBSyncResult`, optional
+  `normalize(raw)->config` (parse a URL to an id, clamp, validate) and
+  `available(tenant_id, sb)->(ok, reason)`. Three specs registered, each
+  `sync()` wrapping the **existing, unmodified** fetcher: `public_url`
+  (`ingestion/webcrawl.crawl`, `exhaustive = len(pages) < max_pages`),
+  `gsheets` (`interpreter/gsheets.fetch_sheet`, one doc per row,
+  `KBDocument.extra` carries `gsheet_*`), `gdocs`
+  (`interpreter/gdrive.fetch_doc`).
+- **Migration `091`** — `kb_source_connections` (one row per connected feed:
+  `connector` slug — no CHECK, connectors are data — `config`, `watermark`,
+  `status` active|paused|error|archived, `last_synced_at`, `last_result`),
+  RLS via `is_tenant_member`/`is_tenant_editor`. `kb_entries` gains
+  `connection_id` (FK) + `external_id` (stable key within a connection: page
+  **title** for a crawl — parity with `_crawl_site`'s `existing_by_title` —
+  row number for a sheet, doc id for a gdoc). **Retrieval is untouched**:
+  `kb_entries.source_id` still points at the parent `internal_kb` collection,
+  so `resolve_sources()` scoping is unchanged — a chat flow with no explicit
+  `kb_sources` already retrieves the union of every connected source.
+  Backfill turns the pre-existing `config.crawl_urls` / `config.gsheets`
+  arrays and `origin='gdoc'` entries into connection rows and points existing
+  entries at them. Applied to the live project (drift check clean); the one
+  real gdoc entry in this sandbox backfilled into a `gdocs` connection.
+- **`api/worker.py::_sync_kb_connection`** — the generic driver, job kind
+  `kb_sync`: `spec.sync()` -> diff by `external_id` (skip byte-identical
+  bodies) -> upsert `kb_entries` + enqueue `embed_kb_entry` -> archive
+  entries missing from the run **only when `res.exhaustive`** -> record
+  `status`/`last_synced_at`/`last_result`/`watermark`. `crawl_site` /
+  `sync_gsheet` are now thin deprecated shims that find-or-create a
+  connection row and call the driver (kept one release for queued jobs).
+- **`api/main.py`** — `GET /api/kb/connectors` (catalogue + per-tenant
+  `available`/`reason`), `GET|POST /api/kb/collections/{sid}/connections`,
+  `POST /api/kb/connections/{cid}/sync`, `PATCH /api/kb/connections/{cid}`
+  (pause/resume), `DELETE /api/kb/connections/{cid}` (soft-archive the
+  connection + its entries). `/crawl`, `/gdoc`, `/gsheet` are now thin
+  wrappers over `_kb_add_connection`; `/entries/{eid}/resync` re-syncs the
+  entry's whole connection.
+- **`ingestion/kb_recrawl.py`** — iterates `kb_source_connections` where
+  `status='active'` and enqueues one `kb_sync` per connection
+  (`dedupe_key=kb_sync:{cid}`); `daily-sync.yml` already runs it + drains
+  the worker, no workflow change.
+- **Web** — `KnowledgeView.tsx` toolbar button-pile (`🌐 crawl a site`,
+  `＋ Google Doc/Sheet`) replaced by a **"Connected sources"** panel: a
+  table of connections (label, type, status pill, entry count, last synced,
+  re-sync / pause / remove) + a registry-driven **"＋ add source"** form
+  (`<select>` of connectors, disabled options show their `reason`,
+  `config_fields` rendered as inputs). `＋ entry` / upload / export / import
+  stay. New `api.kb.listConnectors/listConnections/addConnection/
+  syncConnection/setConnectionStatus/deleteConnection`; `KbConnector` /
+  `KbConnection` types.
+- **`docs/KB_SOURCE_CONNECTORS.md`** — added **§6 Nolt** (feedback/roadmap
+  board, forum-family: pull posts + comments via Nolt's REST API, embed only
+  `complete`-status posts as `community_resolved`, `apikey` auth); marked the
+  registry/table/driver/UI built; refreshed the build order (next: Linear,
+  then Nolt/forums, then the onboarding-wizard source-picker step).
+
+**Verify:** new `tests/test_kb_connectors.py` (registry lookup, Google-auth
+availability, and the driver's create / skip-unchanged / extra-merge /
+archive-when-exhaustive / no-archive-when-not / watermark-persist /
+sync-raises→status=error / paused-skip / missing-connection paths);
+`tests/test_webcrawl.py` + `tests/test_gsheets.py` worker tests rewritten as
+pure connector-`sync()` tests; `tests/test_kb_recrawl.py` rewritten for the
+connection loop; `tests/test_api.py` guard test for the new routes. **816
+offline tests green (was 810).** `tsc -b` clean. Migration `091` applied to
+the live project, `verify_migrations` drift check clean.
+
+**Not live-verified (unchanged residual):** Google OAuth consent is an
+interactive browser flow — a `gsheets`/`gdocs` connection can't be
+end-to-end tested in this sandbox (the one `kind='google'` integration row
+is `inactive`), same category as connector #2. A `public_url` connection
+needs a live worker drain to exercise fully; the driver + connector paths
+are covered offline.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-05 — KB source connector #2 built: Google Sheets.** Second item
+from `docs/KB_SOURCE_
 CONNECTORS.md`'s suggested build order — reuses the existing Google
 connection (`gdrive.py`, `tenant_integrations` kind='google'), no new
 OAuth flow.

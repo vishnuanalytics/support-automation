@@ -52,7 +52,7 @@ from interpreter.loader import (  # noqa: E402
 from interpreter import jobs, sf_ingest  # noqa: E402
 from interpreter.registry import known_types  # noqa: E402
 from interpreter.runs import record_run  # noqa: E402
-from interpreter import gdrive, github as githubmod, gsheets, slack as slackmod  # noqa: E402
+from interpreter import gdrive, github as githubmod, slack as slackmod  # noqa: E402
 from ingestion.sources.kb_common import delete_entry as _kb_delete, embed_entry as _kb_embed  # noqa: E402
 
 import hashlib  # noqa: E402
@@ -1941,21 +1941,164 @@ class KbCrawlIn(BaseModel):
     max_pages: int = 20
 
 
-@app.post("/api/kb/collections/{sid}/crawl", status_code=202)
-def kb_crawl_site(sid: str, body: KbCrawlIn, c: Caller = Depends(caller)) -> dict:
-    """P7c — crawl a public docs site (BFS, same host + path prefix) and turn
-    each page into a KB entry. Async — the worker does the fetching."""
+# ── KB source connections (docs/KB_SOURCE_CONNECTORS.md) ───────────────────
+# A "connected feed" (a crawl root, a Google Sheet/Doc, later Linear/Discourse/
+# Nolt) is a first-class `kb_source_connections` row, not an array buried in
+# `sources.config`. Every connector plugs in through one registry
+# (`interpreter/kb_connectors.py`), one generic sync job (`kb_sync`), and these
+# routes — no per-connector endpoint. `/crawl`, `/gdoc`, `/gsheet`, `/resync`
+# below are kept as thin wrappers over this so old callers don't break.
+
+class KbConnectionIn(BaseModel):
+    connector: str
+    config: dict[str, Any] = {}
+    label: str | None = None
+
+
+class KbConnectionPatch(BaseModel):
+    status: str | None = None   # 'active' | 'paused'
+
+
+def _kb_connection(c: Caller, cid: str) -> dict:
+    rows = (c.sb.table("kb_source_connections").select("*")
+            .eq("connection_id", cid).neq("status", "archived").execute().data or [])
+    if not rows:
+        raise HTTPException(404, "connection not found or not visible to you")
+    return rows[0]
+
+
+def _kb_add_connection(c: Caller, col: dict, connector: str, raw_config: dict,
+                       label: str | None) -> dict:
+    """Validate + create a connection row and kick off its first sync. Shared
+    by POST /connections and the /crawl,/gdoc,/gsheet wrappers."""
+    from interpreter import audit
+    from interpreter.kb_connectors import get_kb_connector
+
+    try:
+        spec = get_kb_connector(connector)
+    except KeyError:
+        raise HTTPException(422, f"unknown connector {connector!r}")
+    ok, reason = spec.is_available(col["tenant_id"], _service)
+    if not ok:
+        raise HTTPException(400, reason or f"{spec.label} is not available")
+    try:
+        config = spec.normalize_config(raw_config)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+    row = c.sb.table("kb_source_connections").insert({
+        "source_id": col["source_id"], "tenant_id": col["tenant_id"],
+        "connector": connector, "config": config,
+        "label": (label or "").strip() or config.get("url") or config.get("doc_url")
+                 or config.get("sheet_id") or spec.label,
+        "created_by": c.user_id,
+    }).execute().data[0]
+    jobs.enqueue("kb_sync", {"connection_id": row["connection_id"],
+                             "collection_name": col["name"]},
+                 dedupe_key=f"kb_sync:{row['connection_id']}", sb=_service)
+    audit.record(_service, tenant_id=col["tenant_id"], action="kb_connection.created",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="kb_connection", target_id=row["connection_id"],
+                 summary=f"connected {spec.label} to KB collection "
+                         f"{col.get('name', col['source_id'])!r}")
+    return row
+
+
+@app.get("/api/kb/connectors")
+def kb_list_connectors(tenant_id: str | None = None, c: Caller = Depends(caller)) -> list[dict]:
+    """The KB source-connector catalogue for the '+ add source' form, each
+    with whether its auth prerequisite is met for this tenant."""
+    from interpreter.kb_connectors import list_kb_connectors
+
+    tid = _caller_tenant(c, tenant_id)
+    out = []
+    for spec in list_kb_connectors():
+        ok, why = spec.is_available(tid, _service)
+        out.append({"slug": spec.slug, "label": spec.label, "auth": spec.auth,
+                    "config_fields": spec.config_fields, "available": ok, "reason": why})
+    return out
+
+
+@app.get("/api/kb/collections/{sid}/connections")
+def kb_list_connections(sid: str, c: Caller = Depends(caller)) -> list[dict]:
+    _kb_collection(c, sid)
+    conns = (c.sb.table("kb_source_connections").select("*")
+             .eq("source_id", sid).neq("status", "archived")
+             .order("created_at").execute().data or [])
+    counts: dict[str, int] = {}
+    for e in (c.sb.table("kb_entries").select("connection_id, status")
+              .eq("source_id", sid).execute().data or []):
+        cid = e.get("connection_id")
+        if cid and e["status"] == "active":
+            counts[cid] = counts.get(cid, 0) + 1
+    for r in conns:
+        r["entry_count"] = counts.get(r["connection_id"], 0)
+    return conns
+
+
+@app.post("/api/kb/collections/{sid}/connections", status_code=202)
+def kb_create_connection(sid: str, body: KbConnectionIn, c: Caller = Depends(caller)) -> dict:
+    rate_limit(c.user_id, "kb_write", 60)
     col = _kb_collection(c, sid)
     _require_editor(c, col["tenant_id"])
-    if not body.url.startswith(("http://", "https://")):
-        raise HTTPException(422, "url must be http(s)")
+    return _kb_add_connection(c, col, body.connector, body.config, body.label)
+
+
+@app.post("/api/kb/connections/{cid}/sync", status_code=202)
+def kb_sync_connection(cid: str, c: Caller = Depends(caller)) -> dict:
     rate_limit(c.user_id, "kb_write", 60)
-    job_id = jobs.enqueue("crawl_site", {
-        "source_id": sid, "tenant_id": col["tenant_id"], "collection_name": col["name"],
-        "url": body.url, "max_pages": max(1, min(body.max_pages, 50)),
-        "created_by": c.user_id,
-    }, dedupe_key=f"crawl:{sid}:{body.url}", sb=_service)
+    conn = _kb_connection(c, cid)
+    _require_editor(c, conn["tenant_id"])
+    job_id = jobs.enqueue("kb_sync", {"connection_id": cid},
+                          dedupe_key=f"kb_sync:{cid}", sb=_service)
     return {"job_id": job_id, "deduped": job_id is None}
+
+
+@app.patch("/api/kb/connections/{cid}")
+def kb_update_connection(cid: str, body: KbConnectionPatch, c: Caller = Depends(caller)) -> dict:
+    conn = _kb_connection(c, cid)
+    _require_editor(c, conn["tenant_id"])
+    if body.status not in (None, "active", "paused"):
+        raise HTTPException(422, "status must be 'active' or 'paused'")
+    if body.status is None:
+        return conn
+    updated = (c.sb.table("kb_source_connections").update({"status": body.status})
+               .eq("connection_id", cid).execute().data[0])
+    if body.status == "active":
+        jobs.enqueue("kb_sync", {"connection_id": cid},
+                     dedupe_key=f"kb_sync:{cid}", sb=_service)
+    return updated
+
+
+@app.delete("/api/kb/connections/{cid}", status_code=204)
+def kb_delete_connection(cid: str, c: Caller = Depends(caller)) -> None:
+    from interpreter import audit
+
+    conn = _kb_connection(c, cid)
+    _require_editor(c, conn["tenant_id"])
+    c.sb.table("kb_source_connections").update({"status": "archived"}) \
+        .eq("connection_id", cid).execute()
+    entries = (c.sb.table("kb_entries").select("entry_id, source_id")
+               .eq("connection_id", cid).neq("status", "archived").execute().data or [])
+    for e in entries:
+        c.sb.table("kb_entries").update({"status": "archived"}) \
+            .eq("entry_id", e["entry_id"]).execute()
+        _kb_delete(_service, url=_kb_url(e["source_id"], e["entry_id"]))
+    audit.record(_service, tenant_id=conn["tenant_id"], action="kb_connection.deleted",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="kb_connection", target_id=cid,
+                 summary=f"disconnected {conn.get('connector')} from a KB collection "
+                         f"({len(entries)} entries archived)")
+
+
+@app.post("/api/kb/collections/{sid}/crawl", status_code=202)
+def kb_crawl_site(sid: str, body: KbCrawlIn, c: Caller = Depends(caller)) -> dict:
+    """Deprecated — thin wrapper over POST /connections {connector:"public_url"}."""
+    rate_limit(c.user_id, "kb_write", 60)
+    col = _kb_collection(c, sid)
+    _require_editor(c, col["tenant_id"])
+    return _kb_add_connection(c, col, "public_url",
+                              {"url": body.url, "max_pages": body.max_pages}, None)
 
 
 # ── Phase 28 step 6: bulk KB export/import ──────────────────────────────
@@ -2132,45 +2275,13 @@ def google_callback(code: str = "", state: str = "", error: str = "") -> HTMLRes
     return page("Google connected. You can close this window.")
 
 
-@app.post("/api/kb/collections/{sid}/gdoc", status_code=201)
+@app.post("/api/kb/collections/{sid}/gdoc", status_code=202)
 def kb_link_gdoc(sid: str, body: GdocLinkIn, c: Caller = Depends(caller)) -> dict:
+    """Deprecated — thin wrapper over POST /connections {connector:"gdocs"}."""
     rate_limit(c.user_id, "kb_write", 60)
     col = _kb_collection(c, sid)
     _require_editor(c, col["tenant_id"])
-    if not gdrive.connected(col["tenant_id"], _service):
-        raise HTTPException(400, "connect Google for this tenant first")
-    try:
-        doc_id = gdrive.parse_doc_id(body.doc_url)
-        fetched = gdrive.fetch_doc(col["tenant_id"], doc_id, _service)
-    except ValueError as e:
-        raise HTTPException(422, str(e))
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(502, f"Google fetch failed: {e}")
-
-    existing = (c.sb.table("kb_entries").select("entry_id")
-                .eq("source_id", sid).eq("gdoc_id", doc_id).neq("status", "archived")
-                .execute().data or [])
-    row = {
-        "source_id": sid, "tenant_id": col["tenant_id"], "title": fetched["title"],
-        "body_md": fetched["markdown"], "origin": "gdoc", "gdoc_id": doc_id,
-        "gdoc_url": body.doc_url.strip(), "gdoc_modified": fetched["modified_time"],
-        "synced_at": _now_iso(), "sync_error": None,
-        "created_by": c.user_id, "updated_by": c.user_id,
-    }
-    if existing:
-        eid = existing[0]["entry_id"]
-        entry = c.sb.table("kb_entries").update(row).eq("entry_id", eid).execute().data[0]
-        action, verb = "kb_entry.updated", "re-synced"
-    else:
-        entry = c.sb.table("kb_entries").insert(row).execute().data[0]
-        action, verb = "kb_entry.created", "linked"
-
-    from interpreter import audit
-    audit.record(_service, tenant_id=col["tenant_id"], action=action,
-                 actor_id=c.user_id, actor_email=c.email,
-                 target_type="kb_entry", target_id=entry["entry_id"],
-                 summary=f"{verb} Google Doc {fetched['title']!r} into {col.get('name', sid)!r}")
-    return _kb_after_write(entry, col, c)
+    return _kb_add_connection(c, col, "gdocs", {"doc_url": body.doc_url}, None)
 
 
 class GsheetLinkIn(BaseModel):
@@ -2180,45 +2291,29 @@ class GsheetLinkIn(BaseModel):
 
 @app.post("/api/kb/collections/{sid}/gsheet", status_code=202)
 def kb_link_gsheet(sid: str, body: GsheetLinkIn, c: Caller = Depends(caller)) -> dict:
-    """KB source connector #2 (docs/KB_SOURCE_CONNECTORS.md) — sync a Google
-    Sheet, one KB entry per data row. Async like /crawl (a sheet can have
-    hundreds of rows); re-posting the same sheet_url re-syncs it, same
-    pattern as re-crawling — no separate resync endpoint needed."""
+    """Deprecated — thin wrapper over POST /connections {connector:"gsheets"}."""
     rate_limit(c.user_id, "kb_write", 60)
     col = _kb_collection(c, sid)
     _require_editor(c, col["tenant_id"])
-    if not gdrive.connected(col["tenant_id"], _service):
-        raise HTTPException(400, "connect Google for this tenant first")
-    try:
-        sheet_id = gsheets.parse_sheet_id(body.sheet_url)
-    except ValueError as e:
-        raise HTTPException(422, str(e))
-    job_id = jobs.enqueue("sync_gsheet", {
-        "source_id": sid, "tenant_id": col["tenant_id"], "collection_name": col["name"],
-        "sheet_id": sheet_id, "sheet_name": body.sheet_name, "created_by": c.user_id,
-    }, dedupe_key=f"gsheet:{sid}:{sheet_id}:{body.sheet_name or ''}", sb=_service)
-    return {"job_id": job_id, "deduped": job_id is None}
+    return _kb_add_connection(c, col, "gsheets",
+                              {"sheet_url": body.sheet_url, "sheet_name": body.sheet_name}, None)
 
 
-@app.post("/api/kb/entries/{eid}/resync")
+@app.post("/api/kb/entries/{eid}/resync", status_code=202)
 def kb_resync_gdoc(eid: str, c: Caller = Depends(caller)) -> dict:
+    """Re-sync the connection that produced this entry (crawl / gsheet / gdoc).
+    A connection re-sync re-fetches every document the feed holds, so a single
+    entry's resync button just kicks off its whole connection."""
     rate_limit(c.user_id, "kb_write", 60)
     entry = _kb_entry(c, eid)
-    if entry.get("origin") != "gdoc":
-        raise HTTPException(400, "not a Google-linked entry")
+    cid = entry.get("connection_id")
+    if not cid:
+        raise HTTPException(400, "not a connected (synced) entry")
     col = _kb_collection(c, entry["source_id"])
     _require_editor(c, col["tenant_id"])
-    try:
-        fetched = gdrive.fetch_doc(col["tenant_id"], entry["gdoc_id"], _service)
-    except Exception as e:  # noqa: BLE001
-        c.sb.table("kb_entries").update({"sync_error": str(e)[:500]}).eq("entry_id", eid).execute()
-        raise HTTPException(502, f"Google fetch failed: {e}")
-    updated = c.sb.table("kb_entries").update({
-        "title": fetched["title"], "body_md": fetched["markdown"],
-        "gdoc_modified": fetched["modified_time"], "synced_at": _now_iso(),
-        "sync_error": None, "updated_by": c.user_id,
-    }).eq("entry_id", eid).execute().data[0]
-    return _kb_after_write(updated, col, c)
+    job_id = jobs.enqueue("kb_sync", {"connection_id": cid, "collection_name": col["name"]},
+                          dedupe_key=f"kb_sync:{cid}", sb=_service)
+    return {"job_id": job_id, "deduped": job_id is None}
 
 
 # ── Phase 20: email channel ─────────────────────────────────────────

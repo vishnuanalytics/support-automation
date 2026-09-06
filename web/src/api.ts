@@ -19,6 +19,8 @@ import type {
   GoogleStatus,
   Invitation,
   KbCollection,
+  KbConnection,
+  KbConnector,
   KbEntry,
   KbEntryRow,
   KbExportBundle,
@@ -268,7 +270,7 @@ export const api = {
     upload: (id: string, b: { filename: string; content_b64: string }) =>
       req<KbEntry>(`/kb/collections/${id}/upload`, { method: "POST", body: JSON.stringify(b) }),
     crawl: (id: string, url: string, max_pages = 20) =>
-      req<{ job_id: string }>(`/kb/collections/${id}/crawl`, {
+      req<KbConnection>(`/kb/collections/${id}/crawl`, {
         method: "POST",
         body: JSON.stringify({ url, max_pages }),
       }),
@@ -277,14 +279,33 @@ export const api = {
       req<KbEntry>(`/kb/entries/${id}`, { method: "PATCH", body: JSON.stringify(b) }),
     deleteEntry: (id: string) => req<void>(`/kb/entries/${id}`, { method: "DELETE" }),
     linkGdoc: (id: string, doc_url: string) =>
-      req<KbEntry>(`/kb/collections/${id}/gdoc`, { method: "POST", body: JSON.stringify({ doc_url }) }),
+      req<KbConnection>(`/kb/collections/${id}/gdoc`, { method: "POST", body: JSON.stringify({ doc_url }) }),
     resyncGdoc: (entryId: string) =>
-      req<KbEntry>(`/kb/entries/${entryId}/resync`, { method: "POST" }),
+      req<{ job_id: string }>(`/kb/entries/${entryId}/resync`, { method: "POST" }),
     linkGsheet: (id: string, sheet_url: string, sheet_name?: string) =>
-      req<{ job_id: string }>(`/kb/collections/${id}/gsheet`, {
+      req<KbConnection>(`/kb/collections/${id}/gsheet`, {
         method: "POST",
         body: JSON.stringify({ sheet_url, sheet_name }),
       }),
+    // KB source connectors (docs/KB_SOURCE_CONNECTORS.md)
+    listConnectors: (tenantId?: string) =>
+      req<KbConnector[]>(`/kb/connectors${tenantId ? `?tenant_id=${tenantId}` : ""}`),
+    listConnections: (id: string) =>
+      req<KbConnection[]>(`/kb/collections/${id}/connections`),
+    addConnection: (id: string, b: { connector: string; config: Record<string, unknown>; label?: string }) =>
+      req<KbConnection>(`/kb/collections/${id}/connections`, {
+        method: "POST",
+        body: JSON.stringify(b),
+      }),
+    syncConnection: (cid: string) =>
+      req<{ job_id: string }>(`/kb/connections/${cid}/sync`, { method: "POST" }),
+    setConnectionStatus: (cid: string, status: "active" | "paused") =>
+      req<KbConnection>(`/kb/connections/${cid}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status }),
+      }),
+    deleteConnection: (cid: string) =>
+      req<void>(`/kb/connections/${cid}`, { method: "DELETE" }),
     export: (id: string) => req<KbExportBundle>(`/kb/collections/${id}/export`),
     import: (id: string, entries: { title: string; body_md: string }[]) =>
       req<{ job_id: string; accepted: number; warnings: string[] }>(

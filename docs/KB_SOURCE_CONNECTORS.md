@@ -5,6 +5,18 @@ Decision record, not a build plan — same convention as
 doesn't re-derive it from scratch. Nothing here is built except what it
 explicitly says already exists.
 
+**Built so far (2026-09-06):** the `KBConnectorSpec` registry
+(`interpreter/kb_connectors.py`), a first-class `kb_source_connections` table
+(migration 091), one generic sync driver
+(`api/worker.py::_sync_kb_connection`), the `/api/kb/connectors` +
+`/api/kb/collections/{sid}/connections` + `/api/kb/connections/{cid}` routes,
+and a unified **"Connected sources"** panel in `KnowledgeView.tsx` (add /
+re-sync / pause / disconnect, one registry-driven form for every connector).
+Three connectors are registered behind it: `public_url` (§1), `gsheets` (§3),
+`gdocs` (§2). Linear (§4), forums (§5) and Nolt (§6) are **not built** — each
+is now just "register a `KBConnectorSpec` + a `sync()`", no new
+worker/endpoint/UI code.
+
 ## The actual insight: this is not five problems
 
 Every existing ingestion path (`webcrawl.py`, `fileimport.py`, `gdrive.py`,
@@ -123,6 +135,30 @@ with no API (custom-built, gated) falls back to the existing crawler as a
 worse-than-ideal but functional default — don't block the whole feature on
 building N bespoke forum-software connectors up front.
 
+### 6. Nolt — not built; a feedback/roadmap board, same shape as a forum
+Nolt (nolt.io — like Canny/Featurebase) is a hosted feedback board: users post
+requests/bugs, others vote and comment, and an admin marks a post's status
+(`planned` / `in progress` / `complete` / `declined`). It has a REST API
+(`GET /v1/boards/{boardId}/posts`, `/v1/posts/{id}/comments`), so — same
+reasoning as Linear (§4) and forums (§5) — **use the API, don't scrape the
+public board HTML through `webcrawl.py`**. Extraction mirrors the forum
+treatment:
+- A post whose status is `complete` (shipped, with the resolution in the
+  post body / a pinned admin comment) is real institutional knowledge —
+  `quality="community_resolved"`, one `KBDocument` per post (title = the
+  post title, body = description + the admin/accepted comment).
+- A still-open `under review` / `planned` post, or a `declined` one, isn't
+  worth embedding — it's a wish, not an answer. Same "pattern vs proof"
+  filter `case_memory.py` and §4 already apply.
+- Auth: Nolt issues an API key (`apikey` auth, same enum as Linear /
+  Zendesk). One board id per connection (`config: {board_id, api_key_ref}`),
+  a tenant can connect several. `watermark` = the last post `updatedAt` seen,
+  for incremental re-sync.
+
+This is a sibling of §5, not a new architecture — it lands the same way:
+a `KBConnectorSpec(slug="nolt", auth="apikey", …)` whose `sync()` pages the
+posts API and yields the resolved ones.
+
 ## Cross-cutting decisions (the "good structure" part)
 
 These are what actually make five connectors compose into one coherent
@@ -193,12 +229,14 @@ design makes any easier or harder.
 ## Suggested build order, if/when this gets picked up
 
 Not committed to, just the honest ranking: (1) ~~public-URL sitemap +
-re-crawl~~ **built 2026-09-05, see PROJECT_SCOPE.md** (cheapest, extends
-what already works, no new auth model) →
-(2) ~~Google Sheets~~ **built 2026-09-05, see PROJECT_SCOPE.md** (reuses
-existing Drive OAuth, high value for FAQ-shaped tenants like a fresh
-workspace would actually have) → (3) Linear (new
-auth, but a clean API) → (4) forums (most fragmented source shape, lowest
-priority until a real tenant asks for a specific one) → (5) the onboarding
-wizard step, once at least two connectors exist to make "pick your
-sources" meaningful.
+re-crawl~~ **built 2026-09-05** (cheapest, extends what already works, no new
+auth model) → (2) ~~Google Sheets~~ **built 2026-09-05** (reuses existing
+Drive OAuth, high value for FAQ-shaped tenants) → (2.5) ~~the
+`KBConnectorSpec` registry + `kb_source_connections` table + generic sync
+driver + unified "Connected sources" UI~~ **built 2026-09-06, see
+PROJECT_SCOPE.md** (the "get the structure right before connector #3" step —
+existing crawl/gsheet/gdoc paths migrated onto it) → (3) Linear
+(`apikey` auth, clean GraphQL API) → (4) forums / **Nolt (§6)** (API-per-
+platform, `apikey`; Nolt first since a real tenant asked) → (5) the
+onboarding-wizard "pick your sources" step, now that the registry + panel
+exist to make it meaningful.
