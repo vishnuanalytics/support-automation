@@ -66,6 +66,16 @@ successful SMTP send the reply is also mirrored onto the Case as an outbound
 send). Salesforce stays the source of truth for the Case; Gmail just carries
 the message.
 
+## Neo4j MCP server (`.mcp.json`)
+
+The `neo4j` MCP server (query the graph from Claude Code) runs from
+`venv/bin/mcp-neo4j-cypher` — the package is in `requirements-dev.txt`, so
+`pip install -r requirements-dev.txt` into `venv/` is all it needs. No
+global `uv`/`uvx` on PATH required (the old config used `uvx`, which failed
+with `Executable not found in $PATH`). It reads `NEO4J_URI` /
+`NEO4J_USERNAME` / `NEO4J_PASSWORD` from the env block in `.mcp.json`; add
+`--read-only` to `args` if you want it query-only.
+
 ## Caveats / next step
 
 - The stack only runs while your PC is on. Fine for demos; not a substitute

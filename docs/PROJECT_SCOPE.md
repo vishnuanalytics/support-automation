@@ -707,8 +707,52 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-06 (chunk 8) — org-level KB is now the default model (this is the
-most recent work in this file).** Customer reviews: companies want the RAG
+**2026-09-06 (chunk 9) — Neo4j + Supabase infra hardening (this is the most
+recent work in this file).** Four things:
+
+1. **Neo4j driver is now a process singleton** (`ingestion/neo4j_sync.py`).
+   `get_neo4j_driver()` used to build a fresh `GraphDatabase.driver` on
+   every call — `retrieval.graph_expand` in the hot path of every flow run,
+   `case_memory` per match/upsert, `kb_writeback` per KB supersede, each
+   `.close()`d after. Now a lock-guarded module singleton with explicit
+   config (`NEO4J_POOL_SIZE` / `CONNECT_TIMEOUT` / `ACQUIRE_TIMEOUT` /
+   `MAX_CONN_LIFETIME` env-overridable, `keep_alive`) + `verify_
+   connectivity()` on first build (an unreachable graph raises and is NOT
+   cached — next call retries); `atexit` + a new `close_neo4j_driver()` for
+   batch scripts. All per-op `.close()` calls removed.
+2. **Migration `095`** — Supabase security advisor pass 2. The `purge_old*`
+   RPCs (all DELETE rows) and `claim_job(uuid)` were granted EXECUTE to
+   `anon`/`authenticated` and reachable via `/rest/v1/rpc` — a signed-in
+   user could `purge_old_audit_log(retain_days => 0)` and wipe the audit
+   log. REVOKEd (cron + service-role only; service key bypasses grants).
+   `SET search_path` on the 6 flagged functions. `idx_zapier_docs_source`
+   for the unindexed FK. Explicit `using(false)` policies on the 5
+   secret/worker-internal tables (documents intent; behaviorally a no-op —
+   RLS-on-no-policy already denies clients). **Security advisors 18 → 3**
+   (the 3 left: Supabase-default `vector`/`citext` in `public`, and the
+   leaked-password-protection Auth toggle — a dashboard setting, do it
+   there).
+3. **Migration `096`** — wrap `auth.uid()`/`auth.jwt()` in `(select …)`
+   across 10 RLS policies (perf advisor 0003 — evaluate once per statement,
+   not per row; semantically identical). `auth_rls_initplan` 10 → 0,
+   `unindexed_fk` 1 → 0. **Not done:** `multiple_permissive_policies` (~40,
+   ~18 tables) — splitting every `FOR ALL` write policy into 3
+   command-specific policies is a big risky write-path RLS refactor for a
+   scale-only lint; left for a dedicated verified pass. The 21 `unused_
+   index` INFOs are low-traffic artifacts (dropping risks needing them).
+4. **Neo4j MCP fixed** — `.mcp.json` was `uvx mcp-neo4j-cypher` and `uvx`
+   isn't on PATH (`Executable not found`). Now `venv/bin/mcp-neo4j-cypher`
+   (added to `requirements-dev.txt`) — no global `uv` needed. Takes effect
+   on the next Claude Code restart.
+
+**Verify:** `test_case_graph_sync.py` +2 (singleton reuse / no-cache-on-
+connectivity-failure). **862 offline tests green.** Migrations `095`/`096`
+applied live; drift check clean; advisors re-run and confirmed.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (chunk 8) — org-level KB is now the default model.** Customer reviews: companies want the RAG
 fed org-wide from many sources; team-level docs are rare. Three changes:
 
 1. **Retrieval scoping** (`interpreter/retrieval.py::resolve_sources`) — a

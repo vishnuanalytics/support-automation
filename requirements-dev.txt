@@ -1,2 +1,6 @@
 # Test + CI only — not in the runtime image.
 pytest
+
+# The Neo4j MCP server (.mcp.json) — installed into venv/ so it works without
+# a global `uv`/`uvx` on PATH. `venv/bin/mcp-neo4j-cypher` is the console script.
+mcp-neo4j-cypher>=0.6.0
