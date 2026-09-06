@@ -650,11 +650,23 @@ export interface BillingUsage {
   runs_count: number;
   tokens_total: number;
   tokens_by_model: Record<string, number>;
+  by_node: { node: string; tokens: number; estimated_cost_usd: number }[];
   by_flow: { flow_id: string; name: string; runs: number; tokens: number; estimated_cost_usd: number }[];
   estimated_cost_usd: number;
   daily: { date: string; runs: number; tokens: number }[];
   pct_runs_used: number | null;
   pct_tokens_used: number | null;
+}
+
+export interface FlowCostDelta {
+  flow_id: string;
+  name: string;
+  edited_at: string;
+  before_avg_tokens: number;
+  after_avg_tokens: number;
+  ratio: number | null;
+  runs_before: number;
+  runs_after: number;
 }
 
 export interface AuditEvent {

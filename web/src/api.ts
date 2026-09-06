@@ -3,6 +3,7 @@ import type {
   AssistResult,
   AuditEvent,
   BillingUsage,
+  FlowCostDelta,
   EmailChannel,
   EmailChannelSave,
   Flow,
@@ -482,6 +483,8 @@ export const api = {
     const qs = p.toString();
     return req<BillingUsage>(`/billing/usage${qs ? `?${qs}` : ""}`);
   },
+  billingFlowDeltas: (tenantId?: string) =>
+    req<FlowCostDelta[]>(`/billing/flow-deltas${tenantId ? `?tenant_id=${tenantId}` : ""}`),
 
   listAudit: (q: { tenantId?: string; action?: string; limit?: number } = {}) => {
     const p = new URLSearchParams();

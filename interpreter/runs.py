@@ -24,12 +24,14 @@ def _slim_retrieval(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def _token_usage(trace: list[dict[str, Any]]) -> tuple[int, dict[str, int]]:
+def _token_usage(trace: list[dict[str, Any]]) -> tuple[int, dict[str, int], dict[str, int]]:
     """P9 — roll each LLM-calling node's `data.tokens.total` (classify /
-    draft / ai_prompt; see interpreter/registry.py) into a run-level total
-    and a per-model breakdown, for the usage & billing dashboard."""
+    draft / ai_prompt; see interpreter/registry.py) into a run-level total,
+    a per-model breakdown, and a per-node-type breakdown, for the usage &
+    billing dashboard."""
     total = 0
     by_model: dict[str, int] = {}
+    by_node: dict[str, int] = {}
     for t in trace or []:
         tok = (t.get("data") or {}).get("tokens")
         if not tok or not tok.get("total"):
@@ -38,7 +40,9 @@ def _token_usage(trace: list[dict[str, Any]]) -> tuple[int, dict[str, int]]:
         total += n
         model = (t.get("data") or {}).get("model") or "unknown"
         by_model[model] = by_model.get(model, 0) + n
-    return total, by_model
+        node = t.get("type") or t.get("key") or "unknown"
+        by_node[node] = by_node.get(node, 0) + n
+    return total, by_model, by_node
 
 
 def build_row(flow: dict, final: dict, *, case: dict, source: str,
@@ -57,7 +61,7 @@ def build_row(flow: dict, final: dict, *, case: dict, source: str,
     # answering in Chatter/comments should still reach the customer.
     pending = (action in ("ask_human", "handover", "notify", "need_info")
                and bool(case.get("sf_id") or case.get("id")))
-    tokens_total, tokens_by_model = _token_usage(final.get("trace") or [])
+    tokens_total, tokens_by_model, tokens_by_node = _token_usage(final.get("trace") or [])
     return {
         "flow_id": flow["flow_id"],
         "flow_version": flow.get("flow_version"),
@@ -77,6 +81,7 @@ def build_row(flow: dict, final: dict, *, case: dict, source: str,
         "trace": final.get("trace") or [],
         "tokens_total": tokens_total,
         "tokens_by_model": tokens_by_model,
+        "tokens_by_node": tokens_by_node,
         "retrieval": _slim_retrieval(final.get("retrieval")),
         "sf_writeback": final.get("sf_writeback"),
         "case_payload": case,

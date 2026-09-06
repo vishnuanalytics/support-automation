@@ -1451,7 +1451,8 @@ def billing_usage(tenant_id: str | None = None, period: str | None = None,
     plan = (trows[0].get("plan") if trows else None) or "free"
 
     rows = (
-        c.sb.table("runs").select("flow_id, tokens_total, tokens_by_model, created_at")
+        c.sb.table("runs")
+        .select("flow_id, tokens_total, tokens_by_model, tokens_by_node, created_at")
         .eq("tenant_id", tid)
         .gte("created_at", period_start).lt("created_at", period_end)
         .limit(5000).execute().data
@@ -1464,6 +1465,59 @@ def billing_usage(tenant_id: str | None = None, period: str | None = None,
     }
     return {"period_label": period_label,
             **billing.usage_summary(rows, plan, period_start, period_end, flow_names)}
+
+
+@app.get("/api/billing/flow-deltas")
+def billing_flow_deltas(tenant_id: str | None = None, c: Caller = Depends(caller)) -> list[dict]:
+    """Which flows got more/less expensive per run right after their last
+    published edit — mean tokens/run in the 14 days before the newest
+    `flow_versions.created_at` vs since. Only flows with >= 5 runs on each
+    side are reported; `ratio` > 1 = pricier now. Owner-only."""
+    from datetime import datetime, timedelta, timezone
+
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    now = datetime.now(timezone.utc)
+    window_start = (now - timedelta(days=45)).isoformat()
+
+    flows = {f["flow_id"]: f["name"] for f in
+             (c.sb.table("flows").select("flow_id, name").eq("tenant_id", tid).execute().data or [])}
+    if not flows:
+        return []
+    # newest version per flow
+    latest: dict[str, str] = {}
+    for v in (c.sb.table("flow_versions").select("flow_id, created_at")
+              .in_("flow_id", list(flows)).order("created_at", desc=True)
+              .limit(2000).execute().data or []):
+        latest.setdefault(v["flow_id"], v["created_at"])
+
+    runs = (c.sb.table("runs").select("flow_id, tokens_total, created_at")
+            .eq("tenant_id", tid).gte("created_at", window_start)
+            .limit(8000).execute().data or [])
+
+    agg: dict[str, dict[str, list[int]]] = {}
+    for r in runs:
+        fid, edited = r.get("flow_id"), latest.get(r.get("flow_id"))
+        if not (fid and edited):
+            continue
+        side = "after" if r["created_at"] >= edited else "before"
+        agg.setdefault(fid, {"before": [], "after": []})[side].append(int(r.get("tokens_total") or 0))
+
+    out = []
+    for fid, s in agg.items():
+        if len(s["before"]) < 5 or len(s["after"]) < 5:
+            continue
+        b = sum(s["before"]) / len(s["before"])
+        a = sum(s["after"]) / len(s["after"])
+        out.append({
+            "flow_id": fid, "name": flows.get(fid, fid),
+            "edited_at": latest[fid],
+            "before_avg_tokens": round(b), "after_avg_tokens": round(a),
+            "ratio": round(a / b, 2) if b else None,
+            "runs_before": len(s["before"]), "runs_after": len(s["after"]),
+        })
+    out.sort(key=lambda x: -(x["ratio"] or 0))
+    return out
 
 
 # ── KIL-f: the Knowledge Integrity Loop review queue + metrics ─────────

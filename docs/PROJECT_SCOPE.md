@@ -707,8 +707,53 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-06 (chunk 11) — closing KB-connector loopholes (this is the most
-recent work in this file).**
+**2026-09-06 (chunk 12) — four feature areas from the product review (this
+is the most recent work in this file).** After the KB-connector loopholes
+were closed, the user picked all four review areas; these landed as a
+sequence of commits on `browser-verified-picker-fixes`:
+
+- **Onboarding bypass closed** (`c95da5b`) — the wizard's top "skip setup"
+  button is disabled until a knowledge source is connected (Step 4 is now
+  required, Step 5 flow-creation is locked on `kbDone`).
+- **Tenant observability** (`4945885`) — `GET /api/health/tenant` aggregates
+  already-tenant-scoped signals (failing connections + sample, review
+  backlog + oldest, stuck reasoning states >6h, pending doc write-backs,
+  24h run outcomes + struggle-rate, ingestion staleness) into one payload;
+  `ReviewView` renders a "Bot health (24h)" tile strip above the KIL
+  metrics. A real per-tenant *failed-jobs* view still needs a
+  `jobs.tenant_id` migration — deferred.
+- **More KB connectors — Discourse** (`7de7339`) — `interpreter/discourse.py`
+  (REST, apikey-optional) + a `discourse` connector spec (accepted-answer /
+  first-replies body, `community_resolved` quality when solved). Confluence
+  / Notion / SharePoint still not built.
+- **Cost & usage analytics** (this commit) — per-node-type token + $
+  breakdown and a "this flow got pricier after its last edit" delta.
+  Migration `098` adds `runs.tokens_by_node` (jsonb); `interpreter/runs.
+  _token_usage` now returns `(total, by_model, by_node)` and `build_row`
+  persists `tokens_by_node` (node = trace entry `type`). `billing.usage_
+  summary` aggregates it into a `by_node` list with cost split
+  proportionally (the trace has no per-node model, so each node's $ is its
+  token share of the run-level estimate). New owner-only `GET
+  /api/billing/flow-deltas`: mean tokens/run in the 45d window before vs.
+  since each flow's newest `flow_versions.created_at`, flows with ≥5 runs
+  each side, `ratio` desc. `BillingView` renders a "by node type" table and
+  a warning banner for any flow with `ratio > 1.5`. Per-tenant spend caps
+  that *enforce* (vs. today's warn-only `check_and_warn`) — not done.
+
+**886 offline tests green** (was 876). `098` applied live, drift clean, tsc
+clean.
+
+**Still open** (product-review list): shared rate limiting (in-memory →
+DB), a real per-tenant failed-*jobs* view (`jobs.tenant_id`), a retrieval
+eval harness + knowledge-health per source, enforcing spend caps,
+Confluence/Notion/SharePoint connectors, and the `multiple_permissive_
+policies` RLS cleanup. Plus the always-on worker (needs a host — guide in
+`docs/DEPLOY_WEB_AND_API.md`).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (chunk 11) — closing KB-connector loopholes.**
 
 - **Incremental sync via the watermark** (`8db0060`) — it was stored on
   `kb_source_connections.watermark` and never read; every daily run

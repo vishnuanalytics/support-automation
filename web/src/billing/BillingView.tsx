@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
-import type { BillingUsage } from "../types";
+import type { BillingUsage, FlowCostDelta } from "../types";
 
 function shiftPeriod(period: string, delta: number): string {
   const [y, m] = period.split("-").map(Number);
@@ -15,6 +15,7 @@ export function BillingView({ tenantId }: { tenantId: string }) {
   }, []);
   const [period, setPeriod] = useState(currentPeriod);
   const [usage, setUsage] = useState<BillingUsage | null>(null);
+  const [deltas, setDeltas] = useState<FlowCostDelta[]>([]);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
@@ -23,6 +24,7 @@ export function BillingView({ tenantId }: { tenantId: string }) {
       .billingUsage({ period, tenantId })
       .then(setUsage)
       .catch((e: ApiError) => setErr(e.message));
+    api.billingFlowDeltas(tenantId).then(setDeltas).catch(() => {});
   }, [period, tenantId]);
 
   const maxDailyTokens = Math.max(1, ...(usage?.daily.map((d) => d.tokens) ?? [0]));
@@ -46,6 +48,21 @@ export function BillingView({ tenantId }: { tenantId: string }) {
           {err.toLowerCase().includes("owner") && (
             <> — only a workspace owner can view billing.</>
           )}
+        </div>
+      )}
+
+      {deltas.filter((d) => (d.ratio ?? 0) > 1.5).length > 0 && (
+        <div className="banner warn col" style={{ gap: 2 }}>
+          <strong>Cost per run jumped after a recent edit</strong>
+          {deltas
+            .filter((d) => (d.ratio ?? 0) > 1.5)
+            .map((d) => (
+              <div key={d.flow_id} style={{ fontSize: 12 }}>
+                {d.name}: ×{d.ratio!.toFixed(1)} tokens/run since {String(d.edited_at).slice(0, 10)} (
+                {d.before_avg_tokens.toLocaleString()} → {d.after_avg_tokens.toLocaleString()},{" "}
+                {d.runs_before}/{d.runs_after} runs before/after)
+              </div>
+            ))}
         </div>
       )}
 
@@ -106,6 +123,30 @@ export function BillingView({ tenantId }: { tenantId: string }) {
                       <td className="muted">{f.runs.toLocaleString()}</td>
                       <td className="muted">{f.tokens.toLocaleString()}</td>
                       <td className="muted">${f.estimated_cost_usd.toFixed(2)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          )}
+
+          {usage.by_node.length > 0 && (
+            <>
+              <h5>by node type</h5>
+              <table className="runs-table">
+                <thead>
+                  <tr>
+                    <th>node</th>
+                    <th>tokens</th>
+                    <th>est. cost</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {usage.by_node.map((n) => (
+                    <tr key={n.node}>
+                      <td>{n.node}</td>
+                      <td className="muted">{n.tokens.toLocaleString()}</td>
+                      <td className="muted">${n.estimated_cost_usd.toFixed(2)}</td>
                     </tr>
                   ))}
                 </tbody>
