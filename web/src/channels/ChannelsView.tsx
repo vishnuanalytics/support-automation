@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
-import type { EmailChannel, EmailChannelSave, FreshchatChannel, FreshchatChannelSave } from "../types";
+import type {
+  EmailChannel,
+  EmailChannelSave,
+  FreshchatChannel,
+  FreshchatChannelSave,
+  PostHogSave,
+  PostHogStatus,
+} from "../types";
 
 type Form = {
   provider: "imap" | "gmail";
@@ -49,6 +56,132 @@ export function ChannelsView({ tenantId }: { tenantId: string }) {
       <EmailPanel tenantId={tenantId} />
       <div style={{ borderTop: "1px solid var(--border)", margin: "8px 0" }} />
       <FreshchatPanel tenantId={tenantId} />
+      <div style={{ borderTop: "1px solid var(--border)", margin: "8px 0" }} />
+      <PostHogPanel tenantId={tenantId} />
+    </div>
+  );
+}
+
+function PostHogPanel({ tenantId }: { tenantId: string }) {
+  const [st, setSt] = useState<PostHogStatus | null>(null);
+  const [host, setHost] = useState("https://us.posthog.com");
+  const [projectId, setProjectId] = useState("");
+  const [milestones, setMilestones] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  function load() {
+    api.posthog
+      .status(tenantId)
+      .then((s) => {
+        setSt(s);
+        if (s.configured) {
+          setHost(s.host || "https://us.posthog.com");
+          setProjectId(s.project_id || "");
+          setMilestones((s.milestone_events || []).join(", "));
+        }
+      })
+      .catch((e: ApiError) => setErr(e.message));
+  }
+  useEffect(load, [tenantId]);
+
+  const payload = useMemo<PostHogSave>(
+    () => ({
+      tenant_id: tenantId,
+      host: host.trim(),
+      project_id: projectId.trim(),
+      milestone_events: milestones
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean),
+      api_key: apiKey || undefined,
+    }),
+    [tenantId, host, projectId, milestones, apiKey],
+  );
+
+  async function run<T>(fn: () => Promise<T>, ok: string) {
+    setBusy(true);
+    setErr(null);
+    setMsg(null);
+    try {
+      await fn();
+      setMsg(ok);
+      setApiKey("");
+      load();
+    } catch (e) {
+      setErr((e as ApiError).message);
+    }
+    setBusy(false);
+  }
+
+  const testConn = () =>
+    run(async () => {
+      const r = await api.posthog.test(payload);
+      if (!r.ok) throw new ApiError(0, r.detail || "connection failed");
+    }, "connection ok");
+
+  return (
+    <div className="pane" style={{ overflow: "auto", padding: 16, maxWidth: 640 }}>
+      <h4>Product analytics — PostHog</h4>
+      <p className="muted" style={{ fontSize: 12 }}>
+        Connect your PostHog project and the platform will pull a per-person
+        activity rollup (last seen, 30-day event & active-day counts, a usage
+        trend) plus counts for the milestone events you name below. It uses that
+        to ground a draft and routing in what the user actually did — never to
+        block a run. Nothing here copies your raw event stream; PostHog stays the
+        source of truth. The API key is stored encrypted (Supabase Vault) and
+        never shown again.
+      </p>
+
+      {st?.configured && (
+        <p style={{ fontSize: 12 }}>
+          Status: <strong>{st.status}</strong>
+          {st.has_credentials ? " · key stored" : " · no key stored"}
+        </p>
+      )}
+
+      <label className="col" style={{ gap: 2, fontSize: 12 }}>
+        Host
+        <input value={host} onChange={(e) => setHost(e.target.value)}
+          placeholder="https://us.posthog.com" />
+      </label>
+      <label className="col" style={{ gap: 2, fontSize: 12, marginTop: 8 }}>
+        Project ID
+        <input value={projectId} onChange={(e) => setProjectId(e.target.value)}
+          placeholder="12345" />
+      </label>
+      <label className="col" style={{ gap: 2, fontSize: 12, marginTop: 8 }}>
+        Milestone events (comma-separated — the ones worth surfacing on a case)
+        <input value={milestones} onChange={(e) => setMilestones(e.target.value)}
+          placeholder="onboarding_completed, api_key_invalid, export_started" />
+      </label>
+      <label className="col" style={{ gap: 2, fontSize: 12, marginTop: 8 }}>
+        Personal API key {st?.has_credentials && <span className="muted">(leave blank to keep the stored one)</span>}
+        <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)}
+          placeholder="phx_..." />
+      </label>
+
+      {err && <div className="banner err" style={{ marginTop: 8 }}>{err}</div>}
+      {msg && <div className="banner ok" style={{ marginTop: 8 }}>{msg}</div>}
+
+      <div className="row" style={{ gap: 6, marginTop: 12 }}>
+        <button className="primary" disabled={busy}
+          onClick={() => run(() => api.posthog.save(payload), "saved")}>
+          {st?.configured ? "Save" : "Connect PostHog"}
+        </button>
+        <button disabled={busy || !projectId.trim()} onClick={testConn}>
+          Test connection
+        </button>
+        {st?.configured && (
+          <button disabled={busy}
+            onClick={() => confirm("Disconnect PostHog?") &&
+              run(() => api.posthog.remove(tenantId), "disconnected")}>
+            Disconnect
+          </button>
+        )}
+      </div>
     </div>
   );
 }

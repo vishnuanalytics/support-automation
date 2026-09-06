@@ -11,6 +11,8 @@ import type {
   FlowMeta,
   FreshchatChannel,
   FreshchatChannelSave,
+  PostHogStatus,
+  PostHogSave,
   GraphAskResult,
   FlowVersion,
   FlowTrigger,
@@ -397,6 +399,19 @@ export const api = {
     oauthAuthorize: (tenantId?: string) =>
       req<{ url: string }>(
         `/integrations/freshchat/oauth/authorize${tenantId ? `?tenant_id=${tenantId}` : ""}`,
+      ),
+  },
+
+  posthog: {
+    status: (tenantId?: string) =>
+      req<PostHogStatus>(`/integrations/posthog${tenantId ? `?tenant_id=${tenantId}` : ""}`),
+    save: (b: PostHogSave) =>
+      req<PostHogStatus>("/integrations/posthog", { method: "PUT", body: JSON.stringify(b) }),
+    remove: (tenantId?: string) =>
+      req<void>(`/integrations/posthog${tenantId ? `?tenant_id=${tenantId}` : ""}`, { method: "DELETE" }),
+    test: (b: PostHogSave) =>
+      req<{ ok: boolean; detail: string }>(
+        "/integrations/posthog/test", { method: "POST", body: JSON.stringify(b) },
       ),
   },
 

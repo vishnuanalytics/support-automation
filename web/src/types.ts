@@ -409,6 +409,24 @@ export interface FreshchatChannelSave {
   client_secret?: string;
 }
 
+export interface PostHogStatus {
+  tenant_id: string;
+  configured: boolean;
+  status: "none" | "inactive" | "active" | "error";
+  host?: string;
+  project_id?: string;
+  milestone_events?: string[];
+  has_credentials?: boolean;
+}
+
+export interface PostHogSave {
+  tenant_id?: string;
+  host?: string;
+  project_id?: string;
+  milestone_events?: string[];
+  api_key?: string;
+}
+
 export interface PolicyRule {
   rule_id: string;
   tenant_id: string;

@@ -707,11 +707,33 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-06 (Phase 30 — Product-analytics connector, chunk 1: design
-doc). This is the most recent work in this file.** Picked from a
-next-phase menu: correlate what a customer's users actually did in the
-product with why they file support cases — the second half of the
-"combination beats any single tool" pitch (the first half being KIL).
+**2026-09-06 (Phase 30 — Product-analytics connector, chunk 2: the PostHog
+connector). This is the most recent work in this file.**
+
+- **`interpreter/posthog.py`** — `PostHogConfig`, Vault-brokered API key,
+  `load`/`save`/`delete`/`available`, `_query` (one HogQL POST), `test_
+  connection`, `fetch_person_rollups(since, limit) -> PersonRollup[]` (base
+  30d rollup + 30-vs-prior trend + milestone counts; 5000-person cap;
+  milestone names validated before inlining — no free text in a query).
+- **`GET/PUT/DELETE /api/integrations/posthog` + `/test`** — owner-gated,
+  `kind='posthog'` in `tenant_integrations` (**no migration**).
+- **Web** — a "Product analytics — PostHog" panel in `ChannelsView` (host /
+  project id / milestone list / key + Test connection).
+- `tests/test_posthog.py` (18) + `test_api.py` +1. **945 offline green**;
+  tsc + `vite build` clean. **Not live-verified** — no PostHog project in
+  this sandbox; `test_connection` is the live check once a key exists.
+- **Next: chunk 3** — `(:Contact {email, tenant_id})` + `(:Case)-[:FILED_BY]
+  ->(:Contact)` in `case_graph_sync`, the `(email, tenant_id)` constraint,
+  and a migration for `graph_sync_state.coverage_pct` + the optional
+  `account_domain`.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (Phase 30 chunk 1: design doc).** Picked from a next-phase
+menu: correlate what a customer's users actually did in the product with
+why they file support cases — the second half of the "combination beats
+any single tool" pitch (the first half being KIL).
 
 - **`docs/PRODUCT_ANALYTICS_CONNECTOR.md`** (new) — the decision record.
   Provider: **PostHog** first (API-key auth, HogQL query API, `email` a

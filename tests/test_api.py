@@ -110,6 +110,13 @@ def test_job_failures_needs_a_token():
     assert client.get("/api/jobs/failures").status_code == 401
 
 
+def test_posthog_integration_endpoints_need_a_token():
+    assert client.get("/api/integrations/posthog").status_code == 401
+    assert client.put("/api/integrations/posthog", json={"project_id": "1"}).status_code == 401
+    assert client.delete("/api/integrations/posthog").status_code == 401
+    assert client.post("/api/integrations/posthog/test", json={"project_id": "1"}).status_code == 401
+
+
 def test_trigger_endpoint_needs_a_token_and_trigger_is_a_node_type():
     assert client.post("/api/triggers/some-flow", json={"plan": "free"}).status_code == 401
     body = client.get("/api/node-types").json()

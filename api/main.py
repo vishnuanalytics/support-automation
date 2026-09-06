@@ -3128,6 +3128,94 @@ def freshchat_webhook_url(tenant_id: str | None = None, c: Caller = Depends(call
     return {"url": f"{_public_base()}/webhooks/freshchat/{tid}"}
 
 
+# ── Product analytics: PostHog (Phase 30, docs/PRODUCT_ANALYTICS_CONNECTOR.md) ──
+class PostHogIn(BaseModel):
+    tenant_id: str | None = None
+    host: str | None = None
+    project_id: str | None = None
+    milestone_events: list[str] | None = None
+    api_key: str | None = None
+
+
+def _posthog_cfg_from_body(tid: str, body: PostHogIn, existing) -> "object":
+    from interpreter.posthog import PostHogConfig, _clean_host, _clean_milestones
+    return PostHogConfig(
+        tenant_id=tid,
+        host=_clean_host(body.host if body.host is not None
+                         else (existing.host if existing else None)),
+        project_id=str(body.project_id if body.project_id is not None
+                       else (existing.project_id if existing else "")),
+        milestone_events=_clean_milestones(
+            body.milestone_events if body.milestone_events is not None
+            else (existing.milestone_events if existing else [])),
+    )
+
+
+@app.get("/api/integrations/posthog")
+def posthog_status(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    """PostHog connection status for the caller's tenant. Never returns the key."""
+    tid = _caller_tenant(c, tenant_id)
+    from interpreter.posthog import load
+    cfg = load(tid, _service)
+    if not cfg:
+        return {"tenant_id": tid, "configured": False, "status": "none"}
+    return {"tenant_id": tid, **cfg.public_status()}
+
+
+@app.put("/api/integrations/posthog")
+def posthog_configure(body: PostHogIn, c: Caller = Depends(caller)) -> dict:
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    rate_limit(c.user_id, "integration", 30)
+    from interpreter.posthog import load, save
+
+    existing = load(tid, _service)
+    cfg = _posthog_cfg_from_body(tid, body, existing)
+    if not cfg.project_id:
+        raise HTTPException(422, "project_id is required")
+    has_key = bool(body.api_key) or bool(existing and existing.has_credentials)
+    if not has_key:
+        raise HTTPException(422, "an api_key is required")
+    cfg.status = "active"
+    save(cfg, _service, api_key=body.api_key)
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid,
+                 action="posthog.configured" if existing else "posthog.connected",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="integration", target_id=tid,
+                 summary=f"{'updated' if existing else 'connected'} the PostHog connector")
+    return posthog_status(tenant_id=tid, c=c)
+
+
+@app.delete("/api/integrations/posthog", status_code=204)
+def posthog_disconnect(tenant_id: str | None = None, c: Caller = Depends(caller)) -> None:
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    from interpreter import audit
+    from interpreter.posthog import delete
+    delete(tid, _service)
+    audit.record(_service, tenant_id=tid, action="posthog.disconnected",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="integration", target_id=tid,
+                 summary="disconnected the PostHog connector")
+
+
+@app.post("/api/integrations/posthog/test")
+def posthog_test(body: PostHogIn, c: Caller = Depends(caller)) -> dict:
+    """A cheap `SELECT 1` HogQL query — saves nothing. Uses the posted key,
+    falling back to the stored one when the field is blank."""
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    rate_limit(c.user_id, "integration", 20)
+    from interpreter.posthog import load, test_connection
+
+    existing = load(tid, _service)
+    cfg = _posthog_cfg_from_body(tid, body, existing)
+    return test_connection(tid, _service, host=cfg.host, project_id=cfg.project_id,
+                           api_key=body.api_key or None)
+
+
 # ── BYOK: self-serve LLM provider keys + model roster (chunk 3 of the
 #    2026-09-04 onboarding/robustness work) ─────────────────────────────
 _LLM_PROVIDERS = ("groq", "anthropic", "openrouter")

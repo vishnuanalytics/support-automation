@@ -201,11 +201,22 @@ tenants with an active `posthog` integration.
 ## Chunk plan (one verifiable chunk each)
 
 1. **This design doc.** ✅
-2. **Connector + credentials** — `interpreter/posthog.py` (auth,
-   `test_connection`, `fetch_person_rollups`), `GET/PUT/DELETE
-   /api/integrations/posthog`, a web "Connect PostHog" card with the
-   milestone-events list. Offline tests with a stubbed HTTP client;
-   `test_connection` live-checked if a key is available.
+2. **Connector + credentials.** ✅ (2026-09-06) `interpreter/posthog.py` —
+   `PostHogConfig` (`host` / `project_id` / `milestone_events`), Vault-brokered
+   API key (`_key`), `load` / `save` / `delete` / `available`, `_query` (one
+   HogQL POST to `/api/projects/:id/query/`), `test_connection` (`SELECT 1`),
+   `fetch_person_rollups(since, limit)` → `PersonRollup(email, last_seen_at,
+   events_30d, active_days_30d, usage_trend, milestones[])` from three HogQL
+   queries (base 30d rollup, 30-vs-prior-30d trend, milestone counts over
+   90d; `_MAX_PERSONS`=5000 cap; milestone names validated against
+   `_EVENT_NAME_RE` before inlining — no free text in a query). `GET/PUT/
+   DELETE /api/integrations/posthog` + `/test`, owner-gated, `kind='posthog'`
+   in `tenant_integrations` (no migration). Web: a "Product analytics —
+   PostHog" panel in `ChannelsView` (host / project id / milestone list /
+   key + Test connection). `tests/test_posthog.py` (18) + `test_api.py` +1
+   guard; 945 offline green; tsc + build clean. Not live-verified (no
+   PostHog project wired in this sandbox — `test_connection` is the live
+   check when a key exists).
 3. **`(:Contact)` in the graph** — `case_graph_sync` MERGEs
    `(:Contact {email})` + `[:FILED_BY]`; the `(email, tenant_id)`
    constraint; migration for `graph_sync_state.coverage_pct` and the
