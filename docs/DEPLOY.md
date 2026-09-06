@@ -14,6 +14,11 @@ HTTP API:
 need no public URL and no inbound firewall rules. `api` is only needed by
 the web editor (it can also live on Vercel).
 
+**Guides:** `DEPLOY_ORACLE.md` — the outbound-only stack on an Oracle
+Always-Free VM. `DEPLOY_WEB_AND_API.md` — adds the public HTTPS API (Caddy +
+TLS) and the CDN-hosted frontend, so the whole product runs continuously at
+$0.
+
 `Procfile` and `railway.json` in the repo root declare these for
 buildpack/Railway-style platforms. `docker-compose.yml` (Phase 20j) runs
 the same four locally or on a VM.
