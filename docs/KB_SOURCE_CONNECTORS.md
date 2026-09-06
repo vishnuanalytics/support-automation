@@ -120,6 +120,15 @@ older single `access` value (`read_only`/`suggest`/`write_back`) still
 normalizes: it maps to `{index: true, on_correction: <the same, "off" for
 read_only>}`.
 
+**Org-level default (built 2026-09-06).** `tenants.kb_doc_defaults` (jsonb,
+migration `094`) is a partial `{index?, on_correction?, github_repo?}` blob
+— `GET`/`PUT /api/kb/doc-defaults` (editor-gated, `_validate_kb_doc_
+defaults` applies the same rules). `_kb_add_connection` merges it *under* an
+incoming gdocs config (`{**default, **raw}`, per-doc wins), and the "+ add
+source" form pre-fills the two dropdowns + repo from it. So an org sets
+"every new doc → suggest into `acme/support-kb`" once. `{}` = system
+defaults (`index: true`, `on_correction: off`).
+
 `suggest` and `write_back` share the same `gdoc_writeback` job, the same
 `kb_doc_writebacks` tracking row, and the same watch (below). The rest of
 this section describes `write_back`; `suggest` is the same minus the

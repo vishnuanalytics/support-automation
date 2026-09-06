@@ -1959,6 +1959,80 @@ class KbConnectionPatch(BaseModel):
     status: str | None = None   # 'active' | 'paused'
 
 
+class KbDocDefaultsIn(BaseModel):
+    tenant_id: str | None = None
+    index: bool | None = None
+    on_correction: str | None = None      # 'off' | 'suggest' | 'write_back'
+    github_repo: str | None = None
+
+
+_KB_DOC_SYSTEM_DEFAULTS = {"index": True, "on_correction": "off"}
+
+
+def _validate_kb_doc_defaults(body: "KbDocDefaultsIn") -> dict:
+    """The stored blob is *partial* — only the keys the org actually set.
+    Same rules as a per-connection gdocs config: `on_correction` in the
+    enum, and if it's not 'off' the default must also carry a valid
+    `github_repo` and not force `index` off."""
+    out: dict[str, Any] = {}
+    if body.index is not None:
+        out["index"] = bool(body.index)
+    oc = (body.on_correction or "").strip()
+    if oc:
+        if oc not in ("off", "suggest", "write_back"):
+            raise HTTPException(422, "on_correction must be 'off', 'suggest' or 'write_back'")
+        out["on_correction"] = oc
+    repo = (body.github_repo or "").strip()
+    if repo:
+        if repo.count("/") != 1 or not all(repo.split("/")):
+            raise HTTPException(422, "github_repo must be 'owner/name'")
+        out["github_repo"] = repo
+    if out.get("on_correction", "off") != "off":
+        if out.get("index") is False:
+            raise HTTPException(422, "a 'suggest' / 'write_back' default needs index = true")
+        if "github_repo" not in out:
+            raise HTTPException(422, "a 'suggest' / 'write_back' default needs a github_repo")
+    return out
+
+
+def _kb_doc_defaults(tenant_id: str) -> dict:
+    rows = (_service.table("tenants").select("kb_doc_defaults")
+            .eq("tenant_id", tenant_id).execute().data or [])
+    return (rows[0].get("kb_doc_defaults") if rows else None) or {}
+
+
+@app.get("/api/kb/doc-defaults")
+def kb_get_doc_defaults(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    """The org-level default for a new Google Doc connection's two knobs.
+    `stored` is what was set ({} = none); `effective` = system defaults with
+    `stored` layered on."""
+    tid = _caller_tenant(c, tenant_id)
+    stored = _kb_doc_defaults(tid)
+    return {"tenant_id": tid, "stored": stored,
+            "effective": {**_KB_DOC_SYSTEM_DEFAULTS, **stored}}
+
+
+@app.put("/api/kb/doc-defaults")
+def kb_set_doc_defaults(body: KbDocDefaultsIn, c: Caller = Depends(caller)) -> dict:
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_editor(c, tid)
+    rate_limit(c.user_id, "kb_write", 60)
+    clean = _validate_kb_doc_defaults(body)
+    updated = (_service.table("tenants").update({"kb_doc_defaults": clean})
+               .eq("tenant_id", tid).execute().data)
+    if not updated:   # a pre-`tenants`-table tenant (see set_case_connector)
+        _service.table("tenants").upsert(
+            {"tenant_id": tid, "name": f"workspace {tid[:8]}", "kb_doc_defaults": clean}
+        ).execute()
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="kb.doc_defaults_changed",
+                 actor_id=c.user_id, actor_email=c.email, target_type="tenant", target_id=tid,
+                 summary=f"Google-Doc defaults set to {clean or '(cleared)'}")
+    return {"tenant_id": tid, "stored": clean,
+            "effective": {**_KB_DOC_SYSTEM_DEFAULTS, **clean}}
+
+
 def _kb_connection(c: Caller, cid: str) -> dict:
     rows = (c.sb.table("kb_source_connections").select("*")
             .eq("connection_id", cid).neq("status", "archived").execute().data or [])
@@ -1981,6 +2055,11 @@ def _kb_add_connection(c: Caller, col: dict, connector: str, raw_config: dict,
     ok, reason = spec.is_available(col["tenant_id"], _service)
     if not ok:
         raise HTTPException(400, reason or f"{spec.label} is not available")
+    # gdocs inherits the tenant's org-level default for any knob the caller
+    # didn't set explicitly (the "+ add source" form pre-fills from it, so
+    # this is the backstop for API callers / form gaps).
+    if connector == "gdocs":
+        raw_config = {**_kb_doc_defaults(col["tenant_id"]), **(raw_config or {})}
     try:
         config = spec.normalize_config(raw_config)
     except ValueError as e:

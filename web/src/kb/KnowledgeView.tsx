@@ -4,6 +4,7 @@ import type {
   KbCollection,
   KbConnection,
   KbConnector,
+  KbDocDefaults,
   KbDocWriteback,
   KbEntry,
   KbEntryRow,
@@ -395,20 +396,24 @@ function ConnectedSources({
   const [conns, setConns] = useState<KbConnection[]>([]);
   const [catalogue, setCatalogue] = useState<KbConnector[]>([]);
   const [writebacks, setWritebacks] = useState<KbDocWriteback[]>([]);
+  const [docDefaults, setDocDefaults] = useState<KbDocDefaults>({});
   const [showWb, setShowWb] = useState(false);
+  const [editDefaults, setEditDefaults] = useState(false);
   const [adding, setAdding] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [cs, cat, wb] = await Promise.all([
+      const [cs, cat, wb, dd] = await Promise.all([
         api.kb.listConnections(col.source_id),
         api.kb.listConnectors(col.tenant_id),
         api.kb.listDocWritebacks(col.source_id).catch(() => [] as KbDocWriteback[]),
+        api.kb.getDocDefaults(col.tenant_id).catch(() => null),
       ]);
       setConns(cs);
       setCatalogue(cat);
       setWritebacks(wb);
+      if (dd) setDocDefaults(dd.effective);
     } catch (e) {
       setErr(e instanceof ApiError ? String(e.detail) : String(e));
     }
@@ -472,6 +477,12 @@ function ConnectedSources({
       <div className="row" style={{ justifyContent: "space-between" }}>
         <strong style={{ fontSize: 13 }}>Connected sources</strong>
         <div className="row" style={{ gap: 6 }}>
+          <button
+            onClick={() => setEditDefaults((v) => !v)}
+            title="Org-wide default for a new Google Doc's read / correction behaviour"
+          >
+            {editDefaults ? "close" : "Google Docs defaults"}
+          </button>
           {needsGoogle && (
             <button onClick={onConnectGoogle} title="OAuth so Google Docs / Sheets can sync">
               Connect Google
@@ -485,10 +496,22 @@ function ConnectedSources({
 
       {err && <div className="err" style={{ fontSize: 12 }}>{err}</div>}
 
+      {editDefaults && (
+        <DocDefaultsForm
+          tenantId={col.tenant_id}
+          current={docDefaults}
+          onDone={(eff) => {
+            setDocDefaults(eff);
+            setEditDefaults(false);
+          }}
+        />
+      )}
+
       {adding && (
         <AddSourceForm
           collectionId={col.source_id}
           catalogue={catalogue}
+          gdocDefaults={docDefaults}
           onDone={() => {
             setAdding(false);
             void load();
@@ -664,10 +687,12 @@ function ConnStatus({ c }: { c: KbConnection }) {
 function AddSourceForm({
   collectionId,
   catalogue,
+  gdocDefaults,
   onDone,
 }: {
   collectionId: string;
   catalogue: KbConnector[];
+  gdocDefaults: KbDocDefaults;
   onDone: () => void;
 }) {
   const [slug, setSlug] = useState(catalogue[0]?.slug ?? "");
@@ -678,6 +703,17 @@ function AddSourceForm({
   useEffect(() => {
     if (!slug && catalogue.length) setSlug(catalogue[0].slug);
   }, [catalogue, slug]);
+
+  // seed the gdocs knobs from the org default when that connector is picked
+  useEffect(() => {
+    if (slug !== "gdocs") return;
+    setValues((v) => ({
+      index: gdocDefaults.index === false ? "no" : "yes",
+      on_correction: gdocDefaults.on_correction ?? "off",
+      ...(gdocDefaults.github_repo ? { github_repo: gdocDefaults.github_repo } : {}),
+      ...v,
+    }));
+  }, [slug, gdocDefaults]);
 
   const spec = catalogue.find((c) => c.slug === slug);
 
@@ -778,6 +814,76 @@ function AddSourceForm({
           disabled={busy || !spec || !spec.available}
         >
           {busy ? "connecting…" : "connect & sync"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DocDefaultsForm({
+  tenantId,
+  current,
+  onDone,
+}: {
+  tenantId: string;
+  current: KbDocDefaults;
+  onDone: (effective: KbDocDefaults) => void;
+}) {
+  const [index, setIndex] = useState(current.index === false ? "no" : "yes");
+  const [onCorr, setOnCorr] = useState<string>(current.on_correction ?? "off");
+  const [repo, setRepo] = useState(current.github_repo ?? "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function save() {
+    setBusy(true);
+    setErr(null);
+    try {
+      const res = await api.kb.setDocDefaults({
+        tenant_id: tenantId,
+        index: index === "yes",
+        on_correction: onCorr,
+        github_repo: repo.trim() || undefined,
+      });
+      onDone(res.effective);
+    } catch (e) {
+      setErr(e instanceof ApiError ? String(e.detail) : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="col" style={{ gap: 8, background: "var(--panel, #00000008)", padding: 10, borderRadius: 6 }}>
+      <span className="muted" style={{ fontSize: 12 }}>
+        Default for every <strong>new</strong> Google Doc connection in this workspace. A
+        per-doc choice in the form below still overrides it.
+      </span>
+      <div className="field">
+        <label>Read new docs into the knowledge base</label>
+        <select value={index} onChange={(e) => setIndex(e.target.value)}>
+          <option value="yes">Yes — the bot can use them to answer</option>
+          <option value="no">No — connected but not used for answers</option>
+        </select>
+      </div>
+      <div className="field">
+        <label>When a support resolution corrects a doc's content</label>
+        <select value={onCorr} onChange={(e) => setOnCorr(e.target.value)}>
+          <option value="off">Do nothing to the doc</option>
+          <option value="suggest">Open a GitHub issue — a person applies it (recommended)</option>
+          <option value="write_back">Let the bot edit the doc — a person verifies</option>
+        </select>
+      </div>
+      {onCorr !== "off" && (
+        <div className="field">
+          <label>GitHub repo for review issues (owner/name)</label>
+          <input value={repo} onChange={(e) => setRepo(e.target.value)} placeholder="acme/support-kb" />
+        </div>
+      )}
+      {err && <div className="err" style={{ fontSize: 12 }}>{err}</div>}
+      <div className="row">
+        <button className="primary" onClick={save} disabled={busy}>
+          {busy ? "saving…" : "save defaults"}
         </button>
       </div>
     </div>

@@ -61,6 +61,29 @@ def test_kb_source_connector_endpoints_need_a_token():
     assert client.patch("/api/kb/connections/x", json={"status": "paused"}).status_code == 401
     assert client.delete("/api/kb/connections/x").status_code == 401
     assert client.get("/api/kb/collections/x/doc-writebacks").status_code == 401
+    assert client.get("/api/kb/doc-defaults").status_code == 401
+    assert client.put("/api/kb/doc-defaults", json={"on_correction": "off"}).status_code == 401
+
+
+def test_kb_doc_defaults_validation():
+    from fastapi import HTTPException
+
+    from api.main import KbDocDefaultsIn, _validate_kb_doc_defaults
+
+    # partial blob — only the keys that were set
+    assert _validate_kb_doc_defaults(KbDocDefaultsIn(index=True)) == {"index": True}
+    assert _validate_kb_doc_defaults(
+        KbDocDefaultsIn(on_correction="suggest", github_repo="acme/kb")
+    ) == {"on_correction": "suggest", "github_repo": "acme/kb"}
+
+    for bad in (
+        KbDocDefaultsIn(on_correction="bogus"),
+        KbDocDefaultsIn(on_correction="suggest"),                       # no repo
+        KbDocDefaultsIn(on_correction="write_back", github_repo="nope"),  # bad repo
+        KbDocDefaultsIn(on_correction="suggest", github_repo="a/b", index=False),
+    ):
+        with pytest.raises(HTTPException):
+            _validate_kb_doc_defaults(bad)
 
 
 def test_approvals_endpoints_need_a_token():

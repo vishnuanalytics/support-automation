@@ -244,6 +244,18 @@ export interface KbConnector {
   writable?: boolean;
 }
 
+export interface KbDocDefaults {
+  index?: boolean;
+  on_correction?: "off" | "suggest" | "write_back";
+  github_repo?: string;
+}
+
+export interface KbDocDefaultsResp {
+  tenant_id: string;
+  stored: KbDocDefaults;
+  effective: KbDocDefaults;
+}
+
 export interface KbDocWriteback {
   id: string;
   connection_id: string | null;

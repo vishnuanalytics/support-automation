@@ -707,8 +707,47 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-06 (chunk 5) — per-tenant *default* for the two gdocs knobs (this
+is the most recent work in this file).** The "organization level" ask
+finished: an org sets the `index` / `on_correction` / `github_repo` policy
+once and every new Google Doc connection inherits it (a per-doc value still
+overrides).
+
+- **Migration `094`** — `tenants.kb_doc_defaults jsonb default '{}'`, a
+  *partial* blob (only the keys the org set; `{}` = system defaults
+  `index:true, on_correction:off`). Data-as-column, same as
+  `tenants.case_connector`.
+- **`api/main.py`** — `GET`/`PUT /api/kb/doc-defaults` (editor-gated,
+  upserts a pre-`tenants`-table tenant like `set_case_connector` does).
+  `_validate_kb_doc_defaults` = the same rules as a per-connection config
+  (`on_correction` enum; ≠ off ⇒ needs a valid `github_repo` and
+  `index ≠ false`). `_kb_add_connection` now merges the tenant default
+  *under* an incoming gdocs config (`{**default, **raw}` — the per-doc
+  value wins) before `_norm_gdocs`.
+- **Web** — a "Google Docs defaults" editor in the "Connected sources"
+  panel header (`DocDefaultsForm`); `AddSourceForm` seeds the `index` /
+  `on_correction` / `github_repo` fields from `getDocDefaults().effective`
+  when the gdocs connector is picked.
+
+**Verify:** `tests/test_api.py` — unauth guard for both routes +
+`_validate_kb_doc_defaults` unit test (partial blob, enum, the two coupling
+rules, repo format). **848 offline tests green (was 847).** `tsc -b` clean.
+Migration `094` applied live; drift clean. **Live-checked against the real
+Supabase project**: a stored `{on_correction:suggest, github_repo:acme/org-kb}`
+default ⇒ a gdocs connection POSTed with only `doc_url` came back with
+`on_correction=suggest` + that repo + `index=true`; an explicit
+`on_correction:off` in the POST won over the default. `tenants.kb_doc_defaults`
+restored to `{}` after.
+
+**Still not built (chunk 6+):** a "Doc write-backs" view in
+`ReviewView.tsx`, a Slack "send to GitHub before applying" button,
+structural section replacement (all pre-existing residuals).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
 **2026-09-06 (chunk 4) — gdocs `access` split into two independent
-org-level knobs (this is the most recent work in this file).** Per the
+org-level knobs.** Per the
 user: an org wants to set "read into the KB" and "suggest corrections back"
 separately, as two dropdowns, not one combined enum. `kb_connectors._norm_
 gdocs` / the `gdocs` `config_fields` now produce/collect:

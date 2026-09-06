@@ -21,6 +21,7 @@ import type {
   KbCollection,
   KbConnection,
   KbConnector,
+  KbDocDefaultsResp,
   KbDocWriteback,
   KbEntry,
   KbEntryRow,
@@ -309,6 +310,14 @@ export const api = {
       req<void>(`/kb/connections/${cid}`, { method: "DELETE" }),
     listDocWritebacks: (id: string) =>
       req<KbDocWriteback[]>(`/kb/collections/${id}/doc-writebacks`),
+    getDocDefaults: (tenantId: string) =>
+      req<KbDocDefaultsResp>(`/kb/doc-defaults?tenant_id=${tenantId}`),
+    setDocDefaults: (b: {
+      tenant_id: string;
+      index?: boolean;
+      on_correction?: string;
+      github_repo?: string;
+    }) => req<KbDocDefaultsResp>("/kb/doc-defaults", { method: "PUT", body: JSON.stringify(b) }),
     export: (id: string) => req<KbExportBundle>(`/kb/collections/${id}/export`),
     import: (id: string, entries: { title: string; body_md: string }[]) =>
       req<{ job_id: string; accepted: number; warnings: string[] }>(
