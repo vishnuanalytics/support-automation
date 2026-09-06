@@ -707,8 +707,42 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-06 (Phase 30 — Product-analytics connector, chunk 3: `(:Contact)`
-in the graph). This is the most recent work in this file.**
+**2026-09-06 (Phase 30 — Product-analytics connector, chunk 4: the
+`product_analytics_sync` job). This is the most recent work in this file.**
+
+- **`ingestion/product_analytics_sync.py`** — per tenant with an active
+  `posthog` integration: `posthog.fetch_person_rollups(since=<watermark>)`
+  → MERGE `(:Contact {email, tenant_id})` + rollup props +
+  `(:Contact)-[:DID {last_ts,count}]->(:Feature)` per milestone → identity
+  resolution (`email` if an inbound `[:FILED_BY]` exists; `domain` if the
+  email domain matches **exactly one** `(:Account {domain})` → MERGE
+  `[:AT_ACCOUNT]`; else `none`) → an account rollup pass
+  (`pa_active_users_30d` / `pa_contacts` / `pa_events_30d` /
+  `pa_usage_trend`). `--once` / `--dry-run` / `--tenant` CLI.
+- **Migration `100`** — `graph_sync_state` gains `contacts_synced` +
+  `coverage_pct`; the sync uses `scope = 'product_analytics:<tenant>'`
+  with `last_modified` as the `last_seen_at` high-water mark.
+- **`sweeps.product_analytics_sync`** (12h in `_SWEEP_EVERY_MIN`) +
+  `api/worker.HANDLERS` entry + a `daily-sync.yml` step.
+- **`GET /api/integrations/posthog`** now also returns `coverage_pct` /
+  `contacts_synced` / `last_synced_at`; the ChannelsView card shows
+  "N contacts · X% matched" and a warning banner under 40%.
+- **Live-verified** on the real Neo4j: all 3 Cypher passes EXPLAIN clean;
+  a real end-to-end run produced `email` / `domain` / `none` matches, the
+  `[:AT_ACCOUNT]` edge, and the account rollup (smoke nodes cleaned up).
+  `tests/test_product_analytics_sync.py` (10); **961 offline green**;
+  `100` applied live, drift clean; tsc + `vite build` clean.
+- **Next: chunk 5** (the last) — a `product_signal` flow node: registry
+  handler that reads the filer's `(:Contact)` rollup + `[:DID]` features +
+  account rollup at triage/draft time, `h_draft` folds it in as context,
+  `builder._context` exposes it for edge conditions, palette + Inspector,
+  a seed flow wiring it. Degrades to `{available:false}` with no match —
+  never blocks a run.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (Phase 30 chunk 3: `(:Contact)` in the graph).**
 
 - **`ingestion/case_graph_sync.py`** — `_case_row` now carries
   `contact_email` (from `Contact.Email`) and `account_domain`

@@ -139,7 +139,24 @@ function PostHogPanel({ tenantId }: { tenantId: string }) {
         <p style={{ fontSize: 12 }}>
           Status: <strong>{st.status}</strong>
           {st.has_credentials ? " · key stored" : " · no key stored"}
+          {st.contacts_synced != null && st.contacts_synced > 0 && (
+            <>
+              {" · "}
+              {st.contacts_synced.toLocaleString()} contacts ·{" "}
+              <strong>
+                {st.coverage_pct != null ? `${st.coverage_pct}%` : "—"}
+              </strong>{" "}
+              matched to an account/contact
+            </>
+          )}
         </p>
+      )}
+      {st?.configured && (st.coverage_pct ?? 100) < 40 && (st.contacts_synced ?? 0) > 0 && (
+        <div className="banner warn" style={{ fontSize: 12 }}>
+          Only {st.coverage_pct}% of your PostHog users match a known Salesforce contact or
+          account — account-level product signals will be sparse until your product calls
+          <code> identify(email)</code>.
+        </div>
       )}
 
       <label className="col" style={{ gap: 2, fontSize: 12 }}>

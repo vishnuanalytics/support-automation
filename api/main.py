@@ -3153,13 +3153,21 @@ def _posthog_cfg_from_body(tid: str, body: PostHogIn, existing) -> "object":
 
 @app.get("/api/integrations/posthog")
 def posthog_status(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
-    """PostHog connection status for the caller's tenant. Never returns the key."""
+    """PostHog connection status for the caller's tenant. Never returns the
+    key. `coverage_pct` / `contacts_synced` / `last_synced_at` come from the
+    last `product_analytics_sync` run (graph_sync_state)."""
     tid = _caller_tenant(c, tenant_id)
     from interpreter.posthog import load
     cfg = load(tid, _service)
     if not cfg:
         return {"tenant_id": tid, "configured": False, "status": "none"}
-    return {"tenant_id": tid, **cfg.public_status()}
+    sync = (_service.table("graph_sync_state")
+            .select("coverage_pct, contacts_synced, last_run_at")
+            .eq("scope", f"product_analytics:{tid}").limit(1).execute().data or [{}])[0]
+    return {"tenant_id": tid, **cfg.public_status(),
+            "coverage_pct": sync.get("coverage_pct"),
+            "contacts_synced": sync.get("contacts_synced"),
+            "last_synced_at": sync.get("last_run_at")}
 
 
 @app.put("/api/integrations/posthog")

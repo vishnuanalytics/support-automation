@@ -234,9 +234,27 @@ tenants with an active `posthog` integration.
    cleaned up). `tests/test_case_graph_sync.py` +5. **Backfill:** the next
    scheduled `case_graph_sync` re-MERGEs every Case in its window, so
    Contact nodes appear as cases are re-synced — no separate backfill job.
-4. **`product_analytics_sync` job + sweep** — the rollup MERGE, identity
-   resolution, account rollup pass, `daily-sync.yml` step, coverage
-   number on the connector card.
+4. **`product_analytics_sync` job + sweep.** ✅ (2026-09-06)
+   `ingestion/product_analytics_sync.py` — per tenant with an active
+   `posthog` integration: `fetch_person_rollups(since=<watermark>)` →
+   `_ROLLUP_CYPHER` MERGEs `(:Contact {email, tenant_id})` + rollup props +
+   `(:Contact)-[:DID {last_ts,count}]->(:Feature)` per milestone →
+   `_IDENTITY_CYPHER` sets `identity_match` (`email` if an inbound
+   `[:FILED_BY]` exists; `domain` if the email domain matches **exactly
+   one** `(:Account {domain})` → MERGE `[:AT_ACCOUNT]`; else `none`) →
+   `_ACCOUNT_ROLLUP_CYPHER` rolls each account's `pa_active_users_30d` /
+   `pa_contacts` / `pa_events_30d` / `pa_usage_trend` from its
+   `[:AT_ACCOUNT]` contacts. `graph_sync_state` (`scope =
+   'product_analytics:<tenant>'`, migration `100` adds `contacts_synced` +
+   `coverage_pct`). Sweep `sweeps.product_analytics_sync` (12h), worker
+   `HANDLERS` entry, `daily-sync.yml` step, `--once`/`--dry-run`/`--tenant`
+   CLI. `GET /api/integrations/posthog` returns `coverage_pct` /
+   `contacts_synced` / `last_synced_at`; the card shows "N contacts · X%
+   matched" + a warning banner under 40%. Best-effort — a failing tenant
+   is logged and skipped. Live-verified: all 3 Cypher passes EXPLAIN clean
+   and a real end-to-end run produced `email` / `domain` / `none` matches
+   + the `[:AT_ACCOUNT]` edge + the account rollup (smoke nodes cleaned
+   up). `tests/test_product_analytics_sync.py` (10); 961 offline green.
 5. **`product_signal` node** — registry handler, `h_draft` fold-in,
    `builder._context` key, palette + Inspector, a seed flow wiring it.
 

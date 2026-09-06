@@ -90,6 +90,20 @@ jobs:
           SF_DOMAIN: ${{ secrets.SF_DOMAIN }}
         run: python -m ingestion.case_graph_sync
 
+      # Phase 30 — pull PostHog person rollups into Neo4j (:Contact) nodes
+      # + resolve identity, for every tenant with an active `posthog`
+      # integration. No-op when nobody has connected PostHog.
+      - name: Sync product-analytics rollups -> Neo4j (Phase 30)
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          NEO4J_URI: ${{ secrets.NEO4J_URI }}
+          NEO4J_USERNAME: ${{ secrets.NEO4J_USERNAME }}
+          NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
+          NEO4J_DATABASE: ${{ secrets.NEO4J_DATABASE }}
+        run: python -m ingestion.product_analytics_sync --once
+
       # Scheduled refresh: `ingestion.kb_recrawl` reads every active
       # `kb_source_connections` row (migration 091 — public_url / gsheets /
       # gdocs / linear / nolt) and enqueues one `kb_sync` per connection.

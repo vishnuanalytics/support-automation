@@ -417,6 +417,9 @@ export interface PostHogStatus {
   project_id?: string;
   milestone_events?: string[];
   has_credentials?: boolean;
+  coverage_pct?: number | null;
+  contacts_synced?: number | null;
+  last_synced_at?: string | null;
 }
 
 export interface PostHogSave {
