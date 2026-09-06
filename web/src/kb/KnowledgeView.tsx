@@ -1118,6 +1118,10 @@ function KbStatusBadge({ entry }: { entry: KbEntryRow }) {
     return pill("#555", "superseded", "replaced by a newer entry — not retrieved");
   if (entry.origin === "review_writeback")
     return pill("#33608a", "from a review", "created by the knowledge-integrity loop");
+  if (entry.quality === "official")
+    return pill("#2b6a2b", "official", "official source — weighted up in retrieval (×1.15)");
+  if (entry.quality === "community_resolved")
+    return pill("#5a3a8a", "resolved", "a shipped/answered community item — retrieval weight ×1.0");
   return null;
 }
 

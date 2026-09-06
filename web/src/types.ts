@@ -222,6 +222,7 @@ export interface KbEntryRow {
   gsheet_row?: number | null;
   connection_id?: string | null;
   external_id?: string | null;
+  quality?: "official" | "community_resolved" | "unverified";
   synced_at?: string | null;
   sync_error?: string | null;
   provisional_until?: string | null;

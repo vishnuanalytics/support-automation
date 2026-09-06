@@ -216,6 +216,34 @@ def _squash(x: float) -> float:
     return 1.0 / (1.0 + math.exp(-x))
 
 
+_QUALITY_WEIGHT = {"official": 1.15, "community_resolved": 1.0, "unverified": 0.9}
+
+
+def _apply_quality_weights(sb, rows: list[dict[str, Any]]) -> None:
+    """Nudge fused RRF scores by the source-trust signal on each chunk's KB
+    entry (`kb_entries.quality`, set from `KBDocument.quality`): an official
+    help article outranks a random forum reply that scored similarly. In
+    place, then re-sorts. Best-effort — a lookup failure leaves scores as
+    they were. Only KB chunks (`kb://<sid>/<eid>` doc_url) are affected;
+    the shared `zapier-public` corpus and any real-URL doc keep weight 1.0."""
+    try:
+        eids = {u.rsplit("/", 1)[-1] for r in rows
+                if (u := r.get("doc_url") or "").startswith("kb://")}
+        if not eids:
+            return
+        q = {row["entry_id"]: (row.get("quality") or "unverified")
+             for row in (sb.table("kb_entries").select("entry_id, quality")
+                         .in_("entry_id", list(eids)).execute().data or [])}
+        for r in rows:
+            u = r.get("doc_url") or ""
+            if u.startswith("kb://"):
+                w = _QUALITY_WEIGHT.get(q.get(u.rsplit("/", 1)[-1], "unverified"), 1.0)
+                r["_rrf"] = (r.get("_rrf") or 0.0) * w
+        rows.sort(key=lambda r: -(r.get("_rrf") or 0.0))
+    except Exception as e:  # noqa: BLE001
+        print(f"  [retrieval] quality weighting skipped: {e}", file=sys.stderr)
+
+
 # --------------------------------------------------------------------------
 # Orchestration
 # --------------------------------------------------------------------------
@@ -241,6 +269,7 @@ def hybrid_retrieve(
     if use_sparse:
         runs.append(sparse_search(sb, query, sparse_k, source_ids))
     fused = rrf_fuse(runs)
+    _apply_quality_weights(sb, fused)
 
     if use_graph:
         seed_urls = list(dict.fromkeys(r["doc_url"] for r in fused[:5]))

@@ -1928,7 +1928,7 @@ def kb_list_entries(sid: str, c: Caller = Depends(caller)) -> list[dict]:
     _kb_collection(c, sid)
     rows = (c.sb.table("kb_entries")
             .select("entry_id, title, status, chunk_count, embedded_at, updated_at, "
-                    "updated_by, origin, gdoc_url, gsheet_id, gsheet_range, gsheet_row, "
+                    "updated_by, origin, quality, gdoc_url, gsheet_id, gsheet_range, gsheet_row, "
                     "synced_at, sync_error, "
                     "provisional_until, supersedes_entry_id, source_review_task")
             .eq("source_id", sid).neq("status", "archived")

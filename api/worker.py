@@ -395,7 +395,7 @@ def _sync_kb_connection(payload: dict, sb) -> dict:
             row = {
                 "source_id": sid, "tenant_id": tid, "connection_id": cid,
                 "external_id": doc.external_id, "title": doc.title, "body_md": doc.body_md,
-                "origin": doc.origin, "status": "active",
+                "origin": doc.origin, "status": "active", "quality": doc.quality,
                 "created_by": conn.get("created_by"), "updated_by": conn.get("created_by"),
                 **(doc.extra or {}),
             }
