@@ -183,6 +183,11 @@ def ensure_constraints(driver):
         "DROP CONSTRAINT account_sf_id IF EXISTS",
         "CREATE CONSTRAINT account_sf_id_tenant IF NOT EXISTS "
         "FOR (a:Account) REQUIRE (a.sf_id, a.tenant_id) IS UNIQUE",
+        # Phase 30 — the Contact node the product-analytics sync MERGEs against,
+        # keyed on the case's Contact.Email; composite with tenant_id for the
+        # same per-org-id reason as Case/Account above.
+        "CREATE CONSTRAINT contact_email_tenant IF NOT EXISTS "
+        "FOR (ct:Contact) REQUIRE (ct.email, ct.tenant_id) IS UNIQUE",
     ):
         try:
             driver.execute_query(cypher, database_=NEO4J_DATABASE)

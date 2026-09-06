@@ -217,10 +217,23 @@ tenants with an active `posthog` integration.
    guard; 945 offline green; tsc + build clean. Not live-verified (no
    PostHog project wired in this sandbox — `test_connection` is the live
    check when a key exists).
-3. **`(:Contact)` in the graph** — `case_graph_sync` MERGEs
-   `(:Contact {email})` + `[:FILED_BY]`; the `(email, tenant_id)`
-   constraint; migration for `graph_sync_state.coverage_pct` and the
-   optional `account_domain`. Backfill note.
+3. **`(:Contact)` in the graph.** ✅ (2026-09-06) `case_graph_sync._case_row`
+   now carries `contact_email` (from `Contact.Email`) and `account_domain`
+   (parsed from `Account.Website` — `_domain_from_website`; SOQL gained
+   `Account.Website`). `case_memory._LIFECYCLE_CYPHER` MERGEs
+   `(:Contact {email, tenant_id})` + `(c)-[:FILED_BY]->(ct)` when an email
+   is present, sets `Account.domain` when a domain is present, and — when a
+   Case names **both** a contact and an account — MERGEs
+   `(ct)-[:AT_ACCOUNT]->(a)` (Salesforce's own ground truth, stronger than
+   chunk 4's email-domain guess). `neo4j_sync.ensure_constraints` gains
+   `contact_email_tenant` uniqueness on `(email, tenant_id)`. No Supabase
+   migration — all Neo4j; `graph_sync_state.coverage_pct` moves to chunk 4
+   where it's written. Live-verified: the lifecycle Cypher EXPLAINs clean,
+   the constraint is created, and a real MERGE produced the
+   `Case-[:FILED_BY]->Contact-[:AT_ACCOUNT]->Account` chain (smoke nodes
+   cleaned up). `tests/test_case_graph_sync.py` +5. **Backfill:** the next
+   scheduled `case_graph_sync` re-MERGEs every Case in its window, so
+   Contact nodes appear as cases are re-synced — no separate backfill job.
 4. **`product_analytics_sync` job + sweep** — the rollup MERGE, identity
    resolution, account rollup pass, `daily-sync.yml` step, coverage
    number on the connector card.

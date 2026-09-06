@@ -203,7 +203,19 @@ FOREACH (_ IN CASE WHEN $case_type  IS NULL THEN [] ELSE [1] END |
   MERGE (t:CaseType {name: $case_type})  MERGE (c)-[:OF_TYPE]->(t))
 FOREACH (_ IN CASE WHEN $account_id IS NULL THEN [] ELSE [1] END |
   MERGE (a:Account {sf_id: $account_id, tenant_id: $tenant_id})
-  MERGE (c)-[:FOR_ACCOUNT]->(a))
+  MERGE (c)-[:FOR_ACCOUNT]->(a)
+  FOREACH (__ IN CASE WHEN $account_domain IS NULL THEN [] ELSE [1] END |
+    SET a.domain = $account_domain))
+// Phase 30: the Case's Contact is the join target the product-analytics
+// sync resolves against. A Case that names both a contact and an account
+// is Salesforce's own ground truth for [:AT_ACCOUNT] — stronger than the
+// email-domain guess the analytics sync falls back to.
+FOREACH (_ IN CASE WHEN $contact_email IS NULL THEN [] ELSE [1] END |
+  MERGE (ct:Contact {email: $contact_email, tenant_id: $tenant_id})
+  MERGE (c)-[:FILED_BY]->(ct)
+  FOREACH (__ IN CASE WHEN $account_id IS NULL THEN [] ELSE [1] END |
+    MERGE (a:Account {sf_id: $account_id, tenant_id: $tenant_id})
+    MERGE (ct)-[:AT_ACCOUNT]->(a)))
 WITH c
 UNWIND $messages AS msg
   MERGE (mm:Message {id: msg.id, tenant_id: $tenant_id})
@@ -244,6 +256,8 @@ def sync_case_lifecycle(case: dict[str, Any], messages: list[dict] | None = None
             module=case.get("module"),
             case_type=case.get("case_type"),
             account_id=case.get("account_id"),
+            account_domain=(case.get("account_domain") or None),
+            contact_email=(case.get("contact_email") or None),
             messages=[{"id": m["id"], "role": m.get("role"),
                        "author_kind": m.get("author_kind"),
                        "author_id": m.get("author_id"),

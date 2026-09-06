@@ -707,8 +707,38 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-06 (Phase 30 — Product-analytics connector, chunk 2: the PostHog
-connector). This is the most recent work in this file.**
+**2026-09-06 (Phase 30 — Product-analytics connector, chunk 3: `(:Contact)`
+in the graph). This is the most recent work in this file.**
+
+- **`ingestion/case_graph_sync.py`** — `_case_row` now carries
+  `contact_email` (from `Contact.Email`) and `account_domain`
+  (`_domain_from_website`, parsing the new `Account.Website` SOQL field).
+- **`interpreter/case_memory._LIFECYCLE_CYPHER`** — MERGEs
+  `(:Contact {email, tenant_id})` + `(c)-[:FILED_BY]->(ct)` when an email
+  is present; sets `Account.domain`; and when a Case names **both** a
+  contact and an account, MERGEs `(ct)-[:AT_ACCOUNT]->(a)` (SF ground
+  truth — stronger than chunk 4's domain guess). All FOREACH-guarded on a
+  NULL param, so the Cypher is static.
+- **`ingestion/neo4j_sync.ensure_constraints`** — `contact_email_tenant`
+  uniqueness on `(:Contact) (email, tenant_id)`.
+- **No Supabase migration** — all Neo4j. `graph_sync_state.coverage_pct`
+  deferred to chunk 4 (where it's written).
+- **Live-verified** on the real Neo4j: lifecycle Cypher EXPLAINs clean,
+  the constraint is created, a real MERGE produced the
+  `Case-[:FILED_BY]->Contact-[:AT_ACCOUNT]->Account` chain (smoke nodes
+  cleaned up). `tests/test_case_graph_sync.py` +5; **954 offline green**.
+- **Backfill:** the next scheduled `case_graph_sync` re-MERGEs every Case
+  in its window — Contact nodes appear as cases re-sync, no separate job.
+- **Next: chunk 4** — the `product_analytics_sync` job + sweep: MERGE the
+  PostHog rollups onto Contacts, identity resolution (`email` /
+  `domain` / `none`), the account rollup pass, `graph_sync_state.
+  coverage_pct` (migration), the `daily-sync.yml` step, and the coverage %
+  on the connector card.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (Phase 30 chunk 2: the PostHog connector).**
 
 - **`interpreter/posthog.py`** — `PostHogConfig`, Vault-brokered API key,
   `load`/`save`/`delete`/`available`, `_query` (one HogQL POST), `test_
