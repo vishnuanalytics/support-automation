@@ -11,6 +11,7 @@ import type {
   FlowMeta,
   FreshchatChannel,
   FreshchatChannelSave,
+  GraphAskResult,
   FlowVersion,
   FlowTrigger,
   Connection,
@@ -454,6 +455,12 @@ export const api = {
       req<KilDigest>(`/kil/digest?weeks=${weeks}`),
     tenantHealth: () => req<TenantHealth>("/health/tenant"),
   },
+
+  graphAsk: (question: string, tenantId?: string) =>
+    req<GraphAskResult>("/graph/ask", {
+      method: "POST",
+      body: JSON.stringify({ question, tenant_id: tenantId }),
+    }),
 
   approvals: {
     list: () =>

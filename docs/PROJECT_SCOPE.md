@@ -707,10 +707,69 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-06 (chunk 12) — four feature areas from the product review (this
-is the most recent work in this file).** After the KB-connector loopholes
-were closed, the user picked all four review areas; these landed as a
-sequence of commits on `browser-verified-picker-fixes`:
+**2026-09-06 (chunk 13) — "Ask the case graph" (natural-language → spec →
+Cypher). This is the most recent work in this file.** Closes the
+long-standing `MULTI_SYSTEM_ARCHITECTURE.md` open question about a
+Neo4j-facing NL query surface — built as a **composable spec compiler,
+deliberately not free-form text-to-Cypher**.
+
+- **Why the spec, not text-to-Cypher:** one shared Community-edition Neo4j
+  — no per-tenant DB, no custom read-only role — so the only tenant
+  boundary is a `tenant_id` predicate per node. A free-form Cypher surface
+  would make a single validator gap a cross-tenant breach. So the LLM only
+  emits a bounded JSON spec (`{entity, metric, group_by, filters, having,
+  order_by, limit}`); `graph_query.compile_spec` turns it into read-only
+  Cypher deterministically. The LLM never authors Cypher.
+- **`interpreter/graph_query.py`** (new) — allow-lists for 5 metrics
+  (`count` / `list` / `avg_resolution_hours` / `distinct_accounts` /
+  `duplicate_count`), 11 group-by dims, 14 filter fields; `to_spec` (LLM,
+  Groq default, `json_object`), `validate_spec` (total — rejects any
+  unknown name/op, type-checks values, clamps limit 1..200), `compile_spec`
+  (every query filters `c.tenant_id = $tenant_id`, always behind a `WITH`
+  so the predicate can't be absorbed into an `OPTIONAL MATCH`; `Account` /
+  `DUPLICATE_OF`-target `Case` also carry `{tenant_id}` in-pattern; all
+  values parameterised), `_assert_safe` (re-scan: refuse
+  `CREATE|MERGE|DELETE|SET|REMOVE|CALL|…` or a missing tenant filter),
+  `_run` (`RoutingControl.READ` + `GRAPH_QUERY_TIMEOUT_S` default 8s).
+  `Reply`/`Message` text is **not** reachable through this surface.
+- **`POST /api/graph/ask`** — owner-only (`_require_owner`); returns
+  `{question, spec, cypher, columns, rows, truncated}` (the compiled Cypher
+  is shown for transparency). `GraphQueryError` → 422 with a user-safe
+  message; no raw driver errors leak.
+- **Web** — an "Ask the case graph" panel in `ReviewView` (`api.graphAsk`,
+  `GraphAskResult` type): a question box, 4 example chips, the result
+  table, a truncation note, and a "show the compiled query" toggle.
+- **Docs** — new `docs/GRAPH_QUERY.md`; `MULTI_SYSTEM_ARCHITECTURE.md`
+  open question flipped to decided.
+- **Live-verified** against the real Neo4j: all 8 metric shapes `EXPLAIN`
+  clean; a real tenant returns its 141 cases / group-by-status / list; a
+  **bogus tenant_id returns count 0** (isolation holds at the query level).
+
+**920 offline tests green** (`tests/test_graph_query.py` new — spec
+validation, tenant-scoping of every compiled shape, param-not-inlined,
+`_assert_safe`, the LLM boundary; `tests/test_api.py` +1 guard). No
+migration (Neo4j-only). tsc + `vite build` clean.
+
+**Residual, stated:** on Community edition the tenant boundary in Neo4j is
+enforced **only in application code** (the compiler) — no DB-level
+backstop. Multi-hop path questions ("cases similar to cases an account
+escalated") return `{"error":"unsupported"}` until a new compiler branch
+is added.
+
+**Still open** (product-review list): shared rate limiting (in-memory →
+DB), a real per-tenant failed-*jobs* view (`jobs.tenant_id`), the
+retrieval eval harness as a CI gate, enforcing spend caps,
+Confluence/Notion/SharePoint connectors, and the `multiple_permissive_
+policies` RLS cleanup. Plus the always-on worker (needs a host — guide in
+`docs/DEPLOY_WEB_AND_API.md`).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (chunk 12) — four feature areas from the product review.**
+After the KB-connector loopholes were closed, the user picked all four
+review areas; these landed as a sequence of commits on
+`browser-verified-picker-fixes`:
 
 - **Onboarding bypass closed** (`c95da5b`) — the wizard's top "skip setup"
   button is disabled until a knowledge source is connected (Step 4 is now

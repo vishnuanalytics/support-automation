@@ -127,10 +127,23 @@ cleanly.
 
 - Retention window length for `runs.case_payload`/`runs.trace` (needs a
   compliance/support-debugging tradeoff call, not a technical one).
-- Whether a natural-language-to-Cypher "ask the graph anything" tool
-  (discussed as the leaner alternative to building N bespoke reports) is
-  the next Neo4j-facing feature to build, versus the `DUPLICATE_OF`-never-
-  fires gap — **root-caused and fixed 2026-09-05, see `PROJECT_SCOPE.md`'s
+- ~~Whether a natural-language-to-Cypher "ask the graph anything" tool is
+  the next Neo4j-facing feature to build~~ — **decided and built
+  2026-09-06 as a composable *spec* compiler, not free-form text-to-Cypher**
+  (`interpreter/graph_query.py`, `docs/GRAPH_QUERY.md`). The reason: this
+  is one shared Community-edition Neo4j with no per-tenant DB and no custom
+  read-only role, so the only tenant boundary is a `tenant_id` predicate
+  per node — a free-form Cypher surface would make one validator gap a
+  cross-tenant breach. Instead the LLM only emits a bounded JSON spec
+  (`{entity, metric, group_by, filters, having, order_by, limit}`); a
+  deterministic compiler produces read-only Cypher with `tenant_id` bolted
+  onto every pattern and a `WITH`-guarded `WHERE`. `Reply`/`Message` text
+  is not exposed. Owner-only. Live-verified: all metric shapes `EXPLAIN`
+  clean on the real graph, and a bogus tenant returns 0. Residual (in the
+  doc): on CE the boundary is app-code-only, and multi-hop path questions
+  need a new compiler branch.
+- The `DUPLICATE_OF`-never-fires gap was **root-caused and fixed
+  2026-09-05, see `PROJECT_SCOPE.md`'s
   "Immediate next step"**: `account_id` was never set because
   `_enrich_from_sf`'s selection filter only checked `case_type`, not
   `account_id`, so a row that already had one (nearly every real row) was

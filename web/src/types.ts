@@ -497,6 +497,23 @@ export interface KilMetrics {
   weekly: { week: string; flagged: number }[];
 }
 
+export interface GraphAskResult {
+  question: string;
+  spec: {
+    entity: string;
+    metric: string;
+    group_by: string[];
+    filters: { field: string; op: string; value: unknown }[];
+    having: { op: string; value: number } | null;
+    order_by: { field: string; dir: string } | null;
+    limit: number;
+  };
+  cypher: string;
+  columns: string[];
+  rows: Record<string, unknown>[];
+  truncated: boolean;
+}
+
 export interface KilDigest {
   week_of: string;
   this_week: KilMetrics;

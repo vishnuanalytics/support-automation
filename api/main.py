@@ -1631,6 +1631,28 @@ def tenant_health(tenant_id: str | None = None, c: Caller = Depends(caller)) -> 
     }
 
 
+class GraphAskIn(BaseModel):
+    question: str
+    tenant_id: str | None = None
+
+
+@app.post("/api/graph/ask")
+def graph_ask(body: GraphAskIn, c: Caller = Depends(caller)) -> dict:
+    """Owner-only 'ask the case graph in English'. The question is turned
+    into a bounded JSON query spec by an LLM, then compiled deterministically
+    to a read-only, tenant-scoped Cypher query — the LLM never authors
+    Cypher (see interpreter/graph_query.py). Returns the compiled query
+    alongside the rows for transparency."""
+    from interpreter import graph_query
+
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    try:
+        return graph_query.answer(body.question, tid)
+    except graph_query.GraphQueryError as e:
+        raise HTTPException(422, str(e))
+
+
 @app.get("/api/kil/digest")
 def kil_digest_ep(weeks: int = 4, tenant_id: str | None = None,
                   format: str = "json", c: Caller = Depends(caller)) -> Any:

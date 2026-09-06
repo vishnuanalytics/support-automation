@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
 import type {
   ActionRequest,
+  GraphAskResult,
   KbDocWriteback,
   KilDigest,
   KilMetrics,
@@ -196,6 +197,8 @@ export function ReviewView() {
         </pre>
       )}
 
+      <GraphAskPanel />
+
       {metrics && metrics.by_source.length > 0 && (
         <div className="col" style={{ gap: 4 }}>
           <h4 style={{ margin: "4px 0" }}>Knowledge health by source</h4>
@@ -389,6 +392,141 @@ export function ReviewView() {
 
 function pct(v: number | null): string {
   return v == null ? "—" : `${Math.round(v * 100)}%`;
+}
+
+const GRAPH_EXAMPLES = [
+  "How many cases were escalated last month, by module?",
+  "Which accounts have more than 2 duplicate cases?",
+  "Average resolution time by tier for the Billing module",
+  "List open cases about refunds",
+];
+
+function GraphAskPanel() {
+  const [q, setQ] = useState("");
+  const [res, setRes] = useState<GraphAskResult | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [showCypher, setShowCypher] = useState(false);
+
+  const ask = async (question: string) => {
+    const text = question.trim();
+    if (!text) return;
+    setBusy(true);
+    setErr(null);
+    setRes(null);
+    try {
+      setRes(await api.graphAsk(text));
+    } catch (e) {
+      setErr((e as ApiError).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="col" style={{ gap: 6 }}>
+      <h4 style={{ margin: "4px 0" }}>Ask the case graph</h4>
+      <div className="muted" style={{ fontSize: 12 }}>
+        Plain-English questions over your cases, accounts, modules, tiers and agents.
+        The question is compiled to a read-only, workspace-scoped query — shown below the answer.
+      </div>
+      <form
+        className="row"
+        style={{ gap: 6 }}
+        onSubmit={(e) => {
+          e.preventDefault();
+          ask(q);
+        }}
+      >
+        <input
+          style={{ flex: 1 }}
+          placeholder="e.g. how many API-module cases were escalated last week"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+        />
+        <button type="submit" disabled={busy || !q.trim()}>
+          {busy ? "…" : "Ask"}
+        </button>
+      </form>
+      <div className="row" style={{ gap: 4, flexWrap: "wrap" }}>
+        {GRAPH_EXAMPLES.map((ex) => (
+          <button
+            key={ex}
+           
+            style={{ fontSize: 11 }}
+            onClick={() => {
+              setQ(ex);
+              ask(ex);
+            }}
+          >
+            {ex}
+          </button>
+        ))}
+      </div>
+
+      {err && <div className="banner err">{err}</div>}
+
+      {res && (
+        <div className="col" style={{ gap: 4 }}>
+          <div style={{ overflowX: "auto" }}>
+            <table className="runs-table" style={{ minWidth: 360 }}>
+              <thead>
+                <tr>
+                  {res.columns.map((col) => (
+                    <th key={col}>{col}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {res.rows.length === 0 && (
+                  <tr>
+                    <td colSpan={res.columns.length} className="muted">
+                      no matching cases
+                    </td>
+                  </tr>
+                )}
+                {res.rows.map((row, i) => (
+                  <tr key={i}>
+                    {res.columns.map((col) => (
+                      <td key={col} className="muted">
+                        {row[col] == null ? "—" : String(row[col])}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {res.truncated && (
+            <div className="muted" style={{ fontSize: 11 }}>
+              showing the first {res.spec.limit} rows
+            </div>
+          )}
+          <button
+           
+            style={{ alignSelf: "flex-start", fontSize: 11 }}
+            onClick={() => setShowCypher((v) => !v)}
+          >
+            {showCypher ? "hide" : "show"} the compiled query
+          </button>
+          {showCypher && (
+            <pre
+              style={{
+                margin: 0,
+                padding: 8,
+                whiteSpace: "pre-wrap",
+                fontSize: 11,
+                background: "var(--card, #f6f7f9)",
+                borderRadius: 6,
+              }}
+            >
+              {res.cypher}
+            </pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function DocWritebacksTable({ rows }: { rows: KbDocWriteback[] }) {
