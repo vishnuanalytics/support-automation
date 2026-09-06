@@ -129,7 +129,13 @@ export function OnboardingWizard({
     <div className="col" style={{ padding: 20, gap: 18, maxWidth: 640, overflow: "auto", height: "100%" }}>
       <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
         <h2 style={{ margin: 0 }}>Get set up</h2>
-        <button onClick={onDismiss}>skip setup</button>
+        <button
+          onClick={onDismiss}
+          disabled={!kbDone}
+          title={kbDone ? "" : "Connect a knowledge source below first — the bot has nothing to answer from otherwise."}
+        >
+          {kbDone ? "skip the rest" : "connect a source to continue"}
+        </button>
       </div>
       <p className="muted" style={{ margin: 0 }}>
         Salesforce, Slack and the model are optional and reachable later.
