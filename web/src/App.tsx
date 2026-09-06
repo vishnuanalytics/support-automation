@@ -271,7 +271,7 @@ export function App() {
         </nav>
         {view === "editor" && (
           <FlowList
-            key={reloadKey}
+            key={`${tenantId}:${reloadKey}`}
             tenantId={tenantId}
             activeId={flowId}
             canEdit={canEdit}

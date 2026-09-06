@@ -113,10 +113,10 @@ export function FlowList({
     }
   }
 
-  const byTenant = flows.reduce<Record<string, FlowMeta[]>>((acc, f) => {
-    (acc[f.tenant_id] ||= []).push(f);
-    return acc;
-  }, {});
+  // the flow list is scoped to the active workspace — /api/flows returns every
+  // tenant the caller belongs to (fine for the cross-tenant runs view), so the
+  // editor sidebar filters here, like every other tenant-scoped view.
+  const visible = flows.filter((f) => f.tenant_id === tenantId);
 
   return (
     <div className="col">
@@ -158,7 +158,7 @@ export function FlowList({
       )}
       {err && <div className="err">{err}</div>}
 
-      {canEdit && flows.length === 0 && !err && (
+      {canEdit && visible.length === 0 && !err && (
         <div
           className="col"
           style={{
@@ -186,27 +186,22 @@ export function FlowList({
         </div>
       )}
 
-      {Object.entries(byTenant).map(([tenant, list]) => (
-        <div key={tenant}>
-          <h3 title={tenant}>tenant …{tenant.slice(0, 8)}</h3>
-          {list.map((f) => (
-            <div
-              key={f.flow_id}
-              className={`flow-item${f.flow_id === activeId ? " active" : ""}`}
-              onClick={() => onSelect(f.flow_id)}
-            >
-              <div className="row" style={{ justifyContent: "space-between" }}>
-                <span>{f.team}</span>
-                <span className={`pill ${f.status}`}>{f.status}</span>
-              </div>
-              <div className="muted" style={{ fontSize: 12 }}>
-                {f.name}
-              </div>
-            </div>
-          ))}
+      {visible.map((f) => (
+        <div
+          key={f.flow_id}
+          className={`flow-item${f.flow_id === activeId ? " active" : ""}`}
+          onClick={() => onSelect(f.flow_id)}
+        >
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <span>{f.team}</span>
+            <span className={`pill ${f.status}`}>{f.status}</span>
+          </div>
+          <div className="muted" style={{ fontSize: 12 }}>
+            {f.name}
+          </div>
         </div>
       ))}
-      {flows.length === 0 && !err && <div className="muted">no flows visible</div>}
+      {visible.length === 0 && !err && <div className="muted">no flows in this workspace</div>}
     </div>
   );
 }
