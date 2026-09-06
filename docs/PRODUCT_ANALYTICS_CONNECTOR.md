@@ -255,8 +255,35 @@ tenants with an active `posthog` integration.
    and a real end-to-end run produced `email` / `domain` / `none` matches
    + the `[:AT_ACCOUNT]` edge + the account rollup (smoke nodes cleaned
    up). `tests/test_product_analytics_sync.py` (10); 961 offline green.
-5. **`product_signal` node** — registry handler, `h_draft` fold-in,
-   `builder._context` key, palette + Inspector, a seed flow wiring it.
+5. **`product_signal` node.** ✅ (2026-09-06) `registry.h_product_signal`
+   (`@register("product_signal")`) — resolves the filer's email
+   (`sender.email` → `case.contact.email` → `case.from`), one tenant-scoped
+   Cypher read (`_PRODUCT_SIGNAL_CYPHER`) for the `(:Contact)`'s rollup +
+   `[:DID]` features + `[:AT_ACCOUNT]` account rollup, writes
+   `state.product_signal = {available, identity_match, last_seen_at,
+   events_30d, active_days_30d, usage_trend, recent_features[], account}`.
+   Any miss (no email / PostHog not connected / no `NEO4J_URI` / graph
+   down / no rollup for this person) → `{available: false, reason}` and the
+   flow proceeds unchanged — **never blocks a run**. `state.py` gains the
+   `product_signal` key (LangGraph drops undeclared keys); `builder.
+   _context` exposes it so edges can branch on `product_signal.available`
+   / `.usage_trend` / `.account.usage_trend`; `h_draft` folds a compact
+   rendering into the prompt under "Product activity for this user
+   (background — do not quote as policy)" — context, **not** a grounding
+   source. `NODE_DEFAULTS` + the flow-copilot `_TYPE_DOC` + the web
+   `NODE_HELP` gain entries; the palette is auto-driven by `known_types()`.
+   **Not done (deliberate):** wiring it into a published seed flow — with
+   no PostHog integration in this environment it would only ever be a
+   `{available:false}` no-op, and it would bump a demo flow's version for
+   nothing. A tenant drops it from the palette after connecting PostHog.
+   `tests/test_product_signal.py` (11); live-verified against the real
+   Neo4j (a seeded Contact + feature + account rollup produced the full
+   payload; smoke nodes cleaned up). 972 offline green.
+
+**Phase 30 complete** (chunks 1–5). Follow-ons noted but not built:
+Mixpanel (§7), extending `interpreter/graph_query.py`'s allow-lists with
+Event-derived dimensions, and a per-account "product health" tile in the
+Review/insights area.
 
 ## §7 — Mixpanel (documented, not built)
 

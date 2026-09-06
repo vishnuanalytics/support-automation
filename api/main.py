@@ -117,6 +117,9 @@ NODE_DEFAULTS: dict[str, dict[str, Any]] = {
                     "skip_signatures": True, "min_image_px": 350,
                     "video": False, "video_frames": 4, "video_max_seconds": 300},
     "sf_context": {"want": ["account", "contacts", "leads", "cases", "team"]},
+    # Phase 30 — the filer's recent product activity from the analytics graph
+    # (needs a connected PostHog integration + the product_analytics_sync run).
+    "product_signal": {"email_field": "contact.email", "out_key": "product_signal"},
     "ai_prompt": {
         "system": "You are a support triage assistant.",
         "user": "Case: {case.subject}\n{case.body}\n\nAccount: {sf_context.account.name} "

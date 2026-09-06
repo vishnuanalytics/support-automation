@@ -45,6 +45,13 @@ _TYPE_DOC: dict[str, str] = {
                "reuse) -- needed before sf_writeback / ask_human / handover can act on a real Case",
     "sf_context": "load Account/Contact/Case-history/team around the Case into "
                   "state.sf_context (config.want); place after identify",
+    "product_signal": "enrich state.product_signal with the filer's recent product "
+                      "activity from the analytics graph (events_30d, usage_trend, "
+                      "recent_features, account rollup) -- draft folds it in as "
+                      "context; edges can branch on product_signal.available / "
+                      ".usage_trend / .account.usage_trend. No-op ({available:false}) "
+                      "unless PostHog is connected AND the sender matches a known "
+                      "contact; place after identify, before draft. Never blocks a run",
     "classify": "triage the case: tier, topic, urgency, summary",
     "extract": "pull named fields out of the message into state.entities -- REQUIRES "
                "config.fields = {\"field_name\": \"what it means\"}; with no config.fields "

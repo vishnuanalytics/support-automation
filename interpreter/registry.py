@@ -796,6 +796,105 @@ def h_kb_lookup(state: CaseState, config: dict) -> dict:
     }
 
 
+_PRODUCT_SIGNAL_CYPHER = """
+MATCH (ct:Contact {email: $email, tenant_id: $tenant_id})
+OPTIONAL MATCH (ct)-[d:DID]->(f:Feature)
+OPTIONAL MATCH (ct)-[:AT_ACCOUNT]->(a:Account)
+RETURN ct.identity_match          AS identity_match,
+       ct.last_seen_at            AS last_seen_at,
+       ct.events_30d              AS events_30d,
+       ct.active_days_30d         AS active_days_30d,
+       ct.usage_trend             AS usage_trend,
+       collect(DISTINCT CASE WHEN f IS NULL THEN NULL
+               ELSE {name: f.name, last_ts: d.last_ts, count: d.count} END) AS features,
+       a.sf_id                    AS account_id,
+       a.pa_active_users_30d      AS account_active_users_30d,
+       a.pa_usage_trend           AS account_usage_trend
+LIMIT 1
+"""
+
+
+@register("product_signal")
+def h_product_signal(state: CaseState, config: dict) -> dict:
+    """Phase 30 — enrich the run with the filer's recent product activity
+    (PostHog rollups, synced to Neo4j `(:Contact)` by
+    `ingestion/product_analytics_sync`). Consulted only when the flow
+    routes here; `draft` folds the result in as *context*, and edges can
+    branch on `product_signal.*`.
+
+    Never blocks a run: no sender email / PostHog not connected / graph
+    down / the person has no product activity -> `{available: false}` and
+    the flow proceeds exactly as it would without this node.
+
+    config: {email_field="contact.email", out_key="product_signal"}
+    """
+    import os
+
+    nid = config["_node_id"]
+    out_key = config.get("out_key", "product_signal")
+    case = state.get("case", {})
+    sender = state.get("sender") or {}
+
+    def _out(payload: dict, note: str) -> dict:
+        return {out_key: payload, **_trace(nid, "product_signal", note, payload)}
+
+    email = ""
+    for cand in (sender.get("email"),
+                 _dig(case, config.get("email_field", "contact.email")),
+                 case.get("from"), _dig(case, "contact.email"), case.get("email")):
+        if isinstance(cand, str) and "@" in cand:
+            email = cand.strip().lower()
+            break
+    if not email:
+        return _out({"available": False, "reason": "no sender email"}, "no sender email")
+
+    tenant_id = state.get("tenant_id")
+    if not (tenant_id and os.environ.get("NEO4J_URI")):
+        return _out({"available": False, "reason": "graph unavailable"}, "graph unavailable")
+
+    from interpreter import case_memory
+    driver = case_memory._driver_or_none()
+    if driver is None:
+        return _out({"available": False, "reason": "graph unavailable"}, "graph unreachable")
+
+    try:
+        rec, _s, _k = driver.execute_query(
+            _PRODUCT_SIGNAL_CYPHER, email=email, tenant_id=str(tenant_id),
+            database_=os.environ.get("NEO4J_DATABASE", "neo4j"))
+    except Exception as e:  # noqa: BLE001 -- an enrichment step never fails a run
+        log.warning("product_signal query: %s", e)
+        return _out({"available": False, "reason": "graph error"}, f"graph error: {e}")
+
+    row = rec[0].data() if rec else None
+    if not row or row.get("last_seen_at") is None:
+        return _out({"available": False, "reason": "no product activity for this user",
+                     "email": email}, f"no product activity for {email}")
+
+    feats = sorted(
+        (f for f in (row.get("features") or []) if f and f.get("name")),
+        key=lambda f: (f.get("last_ts") or ""), reverse=True)
+    acct = None
+    if row.get("account_id"):
+        acct = {"account_id": row["account_id"],
+                "active_users_30d": row.get("account_active_users_30d"),
+                "usage_trend": row.get("account_usage_trend")}
+
+    payload = {
+        "available": True,
+        "email": email,
+        "identity_match": row.get("identity_match"),
+        "last_seen_at": row.get("last_seen_at"),
+        "events_30d": row.get("events_30d"),
+        "active_days_30d": row.get("active_days_30d"),
+        "usage_trend": row.get("usage_trend"),
+        "recent_features": feats[:6],
+        "account": acct,
+    }
+    note = (f"{email}: {payload['events_30d']} events/30d, trend={payload['usage_trend']}, "
+            f"{len(feats)} feature(s)" + (", account linked" if acct else ""))
+    return _out(payload, note)
+
+
 @register("extract")
 def h_extract(state: CaseState, config: dict) -> dict:
     """Pull named fields out of the case into `state["entities"]` so policy
@@ -972,6 +1071,25 @@ def h_draft(state: CaseState, config: dict) -> dict:
                           f"resolution ({p.get('kind')}): {p.get('resolution_text', '')}")
         user += "\n\n# Prior resolved cases (replies that actually resolved a near-identical issue)\n" \
                 + "\n\n".join(blocks)
+
+    # Phase 30: what the filer actually did in the product, if a
+    # `product_signal` node ran upstream and matched them. Context, not a
+    # grounding source — it says nothing about KB truth.
+    psig = state.get("product_signal") or {}
+    if psig.get("available"):
+        lines = [f"Last seen {psig.get('last_seen_at')}; {psig.get('events_30d')} events / "
+                 f"{psig.get('active_days_30d')} active days in the last 30d; "
+                 f"usage trend {psig.get('usage_trend')}."]
+        feats = psig.get("recent_features") or []
+        if feats:
+            lines.append("Recent notable events: "
+                         + ", ".join(f"{f['name']} (x{f.get('count')})" for f in feats[:6]) + ".")
+        acct = psig.get("account") or {}
+        if acct:
+            lines.append(f"Their account: {acct.get('active_users_30d')} active users/30d, "
+                         f"usage trend {acct.get('usage_trend')}.")
+        user += "\n\n# Product activity for this user (background — do not quote as policy)\n" \
+                + "\n".join(lines)
 
     grounding_rule = (
         "Ground the reply in the KNOWLEDGE BASE and, when they closely match, the "
