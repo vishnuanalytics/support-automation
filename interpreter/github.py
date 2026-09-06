@@ -92,3 +92,20 @@ def list_issue_comments(token: str, repo: str, number: int) -> list[dict[str, An
     j = _get(token, f"/repos/{repo}/issues/{number}/comments")
     return [{"id": c["id"], "body": c.get("body", ""),
              "user": (c.get("user") or {}).get("login", "")} for c in j]
+
+
+def add_issue_comment(token: str, repo: str, number: int, body: str) -> dict[str, Any]:
+    """Post a comment on an existing issue. -> {id, html_url}."""
+    import requests
+
+    r = requests.post(
+        f"{_API}/repos/{repo}/issues/{number}/comments", json={"body": body},
+        headers={"Authorization": f"Bearer {token}",
+                 "Accept": "application/vnd.github+json",
+                 "X-GitHub-Api-Version": "2022-11-28"},
+        timeout=20,
+    )
+    if r.status_code >= 300:
+        raise RuntimeError(f"github issue-comment API {r.status_code}: {r.text[:300]}")
+    j = r.json()
+    return {"id": j["id"], "html_url": j.get("html_url", "")}

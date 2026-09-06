@@ -33,6 +33,10 @@ class _Table:
         self._f[k] = v
         return self
 
+    def in_(self, k, vals):
+        self._f[("in", k)] = list(vals)
+        return self
+
     def limit(self, _n):
         return self
 
@@ -51,7 +55,16 @@ class _Table:
             self.rows.append(new)
             self._pending, self._f = None, {}
             return type("R", (), {"data": [new]})()
-        matches = [r for r in self.rows if all(r.get(k) == v for k, v in self._f.items())]
+        def _ok(r):
+            for k, v in self._f.items():
+                if isinstance(k, tuple) and k[0] == "in":
+                    if r.get(k[1]) not in v:
+                        return False
+                elif r.get(k) != v:
+                    return False
+            return True
+
+        matches = [r for r in self.rows if _ok(r)]
         if op == "update":
             for r in matches:
                 r.update(data)
@@ -249,3 +262,114 @@ def test_gdocs_normalize_write_back_requires_a_valid_repo():
                    "access": "write_back", "github_repo": "acme/support-kb"}
     with pytest.raises(ValueError):
         spec.normalize_config({"doc_url": url, "access": "write_back", "github_repo": "not-a-repo"})
+
+
+# ── watch_doc_writebacks (chunk 2: close the loop) ───────────────────────
+def _wb_row(**over):
+    r = {"id": "wb1", "tenant_id": "t", "connection_id": "c1", "status": "applied",
+         "github_repo": "acme/kb", "github_issue_number": 5,
+         "blocks": [{"old": "was A", "new": "now B", "applied": True}]}
+    r.update(over)
+    return r
+
+
+def _wire_watch(monkeypatch, *, state="open", comments=None, get_raises=None):
+    monkeypatch.setattr("interpreter.github.token_for", lambda t, s: "tok")
+
+    def get_issue(tok, repo, num):
+        if get_raises:
+            raise get_raises
+        return {"number": num, "state": state, "html_url": f"https://github.com/{repo}/issues/{num}",
+                "title": "t", "labels": ["kb-writeback"]}
+
+    monkeypatch.setattr("interpreter.github.get_issue", get_issue)
+    monkeypatch.setattr("interpreter.github.list_issue_comments",
+                        lambda tok, repo, num: comments or [])
+    posted = []
+    monkeypatch.setattr("interpreter.github.add_issue_comment",
+                        lambda tok, repo, num, body: posted.append(body) or {"id": 1, "html_url": ""})
+    reversed_blocks = []
+    monkeypatch.setattr("interpreter.gdrive.replace_passage",
+                        lambda t, d, old, new, s: reversed_blocks.append((old, new)) or 1)
+    enq = []
+    monkeypatch.setattr("interpreter.jobs.enqueue",
+                        lambda kind, payload, **kw: enq.append((kind, payload)) or "j1")
+    return {"posted": posted, "reversed": reversed_blocks, "enq": enq}
+
+
+def test_watch_marks_verified_when_the_issue_is_closed(monkeypatch):
+    sb = _SB(kb_doc_writebacks=[_wb_row()])
+    _wire_watch(monkeypatch, state="closed")
+    res = kb_writeback.watch_doc_writebacks(sb)
+    assert res == {"checked": 1, "verified": 1, "reverted": 0, "errors": 0, "dry_run": False}
+    row = sb.table("kb_doc_writebacks").rows[0]
+    assert row["status"] == "verified" and row["verified_at"] == "now()"
+
+
+def test_watch_reverts_on_a_slash_revert_comment(monkeypatch):
+    sb = _SB(kb_doc_writebacks=[_wb_row()],
+             kb_source_connections=[{"connection_id": "c1", "config": {"doc_id": "d1"}}])
+    seen = _wire_watch(monkeypatch, state="open",
+                       comments=[{"body": "looks wrong", "user": "u"},
+                                 {"body": "/revert please", "user": "mgr"}])
+    res = kb_writeback.watch_doc_writebacks(sb)
+    assert res["reverted"] == 1 and res["verified"] == 0
+    assert sb.table("kb_doc_writebacks").rows[0]["status"] == "reverted"
+    assert seen["reversed"] == [("now B", "was A")]          # new -> old, in the doc
+    assert ("kb_sync", {"connection_id": "c1"}) in seen["enq"]
+    assert seen["posted"] and "Reverted" in seen["posted"][0]
+
+
+def test_watch_revert_takes_precedence_over_a_close(monkeypatch):
+    sb = _SB(kb_doc_writebacks=[_wb_row()],
+             kb_source_connections=[{"connection_id": "c1", "config": {"doc_id": "d1"}}])
+    _wire_watch(monkeypatch, state="closed", comments=[{"body": "/revert", "user": "m"}])
+    res = kb_writeback.watch_doc_writebacks(sb)
+    assert res["reverted"] == 1 and res["verified"] == 0
+
+
+def test_watch_ignores_revert_on_a_conflict_row(monkeypatch):
+    sb = _SB(kb_doc_writebacks=[_wb_row(status="conflict", blocks=[{"old": "x", "new": "y",
+                                                                   "applied": False}])])
+    _wire_watch(monkeypatch, state="closed", comments=[{"body": "/revert", "user": "m"}])
+    res = kb_writeback.watch_doc_writebacks(sb)
+    assert res["reverted"] == 0 and res["verified"] == 1     # nothing to revert; close = handled
+
+
+def test_watch_dry_run_writes_nothing(monkeypatch):
+    sb = _SB(kb_doc_writebacks=[_wb_row()])
+    _wire_watch(monkeypatch, state="closed")
+    res = kb_writeback.watch_doc_writebacks(sb, dry_run=True)
+    assert res["verified"] == 1 and res["dry_run"] is True
+    assert sb.table("kb_doc_writebacks").rows[0]["status"] == "applied"   # untouched
+
+
+def test_watch_skips_rows_without_an_issue_and_counts_api_errors(monkeypatch):
+    sb = _SB(kb_doc_writebacks=[
+        _wb_row(id="wb1", github_issue_number=None),
+        _wb_row(id="wb2", github_issue_number=9),
+    ])
+    _wire_watch(monkeypatch, get_raises=RuntimeError("gh 404"))
+    res = kb_writeback.watch_doc_writebacks(sb)
+    assert res["checked"] == 1 and res["errors"] == 1        # wb1 skipped, wb2 errored
+    assert all(r["status"] == "applied" for r in sb.table("kb_doc_writebacks").rows)
+
+
+def test_watch_only_looks_at_open_writeback_statuses(monkeypatch):
+    sb = _SB(kb_doc_writebacks=[
+        _wb_row(id="done", status="verified"),
+        _wb_row(id="gone", status="reverted"),
+    ])
+    _wire_watch(monkeypatch, state="closed")
+    res = kb_writeback.watch_doc_writebacks(sb)
+    assert res["checked"] == 0
+
+
+def test_watch_revert_survives_a_row_with_no_connection(monkeypatch):
+    # a kb_doc_writebacks row can have connection_id=None; _do_doc_revert must
+    # not build a `connection_id=eq.None` query (live-caught regression).
+    sb = _SB(kb_doc_writebacks=[_wb_row(connection_id=None)])
+    _wire_watch(monkeypatch, state="open", comments=[{"body": "/revert", "user": "m"}])
+    res = kb_writeback.watch_doc_writebacks(sb)
+    assert res["reverted"] == 1
+    assert sb.table("kb_doc_writebacks").rows[0]["status"] == "reverted"

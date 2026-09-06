@@ -123,10 +123,21 @@ is **in addition**. Needs the read-write `documents` + `drive` scopes
 (`gdrive.SCOPES`); a tenant on an older read-only token gets a clean job
 failure until they re-consent. Google has no API for tracked "suggestions",
 so verification is against the issue diff + the live doc, not Docs suggestion
-mode. **Chunk 2 (not built):** a `kb_writeback_watch` sweep (issue closed ⇒
-`verified`; a `/revert` comment ⇒ restore the snapshot), a "Doc write-backs"
-view in `ReviewView.tsx`, and true index-range structural section
-replacement.
+mode.
+
+**Chunk 2 — built 2026-09-06.** `interpreter/kb_writeback.py::
+watch_doc_writebacks()` polls every open (`applied`/`partial`/`conflict`)
+`kb_doc_writebacks` row's GitHub issue (`github.get_issue` /
+`list_issue_comments`): issue **closed** ⇒ `status='verified'` +
+`verified_at`; a **`/revert`** comment (on an `applied`/`partial` row) ⇒
+`gdrive.replace_passage` reverses each applied block (`new` → `old`),
+`status='reverted'`, a confirming issue comment, and the connection is
+re-`kb_sync`'d. Runs from `ingestion/kb_writeback_watch.py` (wired into
+`daily-sync.yml`), same "no always-on worker host" pattern as
+`ingestion/kb_recrawl.py`. **Still not built:** a "Doc write-backs" view in
+`ReviewView.tsx` (the list is in the "Connected sources" panel for now), a
+Slack "send to GitHub before applying" button, and true index-range
+structural section replacement (vs. today's `replaceAllText` find/replace).
 
 ### 3. Google Sheets — not built; needs its own chunking model, not prose
 A support/FAQ spreadsheet is structured data, not prose — treating a whole

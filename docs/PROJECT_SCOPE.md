@@ -707,9 +707,50 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-06 (later same day) — KB write-back to Google Docs, chunk 1 of 2
-(this is the most recent work in this file).** A Google Doc connection was
-one-way (doc → KB mirror, locked). The Knowledge Integrity Loop already
+**2026-09-06 (chunk 2) — KB write-back: close the loop (this is the most
+recent work in this file).** Chunk 1 wrote the doc + opened a GitHub issue;
+nothing watched what the human did with it. Now:
+`interpreter/kb_writeback.py::watch_doc_writebacks()` polls every open
+(`applied`/`partial`/`conflict`) `kb_doc_writebacks` row's issue via
+`github.get_issue` / `list_issue_comments`:
+
+- issue **closed** ⇒ `status='verified'`, `verified_at` stamped;
+- a **`/revert`** comment (only on an `applied`/`partial` row) ⇒
+  `_do_doc_revert`: `gdrive.replace_passage` reverses each applied block
+  (`new` → `old`) in the doc, `status='reverted'`, a confirming
+  `github.add_issue_comment` (new helper), and the connection is
+  re-enqueued for `kb_sync` so the mirror re-reads the restored doc.
+  Precedence: a `/revert` wins over a plain close.
+
+Runs from **`ingestion/kb_writeback_watch.py`** (`python -m
+ingestion.kb_writeback_watch [--dry-run]`), wired into `daily-sync.yml`
+before the existing drain step — same "no always-on worker host" pattern as
+`ingestion/kb_recrawl.py`, not a worker sweep (GitHub polling wants a slow
+cadence). Per-tenant GitHub tokens from `tenant_integrations`.
+
+**Verify:** `tests/test_kb_doc_writeback.py` +8 (close→verified,
+`/revert`→reverse-blocks + `kb_sync` + issue comment, revert-beats-close,
+`/revert` ignored on a `conflict` row, dry-run, missing-issue skip +
+API-error count, only-open-statuses, and a `connection_id=None` regression).
+**839 offline tests green (was 831).** **Live-checked against the real
+Supabase project** (throwaway `kb_doc_writebacks` rows, `github`/`gdrive`
+patched in-process, then deleted): closed→`verified`+`verified_at`,
+`/revert`→`reverted` with the block reversed `new`→`old`, open rows
+untouched, dry-run writes nothing. The live run **caught a real bug** the
+offline fakes masked — `_do_doc_revert` built a `connection_id=eq.None`
+query for a row with no connection; fixed (guard on `cid`) + regression
+test.
+
+**Still not built (chunk 3+):** a "Doc write-backs" view in
+`ReviewView.tsx` (the list lives in the "Connected sources" panel for now),
+a Slack "send to GitHub before applying" button, and true index-range
+structural section replacement (vs. today's `replaceAllText` find/replace).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (chunk 1) — KB write-back to Google Docs.** A Google Doc
+connection was one-way (doc → KB mirror, locked). The Knowledge Integrity Loop already
 turns "a human agent answered in a way that contradicts the KB" into a
 manager-approved correction — but for a gdoc-backed entry that only fixed
 the internal mirror, leaving the doc itself stale. This closes that loop
@@ -760,12 +801,12 @@ rewritten → issue opened → human closes" can't run here. Gate logic, diff
 extraction, `batchUpdate` request shape, and tracking-row writes are all
 covered offline.
 
-**Chunk 2 (not built):** a `kb_writeback_watch` sweep — poll each open
-issue (`github.get_issue` / `list_issue_comments`); closed ⇒ mark the
-tracking row `verified`; a `/revert` comment ⇒ restore the pre-edit
-snapshot. Plus a "Doc write-backs" list in `ReviewView.tsx`, a Slack
-"send to GitHub before applying" button, and true index-range structural
-section replacement (vs. today's `replaceAllText` find/replace).
+**Chunk 2 — built (see the most-recent entry above):**
+`watch_doc_writebacks()` + `ingestion/kb_writeback_watch.py`, closed ⇒
+`verified`, `/revert` ⇒ reverse the applied blocks in the doc. Still open:
+a "Doc write-backs" list in `ReviewView.tsx`, a Slack "send to GitHub
+before applying" button, and true index-range structural section
+replacement (vs. today's `replaceAllText` find/replace).
 
 **Older note, superseded by the above as "most recent," kept for its own
 history:**

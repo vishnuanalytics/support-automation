@@ -104,6 +104,18 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python -m ingestion.kb_recrawl
 
+      # KB write-back to Google Docs (docs/KB_SOURCE_CONNECTORS.md §2): poll
+      # the GitHub verification issues each automated doc edit opened —
+      # closed -> `verified`; a `/revert` comment -> undo the doc edit +
+      # re-sync. Per-tenant GitHub tokens come from tenant_integrations; a
+      # revert enqueues a kb_sync the drain step below picks up.
+      - name: Close the loop on KB doc write-backs
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m ingestion.kb_writeback_watch
+
       - name: Drain the job queue (crawl_site + sync_gsheet + embed_kb_entry)
         continue-on-error: true
         if: always()

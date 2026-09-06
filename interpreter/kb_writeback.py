@@ -440,3 +440,84 @@ def promote_provisional(sb, *, dry_run: bool = False) -> int:
               .eq("doc_url", f"kb://{r['source_id']}/{r['entry_id']}").execute()
     log.info("promoted %d provisional KB entr(y/ies) to active (%d held)", len(ready), held)
     return len(ready)
+
+
+# ── KB write-back watch (docs/KB_SOURCE_CONNECTORS.md §2, chunk 2) ───────
+# Closes the loop on an automated Google-Doc edit: poll the GitHub issue it
+# opened. Issue closed  -> the human confirmed  -> mark the row `verified`.
+# A `/revert` comment    -> undo each applied block in the doc and mark the
+# row `reverted`. Runs from `ingestion/kb_writeback_watch.py` (daily), same
+# "no always-on worker host" pattern as `ingestion/kb_recrawl.py`.
+_WATCHED_STATUSES = ("applied", "partial", "conflict")
+
+
+def _revert_requested(body: str) -> bool:
+    return (body or "").strip().lower().startswith("/revert")
+
+
+def _do_doc_revert(sb, row: dict, token: str, repo: str, number: int) -> int:
+    """Reverse every `applied` block in the doc (replace `new` back with
+    `old`). Returns how many blocks were undone."""
+    from interpreter import gdrive, jobs
+
+    cid = row.get("connection_id")
+    conn = ((sb.table("kb_source_connections").select("config")
+             .eq("connection_id", cid).limit(1).execute().data or []) if cid else [])
+    doc_id = ((conn[0].get("config") or {}) if conn else {}).get("doc_id")
+    undone = 0
+    if doc_id:
+        for b in row.get("blocks") or []:
+            if b.get("applied") and (b.get("new") or "").strip():
+                try:
+                    if gdrive.replace_passage(row["tenant_id"], doc_id,
+                                              b["new"], b.get("old", ""), sb):
+                        undone += 1
+                except Exception as e:  # noqa: BLE001
+                    log.warning("kb write-back revert block (%s): %s", row["id"], e)
+    sb.table("kb_doc_writebacks").update({"status": "reverted"}).eq("id", row["id"]).execute()
+    if row.get("connection_id"):
+        jobs.enqueue("kb_sync", {"connection_id": row["connection_id"]},
+                     dedupe_key=f"kb_sync:{row['connection_id']}")
+    try:
+        from interpreter import github as gh
+        gh.add_issue_comment(token, repo, number,
+                             f"Reverted — {undone} block(s) restored in the doc. "
+                             f"The internal KB correction is unchanged; adjust it via review if needed.")
+    except Exception as e:  # noqa: BLE001
+        log.warning("kb write-back revert comment (%s): %s", row["id"], e)
+    return undone
+
+
+def watch_doc_writebacks(sb, *, dry_run: bool = False) -> dict:
+    from interpreter import github as gh
+
+    rows = (sb.table("kb_doc_writebacks").select("*")
+            .in_("status", list(_WATCHED_STATUSES)).execute().data or [])
+    checked = verified = reverted = errors = 0
+    for r in rows:
+        repo, number = r.get("github_repo"), r.get("github_issue_number")
+        if not (repo and number):
+            continue
+        checked += 1
+        try:
+            token = gh.token_for(r["tenant_id"], sb)
+            issue = gh.get_issue(token, repo, int(number))
+            comments = gh.list_issue_comments(token, repo, int(number))
+        except Exception as e:  # noqa: BLE001
+            errors += 1
+            log.warning("watch_doc_writebacks %s#%s: %s", repo, number, e)
+            continue
+
+        wants_revert = (r["status"] in ("applied", "partial")
+                        and any(_revert_requested(c.get("body", "")) for c in comments))
+        if wants_revert:
+            reverted += 1
+            if not dry_run:
+                _do_doc_revert(sb, r, token, repo, int(number))
+        elif issue.get("state") == "closed":
+            verified += 1
+            if not dry_run:
+                sb.table("kb_doc_writebacks").update(
+                    {"status": "verified", "verified_at": "now()"}).eq("id", r["id"]).execute()
+    return {"checked": checked, "verified": verified, "reverted": reverted,
+            "errors": errors, "dry_run": dry_run}
