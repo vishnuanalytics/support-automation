@@ -16,9 +16,14 @@ optional — both "Link Google Doc"/"Google Sheet" buttons stay hidden until
    - User type **External** (or Internal if you have a Workspace).
    - Scopes: `.../auth/drive.readonly`, `.../auth/documents.readonly`,
      `.../auth/spreadsheets.readonly`.
-   - A tenant that connected **before** the Sheets scope was added needs to
-     reconnect once — Google doesn't retroactively grant a new scope to an
-     existing token.
+   - **KB write-back** (docs/KB_SOURCE_CONNECTORS.md §2, opt-in per Google
+     Doc connection) also needs the read-write `.../auth/documents` and
+     `.../auth/drive` scopes. Only add these if a tenant will use
+     write-back; a read-only tenant never needs them.
+   - A tenant that connected **before** a scope was added (Sheets, or the
+     write-back scopes) needs to reconnect once — Google doesn't
+     retroactively grant a new scope to an existing token. Until then a
+     write-back job fails cleanly and is recorded on `kb_doc_writebacks`.
    - While it's in "Testing", add each Google account that will connect as
      a **Test user**.
 4. **APIs & Services → Credentials → Create credentials → OAuth client ID**:

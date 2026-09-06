@@ -4,6 +4,7 @@ import type {
   KbCollection,
   KbConnection,
   KbConnector,
+  KbDocWriteback,
   KbEntry,
   KbEntryRow,
 } from "../types";
@@ -393,17 +394,21 @@ function ConnectedSources({
 }) {
   const [conns, setConns] = useState<KbConnection[]>([]);
   const [catalogue, setCatalogue] = useState<KbConnector[]>([]);
+  const [writebacks, setWritebacks] = useState<KbDocWriteback[]>([]);
+  const [showWb, setShowWb] = useState(false);
   const [adding, setAdding] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [cs, cat] = await Promise.all([
+      const [cs, cat, wb] = await Promise.all([
         api.kb.listConnections(col.source_id),
         api.kb.listConnectors(col.tenant_id),
+        api.kb.listDocWritebacks(col.source_id).catch(() => [] as KbDocWriteback[]),
       ]);
       setConns(cs);
       setCatalogue(cat);
+      setWritebacks(wb);
     } catch (e) {
       setErr(e instanceof ApiError ? String(e.detail) : String(e));
     }
@@ -412,6 +417,9 @@ function ConnectedSources({
   useEffect(() => {
     void load();
   }, [load]);
+
+  const isWriteBack = (c: KbConnection) =>
+    c.connector === "gdocs" && (c.config as { access?: string }).access === "write_back";
 
   async function sync(cid: string) {
     try {
@@ -507,6 +515,17 @@ function ConnectedSources({
               <tr key={c.connection_id}>
                 <td style={{ maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis" }}>
                   {c.label}
+                  {isWriteBack(c) && (
+                    <span
+                      title="An approved KIL correction is written back into this doc, then opens a GitHub issue for review"
+                      style={{
+                        fontSize: 11, marginLeft: 6, padding: "1px 6px", borderRadius: 8,
+                        background: "#5a3a8a", color: "#fff", whiteSpace: "nowrap",
+                      }}
+                    >
+                      write-back
+                    </span>
+                  )}
                 </td>
                 <td className="muted">{c.connector}</td>
                 <td>
@@ -527,6 +546,67 @@ function ConnectedSources({
             ))}
           </tbody>
         </table>
+      )}
+
+      {writebacks.length > 0 && (
+        <div className="col" style={{ gap: 6 }}>
+          <button
+            style={{ alignSelf: "flex-start", fontSize: 12 }}
+            onClick={() => setShowWb((v) => !v)}
+          >
+            {showWb ? "hide" : "show"} {writebacks.length} doc write-back
+            {writebacks.length === 1 ? "" : "s"}
+          </button>
+          {showWb && (
+            <table className="runs-table">
+              <thead>
+                <tr>
+                  <th>when</th>
+                  <th>status</th>
+                  <th>blocks</th>
+                  <th>review issue</th>
+                </tr>
+              </thead>
+              <tbody>
+                {writebacks.map((w) => (
+                  <tr key={w.id}>
+                    <td className="muted">{new Date(w.applied_at).toLocaleString()}</td>
+                    <td>
+                      <span
+                        title={w.error ?? undefined}
+                        style={{
+                          fontSize: 11, padding: "1px 6px", borderRadius: 8, color: "#fff",
+                          background:
+                            w.status === "applied" || w.status === "verified"
+                              ? "#2b6a2b"
+                              : w.status === "partial"
+                                ? "#8a5a00"
+                                : w.status === "reverted"
+                                  ? "#555"
+                                  : "#9b2c2c",
+                        }}
+                      >
+                        {w.status}
+                      </span>
+                    </td>
+                    <td className="muted">
+                      {w.blocks.filter((b) => b.applied).length}/{w.blocks.length}
+                    </td>
+                    <td>
+                      {w.github_issue_url ? (
+                        <a href={w.github_issue_url} target="_blank" rel="noreferrer">
+                          {w.github_repo}#{w.github_issue_number}
+                        </a>
+                      ) : (
+                        <span className="muted">—</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
       )}
     </div>
   );
@@ -581,8 +661,11 @@ function AddSourceForm({
     if (!spec) return;
     setBusy(true);
     setErr(null);
+    const visible = (f: KbConnector["config_fields"][number]) =>
+      !f.show_if || values[f.show_if.key] === f.show_if.eq;
     const config: Record<string, unknown> = {};
     for (const f of spec.config_fields) {
+      if (!visible(f)) continue;
       const raw = (values[f.key] ?? "").trim();
       if (!raw) {
         if (f.required) {
@@ -623,20 +706,33 @@ function AddSourceForm({
         <div className="err" style={{ fontSize: 12 }}>{spec.reason ?? "not available"}</div>
       )}
 
-      {spec?.config_fields.map((f) => (
-        <div className="field" key={f.key}>
-          <label>
-            {f.label}
-            {f.required ? " *" : ""}
-          </label>
-          <input
-            type={f.type === "number" ? "number" : "text"}
-            placeholder={f.placeholder}
-            value={values[f.key] ?? ""}
-            onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
-          />
-        </div>
-      ))}
+      {spec?.config_fields
+        .filter((f) => !f.show_if || values[f.show_if.key] === f.show_if.eq)
+        .map((f) => (
+          <div className="field" key={f.key}>
+            <label>
+              {f.label}
+              {f.required ? " *" : ""}
+            </label>
+            {f.type === "select" ? (
+              <select
+                value={values[f.key] ?? f.options?.[0] ?? ""}
+                onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
+              >
+                {(f.options ?? []).map((o) => (
+                  <option key={o} value={o}>{o}</option>
+                ))}
+              </select>
+            ) : (
+              <input
+                type={f.type === "number" ? "number" : "text"}
+                placeholder={f.placeholder}
+                value={values[f.key] ?? ""}
+                onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
+              />
+            )}
+          </div>
+        ))}
 
       {err && <div className="err" style={{ fontSize: 12 }}>{err}</div>}
 

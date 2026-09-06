@@ -94,6 +94,40 @@ incremental sync after — same resumable-watermark discipline
 `graph_sync_state` already established for `case_graph_sync.py`, not a new
 pattern.
 
+#### Write-back — built 2026-09-06 (chunk 1 of 2)
+
+A gdocs connection can opt into `config.access = "write_back"` (default
+`"read_only"`; picked in the "+ add source" form, `KBConnectorSpec.writable`
+= True for gdocs only). When the Knowledge Integrity Loop's manager review
+approves a correction (`interpreter/kb_writeback.py::apply_kb_change`) for an
+entry on such a connection:
+
+- `_doc_change_blocks()` paragraph-diffs the old vs. new entry markdown into
+  `{old, new}` passages;
+- a `gdoc_writeback` worker job re-fetches the doc (a `modifiedTime` mismatch
+  vs. the last sync ⇒ **conflict**: open the issue, edit nothing), then for
+  each block does `documents.batchUpdate` / `replaceAllText`
+  (`gdrive.replace_passage`) — 0 replacements ⇒ that block is flagged for a
+  manual edit;
+- a **GitHub issue** (`label: kb-writeback`, repo from
+  `config.github_repo`) carries the per-block old→new diff and which blocks
+  applied — the human verifies the doc against it and **closes the issue to
+  confirm**;
+- a best-effort Drive comment points at the issue; the connection is
+  re-`kb_sync`'d so the mirror re-reads the edited doc;
+- every edit is a `kb_doc_writebacks` row (migration `092`) with a pre-edit
+  markdown snapshot.
+
+The Slack manager review still gates the internal `kb_entries` copy — GitHub
+is **in addition**. Needs the read-write `documents` + `drive` scopes
+(`gdrive.SCOPES`); a tenant on an older read-only token gets a clean job
+failure until they re-consent. Google has no API for tracked "suggestions",
+so verification is against the issue diff + the live doc, not Docs suggestion
+mode. **Chunk 2 (not built):** a `kb_writeback_watch` sweep (issue closed ⇒
+`verified`; a `/revert` comment ⇒ restore the snapshot), a "Doc write-backs"
+view in `ReviewView.tsx`, and true index-range structural section
+replacement.
+
 ### 3. Google Sheets — not built; needs its own chunking model, not prose
 A support/FAQ spreadsheet is structured data, not prose — treating a whole
 sheet as one `body_md` blob (the naive approach) destroys retrieval

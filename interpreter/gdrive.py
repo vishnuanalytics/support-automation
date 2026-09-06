@@ -15,9 +15,12 @@ function and unit-tested offline.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from typing import Any
+
+log = logging.getLogger("interpreter.gdrive")
 
 SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
@@ -26,6 +29,14 @@ SCOPES = [
     # tenant that connected before this shipped needs to reconnect once;
     # Google doesn't retroactively grant a new scope to an existing token.
     "https://www.googleapis.com/auth/spreadsheets.readonly",
+    # 2026-09-06 — KB write-back (docs/KB_SOURCE_CONNECTORS.md §2). Only
+    # exercised for a gdocs connection with `config.access == 'write_back'`;
+    # a read-only tenant never uses it, and an existing token keeps working
+    # with its old (read-only) scopes — the job just fails gracefully until
+    # the tenant re-runs Google consent. `documents` = rewrite the passage;
+    # `drive` = post the verification comment on the doc (best-effort).
+    "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/drive",
 ]
 _AUTH_URI = "https://accounts.google.com/o/oauth2/v2/auth"
 _TOKEN_URI = "https://oauth2.googleapis.com/token"
@@ -145,6 +156,51 @@ def fetch_doc(tenant_id: str, doc_id: str, sb) -> dict[str, Any]:
 def get_modified_time(tenant_id: str, doc_id: str, sb) -> str:
     drive, _ = _services(tenant_id, sb)
     return drive.files().get(fileId=doc_id, fields="modifiedTime").execute()["modifiedTime"]
+
+
+# ── write-back (KB write-back, docs/KB_SOURCE_CONNECTORS.md §2) ──────────
+# Only reached for a gdocs connection with `config.access == 'write_back'`.
+# Needs the read-write `documents` / `drive` scopes (see SCOPES) — a tenant
+# on an older read-only token gets a clean failure, not a silent no-op.
+def replace_passage(tenant_id: str, doc_id: str, old_text: str, new_text: str,
+                    sb) -> int:
+    """In-place rewrite of one passage via `documents.batchUpdate` /
+    `replaceAllText`. Returns the number of occurrences replaced — 0 means
+    the old text wasn't found verbatim (formatting split the runs, or the
+    doc already changed), and the caller should fall back to flagging the
+    block for a manual edit rather than guessing."""
+    if not (old_text or "").strip():
+        return 0
+    _, docs = _services(tenant_id, sb)
+    resp = docs.documents().batchUpdate(
+        documentId=doc_id,
+        body={"requests": [{
+            "replaceAllText": {
+                "containsText": {"text": old_text, "matchCase": True},
+                "replaceText": new_text,
+            }
+        }]},
+    ).execute()
+    for r in resp.get("replies", []):
+        rat = (r.get("replaceAllText") or {}).get("occurrencesChanged")
+        if rat is not None:
+            return int(rat)
+    return 0
+
+
+def comment(tenant_id: str, doc_id: str, text: str, sb) -> str | None:
+    """Post an (unanchored) comment on the doc for human visibility. Best
+    effort — returns the comment id, or None if the token can't comment
+    (older read-only scope); the caller must not depend on it."""
+    try:
+        drive, _ = _services(tenant_id, sb)
+        c = drive.comments().create(
+            fileId=doc_id, fields="id", body={"content": text},
+        ).execute()
+        return c.get("id")
+    except Exception as e:  # noqa: BLE001
+        log.warning("gdrive.comment(%s): %s", doc_id, e)
+        return None
 
 
 # ── Docs JSON -> Markdown (pure) ─────────────────────────────────────

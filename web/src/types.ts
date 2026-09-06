@@ -225,9 +225,11 @@ export interface KbEntryRow {
 export interface KbConnectorField {
   key: string;
   label: string;
-  type: "string" | "number";
+  type: "string" | "number" | "select";
   required?: boolean;
   placeholder?: string;
+  options?: string[];
+  show_if?: { key: string; eq: string };
 }
 
 export interface KbConnector {
@@ -237,6 +239,22 @@ export interface KbConnector {
   config_fields: KbConnectorField[];
   available: boolean;
   reason: string | null;
+  writable?: boolean;
+}
+
+export interface KbDocWriteback {
+  id: string;
+  connection_id: string | null;
+  entry_id: string | null;
+  review_task_id: string | null;
+  github_repo: string | null;
+  github_issue_number: number | null;
+  github_issue_url: string | null;
+  status: "applied" | "partial" | "conflict" | "verified" | "reverted" | "error";
+  blocks: { old: string; new: string; applied?: boolean }[];
+  error: string | null;
+  applied_at: string;
+  verified_at: string | null;
 }
 
 export interface KbConnection {

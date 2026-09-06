@@ -475,6 +475,105 @@ def _sync_gsheet(payload: dict, sb) -> dict:
          "collection_name": payload.get("collection_name", "")}, sb)
 
 
+def _writeback_issue_body(doc_url: str, blocks: list[dict], task: str | None,
+                          approver: str, conflict: bool) -> str:
+    lines = [f"Automated KB write-back to [the Google Doc]({doc_url}).", ""]
+    if task:
+        lines.append(f"Source review task: `{task}`")
+    lines += [f"Approved by: {approver}", ""]
+    if conflict:
+        lines += ["> ⚠️ The doc changed since this correction was drafted — "
+                  "**no edit was applied**. Reconcile the blocks below by hand.", ""]
+    for i, b in enumerate(blocks, 1):
+        state = "applied" if b.get("applied") else "NOT applied — needs a manual edit"
+        lines += [f"### Block {i} — {state}", "", "**Was:**", "```",
+                  (b.get("old") or "(new paragraph — nothing to match)"), "```",
+                  "**Now:**", "```", (b.get("new") or "(removed)"), "```", ""]
+    lines.append("_Verify the doc, then **close this issue** to confirm. "
+                 "Comment `/revert` to request a rollback._")
+    return "\n".join(lines)
+
+
+def _gdoc_writeback(payload: dict, sb) -> dict:
+    """KB write-back (docs/KB_SOURCE_CONNECTORS.md §2). A KIL correction was
+    approved for an entry on a `write_back` gdocs connection: rewrite the
+    changed passage in the doc in place, open a GitHub issue carrying the
+    old→new diff for a human to verify and close, drop a Drive comment, and
+    re-sync the KB mirror. All steps are best-effort and recorded on a
+    `kb_doc_writebacks` row."""
+    from interpreter import gdrive, github as gh
+
+    cid, tid = payload["connection_id"], payload["tenant_id"]
+    rows = (sb.table("kb_source_connections").select("*")
+            .eq("connection_id", cid).execute().data or [])
+    if not rows:
+        return {"connection_id": cid, "skipped": "connection gone"}
+    cfg = rows[0].get("config") or {}
+    doc_id = cfg.get("doc_id")
+    doc_url = cfg.get("doc_url") or f"https://docs.google.com/document/d/{doc_id}/edit"
+    repo = payload.get("github_repo") or cfg.get("github_repo")
+    blocks = list(payload.get("blocks") or [])
+    approver = payload.get("approver") or "a manager"
+    task = payload.get("review_task_id")
+
+    track: dict = {"tenant_id": tid, "connection_id": cid, "entry_id": payload.get("entry_id"),
+                   "review_task_id": task, "github_repo": repo}
+
+    try:
+        fetched = gdrive.fetch_doc(tid, doc_id, sb)
+    except Exception as e:  # noqa: BLE001
+        track.update({"status": "error", "error": str(e)[:500], "blocks": blocks})
+        sb.table("kb_doc_writebacks").insert(track).execute()
+        return {"connection_id": cid, "error": str(e)[:300]}
+
+    track["pre_edit_markdown"] = fetched.get("markdown")
+    conflict = bool(payload.get("old_modified")
+                    and fetched.get("modified_time") != payload["old_modified"])
+
+    applied: list[dict] = []
+    if conflict:
+        applied = [{**b, "applied": False} for b in blocks]
+        status = "conflict"
+    else:
+        for b in blocks:
+            n = 0
+            if (b.get("old") or "").strip():
+                try:
+                    n = gdrive.replace_passage(tid, doc_id, b["old"], b.get("new", ""), sb)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("gdoc_writeback replace_passage: %s", e)
+            applied.append({**b, "applied": bool(n)})
+        done = sum(1 for b in applied if b["applied"])
+        status = "applied" if done == len(applied) else ("partial" if done else "conflict")
+
+    track.update({"blocks": applied, "status": status})
+
+    issue = None
+    if repo:
+        try:
+            issue = gh.create_issue(
+                gh.token_for(tid, sb), repo,
+                title=f"KB write-back: {fetched.get('title') or doc_id}",
+                body=_writeback_issue_body(doc_url, applied, task, approver, conflict),
+                labels=["kb-writeback"])
+            track["github_issue_number"] = issue["number"]
+            track["github_issue_url"] = issue["html_url"]
+        except Exception as e:  # noqa: BLE001
+            log.warning("gdoc_writeback github issue: %s", e)
+
+    if status in ("applied", "partial"):
+        where = issue["html_url"] if issue else "(no GitHub repo configured)"
+        gdrive.comment(tid, doc_id,
+                       f"Automated KB write-back applied from a support resolution"
+                       f"{f' (review {task})' if task else ''}, approved by {approver}. "
+                       f"Please verify and close {where} to confirm, or comment /revert.", sb)
+        jobs.enqueue("kb_sync", {"connection_id": cid}, dedupe_key=f"kb_sync:{cid}", sb=sb)
+
+    sb.table("kb_doc_writebacks").insert(track).execute()
+    return {"connection_id": cid, "status": status, "blocks": len(applied),
+            "issue": issue["html_url"] if issue else None}
+
+
 def _import_kb_bundle(payload: dict, sb) -> dict:
     """Phase 28 step 6 — bulk-restore entries from an export bundle. Same
     shape as _crawl_site: upsert-by-title, embed off this job (fastembed x N
@@ -599,6 +698,7 @@ def _sweep_handler(fn):
 HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
             "embed_kb_entry": _embed_kb_entry, "create_github_issue": _create_github_issue,
             "apply_kb_change": _apply_kb_change, "kb_sync": _sync_kb_connection,
+            "gdoc_writeback": _gdoc_writeback,
             "crawl_site": _crawl_site, "sync_gsheet": _sync_gsheet,
             "import_kb_bundle": _import_kb_bundle,
             "queue_sweep": _sweep_handler("queue_sweep"),

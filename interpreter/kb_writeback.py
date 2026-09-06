@@ -250,6 +250,55 @@ def _corrections_source(sb, tenant_id: str) -> str:
     return created["source_id"]
 
 
+def _doc_change_blocks(old_body: str, new_body: str) -> list[dict]:
+    """Paragraph-level diff of an old vs. new doc markdown -> the contiguous
+    changed passages as `{old, new}` pairs. `old == ""` = a pure insertion
+    (nothing to find/replace — the write-back worker flags it for a manual
+    edit); `new == ""` = a deletion."""
+    import difflib
+
+    def paras(s: str) -> list[str]:
+        return [b.strip() for b in re.split(r"\n\s*\n", (s or "").strip()) if b.strip()]
+
+    a, b = paras(old_body), paras(new_body)
+    out: list[dict] = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(a=a, b=b, autojunk=False).get_opcodes():
+        if tag == "equal":
+            continue
+        out.append({"old": "\n\n".join(a[i1:i2]), "new": "\n\n".join(b[j1:j2])})
+    return out
+
+
+def _maybe_enqueue_doc_writeback(sb, *, old_id: str, tenant_id: Any, new_body_md: str,
+                                 approver: str | None, review_task_id: str | None) -> None:
+    """If the superseded entry is on a gdocs connection in `write_back` mode,
+    enqueue a `gdoc_writeback` job (rewrite the passage in the doc + open a
+    GitHub verification issue). Best-effort — the caller swallows failures so
+    the internal KB write is never blocked."""
+    rows = (sb.table("kb_entries").select("body_md, connection_id, gdoc_modified")
+            .eq("entry_id", old_id).limit(1).execute().data or [])
+    if not rows or not rows[0].get("connection_id"):
+        return
+    old = rows[0]
+    conn = (sb.table("kb_source_connections").select("connection_id, connector, config")
+            .eq("connection_id", old["connection_id"]).limit(1).execute().data or [])
+    if not conn:
+        return
+    cfg = conn[0].get("config") or {}
+    if conn[0]["connector"] != "gdocs" or cfg.get("access") != "write_back":
+        return
+    blocks = _doc_change_blocks(old.get("body_md") or "", new_body_md or "")
+    if not blocks:
+        return
+    from interpreter import jobs
+    jobs.enqueue("gdoc_writeback", {
+        "connection_id": conn[0]["connection_id"], "entry_id": old_id,
+        "tenant_id": str(tenant_id), "approver": approver,
+        "review_task_id": review_task_id, "blocks": blocks,
+        "old_modified": old.get("gdoc_modified"), "github_repo": cfg.get("github_repo"),
+    }, dedupe_key=f"gdocwb:{old_id}")
+
+
 def _graph_supersede(new_id: str, old_id: str | None, tenant_id: str, title: str) -> None:
     try:
         from .case_memory import _driver_or_none
@@ -324,6 +373,20 @@ def apply_kb_change(sb, ar_row: dict, *, enqueue=True) -> dict:
             log.warning("apply_kb_change enqueue embed: %s", e)
 
     _graph_supersede(eid, old_id, tenant_id, p["title"])
+
+    # KB write-back (docs/KB_SOURCE_CONNECTORS.md §2): if the superseded entry
+    # is a Google Doc on a `write_back` connection, push the correction into
+    # the doc + open a GitHub issue for a human to verify. Never blocks the
+    # internal KB write above.
+    if old_id:
+        try:
+            _maybe_enqueue_doc_writeback(
+                sb, old_id=old_id, tenant_id=tenant_id, new_body_md=p["body_md"],
+                approver=approver, review_task_id=p.get("review_task_id"),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("apply_kb_change: doc write-back enqueue failed: %s", e)
+
     result = {"entry_id": eid, "op": p["op"], "superseded": old_id, "status": "provisional"}
     try:
         sb.table("action_requests").update({"status": "done", "result": result}) \

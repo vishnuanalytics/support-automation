@@ -21,6 +21,7 @@ import type {
   KbCollection,
   KbConnection,
   KbConnector,
+  KbDocWriteback,
   KbEntry,
   KbEntryRow,
   KbExportBundle,
@@ -306,6 +307,8 @@ export const api = {
       }),
     deleteConnection: (cid: string) =>
       req<void>(`/kb/connections/${cid}`, { method: "DELETE" }),
+    listDocWritebacks: (id: string) =>
+      req<KbDocWriteback[]>(`/kb/collections/${id}/doc-writebacks`),
     export: (id: string) => req<KbExportBundle>(`/kb/collections/${id}/export`),
     import: (id: string, entries: { title: string; body_md: string }[]) =>
       req<{ job_id: string; accepted: number; warnings: string[] }>(

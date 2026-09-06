@@ -707,9 +707,71 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-06 (later same day) — KB write-back to Google Docs, chunk 1 of 2
+(this is the most recent work in this file).** A Google Doc connection was
+one-way (doc → KB mirror, locked). The Knowledge Integrity Loop already
+turns "a human agent answered in a way that contradicts the KB" into a
+manager-approved correction — but for a gdoc-backed entry that only fixed
+the internal mirror, leaving the doc itself stale. This closes that loop
+*back into the doc*, gated by a human on GitHub.
+
+- **Opt-in, per connection.** A `gdocs` `kb_source_connections` row can set
+  `config.access = "write_back"` (default `"read_only"`) + a
+  `config.github_repo` (`owner/name`) — chosen in the registry-driven
+  "+ add source" form (new `select` + `show_if` field types;
+  `KBConnectorSpec.writable`, True for gdocs only). `interpreter/gdrive.py`
+  `SCOPES` gains read-write `documents` + `drive`; a tenant on an older
+  read-only token gets a clean failure until they re-consent
+  (`docs/GOOGLE_SETUP.md` updated).
+- **The hook** — `interpreter/kb_writeback.py::apply_kb_change` (the single
+  chokepoint, already runs on Slack approval): after writing the internal
+  provisional entry, if the superseded entry is on a `write_back` gdocs
+  connection, `_doc_change_blocks()` paragraph-diffs old vs. new markdown
+  and enqueues a `gdoc_writeback` job. Guarded — never blocks the KB write.
+  **Slack review still gates the internal copy; GitHub is in addition.**
+- **`api/worker.py::_gdoc_writeback`** — re-fetch the doc; a `modifiedTime`
+  mismatch vs. the last sync ⇒ **conflict** (open the issue, edit nothing).
+  Otherwise per block: `gdrive.replace_passage()` =
+  `documents.batchUpdate`/`replaceAllText` (0 replacements ⇒ block flagged
+  for a manual edit). Then open a GitHub issue (`label: kb-writeback`) with
+  the per-block old→new diff, a best-effort Drive comment pointing at it,
+  and re-`kb_sync` the connection. Every run ⇒ a `kb_doc_writebacks` row
+  (migration `092`: status `applied|partial|conflict|verified|reverted|
+  error`, the blocks, a pre-edit markdown snapshot) with RLS like `091`.
+- **`interpreter/github.py`** gains `get_issue()` / `list_issue_comments()`
+  (for chunk 2's watch). **`api/main.py`**: `GET
+  /api/kb/collections/{sid}/doc-writebacks`. **Web**: a `write-back` badge
+  on the connection row + a collapsible "doc write-backs" table (status,
+  blocks applied, issue link) in the "Connected sources" panel.
+
+**Verify:** `tests/test_kb_doc_writeback.py` (14 new — the paragraph-diff
+blocks, the `apply_kb_change` gate firing only for a `write_back` gdocs
+connection, and `_gdoc_writeback`'s applied / partial→conflict / conflict
+(doc moved ⇒ no edit) / fetch-error paths with `gdrive`+`github` mocked);
+`tests/test_kb_connectors.py` extended for the gdocs `access`/`github_repo`
+normalize + `writable`. **831 offline tests green (was 817).** `tsc -b` +
+`npm run build` clean. Migration `092` applied to the live project, drift
+check clean.
+
+**Not live-verifiable in this sandbox (stated):** the read-write
+`documents` scope needs interactive re-consent and no live GitHub
+repo/token is wired, so the end-to-end "approve in Slack → doc section
+rewritten → issue opened → human closes" can't run here. Gate logic, diff
+extraction, `batchUpdate` request shape, and tracking-row writes are all
+covered offline.
+
+**Chunk 2 (not built):** a `kb_writeback_watch` sweep — poll each open
+issue (`github.get_issue` / `list_issue_comments`); closed ⇒ mark the
+tracking row `verified`; a `/revert` comment ⇒ restore the pre-edit
+snapshot. Plus a "Doc write-backs" list in `ReviewView.tsx`, a Slack
+"send to GitHub before applying" button, and true index-range structural
+section replacement (vs. today's `replaceAllText` find/replace).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
 **2026-09-06 — KB source connectors made first-class: registry +
-`kb_source_connections` table + one generic sync driver + unified UI (this
-is the most recent work in this file).** Connectors #1 (crawl) and #2
+`kb_source_connections` table + one generic sync driver + unified UI.** Connectors #1 (crawl) and #2
 (Sheets) had each shipped as a one-off — a bespoke `api/worker.py` handler, a
 bespoke `POST /api/kb/collections/{sid}/{crawl,gsheet,gdoc}` endpoint, and a
 `prompt()` button in `KnowledgeView.tsx`; a "connected feed" was an array

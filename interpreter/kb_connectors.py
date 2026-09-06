@@ -83,9 +83,11 @@ class KBConnectorSpec:
     auth: str                       # "none" | "oauth2" | "apikey"
     sync: SyncFn
     config_fields: list[dict[str, Any]] = field(default_factory=list)
-    #   [{key, label, type: "string"|"number", required, placeholder?}] — drives the "+ add source" form
+    #   [{key, label, type: "string"|"number"|"select", required, placeholder?,
+    #     options?: [str], show_if?: {key, eq}}] — drives the "+ add source" form
     normalize: NormFn | None = None  # raw form dict -> stored `config` (parse a URL to an id, clamp, validate)
     available: AvailFn | None = None # (tenant_id, sb) -> (ok, reason) — e.g. "Connect Google first"
+    writable: bool = False           # does an approved KIL change get written back to the source?
 
     def is_available(self, tenant_id: "str | None", sb: Any) -> "tuple[bool, str | None]":
         if self.available is None:
@@ -220,7 +222,20 @@ def _norm_gdocs(raw: dict[str, Any]) -> dict[str, Any]:
     from interpreter import gdrive
 
     doc_url = (raw.get("doc_url") or "").strip()
-    return {"doc_id": gdrive.parse_doc_id(doc_url or raw.get("doc_id") or ""), "doc_url": doc_url}
+    cfg: dict[str, Any] = {
+        "doc_id": gdrive.parse_doc_id(doc_url or raw.get("doc_id") or ""),
+        "doc_url": doc_url,
+    }
+    access = (raw.get("access") or "read_only").strip()
+    if access not in ("read_only", "write_back"):
+        raise ValueError("access must be 'read_only' or 'write_back'")
+    cfg["access"] = access
+    if access == "write_back":
+        repo = (raw.get("github_repo") or "").strip()
+        if repo.count("/") != 1 or not all(repo.split("/")):
+            raise ValueError("github_repo must be 'owner/name' for write-back mode")
+        cfg["github_repo"] = repo
+    return cfg
 
 
 def _sync_gdocs(config: dict, watermark: "dict | None", ctx: SyncCtx) -> KBSyncResult:
@@ -240,10 +255,15 @@ def _sync_gdocs(config: dict, watermark: "dict | None", ctx: SyncCtx) -> KBSyncR
 
 
 register(KBConnectorSpec(
-    slug="gdocs", label="Google Doc", auth="oauth2",
+    slug="gdocs", label="Google Doc", auth="oauth2", writable=True,
     config_fields=[
         {"key": "doc_url", "label": "Google Doc URL", "type": "string", "required": True,
          "placeholder": "https://docs.google.com/document/d/…"},
+        {"key": "access", "label": "Access", "type": "select", "required": False,
+         "options": ["read_only", "write_back"]},
+        {"key": "github_repo", "label": "GitHub repo for review issues (owner/name)",
+         "type": "string", "required": False, "placeholder": "acme/support-kb",
+         "show_if": {"key": "access", "eq": "write_back"}},
     ],
     normalize=_norm_gdocs, available=_google_available,
     sync=_sync_gdocs,

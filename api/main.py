@@ -2091,6 +2091,22 @@ def kb_delete_connection(cid: str, c: Caller = Depends(caller)) -> None:
                          f"({len(entries)} entries archived)")
 
 
+@app.get("/api/kb/collections/{sid}/doc-writebacks")
+def kb_list_doc_writebacks(sid: str, c: Caller = Depends(caller)) -> list[dict]:
+    """KB write-back audit (docs/KB_SOURCE_CONNECTORS.md §2) — the automated
+    Google-Doc edits made after a KIL correction was approved, for this
+    collection's connections, newest first."""
+    _kb_collection(c, sid)
+    cids = [r["connection_id"] for r in
+            (c.sb.table("kb_source_connections").select("connection_id")
+             .eq("source_id", sid).execute().data or [])]
+    if not cids:
+        return []
+    return (c.sb.table("kb_doc_writebacks").select("*")
+            .in_("connection_id", cids).order("applied_at", desc=True)
+            .execute().data or [])
+
+
 @app.post("/api/kb/collections/{sid}/crawl", status_code=202)
 def kb_crawl_site(sid: str, body: KbCrawlIn, c: Caller = Depends(caller)) -> dict:
     """Deprecated — thin wrapper over POST /connections {connector:"public_url"}."""
