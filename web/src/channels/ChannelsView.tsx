@@ -533,7 +533,7 @@ function FreshchatPanel({ tenantId }: { tenantId: string }) {
       <div className="field">
         <label>API token {ch?.configured && <span className="muted">(leave blank to keep)</span>}</label>
         <input type="password" value={f.api_token}
-          onChange={(e) => set("api_token", e.target.value)} placeholder="••••••••••••" />
+          onChange={(e) => set("api_token", e.target.value)} placeholder="API token" />
         <span className="muted" style={{ fontSize: 12 }}>
           Freshchat admin console → Settings → API tokens (Admin API scope). Skip this if your
           account only has a Custom/External App — use OAuth below instead.
@@ -562,7 +562,7 @@ function FreshchatPanel({ tenantId }: { tenantId: string }) {
           <div className="field" style={{ flex: 1 }}>
             <label>Client secret {ch?.oauth_client_configured && <span className="muted">(leave blank to keep)</span>}</label>
             <input type="password" value={f.client_secret}
-              onChange={(e) => set("client_secret", e.target.value)} placeholder="••••••••••••" />
+              onChange={(e) => set("client_secret", e.target.value)} placeholder="Client secret" />
           </div>
         </div>
         <div className="row" style={{ gap: 8, alignItems: "center" }}>
