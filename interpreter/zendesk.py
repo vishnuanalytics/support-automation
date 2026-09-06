@@ -124,6 +124,23 @@ def available(tenant_id: str | None, sb=None) -> bool:
     return _creds(tenant_id, sb) is not None
 
 
+def active_connector_tenants(sb, only: str | None = None) -> list[str]:
+    """Tenant ids with `tenants.case_connector = 'zendesk'` AND an active
+    `zendesk` integration — the set the ticket watcher and the case-graph
+    sync both iterate. Best-effort: a read failure -> []."""
+    try:
+        trows = (sb.table("tenants").select("tenant_id")
+                 .eq("case_connector", KIND).execute().data or [])
+        irows = (sb.table("tenant_integrations").select("tenant_id")
+                 .eq("kind", KIND).eq("status", "active").execute().data or [])
+    except Exception as e:  # noqa: BLE001
+        log.warning("active_connector_tenants: %s", e)
+        return []
+    active = ({r["tenant_id"] for r in trows if r.get("tenant_id")}
+              & {r["tenant_id"] for r in irows if r.get("tenant_id")})
+    return [t for t in active if (only is None or t == only)]
+
+
 # --------------------------------------------------------------------------
 # connect-account: config model + storage + a lightweight connection test —
 # same shape as `interpreter/freshchat.py`'s (subdomain/email non-secret in

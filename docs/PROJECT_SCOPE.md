@@ -707,8 +707,53 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-06 (Phase 31 — Zendesk parity, chunk 2: `auto_reply` delivery
-for a `channel=zendesk` run). This is the most recent work in this file.**
+**2026-09-06 (Phase 31 — Zendesk parity, chunk 3: the case-lifecycle
+graph sync). This is the most recent work in this file.**
+
+`ingestion/case_graph_sync.py` is Salesforce-only (SOQL), so a
+`case_connector=zendesk` tenant got no Neo4j case graph — no "answer from
+past resolutions", no duplicate detection, no `(:Contact)` for Phase-30
+product signals. This closes that.
+
+- **`ingestion/zendesk_case_graph_sync.py`** (new) — for every tenant with
+  `case_connector='zendesk'` + an active `zendesk` integration: walk
+  tickets via Zendesk's **Incremental Export** API
+  (`/incremental/tickets.json?start_time=<unix>`, paged to
+  `end_of_stream`), and MERGE via the **same connector-agnostic
+  `case_memory.sync_case_lifecycle`** the Salesforce sync uses — so a
+  Zendesk tenant gets the identical graph: `(:Case)-[:HAS_MESSAGE]->
+  (:Message)`, `-[:OF_TYPE]->(:CaseType)`, `-[:FOR_ACCOUNT]->(:Account)`,
+  `-[:FILED_BY]->(:Contact)`, `(:Contact)-[:AT_ACCOUNT]->(:Account)`,
+  `Account.domain`. Per-turn `(:Message)` from ticket **comments** (the
+  Zendesk thread *is* the whole conversation): requester / `end-user`
+  role → `inbound`/`customer`; public agent → `agent_reply`; private →
+  `agent_note`; a `[bot draft…]`-marked private comment → `draft`/`bot`
+  (same `_BOT_DRAFT_MARKERS` as the SF sync). A per-run `_Cache` fetches
+  each requester / org / group once.
+- **Mapping choices** (following `interpreter/zendesk.py`'s "honest where
+  it doesn't map" ethos): `type` → `case_type`, `module=None`; `group`
+  name → `routed_team`; `organization` → `Account`; no first-class
+  `closed_at`, so `updated_at` stands in once solved/closed; `tier=None`.
+- Resumable per tenant: `graph_sync_state` scope
+  `case_graph:zendesk:<tenant>`, `last_modified` = the `updated_at`
+  high-water mark; checkpoints every 50; idempotent MERGE.
+- **Sweep** `sweeps.zendesk_case_graph_sync` (60 min) + `HANDLERS` entry +
+  a `daily-sync.yml` step. `--once`/`--tenant`/`--since`/`--backfill`/
+  `--dry-run` CLI. Shared `zendesk.active_connector_tenants(sb)` helper
+  (the ticket watcher now uses it too).
+- `tests/test_zendesk_case_graph_sync.py` new (13). **1005 offline
+  green.** No migration. Live: `--once` no-ops cleanly against the real
+  project; the MERGE Cypher itself was live-verified in Phase 30 chunk 3.
+- **Still deferred:** `case_memory_sync` parity for Zendesk (the pgvector
+  resolution memory + `DUPLICATE_OF` scoring that feeds `draft` /
+  `case_lookup`). The **graph** is now at parity; the **memory** store
+  isn't.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (Phase 31 chunk 2: `auto_reply` delivery for a
+`channel=zendesk` run).**
 
 Chunk 1 made a Zendesk tenant's bot *fire*; this makes its confident
 reply actually *go out*. `_run_flow`'s post-run auto-send hook only

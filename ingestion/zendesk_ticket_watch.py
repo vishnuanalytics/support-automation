@@ -65,21 +65,7 @@ def _resolve_flow(sb, tenant_id: str) -> str | None:
 
 
 def _zendesk_tenants(sb, only: str | None) -> list[str]:
-    try:
-        trows = (sb.table("tenants").select("tenant_id")
-                 .eq("case_connector", "zendesk").execute().data or [])
-    except Exception as e:  # noqa: BLE001
-        log.warning("tenants read: %s", e)
-        return []
-    tids = {r["tenant_id"] for r in trows if r.get("tenant_id")}
-    try:
-        irows = (sb.table("tenant_integrations").select("tenant_id")
-                 .eq("kind", "zendesk").eq("status", "active").execute().data or [])
-    except Exception as e:  # noqa: BLE001
-        log.warning("tenant_integrations read: %s", e)
-        return []
-    active = tids & {r["tenant_id"] for r in irows if r.get("tenant_id")}
-    return [t for t in active if (only is None or t == only)]
+    return zendesk.active_connector_tenants(sb, only)
 
 
 def tick(sb, *, tenant_id: str | None = None, flow_id: str | None = None,

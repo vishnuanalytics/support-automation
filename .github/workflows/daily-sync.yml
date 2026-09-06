@@ -90,6 +90,19 @@ jobs:
           SF_DOMAIN: ${{ secrets.SF_DOMAIN }}
         run: python -m ingestion.case_graph_sync
 
+      # Phase 31 — the Zendesk equivalent: same Neo4j case-lifecycle graph
+      # for every `case_connector=zendesk` tenant. No-op when nobody uses it.
+      - name: Sync the Zendesk case-lifecycle graph -> Neo4j
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          NEO4J_URI: ${{ secrets.NEO4J_URI }}
+          NEO4J_USERNAME: ${{ secrets.NEO4J_USERNAME }}
+          NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
+          NEO4J_DATABASE: ${{ secrets.NEO4J_DATABASE }}
+        run: python -m ingestion.zendesk_case_graph_sync --once
+
       # Phase 30 — pull PostHog person rollups into Neo4j (:Contact) nodes
       # + resolve identity, for every tenant with an active `posthog`
       # integration. No-op when nobody has connected PostHog.
