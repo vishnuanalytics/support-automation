@@ -294,6 +294,8 @@ export const api = {
       req<KbConnector[]>(`/kb/connectors${tenantId ? `?tenant_id=${tenantId}` : ""}`),
     listConnections: (id: string) =>
       req<KbConnection[]>(`/kb/collections/${id}/connections`),
+    listAllConnections: (tenantId?: string) =>
+      req<KbConnection[]>(`/kb/connections${tenantId ? `?tenant_id=${tenantId}` : ""}`),
     addConnection: (id: string, b: { connector: string; config: Record<string, unknown>; label?: string }) =>
       req<KbConnection>(`/kb/collections/${id}/connections`, {
         method: "POST",

@@ -194,6 +194,7 @@ export interface KbCollection {
   tenant_id: string;
   entry_count: number;
   provisional_count?: number;
+  org_kb?: boolean; // the one org-level collection every source feeds by default
   created_at?: string;
 }
 

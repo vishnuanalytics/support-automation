@@ -58,26 +58,46 @@ def embed_query(text: str) -> list[float]:
 # --------------------------------------------------------------------------
 # Individual stages
 # --------------------------------------------------------------------------
+# A source_id that can't exist — returned instead of `None` for a
+# tenant-scoped call that resolves to zero sources, so retrieval matches
+# nothing (`None` would search *every* tenant's chunks).
+_NO_MATCH = ["00000000-0000-0000-0000-000000000000"]
+
+
 def resolve_sources(names: list[str] | None, sb, tenant_id: str | None = None) -> list[str] | None:
     """
     Map a `retrieve` node's `kb_sources` to source_ids, scoped so a flow can
-    only ever reach **shared** sources + **its own tenant's** — never another
-    tenant's private KB.
+    only ever reach **its own tenant's** sources — plus any **shared/global**
+    source it *explicitly names*.
 
-      names given  -> those names, intersected with (shared | this tenant)
-      names None   -> all (shared | this tenant) sources
-      no tenant_id -> shared sources only (admin/eval callers pass source_ids
-                      directly if they want everything)
+      names given        -> those names, intersected with (shared | this tenant);
+                            if none of them are visible, fall back to the
+                            tenant's own sources (never widen, never leak).
+      names None + tenant -> this tenant's OWN sources only. Shared/global
+                            corpora (e.g. the `zapier-public` demo docs) are
+                            opt-in now: a flow must list them in `kb_sources`
+                            to pull from them — a real org's default RAG is
+                            *its* connected sources, nothing else.
+      names None, no tenant -> shared sources only (eval/admin; those callers
+                            pass source_ids directly if they want everything).
+
+    A tenant-scoped call that resolves to nothing returns `_NO_MATCH`, never
+    `None` — an empty scope must mean "no KB context", not "search all tenants".
     """
     rows = sb.table("sources").select("source_id, name, tenant_id").eq("status", "active").execute().data or []
-    visible = [r for r in rows if r["tenant_id"] is None or r["tenant_id"] == tenant_id]
     if names:
-        named = [r for r in visible if r["name"] in names]
+        visible = [r for r in rows if r["tenant_id"] is None or r["tenant_id"] == tenant_id]
+        named = [r["source_id"] for r in visible if r["name"] in names]
         if named:
-            visible = named
-        # else: the flow named source(s) it can't see -> fall back to its own
-        # legitimate scope (shared + own), never widen, never return nothing.
-    return [r["source_id"] for r in visible] or None
+            return named
+        # named nothing visible -> fall through to the tenant's own scope
+
+    if tenant_id:
+        own = [r["source_id"] for r in rows if r["tenant_id"] == tenant_id]
+        return own or _NO_MATCH
+
+    shared = [r["source_id"] for r in rows if r["tenant_id"] is None]
+    return shared or None
 
 
 def dense_search(sb, query_embedding: list[float], k: int,

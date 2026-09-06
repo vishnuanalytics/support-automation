@@ -1783,8 +1783,39 @@ def _now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
+# Every tenant has one canonical org-level KB collection — the default target
+# for connected sources, and what a chat flow's `retrieve` node reads when it
+# names no `kb_sources`. Team collections are optional on top of it.
+_ORG_KB_NAME = "Organization knowledge"
+
+
+def _ensure_org_kb(tenant_id: str) -> dict:
+    """Find (or lazily create) the tenant's org KB collection. Never promotes
+    an existing team collection — a tenant that already had collections just
+    gets the org KB added alongside."""
+    rows = (_service.table("sources").select("source_id, name, config, created_at")
+            .eq("kind", "internal_kb").eq("tenant_id", tenant_id)
+            .neq("status", "archived").execute().data or [])
+    for s in rows:
+        if (s.get("config") or {}).get("org_kb"):
+            return s
+    return (_service.table("sources").insert({
+        "kind": "internal_kb", "tenant_id": tenant_id, "name": _ORG_KB_NAME,
+        "config": {"org_kb": True,
+                   "description": "Every connected knowledge source feeds this. "
+                                  "Your chat flows read all of it by default."},
+    }).execute().data)[0]
+
+
 @app.get("/api/kb/collections")
 def kb_list_collections(c: Caller = Depends(caller)) -> list[dict]:
+    for t in [r["tenant_id"] for r in
+              (c.sb.table("tenant_members").select("tenant_id").execute().data or [])]:
+        try:
+            _ensure_org_kb(t)
+        except Exception as e:  # noqa: BLE001
+            log.warning("ensure_org_kb(%s): %s", t, e)
+
     cols = (c.sb.table("sources").select("*")
             .eq("kind", "internal_kb").neq("status", "archived").execute().data or [])
     out = []
@@ -1798,9 +1829,35 @@ def kb_list_collections(c: Caller = Depends(caller)) -> list[dict]:
             "description": (s.get("config") or {}).get("description"),
             "tenant_id": s["tenant_id"], "entry_count": len(active),
             "provisional_count": len(provisional),
+            "org_kb": bool((s.get("config") or {}).get("org_kb")),
             "created_at": s.get("created_at"),
         })
+    out.sort(key=lambda r: (not r["org_kb"], (r["name"] or "").lower()))
     return out
+
+
+@app.get("/api/kb/connections")
+def kb_list_all_connections(tenant_id: str | None = None, c: Caller = Depends(caller)) -> list[dict]:
+    """Every connected source for the caller's tenant, across all collections
+    — the org-wide "what feeds the KB" view (onboarding + the Knowledge
+    panel's org section)."""
+    tid = _caller_tenant(c, tenant_id)
+    conns = (c.sb.table("kb_source_connections").select("*")
+             .eq("tenant_id", tid).neq("status", "archived")
+             .order("created_at").execute().data or [])
+    col_names = {s["source_id"]: s["name"] for s in
+                 (c.sb.table("sources").select("source_id, name")
+                  .eq("kind", "internal_kb").execute().data or [])}
+    counts: dict[str, int] = {}
+    for e in (c.sb.table("kb_entries").select("connection_id, status")
+              .eq("tenant_id", tid).execute().data or []):
+        cid = e.get("connection_id")
+        if cid and e["status"] == "active":
+            counts[cid] = counts.get(cid, 0) + 1
+    for r in conns:
+        r["collection_name"] = col_names.get(r["source_id"])
+        r["entry_count"] = counts.get(r["connection_id"], 0)
+    return conns
 
 
 @app.post("/api/kb/collections", status_code=201)

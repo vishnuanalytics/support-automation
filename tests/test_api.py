@@ -62,6 +62,7 @@ def test_kb_source_connector_endpoints_need_a_token():
     assert client.delete("/api/kb/connections/x").status_code == 401
     assert client.get("/api/kb/collections/x/doc-writebacks").status_code == 401
     assert client.get("/api/kb/doc-writebacks").status_code == 401
+    assert client.get("/api/kb/connections").status_code == 401
     assert client.get("/api/kb/doc-defaults").status_code == 401
     assert client.put("/api/kb/doc-defaults", json={"on_correction": "off"}).status_code == 401
 

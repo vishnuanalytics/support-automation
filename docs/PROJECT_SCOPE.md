@@ -707,8 +707,53 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-06 (chunk 8) — org-level KB is now the default model (this is the
+most recent work in this file).** Customer reviews: companies want the RAG
+fed org-wide from many sources; team-level docs are rare. Three changes:
+
+1. **Retrieval scoping** (`interpreter/retrieval.py::resolve_sources`) — a
+   `retrieve` node with no `kb_sources` and a tenant now resolves to **that
+   tenant's own sources only**. Shared/global corpora (the `zapier-public`
+   demo docs) are opt-in: a flow must name them in `kb_sources`. A
+   tenant-scoped call that resolves to zero sources returns a `_NO_MATCH`
+   sentinel, never `None` — an empty scope must mean "no KB context", not
+   "search every tenant's chunks" (that would have been a cross-tenant leak
+   once shared sources stopped padding the list).
+2. **One org KB collection per tenant** — `api/main.py::_ensure_org_kb`
+   lazily creates a canonical `internal_kb` source `"Organization
+   knowledge"` (`config.org_kb=true`) on `GET /api/kb/collections`; never
+   promotes an existing team collection. `kb_list_collections` marks it
+   `org_kb` and sorts it first. New `GET /api/kb/connections` (tenant-wide,
+   across all collections) for the org view + onboarding. `KnowledgeView`
+   pins the org KB, groups extra collections under "Additional collections"
+   ("most orgs just use the org KB"), an `org default` badge.
+3. **Onboarding: connecting a knowledge source is required.**
+   `OnboardingWizard` gains Step 4 "Connect a knowledge source" (a crawl-a-
+   URL quick path + a link to Knowledge for Docs/Sheets/Linear/Nolt); Step
+   5 "Create your first flow" (template select + "start blank") is
+   **locked until `kbSourceCount > 0`**. Salesforce/Slack/model stay
+   optional.
+
+**Verify:** `test_interpreter.py::test_resolve_sources_never_leaks_another_
+tenants_kb` rewritten (own-only default, explicit-shared opt-in,
+`_NO_MATCH` for an empty tenant); `test_api.py` guard for `GET
+/api/kb/connections`. **860 offline tests green.** `tsc -b` clean. No
+migration (`sources.config.org_kb` is a jsonb marker). **Live-checked
+against the real Supabase project**: `_ensure_org_kb` created + flagged +
+idempotent; `resolve_sources(None, tenant)` excluded the shared
+`zapier-public`, included the org KB, and naming a shared source opted back
+into it. Test org KB row deleted (re-provisions lazily).
+
+**Behavior change to note:** an existing flow that had no `kb_sources` and
+relied on the shared `zapier-public` corpus now retrieves only the
+tenant's own sources — add `"zapier-public"` to that node's `kb_sources`
+to restore it.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
 **2026-09-06 (chunk 7) — three more KB source connectors: Google Docs
-folder scope, Linear, Nolt (this is the most recent work in this file).**
+folder scope, Linear, Nolt.**
 All three land the same way — register a `KBConnectorSpec` + a `sync()`; no
 new worker, endpoint, or migration. `ingestion/kb_recrawl.py` already
 iterates every active `kb_source_connections` row, so all three sync daily

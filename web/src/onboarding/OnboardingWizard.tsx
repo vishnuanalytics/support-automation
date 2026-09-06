@@ -8,10 +8,10 @@ import type { TemplateMeta } from "../types";
  * tenant previously had to discover on their own across separate tabs
  * (Connections, Rules, and the node Inspector).
  *
- * Each step is independently skippable; nothing here is required to use
- * the platform. `onDone` is called once the user dismisses the wizard
- * (via "skip setup" or after creating a first flow) so the caller can stop
- * auto-showing it.
+ * Salesforce / Slack / model are skippable. **Connecting at least one
+ * knowledge source is required** — the bot has nothing to answer from
+ * otherwise — so the "create your first flow" step stays locked until a
+ * source is connected. `onDismiss` is called once the wizard is dismissed.
  */
 export function OnboardingWizard({
   tenantId,
@@ -22,7 +22,7 @@ export function OnboardingWizard({
 }: {
   tenantId: string;
   isOwner: boolean;
-  onNavigate: (view: "connections" | "rules") => void;
+  onNavigate: (view: "connections" | "rules" | "knowledge") => void;
   onFlowCreated: (id: string) => void;
   onDismiss: () => void;
 }) {
@@ -38,6 +38,19 @@ export function OnboardingWizard({
   const [templateId, setTemplateId] = useState("");
   const [busy, setBusy] = useState(false);
 
+  const [orgKbId, setOrgKbId] = useState<string | null>(null);
+  const [kbSourceCount, setKbSourceCount] = useState<number | null>(null);
+  const [kbUrl, setKbUrl] = useState("");
+  const [kbBusy, setKbBusy] = useState(false);
+  const [kbMsg, setKbMsg] = useState<string | null>(null);
+
+  const loadKb = () => {
+    api.kb.listCollections()
+      .then((cs) => setOrgKbId(cs.find((c) => c.org_kb)?.source_id ?? cs[0]?.source_id ?? null))
+      .catch(() => {});
+    api.kb.listAllConnections(tenantId).then((r) => setKbSourceCount(r.length)).catch(() => setKbSourceCount(0));
+  };
+
   useEffect(() => {
     api.salesforceOrgs.list(tenantId).then((r) => setSfCount(r.length)).catch(() => setSfCount(0));
     api.salesforceOrgs.oauthStatus().then((s) => setSfOauthConfigured(s.configured)).catch(() => {});
@@ -47,7 +60,25 @@ export function OnboardingWizard({
     }).catch(() => setSlackConnected(false));
     api.listFlows().then((fs) => setFlowCount(fs.filter((f) => f.tenant_id === tenantId).length)).catch(() => setFlowCount(0));
     api.templates.list().then(setTemplates).catch(() => {});
+    loadKb();
   }, [tenantId]);
+
+  const connectKbUrl = async () => {
+    const url = kbUrl.trim();
+    if (!orgKbId || !url) return;
+    setKbBusy(true);
+    setKbMsg(null);
+    try {
+      await api.kb.crawl(orgKbId, url);
+      setKbMsg("Crawling in the background — pages will appear in Knowledge as they embed.");
+      setKbUrl("");
+      loadKb();
+    } catch (e) {
+      setKbMsg((e as ApiError).message);
+    } finally {
+      setKbBusy(false);
+    }
+  };
 
   const connectSalesforce = async () => {
     setSfMsg(null);
@@ -92,6 +123,7 @@ export function OnboardingWizard({
   const sfDone = (sfCount ?? 0) > 0;
   const slackDone = !slackConfigured || slackConnected === true; // if not configured server-side, nothing to do here
   const flowDone = (flowCount ?? 0) > 0;
+  const kbDone = (kbSourceCount ?? 0) > 0;
 
   return (
     <div className="col" style={{ padding: 20, gap: 18, maxWidth: 640, overflow: "auto", height: "100%" }}>
@@ -100,8 +132,9 @@ export function OnboardingWizard({
         <button onClick={onDismiss}>skip setup</button>
       </div>
       <p className="muted" style={{ margin: 0 }}>
-        Four quick things, in any order — everything here is also reachable later
-        from the sidebar, so nothing is lost by skipping a step now.
+        Salesforce, Slack and the model are optional and reachable later.
+        <strong> Connecting a knowledge source is required</strong> — it's what
+        your bot answers from.
       </p>
 
       {/* Step 1 — Salesforce */}
@@ -165,27 +198,81 @@ export function OnboardingWizard({
         )}
       </div>
 
-      {/* Step 4 — first flow */}
+      {/* Step 4 — knowledge (required) */}
+      <div
+        className="col"
+        style={{
+          gap: 6, padding: 12, borderRadius: 8,
+          border: `1px solid ${kbDone ? "var(--border)" : "var(--crit, #b4432a)"}`,
+        }}
+      >
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <strong>{kbDone ? "✓ " : "4. "}Connect a knowledge source <em>(required)</em></strong>
+          {kbDone && (
+            <span className="muted" style={{ fontSize: 12 }}>
+              {kbSourceCount} source{kbSourceCount === 1 ? "" : "s"}
+            </span>
+          )}
+        </div>
+        <p className="muted" style={{ margin: 0, fontSize: 12 }}>
+          Everything you connect feeds the org knowledge base and your flows read all of it.
+          Fastest start: crawl a public docs / help-center site (no login needed).
+        </p>
+        {!kbDone && (
+          <>
+            <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+              <input
+                style={{ flex: 1, minWidth: 240 }}
+                placeholder="https://docs.yourcompany.com"
+                value={kbUrl}
+                onChange={(e) => setKbUrl(e.target.value)}
+              />
+              <button
+                className="primary"
+                disabled={kbBusy || !kbUrl.trim() || !orgKbId}
+                onClick={connectKbUrl}
+              >
+                {kbBusy ? "connecting…" : "Crawl & connect"}
+              </button>
+            </div>
+            <button style={{ alignSelf: "flex-start" }} onClick={() => onNavigate("knowledge")}>
+              Google Docs / Sheets, Linear, Nolt… →
+            </button>
+          </>
+        )}
+        {kbMsg && <span className="muted" style={{ fontSize: 12 }}>{kbMsg}</span>}
+      </div>
+
+      {/* Step 5 — first flow (locked until a knowledge source exists) */}
       <div className="col" style={{ gap: 6, padding: 12, border: "1px solid var(--border)", borderRadius: 8 }}>
         <div className="row" style={{ justifyContent: "space-between" }}>
-          <strong>{flowDone ? "✓ " : "4. "}Create your first flow</strong>
+          <strong>{flowDone ? "✓ " : "5. "}Create your first flow</strong>
           {flowDone && <span className="muted" style={{ fontSize: 12 }}>{flowCount} flow{flowCount === 1 ? "" : "s"}</span>}
         </div>
         <p className="muted" style={{ margin: 0, fontSize: 12 }}>
-          Start from a template — a working flow you can edit rather than a blank canvas.
+          {kbDone
+            ? "Start from a template — a working flow you can edit rather than a blank canvas."
+            : "Connect a knowledge source above first."}
         </p>
         {!flowDone && (
           <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
-            <select value={templateId} onChange={(e) => setTemplateId(e.target.value)} style={{ width: "auto", minWidth: 220 }}>
+            <select
+              value={templateId}
+              onChange={(e) => setTemplateId(e.target.value)}
+              disabled={!kbDone}
+              style={{ width: "auto", minWidth: 220 }}
+            >
               <option value="">choose a template…</option>
               {templates.map((t) => (
                 <option key={t.id} value={t.id}>{t.name}</option>
               ))}
             </select>
-            <button className="primary" disabled={!templateId || busy} onClick={createFirstFlow}>
+            <button className="primary" disabled={!kbDone || !templateId || busy} onClick={createFirstFlow}>
               {busy ? "creating…" : "Create flow"}
             </button>
-            <button onClick={() => { onDismiss(); }}>start from a blank flow instead →</button>
+            <button disabled={!kbDone} onClick={() => { onDismiss(); }}>
+              start from a blank flow instead →
+            </button>
           </div>
         )}
       </div>

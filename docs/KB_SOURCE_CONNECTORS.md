@@ -313,8 +313,27 @@ right before writing connector #1, not something to retrofit after #5:
    (`respects_source_acl: bool`), not a design problem to solve generically
    up front.
 
-## Onboarding tie-in (answers the "easy user journey" question directly)
+## Onboarding tie-in — built 2026-09-06 (org-level KB model)
 
+Customer reviews landed on: the RAG should be **org-level, fed from many
+sources**; team-level docs are the exception. So:
+
+- **One org KB collection per tenant** — `api/main.py::_ensure_org_kb`
+  lazily creates `"Organization knowledge"` (`sources.config.org_kb=true`);
+  every connected source defaults there and `KnowledgeView` leads with it,
+  team collections demoted to an optional "Additional collections" group.
+- **Retrieval default narrowed** — `resolve_sources(None, sb, tenant)` =
+  that tenant's own sources only; the shared `zapier-public` demo corpus is
+  opt-in (name it in a node's `kb_sources`). Empty tenant scope → a
+  no-match sentinel, not "search everything".
+- **`OnboardingWizard.tsx` now requires it** — Step 4 "Connect a knowledge
+  source" (crawl-a-URL quick path + a link into Knowledge for the
+  OAuth/apikey connectors); Step 5 "create your first flow" is locked until
+  ≥1 source is connected. Not the full checkbox-per-connector picker
+  sketched below — a single required "connect something" gate — but it
+  closes the "lands in an empty KB" gap.
+
+Original sketch:
 The real fix isn't a new architecture, it's a missing step in
 `OnboardingWizard.tsx`: today's 4 steps (Salesforce, Slack, model, first
 flow) skip KB entirely — a tenant discovers `KnowledgeView` after

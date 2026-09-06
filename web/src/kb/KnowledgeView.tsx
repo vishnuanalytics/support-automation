@@ -11,15 +11,12 @@ import type {
 } from "../types";
 
 /**
- * Self-serve internal knowledge base (Phase 14). Per-team collections of
- * markdown SOPs; a `kb_lookup` node in a flow consults chosen collections
- * at a checkpoint. Editors here = anyone in the tenant.
- *
- * A collection also has **connected sources** (docs/KB_SOURCE_CONNECTORS.md):
- * a crawl root, a Google Sheet/Doc, later Linear/Discourse/Nolt — each a
- * `kb_source_connections` row that produces entries automatically. Managed in
- * the "Connected sources" panel below, one registry-driven form for all of
- * them instead of a button per type.
+ * Self-serve knowledge base (Phase 14). Every tenant has one **org-level
+ * collection** ("Organization knowledge") — the default target for every
+ * connected source (docs/KB_SOURCE_CONNECTORS.md: crawl roots, Google
+ * Docs/Sheets, Linear, Nolt) and what a chat flow's `retrieve` node reads
+ * when it names no `kb_sources`. Extra per-team collections are optional on
+ * top of it (most orgs just use the one).
  */
 export function KnowledgeView({ tenantId }: { tenantId: string }) {
   const [cols, setCols] = useState<KbCollection[]>([]);
@@ -30,7 +27,8 @@ export function KnowledgeView({ tenantId }: { tenantId: string }) {
     try {
       const c = await api.kb.listCollections();
       setCols(c);
-      setSel((s) => s ?? c[0]?.source_id ?? null);
+      // default to the org KB (server sorts it first)
+      setSel((s) => s ?? c.find((x) => x.org_kb)?.source_id ?? c[0]?.source_id ?? null);
     } catch (e) {
       setErr(e instanceof ApiError ? String(e.detail) : String(e));
     }
@@ -41,7 +39,9 @@ export function KnowledgeView({ tenantId }: { tenantId: string }) {
   }, [refresh]);
 
   async function newCollection() {
-    const name = prompt("collection name (e.g. billing-runbook)")?.trim();
+    const name = prompt(
+      "Name for an extra collection (optional — most orgs just use the org knowledge base):",
+    )?.trim();
     if (!name) return;
     try {
       const { source_id } = await api.kb.createCollection({ name, tenant_id: tenantId });
@@ -52,49 +52,55 @@ export function KnowledgeView({ tenantId }: { tenantId: string }) {
     }
   }
 
+  const orgKb = cols.filter((c) => c.org_kb);
+  const teamCols = cols.filter((c) => !c.org_kb);
+
+  const railBtn = (c: KbCollection) => (
+    <button
+      key={c.source_id}
+      className={c.source_id === sel ? "primary" : ""}
+      style={{ justifyContent: "space-between", display: "flex", gap: 6 }}
+      onClick={() => setSel(c.source_id)}
+    >
+      <span>{c.name}</span>
+      <span className="row" style={{ gap: 4 }}>
+        {!!c.provisional_count && (
+          <span
+            title={`${c.provisional_count} entr${c.provisional_count === 1 ? "y" : "ies"} held pending review`}
+            style={{ fontSize: 11, padding: "0 5px", borderRadius: 8, background: "#8a5a00", color: "#fff" }}
+          >
+            {c.provisional_count} held
+          </span>
+        )}
+        <span className="muted">{c.entry_count}</span>
+      </span>
+    </button>
+  );
+
   return (
     <div style={{ display: "flex", height: "100%", minHeight: 0 }}>
       <div
         className="col"
         style={{ width: 220, borderRight: "1px solid var(--border)", padding: 10, gap: 8, overflow: "auto" }}
       >
-        <div className="row" style={{ justifyContent: "space-between" }}>
-          <strong>Knowledge</strong>
-          <button onClick={newCollection}>＋</button>
-        </div>
+        <strong>Knowledge</strong>
         {err && <div className="err" style={{ fontSize: 12 }}>{err}</div>}
+        <div className="col" style={{ gap: 2 }}>{orgKb.map(railBtn)}</div>
+
+        <div className="row" style={{ justifyContent: "space-between", marginTop: 6 }}>
+          <span className="muted" style={{ fontSize: 11 }}>Additional collections</span>
+          <button
+            style={{ fontSize: 11, padding: "0 6px" }}
+            title="Optional — a separate collection a flow can scope to. Most orgs don't need one."
+            onClick={newCollection}
+          >
+            ＋
+          </button>
+        </div>
         <div className="col" style={{ gap: 2 }}>
-          {cols.map((c) => (
-            <button
-              key={c.source_id}
-              className={c.source_id === sel ? "primary" : ""}
-              style={{ justifyContent: "space-between", display: "flex", gap: 6 }}
-              onClick={() => setSel(c.source_id)}
-            >
-              <span>{c.name}</span>
-              <span className="row" style={{ gap: 4 }}>
-                {!!c.provisional_count && (
-                  <span
-                    title={`${c.provisional_count} entr${c.provisional_count === 1 ? "y" : "ies"} held pending review`}
-                    style={{
-                      fontSize: 11,
-                      padding: "0 5px",
-                      borderRadius: 8,
-                      background: "#8a5a00",
-                      color: "#fff",
-                    }}
-                  >
-                    {c.provisional_count} held
-                  </span>
-                )}
-                <span className="muted">{c.entry_count}</span>
-              </span>
-            </button>
-          ))}
-          {cols.length === 0 && !err && (
-            <div className="muted" style={{ fontSize: 12 }}>
-              no collections yet — create one, then add SOP entries
-            </div>
+          {teamCols.map(railBtn)}
+          {teamCols.length === 0 && (
+            <div className="muted" style={{ fontSize: 11 }}>none — everything feeds the org KB</div>
           )}
         </div>
       </div>
@@ -107,7 +113,7 @@ export function KnowledgeView({ tenantId }: { tenantId: string }) {
           />
         ) : (
           <div className="muted" style={{ display: "grid", placeItems: "center", height: "100%" }}>
-            select or create a collection
+            select a collection
           </div>
         )}
       </div>
@@ -233,7 +239,20 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
     <div className="col" style={{ padding: 16, gap: 12, overflow: "auto" }}>
       <div className="row" style={{ justifyContent: "space-between" }}>
         <div className="col" style={{ gap: 2 }}>
-          <h3 style={{ margin: 0 }}>{col.name}</h3>
+          <h3 style={{ margin: 0 }}>
+            {col.name}
+            {col.org_kb && (
+              <span
+                title="The default knowledge base — every connected source feeds it and your chat flows read all of it"
+                style={{
+                  fontSize: 11, marginLeft: 8, padding: "1px 6px", borderRadius: 8,
+                  background: "#2b6a2b", color: "#fff", verticalAlign: "middle",
+                }}
+              >
+                org default
+              </span>
+            )}
+          </h3>
           {col.description && <span className="muted">{col.description}</span>}
           {heldCount > 0 && (
             <span className="muted" style={{ fontSize: 12 }}>
