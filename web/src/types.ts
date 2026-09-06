@@ -269,6 +269,8 @@ export interface KbDocWriteback {
   error: string | null;
   applied_at: string;
   verified_at: string | null;
+  connection_label?: string | null; // enriched by the tenant-wide endpoint
+  doc_url?: string | null;
 }
 
 export interface KbConnection {

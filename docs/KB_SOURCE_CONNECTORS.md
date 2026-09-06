@@ -172,11 +172,14 @@ GitHub issue (`github.get_issue` / `list_issue_comments`): issue **closed**
 applied block (`new` → `old`), `status='reverted'`, a confirming issue
 comment, connection re-`kb_sync`'d. Runs from
 `ingestion/kb_writeback_watch.py` (wired into `daily-sync.yml`), same "no
-always-on worker host" pattern as `ingestion/kb_recrawl.py`. **Still not
-built:** a "Doc write-backs" view in
-`ReviewView.tsx` (the list is in the "Connected sources" panel for now), a
-Slack "send to GitHub before applying" button, and true index-range
-structural section replacement (vs. today's `replaceAllText` find/replace).
+always-on worker host" pattern as `ingestion/kb_recrawl.py`.
+
+The tenant-wide list is surfaced in `ReviewView.tsx` (a "N doc write-backs
+awaiting verification" panel; `GET /api/kb/doc-writebacks?status=open|all`,
+rows enriched with the connection label + doc url), and per-collection in
+the "Connected sources" panel. **Still not built:** a Slack "send to GitHub
+before applying" button, and true index-range structural section
+replacement (vs. today's `replaceAllText` find/replace).
 
 ### 3. Google Sheets — not built; needs its own chunking model, not prose
 A support/FAQ spreadsheet is structured data, not prose — treating a whole

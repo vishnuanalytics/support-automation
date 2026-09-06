@@ -2186,6 +2186,34 @@ def kb_list_doc_writebacks(sid: str, c: Caller = Depends(caller)) -> list[dict]:
             .execute().data or [])
 
 
+_KB_WB_OPEN = ("suggested", "applied", "partial", "conflict")
+
+
+@app.get("/api/kb/doc-writebacks")
+def kb_list_all_doc_writebacks(tenant_id: str | None = None, status: str = "open",
+                               c: Caller = Depends(caller)) -> list[dict]:
+    """Tenant-wide KB write-back audit for the review UI. `status`: 'open'
+    (still awaiting a human on GitHub) or 'all'. Each row is enriched with
+    its connection's label + doc url."""
+    tid = _caller_tenant(c, tenant_id)
+    q = (c.sb.table("kb_doc_writebacks").select("*").eq("tenant_id", tid)
+         .order("applied_at", desc=True).limit(200))
+    if status != "all":
+        q = q.in_("status", list(_KB_WB_OPEN))
+    rows = q.execute().data or []
+    conns = {
+        r["connection_id"]: r for r in
+        (c.sb.table("kb_source_connections")
+         .select("connection_id, label, config")
+         .eq("tenant_id", tid).execute().data or [])
+    }
+    for r in rows:
+        cn = conns.get(r.get("connection_id")) or {}
+        r["connection_label"] = cn.get("label")
+        r["doc_url"] = (cn.get("config") or {}).get("doc_url")
+    return rows
+
+
 @app.post("/api/kb/collections/{sid}/crawl", status_code=202)
 def kb_crawl_site(sid: str, body: KbCrawlIn, c: Caller = Depends(caller)) -> dict:
     """Deprecated — thin wrapper over POST /connections {connector:"public_url"}."""

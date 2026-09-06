@@ -707,8 +707,41 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-06 (chunk 5) — per-tenant *default* for the two gdocs knobs (this
-is the most recent work in this file).** The "organization level" ask
+**2026-09-06 (chunk 6) — the KB write-back audit is now in the review UI
+(this is the most recent work in this file).** The `kb_doc_writebacks` rows
+only showed per-collection in the "Connected sources" panel; a manager
+living in `ReviewView` had no tenant-wide view of "which approved
+corrections turned into doc edits, and which are still waiting on someone
+on GitHub".
+
+- **`api/main.py`** — `GET /api/kb/doc-writebacks?tenant_id=&status=open|all`
+  (`open` = `suggested|applied|partial|conflict`; default). Tenant-scoped
+  via `_caller_tenant`, capped at 200, each row enriched with its
+  connection's `label` + `doc_url` from one batched `kb_source_connections`
+  read. The per-collection `GET /api/kb/collections/{sid}/doc-writebacks`
+  is unchanged.
+- **`web/src/review/ReviewView.tsx`** — a collapsible "N doc write-backs
+  awaiting verification" panel above the review-queue status buttons
+  (`DocWritebacksTable`: doc link, status pill, blocks-applied ratio,
+  applied time, GitHub issue link). Read-only — the actions live on GitHub.
+  `api.kb.listAllDocWritebacks("open"|"all")`; `KbDocWriteback` gains
+  optional `connection_label` / `doc_url`.
+
+**Verify:** `tests/test_api.py` unauth guard for the new route. **848
+offline tests green.** `tsc -b` clean. No migration. **Live-checked against
+the real Supabase project**: 3 throwaway rows (`suggested`/`verified`/
+`reverted`) on a temp connection ⇒ `status=open` returned only the
+`suggested` one, enriched with the connection label + doc url;
+`status=all` returned all three. Rows deleted.
+
+**Still not built (chunk 7+):** a Slack "send to GitHub before applying"
+button (a manager escalation path), and true index-range structural section
+replacement (vs. today's `replaceAllText`).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (chunk 5) — per-tenant *default* for the two gdocs knobs.** The "organization level" ask
 finished: an org sets the `index` / `on_correction` / `github_repo` policy
 once and every new Google Doc connection inherits it (a per-doc value still
 overrides).

@@ -310,6 +310,8 @@ export const api = {
       req<void>(`/kb/connections/${cid}`, { method: "DELETE" }),
     listDocWritebacks: (id: string) =>
       req<KbDocWriteback[]>(`/kb/collections/${id}/doc-writebacks`),
+    listAllDocWritebacks: (status: "open" | "all" = "open") =>
+      req<KbDocWriteback[]>(`/kb/doc-writebacks?status=${status}`),
     getDocDefaults: (tenantId: string) =>
       req<KbDocDefaultsResp>(`/kb/doc-defaults?tenant_id=${tenantId}`),
     setDocDefaults: (b: {

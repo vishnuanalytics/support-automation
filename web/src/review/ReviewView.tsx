@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
-import type { ActionRequest, KilDigest, KilMetrics, ReviewTask } from "../types";
+import type {
+  ActionRequest,
+  KbDocWriteback,
+  KilDigest,
+  KilMetrics,
+  ReviewTask,
+} from "../types";
 
 const STATUS = ["open", "correct", "wrong", "dismissed", "all"] as const;
 
@@ -9,6 +15,8 @@ export function ReviewView() {
   const [digest, setDigest] = useState<KilDigest | null>(null);
   const [rows, setRows] = useState<ReviewTask[]>([]);
   const [ars, setArs] = useState<ActionRequest[]>([]);
+  const [docWb, setDocWb] = useState<KbDocWriteback[]>([]);
+  const [showDocWb, setShowDocWb] = useState(false);
   const [status, setStatus] = useState<(typeof STATUS)[number]>("open");
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -21,6 +29,7 @@ export function ReviewView() {
       .list()
       .then((r) => setArs(r.action_requests))
       .catch(() => {});
+    api.kb.listAllDocWritebacks("open").then(setDocWb).catch(() => {});
   };
   useEffect(load, [status]);
 
@@ -132,6 +141,20 @@ export function ReviewView() {
         >
           {digest.markdown.replace(/\*/g, "")}
         </pre>
+      )}
+
+      {docWb.length > 0 && (
+        <div className="col" style={{ gap: 6 }}>
+          <button
+            style={{ alignSelf: "flex-start" }}
+            onClick={() => setShowDocWb((v) => !v)}
+            title="Automated Google-Doc edits from approved KB corrections, still awaiting a human on GitHub"
+          >
+            {showDocWb ? "hide" : "📄 show"} {docWb.length} doc write-back
+            {docWb.length === 1 ? "" : "s"} awaiting verification
+          </button>
+          {showDocWb && <DocWritebacksTable rows={docWb} />}
+        </div>
       )}
 
       <div className="row" style={{ gap: 4 }}>
@@ -279,6 +302,75 @@ export function ReviewView() {
 
 function pct(v: number | null): string {
   return v == null ? "—" : `${Math.round(v * 100)}%`;
+}
+
+function DocWritebacksTable({ rows }: { rows: KbDocWriteback[] }) {
+  const color = (s: string) =>
+    s === "verified"
+      ? "#2b6a2b"
+      : s === "suggested" || s === "applied"
+        ? "#33608a"
+        : s === "partial"
+          ? "#8a5a00"
+          : s === "reverted"
+            ? "#555"
+            : "#9b2c2c";
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table className="runs-table" style={{ minWidth: 640 }}>
+        <thead>
+          <tr>
+            <th>doc</th>
+            <th>status</th>
+            <th>blocks</th>
+            <th>when</th>
+            <th>review issue</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((w) => (
+            <tr key={w.id}>
+              <td style={{ maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis" }}>
+                {w.doc_url ? (
+                  <a href={w.doc_url} target="_blank" rel="noreferrer">
+                    {w.connection_label || "Google Doc"}
+                  </a>
+                ) : (
+                  w.connection_label || "Google Doc"
+                )}
+              </td>
+              <td>
+                <span
+                  title={w.error ?? undefined}
+                  style={{
+                    fontSize: 11, padding: "1px 6px", borderRadius: 8, color: "#fff",
+                    background: color(w.status),
+                  }}
+                >
+                  {w.status}
+                </span>
+              </td>
+              <td style={{ color: "var(--muted, #667)" }}>
+                {w.blocks.filter((b) => b.applied).length}/{w.blocks.length}
+              </td>
+              <td style={{ color: "var(--muted, #667)" }}>
+                {new Date(w.applied_at).toLocaleString()}
+              </td>
+              <td>
+                {w.github_issue_url ? (
+                  <a href={w.github_issue_url} target="_blank" rel="noreferrer">
+                    {w.github_repo}#{w.github_issue_number}
+                  </a>
+                ) : (
+                  <span style={{ color: "var(--muted, #667)" }}>—</span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 function Tile({ label, value, warn }: { label: string; value: number | string; warn?: boolean }) {
