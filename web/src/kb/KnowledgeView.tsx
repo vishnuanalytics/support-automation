@@ -420,9 +420,12 @@ function ConnectedSources({
 
   const docMode = (c: KbConnection): "suggest" | "write_back" | null => {
     if (c.connector !== "gdocs") return null;
-    const a = (c.config as { access?: string }).access;
+    const cfg = c.config as { on_correction?: string; access?: string };
+    const a = cfg.on_correction ?? cfg.access;
     return a === "suggest" || a === "write_back" ? a : null;
   };
+  const notIndexed = (c: KbConnection) =>
+    c.connector === "gdocs" && (c.config as { index?: boolean }).index === false;
 
   async function sync(cid: string) {
     try {
@@ -532,6 +535,17 @@ function ConnectedSources({
                       }}
                     >
                       {docMode(c) === "suggest" ? "suggests edits" : "write-back"}
+                    </span>
+                  )}
+                  {notIndexed(c) && (
+                    <span
+                      title="Connected but not read into the knowledge base — the bot won't use it to answer"
+                      style={{
+                        fontSize: 11, marginLeft: 6, padding: "1px 6px", borderRadius: 8,
+                        background: "#555", color: "#fff", whiteSpace: "nowrap",
+                      }}
+                    >
+                      not indexed
                     </span>
                   )}
                 </td>

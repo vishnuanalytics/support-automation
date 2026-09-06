@@ -96,14 +96,29 @@ pattern.
 
 #### Write-back — built 2026-09-06
 
-A gdocs connection's `config.access` is a **three-way** choice (picked in the
-"+ add source" form; `KBConnectorSpec.writable` = True for gdocs only):
+A gdocs connection has **two independent knobs** in `config` (picked as two
+separate dropdowns in the "+ add source" form; `KBConnectorSpec.writable` =
+True for gdocs only):
 
-| mode | on an approved KIL correction for a doc-backed entry |
+**`index`** — `true` (default) / `false`. `false` = the doc is connected but
+not read into the KB (`_sync_gdocs` yields nothing, so the generic driver
+archives any prior entry); the bot won't use it to answer. Turning it back
+on re-creates the entry.
+
+**`on_correction`** — what to do to the doc when the Knowledge Integrity
+Loop's manager review approves a correction for that doc's KB entry:
+
+| value | effect |
 |---|---|
-| `read_only` *(default)* | only the internal `kb_entries` mirror is updated — the doc is never touched |
-| **`suggest`** *(recommended when a tenant wants doc corrections)* | open a GitHub issue with the old→new diff + a doc link; **the bot does not edit the doc**. A human applies it and closes the issue; the mirror re-syncs on close. Needs `config.github_repo` but **not** the write OAuth scopes. |
+| `off` *(default)* | only the internal `kb_entries` mirror is updated — the doc is never touched |
+| **`suggest`** *(recommended)* | open a GitHub issue with the old→new diff + a doc link; **the bot does not edit the doc**. A human applies it and closes the issue; the mirror re-syncs on close. Needs `config.github_repo`, **not** the write OAuth scopes. |
 | `write_back` | the bot rewrites the passage in place, opens the issue for the human to verify / `/revert`, re-syncs the mirror. Needs `config.github_repo` **and** the read-write `documents`/`drive` scopes. |
+
+The one coupling: `on_correction` ≠ `off` requires `index = true` (there has
+to be a KB entry to correct) — `_norm_gdocs` rejects the combination. An
+older single `access` value (`read_only`/`suggest`/`write_back`) still
+normalizes: it maps to `{index: true, on_correction: <the same, "off" for
+read_only>}`.
 
 `suggest` and `write_back` share the same `gdoc_writeback` job, the same
 `kb_doc_writebacks` tracking row, and the same watch (below). The rest of

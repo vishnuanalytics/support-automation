@@ -285,7 +285,8 @@ def _maybe_enqueue_doc_writeback(sb, *, old_id: str, tenant_id: Any, new_body_md
     if not conn:
         return
     cfg = conn[0].get("config") or {}
-    mode = cfg.get("access")
+    # `on_correction` (new) or a legacy `access` value both carry the mode
+    mode = cfg.get("on_correction") or cfg.get("access")
     if conn[0]["connector"] != "gdocs" or mode not in ("suggest", "write_back"):
         return
     blocks = _doc_change_blocks(old.get("body_md") or "", new_body_md or "")

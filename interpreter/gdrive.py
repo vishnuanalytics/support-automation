@@ -30,7 +30,7 @@ SCOPES = [
     # Google doesn't retroactively grant a new scope to an existing token.
     "https://www.googleapis.com/auth/spreadsheets.readonly",
     # 2026-09-06 — KB write-back (docs/KB_SOURCE_CONNECTORS.md §2). Only
-    # exercised for a gdocs connection with `config.access == 'write_back'`;
+    # exercised for a gdocs connection with `config.on_correction in ('suggest','write_back')`;
     # a read-only tenant never uses it, and an existing token keeps working
     # with its old (read-only) scopes — the job just fails gracefully until
     # the tenant re-runs Google consent. `documents` = rewrite the passage;
@@ -159,7 +159,7 @@ def get_modified_time(tenant_id: str, doc_id: str, sb) -> str:
 
 
 # ── write-back (KB write-back, docs/KB_SOURCE_CONNECTORS.md §2) ──────────
-# Only reached for a gdocs connection with `config.access == 'write_back'`.
+# Only reached for a gdocs connection with `config.on_correction in ('suggest','write_back')`.
 # Needs the read-write `documents` / `drive` scopes (see SCOPES) — a tenant
 # on an older read-only token gets a clean failure, not a silent no-op.
 def replace_passage(tenant_id: str, doc_id: str, old_text: str, new_text: str,

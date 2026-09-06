@@ -109,8 +109,8 @@ def _entry_row(**over):
 
 def _conn_row(**over):
     r = {"connection_id": "c1", "connector": "gdocs",
-         "config": {"doc_id": "d1", "doc_url": "u", "access": "write_back",
-                    "github_repo": "acme/kb"}}
+         "config": {"doc_id": "d1", "doc_url": "u", "index": True,
+                    "on_correction": "write_back", "github_repo": "acme/kb"}}
     r.update(over)
     return r
 
@@ -137,7 +137,8 @@ def test_writeback_enqueued_for_a_write_back_gdocs_connection(monkeypatch):
 
 def test_writeback_enqueued_for_a_suggest_connection_with_mode_in_payload(monkeypatch):
     sb = _SB(kb_entries=[_entry_row()],
-             kb_source_connections=[_conn_row(config={"doc_id": "d1", "access": "suggest",
+             kb_source_connections=[_conn_row(config={"doc_id": "d1", "index": True,
+                                                      "on_correction": "suggest",
                                                       "github_repo": "acme/kb"})])
     calls = _enq_capture(monkeypatch)
     kb_writeback._maybe_enqueue_doc_writeback(
@@ -149,7 +150,7 @@ def test_writeback_enqueued_for_a_suggest_connection_with_mode_in_payload(monkey
 
 def test_writeback_not_enqueued_when_read_only(monkeypatch):
     sb = _SB(kb_entries=[_entry_row()],
-             kb_source_connections=[_conn_row(config={"doc_id": "d1", "access": "read_only"})])
+             kb_source_connections=[_conn_row(config={"doc_id": "d1", "on_correction": "off"})])
     calls = _enq_capture(monkeypatch)
     kb_writeback._maybe_enqueue_doc_writeback(
         sb, old_id="old1", tenant_id="t", new_body_md="new", approver="m", review_task_id=None)
@@ -224,7 +225,7 @@ def test_gdoc_writeback_applied(monkeypatch):
 
 def test_gdoc_writeback_suggest_opens_an_issue_but_never_edits_the_doc(monkeypatch):
     sb = _SB(kb_source_connections=[_conn_row(config={"doc_id": "d1", "doc_url": "u",
-                                                     "access": "suggest",
+                                                     "index": True, "on_correction": "suggest",
                                                      "github_repo": "acme/kb"})])
     seen = _wire_gdrive_github(monkeypatch, replace_returns=1)
     out = worker._gdoc_writeback(_payload(mode="suggest"), sb)
@@ -272,51 +273,67 @@ def test_gdoc_writeback_records_a_fetch_error(monkeypatch):
     assert row["status"] == "error" and "token expired" in row["error"]
 
 
-# ── gdocs connector: access / github_repo normalize + writable flag ──────
+# ── gdocs connector: two independent knobs (index / on_correction) ───────
+_DOC_URL = "https://docs.google.com/document/d/ABCdef123456789012345/edit"
+
+
 def test_gdocs_is_writable():
     assert kb_connectors.get_kb_connector("gdocs").writable is True
     assert kb_connectors.get_kb_connector("public_url").writable is False
 
 
-def test_gdocs_normalize_defaults_to_read_only():
-    cfg = kb_connectors.get_kb_connector("gdocs").normalize_config(
-        {"doc_url": "https://docs.google.com/document/d/ABCdef123456789012345/edit"})
-    assert cfg["access"] == "read_only" and "github_repo" not in cfg
+def test_gdocs_normalize_defaults_to_indexed_and_no_writeback():
+    cfg = kb_connectors.get_kb_connector("gdocs").normalize_config({"doc_url": _DOC_URL})
+    assert cfg == {"doc_id": "ABCdef123456789012345", "doc_url": _DOC_URL,
+                   "index": True, "on_correction": "off"}
 
 
-def test_gdocs_normalize_write_back_requires_a_valid_repo():
+def test_gdocs_normalize_index_no_is_independent_of_on_correction():
     spec = kb_connectors.get_kb_connector("gdocs")
-    url = "https://docs.google.com/document/d/ABCdef123456789012345/edit"
-    cfg = spec.normalize_config({"doc_url": url, "access": "write_back",
-                                 "github_repo": "acme/support-kb"})
-    assert cfg == {"doc_id": "ABCdef123456789012345", "doc_url": url,
-                   "access": "write_back", "github_repo": "acme/support-kb"}
-    with pytest.raises(ValueError):
-        spec.normalize_config({"doc_url": url, "access": "write_back", "github_repo": "not-a-repo"})
+    cfg = spec.normalize_config({"doc_url": _DOC_URL, "index": "no"})
+    assert cfg["index"] is False and cfg["on_correction"] == "off"
 
 
-def test_gdocs_access_field_has_human_labels_and_help_for_the_ui():
+def test_gdocs_normalize_on_correction_needs_a_repo_and_needs_index():
     spec = kb_connectors.get_kb_connector("gdocs")
-    access = next(f for f in spec.config_fields if f["key"] == "access")
-    assert set(access["options"]) == {"read_only", "suggest", "write_back"}
-    # every option carries a plain-language label + the field has help text
-    assert set(access["option_labels"]) == set(access["options"])
-    assert "recommended" in access["option_labels"]["suggest"]
-    assert access.get("help")
-    repo = next(f for f in spec.config_fields if f["key"] == "github_repo")
-    assert repo["show_if"] == {"key": "access", "ne": "read_only"} and repo.get("help")
+    for mode in ("suggest", "write_back"):
+        cfg = spec.normalize_config({"doc_url": _DOC_URL, "on_correction": mode,
+                                     "github_repo": "acme/kb"})
+        assert cfg["on_correction"] == mode and cfg["github_repo"] == "acme/kb" and cfg["index"] is True
+        with pytest.raises(ValueError):   # no repo
+            spec.normalize_config({"doc_url": _DOC_URL, "on_correction": mode})
+        with pytest.raises(ValueError):   # index=no can't suggest/write
+            spec.normalize_config({"doc_url": _DOC_URL, "on_correction": mode,
+                                   "github_repo": "acme/kb", "index": "no"})
+    with pytest.raises(ValueError):
+        spec.normalize_config({"doc_url": _DOC_URL, "on_correction": "bogus"})
 
 
-def test_gdocs_normalize_suggest_also_needs_a_repo():
+def test_gdocs_normalize_maps_a_legacy_access_value():
     spec = kb_connectors.get_kb_connector("gdocs")
-    url = "https://docs.google.com/document/d/ABCdef123456789012345/edit"
-    cfg = spec.normalize_config({"doc_url": url, "access": "suggest",
-                                 "github_repo": "acme/kb"})
-    assert cfg["access"] == "suggest" and cfg["github_repo"] == "acme/kb"
-    with pytest.raises(ValueError):
-        spec.normalize_config({"doc_url": url, "access": "suggest"})
-    with pytest.raises(ValueError):
-        spec.normalize_config({"doc_url": url, "access": "bogus"})
+    assert spec.normalize_config({"doc_url": _DOC_URL, "access": "read_only"})["on_correction"] == "off"
+    cfg = spec.normalize_config({"doc_url": _DOC_URL, "access": "suggest", "github_repo": "a/b"})
+    assert cfg["index"] is True and cfg["on_correction"] == "suggest"
+
+
+def test_gdocs_fields_are_two_independent_selects_with_labels():
+    fields = {f["key"]: f for f in kb_connectors.get_kb_connector("gdocs").config_fields}
+    assert set(fields["index"]["options"]) == {"yes", "no"}
+    assert set(fields["on_correction"]["options"]) == {"off", "suggest", "write_back"}
+    assert "recommended" in fields["on_correction"]["option_labels"]["suggest"]
+    assert fields["index"]["option_labels"] and fields["on_correction"].get("help")
+    assert fields["github_repo"]["show_if"] == {"key": "on_correction", "ne": "off"}
+
+
+def test_gdocs_sync_produces_nothing_when_index_is_off(monkeypatch):
+    called = []
+    monkeypatch.setattr("interpreter.gdrive.fetch_doc",
+                        lambda *a, **k: called.append(1) or {"title": "x", "markdown": "y",
+                                                             "modified_time": "M"})
+    ctx = kb_connectors.SyncCtx(tenant_id="t", sb=None, collection_name="c")
+    res = kb_connectors._sync_gdocs({"doc_id": "d1", "index": False}, None, ctx)
+    assert res.documents == [] and res.exhaustive is True
+    assert called == []   # not even fetched
 
 
 # ── watch_doc_writebacks (chunk 2: close the loop) ───────────────────────

@@ -218,6 +218,18 @@ register(KBConnectorSpec(
 
 
 # ---- 3. gdocs — a linked Google Doc (interpreter/gdrive.py, Phase 15) -----
+# Two **independent** org-level knobs, not one combined enum:
+#   index          — is this doc read into the KB for answering?  (yes / no)
+#   on_correction  — what to do to the doc when a support resolution corrects
+#                    the KB content: off | suggest (GitHub issue) | write_back
+# The one coupling: `suggest`/`write_back` need a KB entry to correct, so they
+# require `index = yes`.
+def _as_yes(v: Any, default: bool = True) -> bool:
+    if v is None:
+        return default
+    return str(v).strip().lower() not in ("no", "false", "0", "off", "")
+
+
 def _norm_gdocs(raw: dict[str, Any]) -> dict[str, Any]:
     from interpreter import gdrive
 
@@ -226,11 +238,23 @@ def _norm_gdocs(raw: dict[str, Any]) -> dict[str, Any]:
         "doc_id": gdrive.parse_doc_id(doc_url or raw.get("doc_id") or ""),
         "doc_url": doc_url,
     }
-    access = (raw.get("access") or "read_only").strip()
-    if access not in ("read_only", "suggest", "write_back"):
-        raise ValueError("access must be 'read_only', 'suggest' or 'write_back'")
-    cfg["access"] = access
-    if access in ("suggest", "write_back"):
+
+    # back-compat: an older single `access` value maps onto the two knobs
+    legacy = raw.get("access")
+    index = _as_yes(raw.get("index"))
+    if legacy in ("read_only", "suggest", "write_back"):
+        index, on_corr = True, ("off" if legacy == "read_only" else legacy)
+    else:
+        on_corr = (raw.get("on_correction") or "off").strip()
+
+    if on_corr not in ("off", "suggest", "write_back"):
+        raise ValueError("on_correction must be 'off', 'suggest' or 'write_back'")
+    if on_corr != "off" and not index:
+        raise ValueError("'suggest' / 'write_back' need the doc read into the KB — set 'Read' to Yes")
+
+    cfg["index"] = index
+    cfg["on_correction"] = on_corr
+    if on_corr != "off":
         repo = (raw.get("github_repo") or "").strip()
         if repo.count("/") != 1 or not all(repo.split("/")):
             raise ValueError("github_repo must be 'owner/name' when the bot opens review issues")
@@ -240,6 +264,12 @@ def _norm_gdocs(raw: dict[str, Any]) -> dict[str, Any]:
 
 def _sync_gdocs(config: dict, watermark: "dict | None", ctx: SyncCtx) -> KBSyncResult:
     from interpreter import gdrive
+
+    # `index = no` — the doc is connected (so a future correction *could* be
+    # aimed at it once turned on) but not read for answering: produce nothing,
+    # which lets the generic driver archive any prior entry.
+    if config.get("index") is False:
+        return KBSyncResult(documents=[], exhaustive=True)
 
     doc_id = config["doc_id"]
     fetched = gdrive.fetch_doc(ctx.tenant_id, doc_id, ctx.sb)
@@ -259,21 +289,25 @@ register(KBConnectorSpec(
     config_fields=[
         {"key": "doc_url", "label": "Google Doc URL", "type": "string", "required": True,
          "placeholder": "https://docs.google.com/document/d/…"},
-        {"key": "access", "label": "When this doc's KB entry is corrected",
-         "type": "select", "required": False,
-         "options": ["read_only", "suggest", "write_back"],
+        {"key": "index", "label": "Read this doc into the knowledge base",
+         "type": "select", "required": False, "options": ["yes", "no"],
          "option_labels": {
-             "read_only": "Read only — never change the doc",
-             "suggest": "Suggest edits — open a GitHub issue, a person applies it (recommended)",
-             "write_back": "Auto-write — the bot edits the doc, a person verifies",
+             "yes": "Yes — the bot can use it to answer",
+             "no": "No — connected but not used for answers",
+         }},
+        {"key": "on_correction", "label": "When a support resolution corrects this content",
+         "type": "select", "required": False,
+         "options": ["off", "suggest", "write_back"],
+         "option_labels": {
+             "off": "Do nothing to the doc (default)",
+             "suggest": "Open a GitHub issue with the fix — a person applies it (recommended)",
+             "write_back": "Let the bot edit the doc — a person verifies",
          },
-         "help": ("The doc is always read into the knowledge base. This only controls "
-                  "what happens when a support resolution corrects that content: leave the "
-                  "doc alone, propose the fix for a human to apply, or let the bot apply it.")},
+         "help": "'Suggest' and 'Let the bot edit' both need 'Read' set to Yes."},
         {"key": "github_repo", "label": "GitHub repo for review issues (owner/name)",
          "type": "string", "required": False, "placeholder": "acme/support-kb",
          "help": "Where the correction issue is opened. Needs a GitHub connection for this tenant.",
-         "show_if": {"key": "access", "ne": "read_only"}},
+         "show_if": {"key": "on_correction", "ne": "off"}},
     ],
     normalize=_norm_gdocs, available=_google_available,
     sync=_sync_gdocs,

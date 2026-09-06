@@ -505,7 +505,7 @@ def _writeback_issue_body(doc_url: str, blocks: list[dict], task: str | None,
 
 def _gdoc_writeback(payload: dict, sb) -> dict:
     """KB write-back (docs/KB_SOURCE_CONNECTORS.md §2). A KIL correction was
-    approved for an entry on a gdocs connection whose `config.access` is:
+    approved for an entry on a gdocs connection whose `config.on_correction` is:
 
       * "suggest"    — open a GitHub issue with the old→new diff + a doc link;
                        the bot does NOT touch the doc, a human applies it and
@@ -523,7 +523,7 @@ def _gdoc_writeback(payload: dict, sb) -> dict:
     if not rows:
         return {"connection_id": cid, "skipped": "connection gone"}
     cfg = rows[0].get("config") or {}
-    mode = payload.get("mode") or cfg.get("access") or "write_back"
+    mode = payload.get("mode") or cfg.get("on_correction") or cfg.get("access") or "write_back"
     suggest = mode == "suggest"
     doc_id = cfg.get("doc_id")
     doc_url = cfg.get("doc_url") or f"https://docs.google.com/document/d/{doc_id}/edit"

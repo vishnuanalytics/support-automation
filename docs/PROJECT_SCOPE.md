@@ -707,8 +707,49 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-06 (chunk 4) — gdocs `access` split into two independent
+org-level knobs (this is the most recent work in this file).** Per the
+user: an org wants to set "read into the KB" and "suggest corrections back"
+separately, as two dropdowns, not one combined enum. `kb_connectors._norm_
+gdocs` / the `gdocs` `config_fields` now produce/collect:
+
+- **`index`** (`yes`/`no`, default `yes`) — read the doc into the KB for
+  answering. `no` ⇒ `_sync_gdocs` yields nothing so the generic driver
+  archives any prior entry (connected but unused; reversible).
+- **`on_correction`** (`off`/`suggest`/`write_back`, default `off`) — what
+  chunk 1–3 called `access` minus the read part. `_maybe_enqueue_doc_
+  writeback` / `_gdoc_writeback` now read `config.on_correction` (falling
+  back to a legacy `config.access`).
+
+One coupling enforced in `_norm_gdocs`: `on_correction ≠ off` requires
+`index = yes`. A legacy `access` value still normalizes
+(`read_only`→`{index:true, on_correction:off}`, etc.) — **no migration, no
+data backfill** (the one live gdocs row has neither key; defaults cover it).
+Web: two `<select>`s via the generic `config_fields` loop (`option_labels` +
+`help` + `show_if:{key:on_correction, ne:off}` on `github_repo`), a
+`not indexed` badge, `docMode` reads `on_correction`.
+
+**Verify:** `tests/test_kb_doc_writeback.py` normalize/field tests
+rewritten for the two knobs (+ `index=no` ⇒ `_sync_gdocs` yields nothing
+and never fetches; `on_correction≠off` needs a repo *and* `index`; legacy
+`access` maps). **847 offline tests green (was 845).** `tsc -b` clean.
+**Live-checked against the real Supabase project** (throwaway connections):
+`index=false` ⇒ `_sync_kb_connection` synced 0 docs, `fetch_doc` never
+called, no `kb_entries`; `on_correction="suggest"` (new key shape) ⇒
+`gdoc_writeback` enqueued with `mode="suggest"`; `normalize` rejects
+`suggest`+`index=no`. Rows deleted.
+
+**Still not built (chunk 5+):** a per-tenant *default* for these two knobs
+(new gdocs connections would inherit it) — the "organization level" ask
+could go further than per-connection; noted, not built. Also still open: a
+"Doc write-backs" view in `ReviewView.tsx`, a Slack "send to GitHub before
+applying" button, structural section replacement.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
 **2026-09-06 (chunk 3) — KB write-back gains a `suggest` mode, now the
-recommended one (this is the most recent work in this file).** A design
+recommended one.** A design
 check ("is the bot writing the customer's doc even a good idea?") landed on:
 make "human applies, bot just proposes" a first-class option, not the thing
 we skipped. `kb_source_connections.config.access` for a gdocs connection is
