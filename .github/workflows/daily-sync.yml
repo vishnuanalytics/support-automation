@@ -90,14 +90,13 @@ jobs:
           SF_DOMAIN: ${{ secrets.SF_DOMAIN }}
         run: python -m ingestion.case_graph_sync
 
-      # 2026-09-05 — scheduled refresh for every KB collection with a known
-      # crawl or linked-sheet history (sources.config.crawl_urls /
-      # config.gsheets, recorded by api/worker.py::_crawl_site /
-      # _sync_gsheet the first time a tenant crawls a site or links a
-      # sheet). Just enqueues jobs; the drain step right after actually
-      # runs them — there's no always-on worker host, same reason
-      # email-automation.yml drains its own queue in-workflow.
-      - name: Refresh KB sources (re-crawl + re-sync linked sheets)
+      # Scheduled refresh: `ingestion.kb_recrawl` reads every active
+      # `kb_source_connections` row (migration 091 — public_url / gsheets /
+      # gdocs / linear / nolt) and enqueues one `kb_sync` per connection.
+      # Just enqueues; the drain step right after runs them — there's no
+      # always-on worker host, same reason email-automation.yml drains its
+      # own queue in-workflow.
+      - name: Refresh KB sources (re-sync every active connection)
         continue-on-error: true
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -116,7 +115,7 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python -m ingestion.kb_writeback_watch
 
-      - name: Drain the job queue (crawl_site + sync_gsheet + embed_kb_entry)
+      - name: Drain the job queue (kb_sync + gdoc_writeback + embed_kb_entry ...)
         continue-on-error: true
         if: always()
         env:

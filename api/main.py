@@ -2114,10 +2114,11 @@ def _kb_pull_secrets(tenant_id: str, connector: str, spec, raw_config: dict) -> 
     secrets = {k: v for k, v in secrets.items() if v}
     if secrets:
         prior = vault_secrets.get(tenant_id, connector, sb=_service)
-        vault_secrets.put(tenant_id, connector, {**prior, **secrets}, sb=_service)
-        _service.table("tenant_integrations").upsert(
-            {"tenant_id": tenant_id, "kind": connector,
-             "secret": {"has_credentials": True}}).execute()
+        vault_id = vault_secrets.put(tenant_id, connector, {**prior, **secrets}, sb=_service)
+        row = {"tenant_id": tenant_id, "kind": connector, "secret": {"has_credentials": True}}
+        if vault_id:
+            row["vault_secret_id"] = vault_id   # match the slack/llm integration shape
+        _service.table("tenant_integrations").upsert(row).execute()
     return raw
 
 
