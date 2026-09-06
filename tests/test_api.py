@@ -106,6 +106,10 @@ def test_graph_ask_needs_a_token():
     assert client.post("/api/graph/ask", json={"question": "how many cases"}).status_code == 401
 
 
+def test_job_failures_needs_a_token():
+    assert client.get("/api/jobs/failures").status_code == 401
+
+
 def test_trigger_endpoint_needs_a_token_and_trigger_is_a_node_type():
     assert client.post("/api/triggers/some-flow", json={"plan": "free"}).status_code == 401
     body = client.get("/api/node-types").json()

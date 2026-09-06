@@ -744,6 +744,35 @@ class _JobTimeout(Exception):
     pass
 
 
+def _resolve_job_tenant(kind: str, payload: dict, sb) -> str | None:
+    """Best-effort tenant attribution for a job whose row has no tenant_id
+    (payload didn't carry one). Cheap single lookups keyed on whatever id
+    the payload does have. Cross-tenant infra sweeps have no owner -> None."""
+    direct = jobs._tenant_from_payload(payload)
+    if direct:
+        return direct
+    try:
+        if kind in ("run_flow",) and payload.get("flow_id"):
+            r = (sb.table("flows").select("tenant_id")
+                 .eq("flow_id", payload["flow_id"]).limit(1).execute().data or [])
+            return r[0]["tenant_id"] if r else None
+        if kind == "check_resolution" and payload.get("run_id"):
+            r = (sb.table("runs").select("tenant_id")
+                 .eq("run_id", payload["run_id"]).limit(1).execute().data or [])
+            return r[0]["tenant_id"] if r else None
+        if kind in ("kb_sync", "gdoc_writeback") and payload.get("connection_id"):
+            r = (sb.table("kb_source_connections").select("tenant_id")
+                 .eq("connection_id", payload["connection_id"]).limit(1).execute().data or [])
+            return r[0]["tenant_id"] if r else None
+        if kind == "embed_kb_entry" and payload.get("entry_id"):
+            r = (sb.table("kb_entries").select("tenant_id")
+                 .eq("entry_id", payload["entry_id"]).limit(1).execute().data or [])
+            return r[0]["tenant_id"] if r else None
+    except Exception as e:  # noqa: BLE001 -- attribution is never worth failing a job over
+        log.warning("_resolve_job_tenant(%s): %s", kind, e)
+    return None
+
+
 def process_one(sb, *, job_id: str | None = None) -> bool:
     import signal
 
@@ -751,6 +780,14 @@ def process_one(sb, *, job_id: str | None = None) -> bool:
     if not job:
         return False
     jid, kind = job["job_id"], job["kind"]
+
+    if not job.get("tenant_id"):
+        tid = _resolve_job_tenant(kind, job.get("payload") or {}, sb)
+        if tid:
+            try:
+                sb.table("jobs").update({"tenant_id": str(tid)}).eq("job_id", jid).execute()
+            except Exception as e:  # noqa: BLE001
+                log.warning("stamp job %s tenant: %s", jid, e)
 
     def _alarm(_sig, _frm):
         raise _JobTimeout(f"job exceeded {JOB_TIMEOUT}s")

@@ -263,8 +263,25 @@ export interface TenantHealth {
   review_backlog: { open: number; oldest_days: number | null };
   reasoning_stuck: number;
   doc_writebacks_pending: number;
+  failed_jobs_24h: number;
   runs_24h: { total: number; by_outcome: Record<string, number>; struggle_rate: number };
   system_stale: { component: string; stale_hours: number }[];
+}
+
+export interface JobFailures {
+  window_hours: number;
+  total: number;
+  by_kind: Record<string, number>;
+  failures: {
+    job_id: string;
+    kind: string;
+    attempts: number;
+    max_attempts: number;
+    error: string | null;
+    dedupe_key: string | null;
+    created_at: string;
+    updated_at: string;
+  }[];
 }
 
 export interface KbDocDefaults {

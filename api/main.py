@@ -1600,6 +1600,11 @@ def tenant_health(tenant_id: str | None = None, c: Caller = Depends(caller)) -> 
         c.sb.table("kb_doc_writebacks").select("id")
         .eq("tenant_id", tid).in_("status", ["applied", "partial"]).execute().data or [])
 
+    failed_jobs = len(
+        _service.table("jobs").select("job_id")
+        .eq("tenant_id", tid).eq("status", "failed")
+        .gte("updated_at", day_ago).execute().data or [])
+
     runs = (c.sb.table("runs").select("outcome")
             .eq("tenant_id", tid).gte("created_at", day_ago).limit(2000).execute().data or [])
     by_outcome: dict[str, int] = {}
@@ -1625,10 +1630,38 @@ def tenant_health(tenant_id: str | None = None, c: Caller = Depends(caller)) -> 
         "review_backlog": {"open": len(open_tasks), "oldest_days": oldest_days},
         "reasoning_stuck": reasoning_stuck,
         "doc_writebacks_pending": wb_pending,
+        "failed_jobs_24h": failed_jobs,
         "runs_24h": {"total": len(runs), "by_outcome": by_outcome,
                      "struggle_rate": round(struggle / n, 3)},
         "system_stale": sys_stale,
     }
+
+
+@app.get("/api/jobs/failures")
+def job_failures(hours: int = 24, limit: int = 50, tenant_id: str | None = None,
+                 c: Caller = Depends(caller)) -> dict:
+    """Jobs that ran out of retries for this tenant in the last `hours`.
+    Owner-only. Never returns the payload (it can hold case text) — only
+    the kind, attempt count, truncated error and timestamps."""
+    from datetime import datetime, timedelta, timezone
+
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    hours = min(max(hours, 1), 168)
+    limit = min(max(limit, 1), 200)
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
+    rows = (_service.table("jobs")
+            .select("job_id, kind, attempts, max_attempts, error, dedupe_key, "
+                    "created_at, updated_at")
+            .eq("tenant_id", tid).eq("status", "failed")
+            .gte("updated_at", since)
+            .order("updated_at", desc=True).limit(limit).execute().data or [])
+    by_kind: dict[str, int] = {}
+    for r in rows:
+        by_kind[r["kind"]] = by_kind.get(r["kind"], 0) + 1
+    return {"window_hours": hours, "total": len(rows),
+            "by_kind": by_kind, "failures": rows}
 
 
 class GraphAskIn(BaseModel):

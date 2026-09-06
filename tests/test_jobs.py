@@ -83,3 +83,41 @@ def test_fail_with_no_job_id_is_a_noop():
     sb = _FakeSb(attempts=1)
     jobs.fail("", "boom", sb=sb)
     assert sb.patch is None
+
+
+# ── enqueue: tenant attribution (migration 099) ──────────────────────
+class _InsertSb:
+    def __init__(self):
+        self.row: dict | None = None
+
+    def table(self, name):
+        return self
+
+    def insert(self, row):
+        self.row = row
+        return self
+
+    def execute(self):
+        return type("R", (), {"data": [{"job_id": "j-1"}]})()
+
+
+def test_enqueue_takes_explicit_tenant_id():
+    sb = _InsertSb()
+    jobs.enqueue("kb_sync", {"connection_id": "c1"}, tenant_id="TENANT-A", sb=sb)
+    assert sb.row["tenant_id"] == "TENANT-A"
+
+
+def test_enqueue_falls_back_to_payload_tenant_id():
+    sb = _InsertSb()
+    jobs.enqueue("gdoc_writeback", {"tenant_id": "TENANT-B", "entry_id": "e1"}, sb=sb)
+    assert sb.row["tenant_id"] == "TENANT-B"
+
+    sb2 = _InsertSb()
+    jobs.enqueue("run_flow", {"case": {"tenant_id": "TENANT-C"}}, sb=sb2)
+    assert sb2.row["tenant_id"] == "TENANT-C"
+
+
+def test_enqueue_omits_tenant_id_when_none_is_known():
+    sb = _InsertSb()
+    jobs.enqueue("queue_sweep", {}, sb=sb)
+    assert "tenant_id" not in sb.row

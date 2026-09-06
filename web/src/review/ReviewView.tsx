@@ -3,6 +3,7 @@ import { api, ApiError } from "../api";
 import type {
   ActionRequest,
   GraphAskResult,
+  JobFailures,
   KbDocWriteback,
   KilDigest,
   KilMetrics,
@@ -20,6 +21,7 @@ export function ReviewView() {
   const [docWb, setDocWb] = useState<KbDocWriteback[]>([]);
   const [showDocWb, setShowDocWb] = useState(false);
   const [health, setHealth] = useState<TenantHealth | null>(null);
+  const [jobFails, setJobFails] = useState<JobFailures | null>(null);
   const [status, setStatus] = useState<(typeof STATUS)[number]>("open");
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -34,6 +36,7 @@ export function ReviewView() {
       .catch(() => {});
     api.kb.listAllDocWritebacks("open").then(setDocWb).catch(() => {});
     api.review.tenantHealth().then(setHealth).catch(() => {});
+    setJobFails(null);
   };
   useEffect(load, [status]);
 
@@ -103,6 +106,11 @@ export function ReviewView() {
               warn={health.doc_writebacks_pending > 0}
             />
             <Tile
+              label="failed jobs (24h)"
+              value={health.failed_jobs_24h}
+              warn={health.failed_jobs_24h > 0}
+            />
+            <Tile
               label="review backlog"
               value={
                 health.review_backlog.oldest_days != null
@@ -129,6 +137,48 @@ export function ReviewView() {
             <span style={{ fontSize: 12, color: "var(--crit, #b4432a)" }}>
               ⚠ {health.connections.sample}
             </span>
+          )}
+          {health.failed_jobs_24h > 0 && (
+            <button
+              style={{ alignSelf: "flex-start", fontSize: 12 }}
+              onClick={() => {
+                if (jobFails) {
+                  setJobFails(null);
+                } else {
+                  api.review.jobFailures().then(setJobFails).catch((e: ApiError) => setErr(e.message));
+                }
+              }}
+            >
+              {jobFails ? "hide" : "show"} failed jobs
+            </button>
+          )}
+          {jobFails && (
+            <div style={{ overflowX: "auto" }}>
+              <table className="runs-table" style={{ minWidth: 560 }}>
+                <thead>
+                  <tr>
+                    <th>kind</th>
+                    <th>attempts</th>
+                    <th>last error</th>
+                    <th>failed</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {jobFails.failures.map((j) => (
+                    <tr key={j.job_id}>
+                      <td>{j.kind}</td>
+                      <td className="muted">
+                        {j.attempts}/{j.max_attempts}
+                      </td>
+                      <td className="muted" style={{ maxWidth: 360, whiteSpace: "pre-wrap" }}>
+                        {j.error || "—"}
+                      </td>
+                      <td className="muted">{j.updated_at.slice(0, 16).replace("T", " ")}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       )}

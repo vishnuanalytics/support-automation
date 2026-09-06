@@ -32,6 +32,7 @@ import type {
   PolicyRule,
   NodeTypesResp,
   ReviewTask,
+  JobFailures,
   KilMetrics,
   KilDigest,
   TenantHealth,
@@ -454,6 +455,7 @@ export const api = {
     digest: (weeks = 4) =>
       req<KilDigest>(`/kil/digest?weeks=${weeks}`),
     tenantHealth: () => req<TenantHealth>("/health/tenant"),
+    jobFailures: (hours = 24) => req<JobFailures>(`/jobs/failures?hours=${hours}`),
   },
 
   graphAsk: (question: string, tenantId?: string) =>

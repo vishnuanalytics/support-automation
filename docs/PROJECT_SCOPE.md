@@ -707,11 +707,61 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-06 (chunk 14) — per-tenant failed-jobs visibility (migration
+`099`). This is the most recent work in this file.** Completes the
+tenant-observability work: `/api/health/tenant` and the Approvals/Review
+"Bot health" strip could show a KIL backlog and stuck reasoning but never
+"N of your jobs failed permanently" — because `jobs` (013) is
+service-role infra with no `tenant_id`.
+
+- **Migration `099`** — `jobs.tenant_id uuid` (nullable: cross-tenant
+  infra sweeps keep it NULL), `idx_jobs_failed_by_tenant (tenant_id,
+  updated_at desc) where status='failed'`, and a 3-step backfill (payload
+  `tenant_id`; `run_flow` → `flows.tenant_id`; `kb_sync`/`gdoc_writeback`
+  → `kb_source_connections.tenant_id`). No RLS policy — the read path is an
+  owner-only route on the service client. **Live backfill result: 95/95
+  failed `run_flow` jobs attributed** (100%); infra sweeps correctly left
+  NULL.
+- **`interpreter/jobs.enqueue(..., tenant_id=None)`** — fills
+  `row["tenant_id"]` from the kwarg or `_tenant_from_payload` (checks
+  `payload` + nested `case`/`context`).
+- **`api/worker.py::_resolve_job_tenant`** — post-claim, if the row still
+  has no `tenant_id`, one cheap lookup by kind (`run_flow`→flow,
+  `check_resolution`→run, `kb_sync`/`gdoc_writeback`→connection,
+  `embed_kb_entry`→entry); infra sweeps → None. Never fails the job.
+- **`GET /api/jobs/failures?hours=24`** — owner-only; returns
+  `{window_hours, total, by_kind, failures[]}` with **no payload** (only
+  kind / attempts / truncated error / timestamps — the payload can hold
+  case text). `/api/health/tenant` gains `failed_jobs_24h`.
+- **Web** — a "failed jobs (24h)" tile in the Bot-health strip
+  (`TenantHealth.failed_jobs_24h`) + a "show failed jobs" drill-down table
+  (`api.review.jobFailures`, `JobFailures` type) shown only when the count
+  is > 0.
+- Tests: `tests/test_jobs.py` +4 (enqueue tenant attribution),
+  `tests/test_worker_tenant_resolve.py` new (7), `tests/test_api.py` +1
+  guard.
+
+**931 offline tests green.** `099` applied live, drift clean, tsc + `vite
+build` clean.
+
+**Residual:** historical `check_resolution` / `embed_kb_entry` rows (all
+`done`, so never in the failures view) stay unattributed — the backfill
+only covered `run_flow` and connection-keyed kinds. New jobs of every kind
+get attributed at enqueue or first claim.
+
+**Still open** (product-review list): shared rate limiting (in-memory →
+DB), enforcing spend caps, the retrieval eval harness as a CI gate,
+Confluence/Notion/SharePoint connectors, and the `multiple_permissive_
+policies` RLS cleanup. Plus the always-on worker (needs a host — guide in
+`docs/DEPLOY_WEB_AND_API.md`).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
 **2026-09-06 (chunk 13) — "Ask the case graph" (natural-language → spec →
-Cypher). This is the most recent work in this file.** Closes the
-long-standing `MULTI_SYSTEM_ARCHITECTURE.md` open question about a
-Neo4j-facing NL query surface — built as a **composable spec compiler,
-deliberately not free-form text-to-Cypher**.
+Cypher).** Closes the long-standing `MULTI_SYSTEM_ARCHITECTURE.md` open
+question about a Neo4j-facing NL query surface — built as a **composable
+spec compiler, deliberately not free-form text-to-Cypher**.
 
 - **Why the spec, not text-to-Cypher:** one shared Community-edition Neo4j
   — no per-tenant DB, no custom read-only role — so the only tenant
