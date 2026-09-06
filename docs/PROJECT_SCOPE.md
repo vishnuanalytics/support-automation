@@ -707,8 +707,37 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-06 (chunk 9) — Neo4j + Supabase infra hardening (this is the most
-recent work in this file).** Four things:
+**2026-09-06 (chunk 10) — KB-connector quick-wins (this is the most recent
+work in this file).** Four small in-repo improvements from the product
+review list:
+
+1. **`max_items` cap** on gdocs-folder / Linear / Nolt syncs (clamped
+   1..2000; gdocs 300, linear 300, nolt→existing 500). A capped run reports
+   `exhaustive=False` so the driver won't archive what it didn't see.
+   `linear._page` takes a `limit` and stops paging early.
+2. **Edit a connection's config** — `PATCH /api/kb/connections/{cid}` now
+   also takes `label` + a partial `config` (merged onto the stored config,
+   re-normalized, re-synced). Secret fields route to Vault via the extracted
+   `_kb_pull_secrets`. Web: an "edit" button per connection row →
+   `ConnectionEditForm` (shared `KbConfigField` / `kbFieldVisible`).
+3. **`/test` for Linear/Nolt** — `POST /api/kb/connectors/{slug}/test` +
+   `linear/nolt.test_connection()` (a trivial authed read, saves nothing;
+   accepts a not-yet-saved key). Web: a "test connection" button on the
+   add-source form for apikey connectors. Also fixed: "connect & sync" was
+   disabled for a first-time apikey connector.
+4. **Failing-sources banner** — "N sources failing to sync — <error>" +
+   "retry all" at the top of the Connected sources panel.
+
+**Verify:** `tests/test_kb_linear_nolt.py` +9 (max_items clamp / passthrough,
+`_page` limit, `test_connection` ok/override/failure); connection-edit
+live-checked against the real project (partial merge re-clamps 999999→2000,
+status→active, key stays out of the row, rotation lands in Vault). **869
+offline tests green.** `tsc -b` clean. No migration.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (chunk 9) — Neo4j + Supabase infra hardening.** Four things:
 
 1. **Neo4j driver is now a process singleton** (`ingestion/neo4j_sync.py`).
    `get_neo4j_driver()` used to build a fresh `GraphDatabase.driver` on
