@@ -95,6 +95,7 @@ def _llm_draft(statement: str, contexts: list[dict], verdict: dict, target_entry
         model=model or llm.FAST_MODEL,
         json_object=True,
         max_tokens=600,
+        cache=True,   # same statement+context+feedback -> same draft; kills retry/re-run cost
         tenant_id=tenant_id,
     )
     try:
@@ -249,6 +250,57 @@ def _corrections_source(sb, tenant_id: str) -> str:
     return created["source_id"]
 
 
+def _doc_change_blocks(old_body: str, new_body: str) -> list[dict]:
+    """Paragraph-level diff of an old vs. new doc markdown -> the contiguous
+    changed passages as `{old, new}` pairs. `old == ""` = a pure insertion
+    (nothing to find/replace — the write-back worker flags it for a manual
+    edit); `new == ""` = a deletion."""
+    import difflib
+
+    def paras(s: str) -> list[str]:
+        return [b.strip() for b in re.split(r"\n\s*\n", (s or "").strip()) if b.strip()]
+
+    a, b = paras(old_body), paras(new_body)
+    out: list[dict] = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(a=a, b=b, autojunk=False).get_opcodes():
+        if tag == "equal":
+            continue
+        out.append({"old": "\n\n".join(a[i1:i2]), "new": "\n\n".join(b[j1:j2])})
+    return out
+
+
+def _maybe_enqueue_doc_writeback(sb, *, old_id: str, tenant_id: Any, new_body_md: str,
+                                 approver: str | None, review_task_id: str | None) -> None:
+    """If the superseded entry is on a gdocs connection in `write_back` mode,
+    enqueue a `gdoc_writeback` job (rewrite the passage in the doc + open a
+    GitHub verification issue). Best-effort — the caller swallows failures so
+    the internal KB write is never blocked."""
+    rows = (sb.table("kb_entries").select("body_md, connection_id, gdoc_modified")
+            .eq("entry_id", old_id).limit(1).execute().data or [])
+    if not rows or not rows[0].get("connection_id"):
+        return
+    old = rows[0]
+    conn = (sb.table("kb_source_connections").select("connection_id, connector, config")
+            .eq("connection_id", old["connection_id"]).limit(1).execute().data or [])
+    if not conn:
+        return
+    cfg = conn[0].get("config") or {}
+    # `on_correction` (new) or a legacy `access` value both carry the mode
+    mode = cfg.get("on_correction") or cfg.get("access")
+    if conn[0]["connector"] != "gdocs" or mode not in ("suggest", "write_back"):
+        return
+    blocks = _doc_change_blocks(old.get("body_md") or "", new_body_md or "")
+    if not blocks:
+        return
+    from interpreter import jobs
+    jobs.enqueue("gdoc_writeback", {
+        "connection_id": conn[0]["connection_id"], "entry_id": old_id,
+        "tenant_id": str(tenant_id), "approver": approver, "mode": mode,
+        "review_task_id": review_task_id, "blocks": blocks,
+        "old_modified": old.get("gdoc_modified"), "github_repo": cfg.get("github_repo"),
+    }, dedupe_key=f"gdocwb:{old_id}")
+
+
 def _graph_supersede(new_id: str, old_id: str | None, tenant_id: str, title: str) -> None:
     try:
         from .case_memory import _driver_or_none
@@ -263,8 +315,7 @@ def _graph_supersede(new_id: str, old_id: str | None, tenant_id: str, title: str
             cy += ("WITH k MERGE (o:KBArticle {entry_id: $old}) "
                    "SET o.status = 'superseded' MERGE (k)-[:SUPERSEDES]->(o)")
             params["old"] = old_id
-        driver.execute_query(cy, database_=db, **params)
-        driver.close()
+        driver.execute_query(cy, database_=db, **params)   # cached singleton — no close
     except Exception as e:  # noqa: BLE001
         log.warning("kb_writeback._graph_supersede: %s", e)
 
@@ -323,6 +374,20 @@ def apply_kb_change(sb, ar_row: dict, *, enqueue=True) -> dict:
             log.warning("apply_kb_change enqueue embed: %s", e)
 
     _graph_supersede(eid, old_id, tenant_id, p["title"])
+
+    # KB write-back (docs/KB_SOURCE_CONNECTORS.md §2): if the superseded entry
+    # is a Google Doc on a `write_back` connection, push the correction into
+    # the doc + open a GitHub issue for a human to verify. Never blocks the
+    # internal KB write above.
+    if old_id:
+        try:
+            _maybe_enqueue_doc_writeback(
+                sb, old_id=old_id, tenant_id=tenant_id, new_body_md=p["body_md"],
+                approver=approver, review_task_id=p.get("review_task_id"),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("apply_kb_change: doc write-back enqueue failed: %s", e)
+
     result = {"entry_id": eid, "op": p["op"], "superseded": old_id, "status": "provisional"}
     try:
         sb.table("action_requests").update({"status": "done", "result": result}) \
@@ -376,3 +441,91 @@ def promote_provisional(sb, *, dry_run: bool = False) -> int:
               .eq("doc_url", f"kb://{r['source_id']}/{r['entry_id']}").execute()
     log.info("promoted %d provisional KB entr(y/ies) to active (%d held)", len(ready), held)
     return len(ready)
+
+
+# ── KB write-back watch (docs/KB_SOURCE_CONNECTORS.md §2, chunk 2) ───────
+# Closes the loop on an automated Google-Doc edit: poll the GitHub issue it
+# opened. Issue closed  -> the human confirmed  -> mark the row `verified`.
+# A `/revert` comment    -> undo each applied block in the doc and mark the
+# row `reverted`. Runs from `ingestion/kb_writeback_watch.py` (daily), same
+# "no always-on worker host" pattern as `ingestion/kb_recrawl.py`.
+_WATCHED_STATUSES = ("suggested", "applied", "partial", "conflict")
+
+
+def _revert_requested(body: str) -> bool:
+    return (body or "").strip().lower().startswith("/revert")
+
+
+def _do_doc_revert(sb, row: dict, token: str, repo: str, number: int) -> int:
+    """Reverse every `applied` block in the doc (replace `new` back with
+    `old`). Returns how many blocks were undone."""
+    from interpreter import gdrive, jobs
+
+    cid = row.get("connection_id")
+    conn = ((sb.table("kb_source_connections").select("config")
+             .eq("connection_id", cid).limit(1).execute().data or []) if cid else [])
+    doc_id = ((conn[0].get("config") or {}) if conn else {}).get("doc_id")
+    undone = 0
+    if doc_id:
+        for b in row.get("blocks") or []:
+            if b.get("applied") and (b.get("new") or "").strip():
+                try:
+                    if gdrive.replace_passage(row["tenant_id"], doc_id,
+                                              b["new"], b.get("old", ""), sb):
+                        undone += 1
+                except Exception as e:  # noqa: BLE001
+                    log.warning("kb write-back revert block (%s): %s", row["id"], e)
+    sb.table("kb_doc_writebacks").update({"status": "reverted"}).eq("id", row["id"]).execute()
+    if row.get("connection_id"):
+        jobs.enqueue("kb_sync", {"connection_id": row["connection_id"]},
+                     dedupe_key=f"kb_sync:{row['connection_id']}")
+    try:
+        from interpreter import github as gh
+        gh.add_issue_comment(token, repo, number,
+                             f"Reverted — {undone} block(s) restored in the doc. "
+                             f"The internal KB correction is unchanged; adjust it via review if needed.")
+    except Exception as e:  # noqa: BLE001
+        log.warning("kb write-back revert comment (%s): %s", row["id"], e)
+    return undone
+
+
+def watch_doc_writebacks(sb, *, dry_run: bool = False) -> dict:
+    from interpreter import github as gh
+
+    rows = (sb.table("kb_doc_writebacks").select("*")
+            .in_("status", list(_WATCHED_STATUSES)).execute().data or [])
+    checked = verified = reverted = errors = 0
+    for r in rows:
+        repo, number = r.get("github_repo"), r.get("github_issue_number")
+        if not (repo and number):
+            continue
+        checked += 1
+        try:
+            token = gh.token_for(r["tenant_id"], sb)
+            issue = gh.get_issue(token, repo, int(number))
+            comments = gh.list_issue_comments(token, repo, int(number))
+        except Exception as e:  # noqa: BLE001
+            errors += 1
+            log.warning("watch_doc_writebacks %s#%s: %s", repo, number, e)
+            continue
+
+        was = r["status"]
+        wants_revert = (was in ("applied", "partial")
+                        and any(_revert_requested(c.get("body", "")) for c in comments))
+        if wants_revert:
+            reverted += 1
+            if not dry_run:
+                _do_doc_revert(sb, r, token, repo, int(number))
+        elif issue.get("state") == "closed":
+            verified += 1
+            if not dry_run:
+                sb.table("kb_doc_writebacks").update(
+                    {"status": "verified", "verified_at": "now()"}).eq("id", r["id"]).execute()
+                # a `suggest`-mode issue closing means a human just edited the
+                # doc — re-sync now instead of waiting for the daily crawl.
+                if was == "suggested" and r.get("connection_id"):
+                    from interpreter import jobs
+                    jobs.enqueue("kb_sync", {"connection_id": r["connection_id"]},
+                                 dedupe_key=f"kb_sync:{r['connection_id']}")
+    return {"checked": checked, "verified": verified, "reverted": reverted,
+            "errors": errors, "dry_run": dry_run}

@@ -194,6 +194,7 @@ export interface KbCollection {
   tenant_id: string;
   entry_count: number;
   provisional_count?: number;
+  org_kb?: boolean; // the one org-level collection every source feeds by default
   created_at?: string;
 }
 
@@ -205,13 +206,131 @@ export interface KbEntryRow {
   embedded_at: string | null;
   updated_at: string;
   updated_by: string | null;
-  origin?: "manual" | "gdoc" | "file" | "crawl" | "import" | "review_writeback";
+  origin?:
+    | "manual"
+    | "gdoc"
+    | "gsheet"
+    | "file"
+    | "crawl"
+    | "import"
+    | "review_writeback"
+    | "linear"
+    | "nolt"
+    | "discourse";
   gdoc_url?: string | null;
+  gsheet_id?: string | null;
+  gsheet_range?: string | null;
+  gsheet_row?: number | null;
+  connection_id?: string | null;
+  external_id?: string | null;
+  quality?: "official" | "community_resolved" | "unverified";
   synced_at?: string | null;
   sync_error?: string | null;
   provisional_until?: string | null;
   supersedes_entry_id?: string | null;
   source_review_task?: string | null;
+}
+
+// KB source connectors (docs/KB_SOURCE_CONNECTORS.md) — a connected feed
+// (crawl root, Google Sheet/Doc, later Linear/Discourse/Nolt) and the
+// registry catalogue that drives the "+ add source" form.
+export interface KbConnectorField {
+  key: string;
+  label: string;
+  type: "string" | "number" | "select";
+  required?: boolean;
+  placeholder?: string;
+  options?: string[];
+  option_labels?: Record<string, string>; // raw value -> human label (select fields)
+  help?: string; // one-line explanation shown under the field
+  secret?: boolean; // stored in the vault, rendered as a password input
+  show_if?: { key: string; eq?: string; ne?: string; in?: string[] };
+}
+
+export interface KbConnector {
+  slug: string;
+  label: string;
+  auth: "none" | "oauth2" | "apikey";
+  config_fields: KbConnectorField[];
+  available: boolean;
+  reason: string | null;
+  writable?: boolean;
+}
+
+export interface TenantHealth {
+  tenant_id: string;
+  connections: { failing: number; sample: string | null };
+  review_backlog: { open: number; oldest_days: number | null };
+  reasoning_stuck: number;
+  doc_writebacks_pending: number;
+  failed_jobs_24h: number;
+  runs_24h: { total: number; by_outcome: Record<string, number>; struggle_rate: number };
+  system_stale: { component: string; stale_hours: number }[];
+}
+
+export interface JobFailures {
+  window_hours: number;
+  total: number;
+  by_kind: Record<string, number>;
+  failures: {
+    job_id: string;
+    kind: string;
+    attempts: number;
+    max_attempts: number;
+    error: string | null;
+    dedupe_key: string | null;
+    created_at: string;
+    updated_at: string;
+  }[];
+}
+
+export interface KbDocDefaults {
+  index?: boolean;
+  on_correction?: "off" | "suggest" | "write_back";
+  github_repo?: string;
+}
+
+export interface KbDocDefaultsResp {
+  tenant_id: string;
+  stored: KbDocDefaults;
+  effective: KbDocDefaults;
+}
+
+export interface KbDocWriteback {
+  id: string;
+  connection_id: string | null;
+  entry_id: string | null;
+  review_task_id: string | null;
+  github_repo: string | null;
+  github_issue_number: number | null;
+  github_issue_url: string | null;
+  status: "suggested" | "applied" | "partial" | "conflict" | "verified" | "reverted" | "error";
+  blocks: { old: string; new: string; applied?: boolean }[];
+  error: string | null;
+  applied_at: string;
+  verified_at: string | null;
+  connection_label?: string | null; // enriched by the tenant-wide endpoint
+  doc_url?: string | null;
+}
+
+export interface KbConnection {
+  connection_id: string;
+  source_id: string;
+  tenant_id: string;
+  connector: string;
+  label: string;
+  config: Record<string, unknown>;
+  status: "active" | "paused" | "error" | "archived";
+  last_synced_at: string | null;
+  last_result: {
+    documents?: number;
+    entries?: number;
+    unchanged?: number;
+    archived?: number;
+    error?: string;
+  } | null;
+  entry_count: number;
+  created_at?: string;
 }
 
 export interface KbEntry extends KbEntryRow {
@@ -274,6 +393,8 @@ export interface FreshchatChannel {
   team?: string;
   auto_send_enabled?: boolean;
   signature_verification?: boolean;
+  oauth?: boolean;
+  oauth_client_configured?: boolean;
 }
 
 export interface FreshchatChannelSave {
@@ -283,6 +404,27 @@ export interface FreshchatChannelSave {
   api_token?: string;
   webhook_public_key?: string;
   auto_send_enabled?: boolean;
+  oauth_domain?: string;
+  client_id?: string;
+  client_secret?: string;
+}
+
+export interface PostHogStatus {
+  tenant_id: string;
+  configured: boolean;
+  status: "none" | "inactive" | "active" | "error";
+  host?: string;
+  project_id?: string;
+  milestone_events?: string[];
+  has_credentials?: boolean;
+}
+
+export interface PostHogSave {
+  tenant_id?: string;
+  host?: string;
+  project_id?: string;
+  milestone_events?: string[];
+  api_key?: string;
 }
 
 export interface PolicyRule {
@@ -379,7 +521,32 @@ export interface KilMetrics {
     promotion_rate: number | null;
   };
   knowledge_freshness_days: number | null;
+  by_source: {
+    source: string;
+    flagged: number;
+    confirmed: number;
+    dismissed: number;
+    false_flag_rate: number | null;
+    median_time_to_correct_h: number | null;
+  }[];
   weekly: { week: string; flagged: number }[];
+}
+
+export interface GraphAskResult {
+  question: string;
+  spec: {
+    entity: string;
+    metric: string;
+    group_by: string[];
+    filters: { field: string; op: string; value: unknown }[];
+    having: { op: string; value: number } | null;
+    order_by: { field: string; dir: string } | null;
+    limit: number;
+  };
+  cypher: string;
+  columns: string[];
+  rows: Record<string, unknown>[];
+  truncated: boolean;
 }
 
 export interface KilDigest {
@@ -543,11 +710,23 @@ export interface BillingUsage {
   runs_count: number;
   tokens_total: number;
   tokens_by_model: Record<string, number>;
+  by_node: { node: string; tokens: number; estimated_cost_usd: number }[];
   by_flow: { flow_id: string; name: string; runs: number; tokens: number; estimated_cost_usd: number }[];
   estimated_cost_usd: number;
   daily: { date: string; runs: number; tokens: number }[];
   pct_runs_used: number | null;
   pct_tokens_used: number | null;
+}
+
+export interface FlowCostDelta {
+  flow_id: string;
+  name: string;
+  edited_at: string;
+  before_avg_tokens: number;
+  after_avg_tokens: number;
+  ratio: number | null;
+  runs_before: number;
+  runs_after: number;
 }
 
 export interface AuditEvent {

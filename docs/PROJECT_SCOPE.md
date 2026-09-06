@@ -707,8 +707,1167 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-05 — `docs/MULTI_SYSTEM_ARCHITECTURE.md` written (new file, this
-is the most recent work in this file).** A design conversation worked out
+**2026-09-06 (Phase 30 — Product-analytics connector, chunk 2: the PostHog
+connector). This is the most recent work in this file.**
+
+- **`interpreter/posthog.py`** — `PostHogConfig`, Vault-brokered API key,
+  `load`/`save`/`delete`/`available`, `_query` (one HogQL POST), `test_
+  connection`, `fetch_person_rollups(since, limit) -> PersonRollup[]` (base
+  30d rollup + 30-vs-prior trend + milestone counts; 5000-person cap;
+  milestone names validated before inlining — no free text in a query).
+- **`GET/PUT/DELETE /api/integrations/posthog` + `/test`** — owner-gated,
+  `kind='posthog'` in `tenant_integrations` (**no migration**).
+- **Web** — a "Product analytics — PostHog" panel in `ChannelsView` (host /
+  project id / milestone list / key + Test connection).
+- `tests/test_posthog.py` (18) + `test_api.py` +1. **945 offline green**;
+  tsc + `vite build` clean. **Not live-verified** — no PostHog project in
+  this sandbox; `test_connection` is the live check once a key exists.
+- **Next: chunk 3** — `(:Contact {email, tenant_id})` + `(:Case)-[:FILED_BY]
+  ->(:Contact)` in `case_graph_sync`, the `(email, tenant_id)` constraint,
+  and a migration for `graph_sync_state.coverage_pct` + the optional
+  `account_domain`.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (Phase 30 chunk 1: design doc).** Picked from a next-phase
+menu: correlate what a customer's users actually did in the product with
+why they file support cases — the second half of the "combination beats
+any single tool" pitch (the first half being KIL).
+
+- **`docs/PRODUCT_ANALYTICS_CONNECTOR.md`** (new) — the decision record.
+  Provider: **PostHog** first (API-key auth, HogQL query API, `email` a
+  first-class person prop, free tier); Mixpanel documented (§7) not built.
+- **Key design calls:** Neo4j holds a *correlation layer*, not an event
+  store — `(:Contact {email, tenant_id})` rollup props + a bounded
+  `(:Contact)-[:DID]->(:Feature)` from the tenant's configured milestone
+  list + `(:Contact)-[:AT_ACCOUNT]->(:Account)`. **Not** one node per raw
+  event (that's a warehouse copy, violates Rule 1). Identity resolution is
+  the flagged hard problem: every Contact carries an `identity_match`
+  (`email` / `domain` / `none`) and a per-tenant **coverage %** is shown
+  on the connector card; the payoff node degrades cleanly when there's no
+  match. A `(:Contact)` node does not exist in the graph yet — this phase
+  introduces it, co-owned by `case_graph_sync` (identity + `[:FILED_BY]`)
+  and the analytics sync (activity rollups).
+- **Payoff (chunk 5):** a `product_signal` flow node — at triage/draft
+  time, enrich `state` with the filer's recent product activity so the
+  draft and routing are grounded in what the user did. Same "consulted
+  only when the run reaches it" model as `kb_lookup`; never blocks a run.
+- **Chunk plan:** 1 design doc ✅ · 2 connector + `/api/integrations/
+  posthog` · 3 `(:Contact)` + `[:FILED_BY]` in `case_graph_sync` +
+  constraint + migration · 4 `product_analytics_sync` job/sweep + identity
+  resolution + account rollup · 5 the `product_signal` node.
+
+No code, no migration in this chunk — design only.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (chunk 14) — per-tenant failed-jobs visibility (migration
+`099`).** Completes the tenant-observability work: `/api/health/tenant`
+and the Approvals/Review
+"Bot health" strip could show a KIL backlog and stuck reasoning but never
+"N of your jobs failed permanently" — because `jobs` (013) is
+service-role infra with no `tenant_id`.
+
+- **Migration `099`** — `jobs.tenant_id uuid` (nullable: cross-tenant
+  infra sweeps keep it NULL), `idx_jobs_failed_by_tenant (tenant_id,
+  updated_at desc) where status='failed'`, and a 3-step backfill (payload
+  `tenant_id`; `run_flow` → `flows.tenant_id`; `kb_sync`/`gdoc_writeback`
+  → `kb_source_connections.tenant_id`). No RLS policy — the read path is an
+  owner-only route on the service client. **Live backfill result: 95/95
+  failed `run_flow` jobs attributed** (100%); infra sweeps correctly left
+  NULL.
+- **`interpreter/jobs.enqueue(..., tenant_id=None)`** — fills
+  `row["tenant_id"]` from the kwarg or `_tenant_from_payload` (checks
+  `payload` + nested `case`/`context`).
+- **`api/worker.py::_resolve_job_tenant`** — post-claim, if the row still
+  has no `tenant_id`, one cheap lookup by kind (`run_flow`→flow,
+  `check_resolution`→run, `kb_sync`/`gdoc_writeback`→connection,
+  `embed_kb_entry`→entry); infra sweeps → None. Never fails the job.
+- **`GET /api/jobs/failures?hours=24`** — owner-only; returns
+  `{window_hours, total, by_kind, failures[]}` with **no payload** (only
+  kind / attempts / truncated error / timestamps — the payload can hold
+  case text). `/api/health/tenant` gains `failed_jobs_24h`.
+- **Web** — a "failed jobs (24h)" tile in the Bot-health strip
+  (`TenantHealth.failed_jobs_24h`) + a "show failed jobs" drill-down table
+  (`api.review.jobFailures`, `JobFailures` type) shown only when the count
+  is > 0.
+- Tests: `tests/test_jobs.py` +4 (enqueue tenant attribution),
+  `tests/test_worker_tenant_resolve.py` new (7), `tests/test_api.py` +1
+  guard.
+
+**931 offline tests green.** `099` applied live, drift clean, tsc + `vite
+build` clean.
+
+**Residual:** historical `check_resolution` / `embed_kb_entry` rows (all
+`done`, so never in the failures view) stay unattributed — the backfill
+only covered `run_flow` and connection-keyed kinds. New jobs of every kind
+get attributed at enqueue or first claim.
+
+**Still open** (product-review list): shared rate limiting (in-memory →
+DB), enforcing spend caps, the retrieval eval harness as a CI gate,
+Confluence/Notion/SharePoint connectors, and the `multiple_permissive_
+policies` RLS cleanup. Plus the always-on worker (needs a host — guide in
+`docs/DEPLOY_WEB_AND_API.md`).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (chunk 13) — "Ask the case graph" (natural-language → spec →
+Cypher).** Closes the long-standing `MULTI_SYSTEM_ARCHITECTURE.md` open
+question about a Neo4j-facing NL query surface — built as a **composable
+spec compiler, deliberately not free-form text-to-Cypher**.
+
+- **Why the spec, not text-to-Cypher:** one shared Community-edition Neo4j
+  — no per-tenant DB, no custom read-only role — so the only tenant
+  boundary is a `tenant_id` predicate per node. A free-form Cypher surface
+  would make a single validator gap a cross-tenant breach. So the LLM only
+  emits a bounded JSON spec (`{entity, metric, group_by, filters, having,
+  order_by, limit}`); `graph_query.compile_spec` turns it into read-only
+  Cypher deterministically. The LLM never authors Cypher.
+- **`interpreter/graph_query.py`** (new) — allow-lists for 5 metrics
+  (`count` / `list` / `avg_resolution_hours` / `distinct_accounts` /
+  `duplicate_count`), 11 group-by dims, 14 filter fields; `to_spec` (LLM,
+  Groq default, `json_object`), `validate_spec` (total — rejects any
+  unknown name/op, type-checks values, clamps limit 1..200), `compile_spec`
+  (every query filters `c.tenant_id = $tenant_id`, always behind a `WITH`
+  so the predicate can't be absorbed into an `OPTIONAL MATCH`; `Account` /
+  `DUPLICATE_OF`-target `Case` also carry `{tenant_id}` in-pattern; all
+  values parameterised), `_assert_safe` (re-scan: refuse
+  `CREATE|MERGE|DELETE|SET|REMOVE|CALL|…` or a missing tenant filter),
+  `_run` (`RoutingControl.READ` + `GRAPH_QUERY_TIMEOUT_S` default 8s).
+  `Reply`/`Message` text is **not** reachable through this surface.
+- **`POST /api/graph/ask`** — owner-only (`_require_owner`); returns
+  `{question, spec, cypher, columns, rows, truncated}` (the compiled Cypher
+  is shown for transparency). `GraphQueryError` → 422 with a user-safe
+  message; no raw driver errors leak.
+- **Web** — an "Ask the case graph" panel in `ReviewView` (`api.graphAsk`,
+  `GraphAskResult` type): a question box, 4 example chips, the result
+  table, a truncation note, and a "show the compiled query" toggle.
+- **Docs** — new `docs/GRAPH_QUERY.md`; `MULTI_SYSTEM_ARCHITECTURE.md`
+  open question flipped to decided.
+- **Live-verified** against the real Neo4j: all 8 metric shapes `EXPLAIN`
+  clean; a real tenant returns its 141 cases / group-by-status / list; a
+  **bogus tenant_id returns count 0** (isolation holds at the query level).
+
+**920 offline tests green** (`tests/test_graph_query.py` new — spec
+validation, tenant-scoping of every compiled shape, param-not-inlined,
+`_assert_safe`, the LLM boundary; `tests/test_api.py` +1 guard). No
+migration (Neo4j-only). tsc + `vite build` clean.
+
+**Residual, stated:** on Community edition the tenant boundary in Neo4j is
+enforced **only in application code** (the compiler) — no DB-level
+backstop. Multi-hop path questions ("cases similar to cases an account
+escalated") return `{"error":"unsupported"}` until a new compiler branch
+is added.
+
+**Still open** (product-review list): shared rate limiting (in-memory →
+DB), a real per-tenant failed-*jobs* view (`jobs.tenant_id`), the
+retrieval eval harness as a CI gate, enforcing spend caps,
+Confluence/Notion/SharePoint connectors, and the `multiple_permissive_
+policies` RLS cleanup. Plus the always-on worker (needs a host — guide in
+`docs/DEPLOY_WEB_AND_API.md`).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (chunk 12) — four feature areas from the product review.**
+After the KB-connector loopholes were closed, the user picked all four
+review areas; these landed as a sequence of commits on
+`browser-verified-picker-fixes`:
+
+- **Onboarding bypass closed** (`c95da5b`) — the wizard's top "skip setup"
+  button is disabled until a knowledge source is connected (Step 4 is now
+  required, Step 5 flow-creation is locked on `kbDone`).
+- **Tenant observability** (`4945885`) — `GET /api/health/tenant` aggregates
+  already-tenant-scoped signals (failing connections + sample, review
+  backlog + oldest, stuck reasoning states >6h, pending doc write-backs,
+  24h run outcomes + struggle-rate, ingestion staleness) into one payload;
+  `ReviewView` renders a "Bot health (24h)" tile strip above the KIL
+  metrics. A real per-tenant *failed-jobs* view still needs a
+  `jobs.tenant_id` migration — deferred.
+- **More KB connectors — Discourse** (`7de7339`) — `interpreter/discourse.py`
+  (REST, apikey-optional) + a `discourse` connector spec (accepted-answer /
+  first-replies body, `community_resolved` quality when solved). Confluence
+  / Notion / SharePoint still not built.
+- **Cost & usage analytics** (this commit) — per-node-type token + $
+  breakdown and a "this flow got pricier after its last edit" delta.
+  Migration `098` adds `runs.tokens_by_node` (jsonb); `interpreter/runs.
+  _token_usage` now returns `(total, by_model, by_node)` and `build_row`
+  persists `tokens_by_node` (node = trace entry `type`). `billing.usage_
+  summary` aggregates it into a `by_node` list with cost split
+  proportionally (the trace has no per-node model, so each node's $ is its
+  token share of the run-level estimate). New owner-only `GET
+  /api/billing/flow-deltas`: mean tokens/run in the 45d window before vs.
+  since each flow's newest `flow_versions.created_at`, flows with ≥5 runs
+  each side, `ratio` desc. `BillingView` renders a "by node type" table and
+  a warning banner for any flow with `ratio > 1.5`. Per-tenant spend caps
+  that *enforce* (vs. today's warn-only `check_and_warn`) — not done.
+- **Knowledge-quality loop — health by source** (this commit, no migration)
+  — `kil_metrics.compute` gains `by_source`: each contradiction/novel
+  `review_task` is attributed to a KB source via its top KB context `ref`
+  (`kb://<eid>` → `kb_entries.connection_id` → `kb_source_connections`
+  label; `http(s)://` → domain; else "Unattributed"), then per source:
+  `flagged`, `confirmed` (human said real gap), `dismissed`,
+  `false_flag_rate`, `median_time_to_correct_h`. Surfaced as a "Knowledge
+  health by source" table in `ReviewView` (returned straight through the
+  existing `/api/kil/metrics`). The offline **retrieval eval harness**
+  already exists (`ingestion/eval/run_eval.py`, recall@k/MRR over
+  `qrels.jsonl`); wiring it as a CI regression gate needs a seeded fixture
+  DB — still open.
+
+**888 offline tests green** (was 876). `098` applied live, drift clean, tsc
+clean.
+
+**Still open** (product-review list): shared rate limiting (in-memory →
+DB), a real per-tenant failed-*jobs* view (`jobs.tenant_id`), the retrieval
+eval harness as a CI gate, enforcing spend caps,
+Confluence/Notion/SharePoint connectors, and the `multiple_permissive_
+policies` RLS cleanup. Plus the always-on worker (needs a host — guide in
+`docs/DEPLOY_WEB_AND_API.md`).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (chunk 11) — closing KB-connector loopholes.**
+
+- **Incremental sync via the watermark** (`8db0060`) — it was stored on
+  `kb_source_connections.watermark` and never read; every daily run
+  re-fetched everything. `SyncCtx.existing` ({external_id → stored
+  body/gdoc_modified}) is now populated by `_sync_kb_connection` before it
+  calls `sync()`. **gdocs folder**: skip `fetch_doc` when Drive's
+  `modifiedTime` matches the stored `gdoc_modified` (reuse the stored body).
+  **linear**: `fetch_documents`/`fetch_resolved_issues` take
+  `updated_after`; a run with a watermark filters `updatedAt > since`
+  server-side and reports `exhaustive=False` (won't archive what it didn't
+  fetch); `watermark.since` advances. First run stays full. nolt unchanged
+  (no verified `since` param; the `max_items` cap bounds it).
+- **`KBDocument.quality` persisted + used** (`3031d27`, migration `097`) —
+  connectors set `official` / `community_resolved` / `unverified` and it was
+  dropped. Now `kb_entries.quality`; `interpreter/retrieval._apply_quality_
+  weights` multiplies each KB chunk's fused RRF score (official ×1.15,
+  unverified ×0.9) and re-sorts, before graph-expand and the pool cut. One
+  batched lookup, best-effort, only `kb://` chunks. `KnowledgeView` shows an
+  `official` / `resolved` badge.
+- **Deploy guide** (`50a970c`) — `docs/DEPLOY_WEB_AND_API.md`: frontend +
+  public HTTPS API on an Oracle Always-Free VM at $0 (Caddy TLS, Cloudflare
+  Pages, `sslip.io`, OAuth redirect updates). Parked — needs an Oracle
+  account.
+- **Cosmetics** (`7a2abf3`) — stale `daily-sync.yml` step names/comments
+  (pre-091 wording); `_kb_pull_secrets` now stores `vault_secret_id` on the
+  `tenant_integrations` row like slack/llm do.
+
+**876 offline tests green** (was 869). `097` applied live, drift clean, tsc
+clean.
+
+**Still open** (product-review list): shared rate limiting (in-memory →
+DB), a per-tenant failed-runs view, a retrieval eval harness, knowledge-
+health per source, cost breakdown per flow/node, onboarding "skip setup"
+bypass + "send a test message" finish, and the `multiple_permissive_
+policies` RLS cleanup. Plus the always-on worker (needs a host).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (chunk 10) — KB-connector quick-wins.** Four small in-repo
+improvements from the product review list:
+
+1. **`max_items` cap** on gdocs-folder / Linear / Nolt syncs (clamped
+   1..2000; gdocs 300, linear 300, nolt→existing 500). A capped run reports
+   `exhaustive=False` so the driver won't archive what it didn't see.
+   `linear._page` takes a `limit` and stops paging early.
+2. **Edit a connection's config** — `PATCH /api/kb/connections/{cid}` now
+   also takes `label` + a partial `config` (merged onto the stored config,
+   re-normalized, re-synced). Secret fields route to Vault via the extracted
+   `_kb_pull_secrets`. Web: an "edit" button per connection row →
+   `ConnectionEditForm` (shared `KbConfigField` / `kbFieldVisible`).
+3. **`/test` for Linear/Nolt** — `POST /api/kb/connectors/{slug}/test` +
+   `linear/nolt.test_connection()` (a trivial authed read, saves nothing;
+   accepts a not-yet-saved key). Web: a "test connection" button on the
+   add-source form for apikey connectors. Also fixed: "connect & sync" was
+   disabled for a first-time apikey connector.
+4. **Failing-sources banner** — "N sources failing to sync — <error>" +
+   "retry all" at the top of the Connected sources panel.
+
+**Verify:** `tests/test_kb_linear_nolt.py` +9 (max_items clamp / passthrough,
+`_page` limit, `test_connection` ok/override/failure); connection-edit
+live-checked against the real project (partial merge re-clamps 999999→2000,
+status→active, key stays out of the row, rotation lands in Vault). **869
+offline tests green.** `tsc -b` clean. No migration.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (chunk 9) — Neo4j + Supabase infra hardening.** Four things:
+
+1. **Neo4j driver is now a process singleton** (`ingestion/neo4j_sync.py`).
+   `get_neo4j_driver()` used to build a fresh `GraphDatabase.driver` on
+   every call — `retrieval.graph_expand` in the hot path of every flow run,
+   `case_memory` per match/upsert, `kb_writeback` per KB supersede, each
+   `.close()`d after. Now a lock-guarded module singleton with explicit
+   config (`NEO4J_POOL_SIZE` / `CONNECT_TIMEOUT` / `ACQUIRE_TIMEOUT` /
+   `MAX_CONN_LIFETIME` env-overridable, `keep_alive`) + `verify_
+   connectivity()` on first build (an unreachable graph raises and is NOT
+   cached — next call retries); `atexit` + a new `close_neo4j_driver()` for
+   batch scripts. All per-op `.close()` calls removed.
+2. **Migration `095`** — Supabase security advisor pass 2. The `purge_old*`
+   RPCs (all DELETE rows) and `claim_job(uuid)` were granted EXECUTE to
+   `anon`/`authenticated` and reachable via `/rest/v1/rpc` — a signed-in
+   user could `purge_old_audit_log(retain_days => 0)` and wipe the audit
+   log. REVOKEd (cron + service-role only; service key bypasses grants).
+   `SET search_path` on the 6 flagged functions. `idx_zapier_docs_source`
+   for the unindexed FK. Explicit `using(false)` policies on the 5
+   secret/worker-internal tables (documents intent; behaviorally a no-op —
+   RLS-on-no-policy already denies clients). **Security advisors 18 → 3**
+   (the 3 left: Supabase-default `vector`/`citext` in `public`, and the
+   leaked-password-protection Auth toggle — a dashboard setting, do it
+   there).
+3. **Migration `096`** — wrap `auth.uid()`/`auth.jwt()` in `(select …)`
+   across 10 RLS policies (perf advisor 0003 — evaluate once per statement,
+   not per row; semantically identical). `auth_rls_initplan` 10 → 0,
+   `unindexed_fk` 1 → 0. **Not done:** `multiple_permissive_policies` (~40,
+   ~18 tables) — splitting every `FOR ALL` write policy into 3
+   command-specific policies is a big risky write-path RLS refactor for a
+   scale-only lint; left for a dedicated verified pass. The 21 `unused_
+   index` INFOs are low-traffic artifacts (dropping risks needing them).
+4. **Neo4j MCP fixed** — `.mcp.json` was `uvx mcp-neo4j-cypher` and `uvx`
+   isn't on PATH (`Executable not found`). Now `venv/bin/mcp-neo4j-cypher`
+   (added to `requirements-dev.txt`) — no global `uv` needed. Takes effect
+   on the next Claude Code restart.
+
+**Verify:** `test_case_graph_sync.py` +2 (singleton reuse / no-cache-on-
+connectivity-failure). **862 offline tests green.** Migrations `095`/`096`
+applied live; drift check clean; advisors re-run and confirmed.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (chunk 8) — org-level KB is now the default model.** Customer reviews: companies want the RAG
+fed org-wide from many sources; team-level docs are rare. Three changes:
+
+1. **Retrieval scoping** (`interpreter/retrieval.py::resolve_sources`) — a
+   `retrieve` node with no `kb_sources` and a tenant now resolves to **that
+   tenant's own sources only**. Shared/global corpora (the `zapier-public`
+   demo docs) are opt-in: a flow must name them in `kb_sources`. A
+   tenant-scoped call that resolves to zero sources returns a `_NO_MATCH`
+   sentinel, never `None` — an empty scope must mean "no KB context", not
+   "search every tenant's chunks" (that would have been a cross-tenant leak
+   once shared sources stopped padding the list).
+2. **One org KB collection per tenant** — `api/main.py::_ensure_org_kb`
+   lazily creates a canonical `internal_kb` source `"Organization
+   knowledge"` (`config.org_kb=true`) on `GET /api/kb/collections`; never
+   promotes an existing team collection. `kb_list_collections` marks it
+   `org_kb` and sorts it first. New `GET /api/kb/connections` (tenant-wide,
+   across all collections) for the org view + onboarding. `KnowledgeView`
+   pins the org KB, groups extra collections under "Additional collections"
+   ("most orgs just use the org KB"), an `org default` badge.
+3. **Onboarding: connecting a knowledge source is required.**
+   `OnboardingWizard` gains Step 4 "Connect a knowledge source" (a crawl-a-
+   URL quick path + a link to Knowledge for Docs/Sheets/Linear/Nolt); Step
+   5 "Create your first flow" (template select + "start blank") is
+   **locked until `kbSourceCount > 0`**. Salesforce/Slack/model stay
+   optional.
+
+**Verify:** `test_interpreter.py::test_resolve_sources_never_leaks_another_
+tenants_kb` rewritten (own-only default, explicit-shared opt-in,
+`_NO_MATCH` for an empty tenant); `test_api.py` guard for `GET
+/api/kb/connections`. **860 offline tests green.** `tsc -b` clean. No
+migration (`sources.config.org_kb` is a jsonb marker). **Live-checked
+against the real Supabase project**: `_ensure_org_kb` created + flagged +
+idempotent; `resolve_sources(None, tenant)` excluded the shared
+`zapier-public`, included the org KB, and naming a shared source opted back
+into it. Test org KB row deleted (re-provisions lazily).
+
+**Behavior change to note:** an existing flow that had no `kb_sources` and
+relied on the shared `zapier-public` corpus now retrieves only the
+tenant's own sources — add `"zapier-public"` to that node's `kb_sources`
+to restore it.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (chunk 7) — three more KB source connectors: Google Docs
+folder scope, Linear, Nolt.**
+All three land the same way — register a `KBConnectorSpec` + a `sync()`; no
+new worker, endpoint, or migration. `ingestion/kb_recrawl.py` already
+iterates every active `kb_source_connections` row, so all three sync daily
+via `daily-sync.yml` with zero workflow change.
+
+- **gdocs folder scope** (`4f7dfa4`) — a gdocs connection's URL can be a
+  `/drive/folders/<id>` link; `gdrive.list_folder_docs()` +
+  `_sync_gdocs` emit one `KBDocument` per Doc (recursive optional).
+  `on_correction ≠ off` is rejected for a folder.
+- **`interpreter/linear.py` + `linear` connector** (`auth="apikey"`) —
+  personal API key → Vault (kind='linear'); GraphQL. `_sync_linear` pulls
+  **Documents** (`quality="official"`) and **resolved issues**
+  (`state.type=="completed"`, optional `team_key`) + comment thread
+  (`quality="community_resolved"`); a bodyless/commentless issue is
+  skipped. `origin="linear"`, `external_id` `doc:<id>` / `issue:<id>`.
+- **`interpreter/nolt.py` + `nolt` connector** (`auth="apikey"`) — board
+  API key → Vault (kind='nolt'); REST. `_sync_nolt` keeps only
+  done/shipped-status posts + their comments, `origin="nolt"`,
+  `quality="community_resolved"`, `external_id="post:<id>"`. `board_id` is
+  a required field.
+- **Secret plumbing** — a `config_fields` entry with `"secret": true` (the
+  `api_key` on an apikey connector) is popped by
+  `api/main.py::_kb_add_connection` into Vault under the connector kind
+  (merged with any prior key so a blank field on a 2nd source reuses it) +
+  a `tenant_integrations` upsert; it never enters the row returned to the
+  browser. Web: apikey connectors stay pickable in the "+ add source"
+  `<select>` even with no key yet; `secret` fields render as password
+  inputs. `KbEntryRow.origin` gains `linear` / `nolt` (no CHECK on the
+  column; no migration).
+
+**Verify:** `tests/test_kb_linear_nolt.py` (10 — availability from a stored
+key, `_norm_*`, the `sync()` producers + their resolved/bodyless filters,
+`nolt._is_resolved`) + folder-scope tests in
+`tests/test_kb_doc_writeback.py`. **860 offline tests green (was 848).**
+`tsc -b` clean. No migration. **Live-checked against the real Supabase
+project**: `_kb_add_connection` for `linear` with an `api_key` in the body ⇒
+key in Vault (kind='linear'), **not** in `kb_source_connections.config`,
+`tenant_integrations` row upserted; a 2nd linear source with a blank key
+reused the saved one. Rows + test creds deleted. **Not live-verifiable**:
+no real Linear/Nolt account in this sandbox, so the GraphQL/REST `sync()`
+calls are covered offline only (same residual class as the OAuth-gated
+connectors).
+
+**Still open:** forums (§5 — Discourse etc.), the onboarding-wizard "pick
+your sources" step, a Slack "send to GitHub before applying" button,
+structural section replacement, and true `changes.list` incremental for the
+gdocs folder (fetches every Doc each run today).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (chunk 6) — the KB write-back audit is now in the review UI.** The `kb_doc_writebacks` rows
+only showed per-collection in the "Connected sources" panel; a manager
+living in `ReviewView` had no tenant-wide view of "which approved
+corrections turned into doc edits, and which are still waiting on someone
+on GitHub".
+
+- **`api/main.py`** — `GET /api/kb/doc-writebacks?tenant_id=&status=open|all`
+  (`open` = `suggested|applied|partial|conflict`; default). Tenant-scoped
+  via `_caller_tenant`, capped at 200, each row enriched with its
+  connection's `label` + `doc_url` from one batched `kb_source_connections`
+  read. The per-collection `GET /api/kb/collections/{sid}/doc-writebacks`
+  is unchanged.
+- **`web/src/review/ReviewView.tsx`** — a collapsible "N doc write-backs
+  awaiting verification" panel above the review-queue status buttons
+  (`DocWritebacksTable`: doc link, status pill, blocks-applied ratio,
+  applied time, GitHub issue link). Read-only — the actions live on GitHub.
+  `api.kb.listAllDocWritebacks("open"|"all")`; `KbDocWriteback` gains
+  optional `connection_label` / `doc_url`.
+
+**Verify:** `tests/test_api.py` unauth guard for the new route. **848
+offline tests green.** `tsc -b` clean. No migration. **Live-checked against
+the real Supabase project**: 3 throwaway rows (`suggested`/`verified`/
+`reverted`) on a temp connection ⇒ `status=open` returned only the
+`suggested` one, enriched with the connection label + doc url;
+`status=all` returned all three. Rows deleted.
+
+**Still not built (chunk 7+):** a Slack "send to GitHub before applying"
+button (a manager escalation path), and true index-range structural section
+replacement (vs. today's `replaceAllText`).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (chunk 5) — per-tenant *default* for the two gdocs knobs.** The "organization level" ask
+finished: an org sets the `index` / `on_correction` / `github_repo` policy
+once and every new Google Doc connection inherits it (a per-doc value still
+overrides).
+
+- **Migration `094`** — `tenants.kb_doc_defaults jsonb default '{}'`, a
+  *partial* blob (only the keys the org set; `{}` = system defaults
+  `index:true, on_correction:off`). Data-as-column, same as
+  `tenants.case_connector`.
+- **`api/main.py`** — `GET`/`PUT /api/kb/doc-defaults` (editor-gated,
+  upserts a pre-`tenants`-table tenant like `set_case_connector` does).
+  `_validate_kb_doc_defaults` = the same rules as a per-connection config
+  (`on_correction` enum; ≠ off ⇒ needs a valid `github_repo` and
+  `index ≠ false`). `_kb_add_connection` now merges the tenant default
+  *under* an incoming gdocs config (`{**default, **raw}` — the per-doc
+  value wins) before `_norm_gdocs`.
+- **Web** — a "Google Docs defaults" editor in the "Connected sources"
+  panel header (`DocDefaultsForm`); `AddSourceForm` seeds the `index` /
+  `on_correction` / `github_repo` fields from `getDocDefaults().effective`
+  when the gdocs connector is picked.
+
+**Verify:** `tests/test_api.py` — unauth guard for both routes +
+`_validate_kb_doc_defaults` unit test (partial blob, enum, the two coupling
+rules, repo format). **848 offline tests green (was 847).** `tsc -b` clean.
+Migration `094` applied live; drift clean. **Live-checked against the real
+Supabase project**: a stored `{on_correction:suggest, github_repo:acme/org-kb}`
+default ⇒ a gdocs connection POSTed with only `doc_url` came back with
+`on_correction=suggest` + that repo + `index=true`; an explicit
+`on_correction:off` in the POST won over the default. `tenants.kb_doc_defaults`
+restored to `{}` after.
+
+**Still not built (chunk 6+):** a "Doc write-backs" view in
+`ReviewView.tsx`, a Slack "send to GitHub before applying" button,
+structural section replacement (all pre-existing residuals).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (chunk 4) — gdocs `access` split into two independent
+org-level knobs.** Per the
+user: an org wants to set "read into the KB" and "suggest corrections back"
+separately, as two dropdowns, not one combined enum. `kb_connectors._norm_
+gdocs` / the `gdocs` `config_fields` now produce/collect:
+
+- **`index`** (`yes`/`no`, default `yes`) — read the doc into the KB for
+  answering. `no` ⇒ `_sync_gdocs` yields nothing so the generic driver
+  archives any prior entry (connected but unused; reversible).
+- **`on_correction`** (`off`/`suggest`/`write_back`, default `off`) — what
+  chunk 1–3 called `access` minus the read part. `_maybe_enqueue_doc_
+  writeback` / `_gdoc_writeback` now read `config.on_correction` (falling
+  back to a legacy `config.access`).
+
+One coupling enforced in `_norm_gdocs`: `on_correction ≠ off` requires
+`index = yes`. A legacy `access` value still normalizes
+(`read_only`→`{index:true, on_correction:off}`, etc.) — **no migration, no
+data backfill** (the one live gdocs row has neither key; defaults cover it).
+Web: two `<select>`s via the generic `config_fields` loop (`option_labels` +
+`help` + `show_if:{key:on_correction, ne:off}` on `github_repo`), a
+`not indexed` badge, `docMode` reads `on_correction`.
+
+**Verify:** `tests/test_kb_doc_writeback.py` normalize/field tests
+rewritten for the two knobs (+ `index=no` ⇒ `_sync_gdocs` yields nothing
+and never fetches; `on_correction≠off` needs a repo *and* `index`; legacy
+`access` maps). **847 offline tests green (was 845).** `tsc -b` clean.
+**Live-checked against the real Supabase project** (throwaway connections):
+`index=false` ⇒ `_sync_kb_connection` synced 0 docs, `fetch_doc` never
+called, no `kb_entries`; `on_correction="suggest"` (new key shape) ⇒
+`gdoc_writeback` enqueued with `mode="suggest"`; `normalize` rejects
+`suggest`+`index=no`. Rows deleted.
+
+**Still not built (chunk 5+):** a per-tenant *default* for these two knobs
+(new gdocs connections would inherit it) — the "organization level" ask
+could go further than per-connection; noted, not built. Also still open: a
+"Doc write-backs" view in `ReviewView.tsx`, a Slack "send to GitHub before
+applying" button, structural section replacement.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (chunk 3) — KB write-back gains a `suggest` mode, now the
+recommended one.** A design
+check ("is the bot writing the customer's doc even a good idea?") landed on:
+make "human applies, bot just proposes" a first-class option, not the thing
+we skipped. `kb_source_connections.config.access` for a gdocs connection is
+now **three-way**:
+
+- `read_only` (default) — only the internal `kb_entries` mirror is updated;
+- **`suggest`** (recommended) — a `gdoc_writeback` job opens a GitHub issue
+  with the old→new diff + a doc link and drops a Drive comment, but
+  **never calls `replace_passage`** — a human applies the change and closes
+  the issue; `watch_doc_writebacks` sees the close, marks the row
+  `verified`, and enqueues a `kb_sync` so the mirror converges. Needs
+  `config.github_repo` but **not** the read-write Google scopes.
+- `write_back` — unchanged from chunk 1/2 (bot rewrites the passage, human
+  verifies / `/revert`s).
+
+`suggest` and `write_back` share the job, the `kb_doc_writebacks` row, and
+the watch. Changes: `_norm_gdocs` accepts `"suggest"` and requires
+`github_repo` for both non-read-only modes; the `access` select is now
+`read_only|suggest|write_back` with `show_if` widened to `{key, ne}` /
+`{key, in}` (web `fieldVisible` helper); `_maybe_enqueue_doc_writeback`
+gates on `access in ("suggest","write_back")` and threads `mode` into the
+payload; `_gdoc_writeback` branches on `mode` (`suggest` ⇒
+`status='suggested'`, no doc edit, no immediate `kb_sync`, issue text says
+"correction to apply"); `watch_doc_writebacks` watches `suggested` too and
+`kb_sync`s the mirror when a `suggested` issue closes. Migration `093`
+widens the `idx_kb_doc_writebacks_open` partial index to include
+`'suggested'` (no table change — `access`/`status` have no CHECK).
+`KnowledgeView` shows a `suggests edits` vs `write-back` badge, and the
+`access` picker now renders plain-language option labels ("Suggest edits —
+open a GitHub issue, a person applies it (recommended)" …) + one-line help
+text under the field, driven by new `option_labels` / `help` keys on the
+`KBConnectorSpec` `config_fields` (web `fieldVisible` already handles the
+`show_if`).
+
+**Verify:** `tests/test_kb_doc_writeback.py` +5 (`suggest` normalize +
+repo-required, the gate firing with `mode='suggest'`, `_gdoc_writeback`
+suggest = issue-only-never-edits, watch: `suggested`+closed ⇒ verified +
+`kb_sync`, `suggested`+open ⇒ untouched). A bug found writing it —
+`watch_doc_writebacks` checked `r["status"]` *after* the fake/real client
+had mutated the row dict in place; fixed by capturing `was = r["status"]`
+first. **844 offline tests green (was 839).** `tsc -b` + `npm run build`
+clean. Migration `093` applied live; drift clean. **Live-checked against
+the real Supabase project** (throwaway `suggest` connection): job ⇒
+`status='suggested'` with the doc untouched + an issue opened + a Drive
+comment + no `kb_sync`; then a (mocked) issue close ⇒ `verified` +
+`verified_at` + `kb_sync` enqueued; rows deleted.
+
+**Still not built (chunk 4+):** a "Doc write-backs" view in
+`ReviewView.tsx`, a Slack "send to GitHub before applying" button, and true
+index-range structural section replacement.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (chunk 2) — KB write-back: close the loop.** Chunk 1 wrote the doc + opened a GitHub issue;
+nothing watched what the human did with it. Now:
+`interpreter/kb_writeback.py::watch_doc_writebacks()` polls every open
+(`applied`/`partial`/`conflict`) `kb_doc_writebacks` row's issue via
+`github.get_issue` / `list_issue_comments`:
+
+- issue **closed** ⇒ `status='verified'`, `verified_at` stamped;
+- a **`/revert`** comment (only on an `applied`/`partial` row) ⇒
+  `_do_doc_revert`: `gdrive.replace_passage` reverses each applied block
+  (`new` → `old`) in the doc, `status='reverted'`, a confirming
+  `github.add_issue_comment` (new helper), and the connection is
+  re-enqueued for `kb_sync` so the mirror re-reads the restored doc.
+  Precedence: a `/revert` wins over a plain close.
+
+Runs from **`ingestion/kb_writeback_watch.py`** (`python -m
+ingestion.kb_writeback_watch [--dry-run]`), wired into `daily-sync.yml`
+before the existing drain step — same "no always-on worker host" pattern as
+`ingestion/kb_recrawl.py`, not a worker sweep (GitHub polling wants a slow
+cadence). Per-tenant GitHub tokens from `tenant_integrations`.
+
+**Verify:** `tests/test_kb_doc_writeback.py` +8 (close→verified,
+`/revert`→reverse-blocks + `kb_sync` + issue comment, revert-beats-close,
+`/revert` ignored on a `conflict` row, dry-run, missing-issue skip +
+API-error count, only-open-statuses, and a `connection_id=None` regression).
+**839 offline tests green (was 831).** **Live-checked against the real
+Supabase project** (throwaway `kb_doc_writebacks` rows, `github`/`gdrive`
+patched in-process, then deleted): closed→`verified`+`verified_at`,
+`/revert`→`reverted` with the block reversed `new`→`old`, open rows
+untouched, dry-run writes nothing. The live run **caught a real bug** the
+offline fakes masked — `_do_doc_revert` built a `connection_id=eq.None`
+query for a row with no connection; fixed (guard on `cid`) + regression
+test.
+
+**Still not built (chunk 3+):** a "Doc write-backs" view in
+`ReviewView.tsx` (the list lives in the "Connected sources" panel for now),
+a Slack "send to GitHub before applying" button, and true index-range
+structural section replacement (vs. today's `replaceAllText` find/replace).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 (chunk 1) — KB write-back to Google Docs.** A Google Doc
+connection was one-way (doc → KB mirror, locked). The Knowledge Integrity Loop already
+turns "a human agent answered in a way that contradicts the KB" into a
+manager-approved correction — but for a gdoc-backed entry that only fixed
+the internal mirror, leaving the doc itself stale. This closes that loop
+*back into the doc*, gated by a human on GitHub.
+
+- **Opt-in, per connection.** A `gdocs` `kb_source_connections` row can set
+  `config.access = "write_back"` (default `"read_only"`) + a
+  `config.github_repo` (`owner/name`) — chosen in the registry-driven
+  "+ add source" form (new `select` + `show_if` field types;
+  `KBConnectorSpec.writable`, True for gdocs only). `interpreter/gdrive.py`
+  `SCOPES` gains read-write `documents` + `drive`; a tenant on an older
+  read-only token gets a clean failure until they re-consent
+  (`docs/GOOGLE_SETUP.md` updated).
+- **The hook** — `interpreter/kb_writeback.py::apply_kb_change` (the single
+  chokepoint, already runs on Slack approval): after writing the internal
+  provisional entry, if the superseded entry is on a `write_back` gdocs
+  connection, `_doc_change_blocks()` paragraph-diffs old vs. new markdown
+  and enqueues a `gdoc_writeback` job. Guarded — never blocks the KB write.
+  **Slack review still gates the internal copy; GitHub is in addition.**
+- **`api/worker.py::_gdoc_writeback`** — re-fetch the doc; a `modifiedTime`
+  mismatch vs. the last sync ⇒ **conflict** (open the issue, edit nothing).
+  Otherwise per block: `gdrive.replace_passage()` =
+  `documents.batchUpdate`/`replaceAllText` (0 replacements ⇒ block flagged
+  for a manual edit). Then open a GitHub issue (`label: kb-writeback`) with
+  the per-block old→new diff, a best-effort Drive comment pointing at it,
+  and re-`kb_sync` the connection. Every run ⇒ a `kb_doc_writebacks` row
+  (migration `092`: status `applied|partial|conflict|verified|reverted|
+  error`, the blocks, a pre-edit markdown snapshot) with RLS like `091`.
+- **`interpreter/github.py`** gains `get_issue()` / `list_issue_comments()`
+  (for chunk 2's watch). **`api/main.py`**: `GET
+  /api/kb/collections/{sid}/doc-writebacks`. **Web**: a `write-back` badge
+  on the connection row + a collapsible "doc write-backs" table (status,
+  blocks applied, issue link) in the "Connected sources" panel.
+
+**Verify:** `tests/test_kb_doc_writeback.py` (14 new — the paragraph-diff
+blocks, the `apply_kb_change` gate firing only for a `write_back` gdocs
+connection, and `_gdoc_writeback`'s applied / partial→conflict / conflict
+(doc moved ⇒ no edit) / fetch-error paths with `gdrive`+`github` mocked);
+`tests/test_kb_connectors.py` extended for the gdocs `access`/`github_repo`
+normalize + `writable`. **831 offline tests green (was 817).** `tsc -b` +
+`npm run build` clean. Migration `092` applied to the live project, drift
+check clean.
+
+**Not live-verifiable in this sandbox (stated):** the read-write
+`documents` scope needs interactive re-consent and no live GitHub
+repo/token is wired, so the end-to-end "approve in Slack → doc section
+rewritten → issue opened → human closes" can't run here. Gate logic, diff
+extraction, `batchUpdate` request shape, and tracking-row writes are all
+covered offline.
+
+**Chunk 2 — built (see the most-recent entry above):**
+`watch_doc_writebacks()` + `ingestion/kb_writeback_watch.py`, closed ⇒
+`verified`, `/revert` ⇒ reverse the applied blocks in the doc. Still open:
+a "Doc write-backs" list in `ReviewView.tsx`, a Slack "send to GitHub
+before applying" button, and true index-range structural section
+replacement (vs. today's `replaceAllText` find/replace).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-06 — KB source connectors made first-class: registry +
+`kb_source_connections` table + one generic sync driver + unified UI.** Connectors #1 (crawl) and #2
+(Sheets) had each shipped as a one-off — a bespoke `api/worker.py` handler, a
+bespoke `POST /api/kb/collections/{sid}/{crawl,gsheet,gdoc}` endpoint, and a
+`prompt()` button in `KnowledgeView.tsx`; a "connected feed" was an array
+buried in `sources.config` with no status / last-sync / doc-count / re-sync /
+disconnect. This chunk (item 2.5 in `docs/KB_SOURCE_CONNECTORS.md`'s build
+order) fixes the structure before connector #3, exactly as that doc
+recommended.
+
+- **`interpreter/kb_connectors.py`** — new `KBConnectorSpec` registry
+  mirroring `interpreter/connectors.py`: `KBDocument` / `KBSyncResult` /
+  `SyncCtx` dataclasses, `register` / `get_kb_connector` / `list_kb_connectors`.
+  Each spec has `sync(config, watermark, ctx) -> KBSyncResult`, optional
+  `normalize(raw)->config` (parse a URL to an id, clamp, validate) and
+  `available(tenant_id, sb)->(ok, reason)`. Three specs registered, each
+  `sync()` wrapping the **existing, unmodified** fetcher: `public_url`
+  (`ingestion/webcrawl.crawl`, `exhaustive = len(pages) < max_pages`),
+  `gsheets` (`interpreter/gsheets.fetch_sheet`, one doc per row,
+  `KBDocument.extra` carries `gsheet_*`), `gdocs`
+  (`interpreter/gdrive.fetch_doc`).
+- **Migration `091`** — `kb_source_connections` (one row per connected feed:
+  `connector` slug — no CHECK, connectors are data — `config`, `watermark`,
+  `status` active|paused|error|archived, `last_synced_at`, `last_result`),
+  RLS via `is_tenant_member`/`is_tenant_editor`. `kb_entries` gains
+  `connection_id` (FK) + `external_id` (stable key within a connection: page
+  **title** for a crawl — parity with `_crawl_site`'s `existing_by_title` —
+  row number for a sheet, doc id for a gdoc). **Retrieval is untouched**:
+  `kb_entries.source_id` still points at the parent `internal_kb` collection,
+  so `resolve_sources()` scoping is unchanged — a chat flow with no explicit
+  `kb_sources` already retrieves the union of every connected source.
+  Backfill turns the pre-existing `config.crawl_urls` / `config.gsheets`
+  arrays and `origin='gdoc'` entries into connection rows and points existing
+  entries at them. Applied to the live project (drift check clean); the one
+  real gdoc entry in this sandbox backfilled into a `gdocs` connection.
+- **`api/worker.py::_sync_kb_connection`** — the generic driver, job kind
+  `kb_sync`: `spec.sync()` -> diff by `external_id` (skip byte-identical
+  bodies) -> upsert `kb_entries` + enqueue `embed_kb_entry` -> archive
+  entries missing from the run **only when `res.exhaustive`** -> record
+  `status`/`last_synced_at`/`last_result`/`watermark`. `crawl_site` /
+  `sync_gsheet` are now thin deprecated shims that find-or-create a
+  connection row and call the driver (kept one release for queued jobs).
+- **`api/main.py`** — `GET /api/kb/connectors` (catalogue + per-tenant
+  `available`/`reason`), `GET|POST /api/kb/collections/{sid}/connections`,
+  `POST /api/kb/connections/{cid}/sync`, `PATCH /api/kb/connections/{cid}`
+  (pause/resume), `DELETE /api/kb/connections/{cid}` (soft-archive the
+  connection + its entries). `/crawl`, `/gdoc`, `/gsheet` are now thin
+  wrappers over `_kb_add_connection`; `/entries/{eid}/resync` re-syncs the
+  entry's whole connection.
+- **`ingestion/kb_recrawl.py`** — iterates `kb_source_connections` where
+  `status='active'` and enqueues one `kb_sync` per connection
+  (`dedupe_key=kb_sync:{cid}`); `daily-sync.yml` already runs it + drains
+  the worker, no workflow change.
+- **Web** — `KnowledgeView.tsx` toolbar button-pile (`🌐 crawl a site`,
+  `＋ Google Doc/Sheet`) replaced by a **"Connected sources"** panel: a
+  table of connections (label, type, status pill, entry count, last synced,
+  re-sync / pause / remove) + a registry-driven **"＋ add source"** form
+  (`<select>` of connectors, disabled options show their `reason`,
+  `config_fields` rendered as inputs). `＋ entry` / upload / export / import
+  stay. New `api.kb.listConnectors/listConnections/addConnection/
+  syncConnection/setConnectionStatus/deleteConnection`; `KbConnector` /
+  `KbConnection` types.
+- **`docs/KB_SOURCE_CONNECTORS.md`** — added **§6 Nolt** (feedback/roadmap
+  board, forum-family: pull posts + comments via Nolt's REST API, embed only
+  `complete`-status posts as `community_resolved`, `apikey` auth); marked the
+  registry/table/driver/UI built; refreshed the build order (next: Linear,
+  then Nolt/forums, then the onboarding-wizard source-picker step).
+
+**Verify:** new `tests/test_kb_connectors.py` (registry lookup, Google-auth
+availability, and the driver's create / skip-unchanged / extra-merge /
+archive-when-exhaustive / no-archive-when-not / watermark-persist /
+sync-raises→status=error / paused-skip / missing-connection paths);
+`tests/test_webcrawl.py` + `tests/test_gsheets.py` worker tests rewritten as
+pure connector-`sync()` tests; `tests/test_kb_recrawl.py` rewritten for the
+connection loop; `tests/test_api.py` guard test for the new routes. **816
+offline tests green (was 810).** `tsc -b` clean. Migration `091` applied to
+the live project, `verify_migrations` drift check clean.
+
+**Not live-verified (unchanged residual):** Google OAuth consent is an
+interactive browser flow — a `gsheets`/`gdocs` connection can't be
+end-to-end tested in this sandbox (the one `kind='google'` integration row
+is `inactive`), same category as connector #2. A `public_url` connection
+needs a live worker drain to exercise fully; the driver + connector paths
+are covered offline.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-05 — KB source connector #2 built: Google Sheets.** Second item
+from `docs/KB_SOURCE_
+CONNECTORS.md`'s suggested build order — reuses the existing Google
+connection (`gdrive.py`, `tenant_integrations` kind='google'), no new
+OAuth flow.
+
+**One KB entry per data row, not the whole sheet as one blob** — the
+same reasoning the design doc gave for why this needed its own chunking
+model. New `interpreter/gsheets.py`: `parse_sheet_id`, `fetch_sheet`
+(`{title, modified_time, tab, rows: [{row, title, body_md}]}` — header is
+row 1, `_row_doc` renders each subsequent row as `**Header:** value` pairs
+for every non-empty column, title = the row's first non-empty cell,
+fully-empty rows skipped). `gdrive.SCOPES` now also requests
+`spreadsheets.readonly` — **a tenant connected before this shipped needs
+to reconnect once**, Google doesn't retroactively grant a new scope to an
+existing token (flagged in `docs/GOOGLE_SETUP.md` too).
+
+**Migration `090`** adds `gsheet_id`/`gsheet_range`/`gsheet_row`/
+`gsheet_modified` to `kb_entries`, same shape as migration `024`'s gdoc
+columns. New `api/worker.py::_sync_gsheet` job handler — same diff/archive
+discipline as `_crawl_site` (skip update+re-embed when a row's body is
+byte-identical to what's stored; archive a row that's gone) **but simpler
+than crawling's archive rule**: `fetch_sheet` always reads the sheet's
+entire current range (no page-budget ambiguity like `max_pages`), so
+"not in this run" always safely means "no longer in the sheet." Records
+`{sheet_id, sheet_name}` onto the source's `config.gsheets` (deduped),
+same as crawl's `config.crawl_urls`, so `ingestion/kb_recrawl.py` (renamed
+in spirit, not in file — now reads both) picks it up for scheduled
+re-sync. New `POST /api/kb/collections/{sid}/gsheet` (async job, same
+shape as `/crawl`; re-posting the same sheet re-syncs it — no separate
+resync endpoint needed) + a "+ Google Sheet" button in `KnowledgeView.tsx`.
+
+**Known row-identity limitation, stated not hidden:** a row's identity for
+re-sync is its row *number* within the tab — stable across an edit, not
+across an insert/delete that shifts subsequent rows' numbering (Sheets has
+no native stable per-row id without a helper column). Documented in
+`gsheets.py`'s docstring, not silently assumed away.
+
+**Verify:** 25 new offline tests (`tests/test_gsheets.py` — parsing,
+row-to-doc rendering, `fetch_sheet` against a mocked API client, the
+worker job's create/skip-unchanged/archive/dedup-config/error-handling
+paths; 2 new in `tests/test_kb_recrawl.py`). 810 offline tests green (was
+793). Migration applied to the real Supabase project, drift check clean,
+`tsc -b` clean. **Not live-verified** — no tenant in this sandbox has
+completed real Google OAuth consent (`tenant_integrations` shows
+`status: inactive` for the one `kind='google'` row), and OAuth consent is
+an interactive browser flow no agent can complete — same "flagged, not
+spent" category as this project's other OAuth-gated live-verification
+residuals (Freshchat, Salesforce OAuth).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-05 — the first connector-design chunk built: sitemap-first
+crawl discovery + scheduled re-crawl.** Picked as the easiest item from `docs/KB_SOURCE_CONNECTORS.md`'s
+suggested build order (no new auth, extends code that already works).
+
+**`ingestion/webcrawl.py`**: `crawl()` now best-effort fetches
+`/sitemap.xml` (one level of `<sitemapindex>` indirection, namespace-
+agnostic parsing) and seeds every in-scope URL straight into the BFS queue
+before link-following starts — closes the real gap a pure link-follow
+crawl has (orphan pages nothing on the crawled path links to). Same
+"best-effort, never raises" discipline as the existing robots.txt handling
+— a missing/malformed/blocked sitemap just falls back to link-discovery
+alone. **Live-verified against the real `docs.zapier.com`**: its sitemap
+has 402 real URLs; a scoped prefix query correctly found 52 real pages
+under `/integrations/build`, and a full `crawl()` call against that section
+correctly picked them up.
+
+**`api/worker.py::_crawl_site`** gained three things: (1) skips the
+update+re-embed for a page whose markdown is byte-identical to what's
+already stored (a re-crawl of an unchanged site now costs nothing beyond
+the fetches themselves); (2) records the crawled URL onto the source's
+`config.crawl_urls` (deduped) so a scheduled re-crawl knows what to
+re-fetch without a human re-clicking "crawl a site"; (3) archives
+(soft-delete, `status='archived'`, never hard-delete) a crawl-origin entry
+whose page didn't appear in this run — but **only** when the run wasn't
+truncated by `max_pages` (fewer pages than the cap is the only reliable
+signal that a crawl actually exhausted everything reachable; hitting the
+cap says nothing about whether a missing page is gone or just outside this
+run's budget — tested explicitly, both directions).
+
+**New `ingestion/kb_recrawl.py`** — the scheduled path: reads every active
+source's `config.crawl_urls` and re-enqueues one `crawl_site` job per
+(source, url), same job-dedupe-key discipline as everywhere else in this
+codebase so a run that fires while a previous run's jobs are still queued
+is a no-op, not a pile-up. Wired into `.github/workflows/daily-sync.yml`
+(new "Re-crawl KB sources" step) **plus a `python -m api.worker --once`
+drain step right after it** — this project has no always-on worker host
+(a known, already-documented residual), so without an explicit drain the
+enqueued `crawl_site` jobs would just sit in the queue forever; same
+reason `email-automation.yml` already drains its own queue in-workflow.
+
+**Verify:** 12 new offline tests (4 sitemap-discovery tests in
+`tests/test_webcrawl.py`, 4 new `_crawl_site` tests covering unchanged-skip/
+archive-when-not-truncated/no-archive-when-truncated/crawl_urls-dedup, 4 in
+new `tests/test_kb_recrawl.py`). 793 offline tests green (was 781). No
+migration needed — `sources.config` was already free-form jsonb.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-05 — `docs/KB_SOURCE_CONNECTORS.md` written.** A design conversation worked out how
+new KB source types (public-URL crawl improvements, Google Docs at
+folder/Shared-Drive scope, Google Sheets, Linear, forums) should plug into
+the *existing* ingestion pipeline rather than each reinventing chunking/
+scoping/dedup — read that file before building any of them. It's a
+decision record, not new code — nothing in it is built yet. Key structural
+point: every existing ingestion path already converges on one narrow
+contract (`api/worker.py::_embed_kb_entry` — produce `(title, body_md)`
+pairs, everything downstream — chunking, `resolve_sources` scoping,
+retrieval — is already shared and untouched by source type), so a new
+connector is a new *producer*, mirroring `interpreter/connectors.py`'s
+existing "connector is data, not a hardcoded importer" philosophy for
+case-system actions. Also answers a related open question from the same
+conversation: Google OAuth (`gdrive.py`, `drive.readonly`) only ever means
+the structured Drive/Docs API — it is **not** a mechanism for crawling
+arbitrary third-party internal tools gated by "Sign in with Google" (those
+issue their own session after login; a Drive API token means nothing to
+them) — that would need its own bespoke connector per tool, not something
+this design makes easier.
+
+**Not built, deliberately — this session stayed at the design/decision
+level, no code changed:** none of the five connector types, no onboarding
+wizard step. The doc ends with a suggested (not committed) build order:
+public-URL sitemap+re-crawl first (cheapest, extends what exists), then
+Google Sheets (reuses existing Drive OAuth), then Linear, then forums,
+then the onboarding wizard step once ≥2 connectors exist to make a
+source-picker meaningful.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-05 — root-caused and fixed why Neo4j's `DUPLICATE_OF` edges never
+fire.** `docs/MULTI_SYSTEM_
+ARCHITECTURE.md` flagged this as "not investigated further yet" (0
+`DUPLICATE_OF` edges despite 232 `SIMILAR_TO`, suspected `account_id` never
+set on Salesforce-sourced cases). Investigated and confirmed, live: exactly
+232 `SIMILAR_TO` / 0 `DUPLICATE_OF` (Neo4j, direct driver query, no MCP
+server needed for this). Worse than suspected — 20 real case pairs score
+>= the 0.92 dup threshold, including a 6-case cluster (00001130-00001138,
+all the same recurring proxy-timeout error from `SupportAutomationHook`)
+and a 2-case renewal duplicate, both **confirmed same Salesforce AccountId**
+via a live SF query — real duplicate tickets, currently invisible to
+duplicate detection.
+
+**Root cause, precisely isolated (more general than the doc's guess):**
+neither `case_memory_sync.py` row producer (`_row_from_run` for the default
+`runs`-sourced path, `_from_salesforce` for `--from-salesforce`) ever sets
+`account_id` — it's populated *only* by `_enrich_from_sf`'s Salesforce
+round-trip. But `_enrich_from_sf`'s selection filter (`want`) only checked
+whether `case_type` was missing, not `account_id` — so any row that
+already had `case_type` (from `sf_writeback`, or from `_from_salesforce`'s
+own SOQL, which always includes `Type`) was wrongly treated as "already
+enriched" and skipped, silently starving it of `account_id` specifically.
+Since `same_account` (in `_sync_rows`) needs a non-empty `account_id` on
+both sides of a candidate pair, this made `DUPLICATE_OF`'s same-account
+gate false for effectively every real row.
+
+**Fix, two small changes in `ingestion/case_memory_sync.py`:** (1)
+`_enrich_from_sf`'s `want` filter now also re-queries a row missing
+`account_id` even when `case_type` is present — closes the gap for both
+sources without touching anything else. (2) `_from_salesforce`'s own SOQL
+now selects `AccountId` directly and sets it on the row it builds — avoids
+needing the enrichment round-trip at all for that path's common case (a
+real compute-cost win, not just correctness). 4 new offline tests
+(`tests/test_case_memory_sync.py` — this ingestion module had zero
+coverage before). 778 offline tests green (was 774).
+
+**Re-run live (user approved) — two more root causes found and fixed before
+it actually worked, all three now confirmed with real edges:**
+
+1. **`case_sf_id` vs the real Salesforce Id.** `_row_from_run`'s `case_sf_id`
+   is the Case *Number* (e.g. `"00001130"`), not the real 15/18-char
+   Salesforce Id — `case_payload["sf_id"]` is (the `case.get("sf_id") or
+   case.get("id")` convention used everywhere else in this codebase). Since
+   `case_sf_id` is the MERGE/upsert identity key for already-live
+   `case_memory` rows and Neo4j `Case` nodes, it couldn't just be
+   repointed at the real Id without orphaning/duplicating 141 existing
+   rows/nodes. Fix: a new `_sf_lookup_id` field (from `case_payload.sf_id`)
+   that `_enrich_from_sf` uses *only* to query Salesforce correctly —
+   `case_sf_id` itself, and every existing row/node it keys, is untouched.
+2. **`case_memory` never had an `account_id` column at all**, and
+   `match_case_memory()` never returned one — so even a correctly-computed
+   `account_id` on the row *being synced* had nothing to compare against
+   for a kNN neighbour, since that neighbour's `account_id` could never be
+   fetched. **Migration `089`**: adds the column, drops+recreates
+   `match_case_memory()` (return-type change) to include it.
+   `case_memory.upsert()` now persists it. Applied to the real Supabase
+   project; drift check clean.
+
+**Live-verified, fully working end to end:** re-running
+`python -m ingestion.case_memory_sync` (default `runs` mode, since these
+cases came from there) now produces **20 real `DUPLICATE_OF` edges**,
+correctly connecting the exact clusters found during investigation — the
+6-case proxy-timeout cluster (00001130/32/33/34/36/38, all pointing
+newer -> older), the 2-case renewal duplicate (00001189/00001190), and a
+third cluster (00001191/00001215/DEMO-1). Zero new Case nodes (141
+throughout — identity fix confirmed safe), `SIMILAR_TO` unchanged at 232
+(existing edges updated, not duplicated). **One operational gotcha hit and
+understood, not a residual bug:** the *first* post-fix run persisted
+correct `account_id` for these rows but created 0 edges — a same-batch
+ordering artifact (whichever cluster-mate is processed first in a run
+sees the others' pre-fix/stale `account_id`, since they haven't been
+re-upserted yet *in that same pass*). A second run (every row's
+`account_id` now already correct in the table from the first) produced
+all 20 edges immediately. This only ever affects the one-time backfill
+after adding a new enrichable field — routine incremental syncs going
+forward never hit it, since neighbours are always already-persisted from
+a prior run.
+
+7 new offline tests total for this fix (`tests/test_case_memory_sync.py`).
+781 offline tests green.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-05 — `h_draft` collapsed to one `integrity.check` call instead of
+two.** The last item from this
+session's architecture/compute audit: `h_draft` ran `integrity.check()`
+twice per invocation (`kind="draft"` on the reply, `kind="inbound"` on the
+customer's text) against the *same* `icontexts` — two separate Groq
+round-trips for what's really one judge task over two labeled inputs.
+
+New `integrity.check_many(statements: dict, contexts, *, kinds, ...)`
+scores several named statements against one shared context in a single
+call (a `{"statements": {"<label>": {"claims": [...]}}}` JSON shape,
+prompt asks the model to judge each label only against context, not the
+other labels) — falls back to the original per-statement `check()` calls
+when: fewer than 2 statements are non-empty, no LLM key, the JSON fails to
+parse, or the model drops a label from its response entirely (a real LLM
+won't always perfectly follow "one entry per label" — this never half-
+trusts a partial response). `check()` and `_judge_groq` are both unchanged
+in behavior; `_parse_claims`/`_finish` extracted so the new code doesn't
+duplicate their logic. `registry.py::h_draft` is the only caller changed —
+every other `integrity.check()` call site (`handoff_watch.py`, `review.py`,
+`kb_writeback.py`'s self-critique, the eval scripts) is untouched.
+
+**Verify:** 5 new offline tests (`tests/test_integrity.py` — one combined
+call for 2 statements, falls back below 2 non-empty, falls back on
+malformed JSON, falls back when a label is dropped, falls back cleanly
+with no LLM key) — 774 offline tests green (was 769), no regression.
+**Live-verified against real Groq**: a contradicting draft + a related
+inbound question, single call, correctly split into two independently-
+scored verdicts (both `contradicts`, real evidence quoted per label).
+
+**Audit fully closed**: all 4 chunks it surfaced are now either built
+(judge-call caching, this retention fix, this `h_draft` collapse, the
+`h_agent` eval re-run + the stale-model bug it found) or explicitly left
+open as a judgment call (`h_policy_gate` replacing `escalate_topics`'s
+static list — a real behavior change to what triggers escalation, not
+attempted this session; whether to keep/retune/revert `h_agent` given its
+honest null result).
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-05 — `eval/agent/run_agent_eval.py` re-run for real, plus a real
+bug it surfaced fixed (migration 088).** Answers the "genuinely open" agentic question this session's
+audit flagged: does `h_agent`'s reformulation loop actually beat a single
+retrieve call? **Re-run clean (real Groq, `python -u` to avoid stdout
+buffering silently swallowing output under a hard `timeout` — the first
+attempt looked hung and produced nothing for that reason, not an actual
+hang):** baseline and agent scored **identically** (hit@1 0.200, MRR@10
+0.253) — a stronger null result than the original confounded run, since
+this time 4/10 questions (not 1/10) triggered real reformulation and the
+agent spent 27,218 real tokens; on the two questions where reformulation
+changed the top-1 answer, it swapped one wrong answer for a different
+wrong one, never the right one. **Net: the agent node, as currently
+configured/thresholded, does not measurably improve retrieval accuracy on
+this hard-question set** — a real, if modest, finding, not a shrug.
+
+**A real bug the eval surfaced, root-caused and fixed, not left as noise:**
+every single agent-node call 404'd on Groq (`llama-3.3-70b-versatile`)
+before silently falling back to a free OpenRouter model — meaning neither
+this run nor the original one ever actually exercised a real strong model.
+Root cause: migration `081` (Phase 29 step 2, the `agent` node's adoption)
+hardcoded that retired model name as a literal in its own SQL, contradicting
+its comment that it "reuses both old nodes' settings verbatim" — the
+sibling `draft` node's *actual* live value had already been fixed by
+migration `017` (Phase 12) four years of migration history earlier; `081`
+silently reintroduced the exact string `017` fixed, just one level deeper
+in the jsonb (`config.draft.model` on an `agent` node vs. `017`'s
+`where type = 'draft'` filter, which never matched it). Same bug class
+`020` already hit once for `classify` nodes. **Migration `088`** (same
+`jsonb_set` + re-snapshot-published-flows shape as `017`/`020`) repoints it
+at `openai/gpt-oss-120b`; applied to the real Supabase project (by the
+user, via the SQL editor, after the MCP `apply_migration` call hit an
+auto-mode permission block — confirmed live: the agent node's
+`draft.model` now reads `openai/gpt-oss-120b`, Acme's flow re-snapshotted
+4→5). 769 offline tests green, no drift (data-only fix, no schema change).
+
+**Open question for a future session, not decided here:** given the honest
+null result, is `h_agent` worth keeping as-is, worth re-tuning
+(`groundedness_threshold`, `max_iterations`), or should Acme's flow revert
+to a plain `retrieve`+`draft` pair? Nothing changed here either way — this
+chunk was "get a clean signal + fix the bug it found," not "act on the
+signal."
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-05 — retention/pruning built for the 3 tables the audit flagged as
+missing it.** Migration `087`
+(`purge_old_case_events`, `purge_old_audit_log` — age-only, default 365d;
+`purge_old_reasoning_sessions` — terminal states only, `sent`/`abandoned`,
+aged off `updated_at`, never touches an open session regardless of age),
+same pattern as `runs`/`jobs` (059) and `flow_versions` (077). Applied to
+the real Supabase project; `test_verify_migrations.py`'s live drift check
+confirms zero drift; `scripts/purge_old.py` gains
+`--case-events-days`/`--audit-log-days`/`--reasoning-days` (default 365
+each) and was run for real against the live project (a 3650-day cutoff, to
+confirm the whole call chain works without actually deleting live data —
+all three returned 0, correctly, on a project created 2026-08-25). 769
+offline tests green (no new tests — matches the existing convention: `059`/
+`077`'s purge functions have no unit tests either, verified live only).
+No unit-test coverage added for the SQL functions themselves, consistent
+with that precedent.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-05 — architecture/cost audit run, one chunk built: judge-call
+caching.** User asked for a
+whole-system pass on storage/compute cost, accuracy, and where else
+agentic orchestration earns its cost. Three read-only audits (DB schema
+across all 86 migrations, LLM call sites, and node-handler agentic
+candidates) came back with no large/risky finding — this codebase's
+storage and agentic-scoping discipline are both already in good shape.
+Ranked findings, **one built, the rest deliberately left as options for a
+future session (not built now — the user picks the next one)**:
+
+- **Built:** `groundedness._judge`, `integrity._judge_groq`, and
+  `kb_writeback._llm_draft` (backs both the first KIL draft and
+  `_self_critique`'s one bounded redraft) now pass `cache=True` to
+  `llm.complete()` — they fire on every draft, and up to 3x inside
+  `h_agent`'s reformulation loop, but were the only judge/draft call sites
+  not using the in-process LRU cache `h_classify` already established
+  ("same case text -> same triage; kills retry/re-run cost", registry.py).
+  Same convention, zero behavior change (cache keys on exact
+  model+system+user+max_tokens, so a genuinely different input always
+  misses). 769 offline tests green, no regression.
+- ~~**Not built — storage:** `case_events`, `reasoning_sessions`, and
+  `audit_log` are the only append-only tables with no pruning~~ **Built
+  2026-09-05, migration 087 — see the entry above.** (Note this was always
+  a different gap from the `runs.case_payload`/`runs.trace` redundancy
+  point below, which is still open.)
+- ~~**Not built — compute:** `h_draft` makes two separate `integrity.check()`
+  Groq round-trips per invocation~~ **Built 2026-09-05 —
+  `integrity.check_many()`, see the entry above.**
+- **Not built — accuracy, wiring gap not new build:** `confidence_gate`'s
+  `escalate_topics` is still a static slug-list even though `h_policy_gate`
+  (its already-named successor, Phase 16) exists and isn't wired into the
+  default flows in its place.
+- **Not built — the honest agentic question:** `h_agent`'s only real eval
+  (`eval/agent/run_agent_eval.py`, 2026-09-04) came back a null result, but
+  confounded by Groq/OpenRouter rate-limiting breaking the reformulation
+  call on the one case that triggered it. Before any *further* agentic
+  surface, re-running that eval off-peak or via `ANTHROPIC_API_KEY` would
+  turn a confounded null into an honest signal either way. No other node
+  handler (classify/extract/routing/escalate_topics) cleared the bar for a
+  new bounded agentic loop — routing.py and case_taxonomy.py are already
+  deterministic + TTL-cached, and wrapping them in an LLM call would be
+  pure cost with no accuracy upside on any documented failure mode.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
+**2026-09-05 — `docs/MULTI_SYSTEM_ARCHITECTURE.md` written (new file).** A design conversation worked out
 how Postgres/Supabase, Neo4j, Salesforce/Zendesk, Slack, and a future
 per-tenant product-analytics connector (Mixpanel/GA4/GTM) should divide
 ownership so no two systems hold conflicting copies of the same fact —

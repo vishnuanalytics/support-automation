@@ -1024,11 +1024,13 @@ def h_draft(state: CaseState, config: dict) -> dict:
     # a past resolution? A contradicting draft forces the gate to escalate.
     icontexts = integrity.contexts_from_state(
         {"prior_resolutions": prior, "internal_kb": internal, "retrieval": retrieval})
-    integ = {
-        "draft": integrity.check(reply, icontexts, kind="draft", tenant_id=state.get("tenant_id")),
-        "inbound": integrity.check(case.get("body") or "", icontexts, kind="inbound",
-                                   tenant_id=state.get("tenant_id")),
-    }
+    # One combined judge call for both statements against the same context
+    # instead of two separate Groq round-trips (they only differ in which
+    # text is being checked, not the context or the prompt shape).
+    integ = integrity.check_many(
+        {"draft": reply, "inbound": case.get("body") or ""}, icontexts,
+        kinds={"draft": "draft", "inbound": "inbound"}, tenant_id=state.get("tenant_id"),
+    )
     idraft = integ["draft"]
 
     return {

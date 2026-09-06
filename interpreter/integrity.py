@@ -81,6 +81,21 @@ def _cap_contexts(contexts: list[dict[str, Any]], *, budget: int = 7000) -> str:
     return "\n\n---\n\n".join(parts) or "(none)"
 
 
+def _parse_claims(claims: list[Any]) -> list[dict[str, Any]]:
+    verdicts = []
+    for c in claims[:12]:
+        rel = str(c.get("relation", "neutral")).lower()
+        if rel not in _REL:
+            rel = "neutral"
+        try:
+            conf = max(0.0, min(1.0, float(c.get("confidence", 0.5))))
+        except (TypeError, ValueError):
+            conf = 0.5
+        verdicts.append({"claim": str(c.get("claim", ""))[:300], "relation": rel,
+                         "evidence": str(c.get("evidence", ""))[:300], "confidence": conf})
+    return verdicts
+
+
 def _judge_groq(statement: str, contexts: list[dict[str, Any]],
                 *, model: str | None, tenant_id: str | None = None) -> dict[str, Any]:
     raw = llm.complete(
@@ -98,24 +113,14 @@ def _judge_groq(statement: str, contexts: list[dict[str, Any]],
         model=model or llm.FAST_MODEL,
         json_object=True,
         max_tokens=500,
+        cache=True,   # same statement+context -> same verdict; kills retry/re-run cost
         tenant_id=tenant_id,
     )
     try:
         claims = json.loads(raw).get("claims", [])
     except (json.JSONDecodeError, TypeError, AttributeError):
         return _judge_heuristic(statement, contexts)
-    verdicts = []
-    for c in claims[:12]:
-        rel = str(c.get("relation", "neutral")).lower()
-        if rel not in _REL:
-            rel = "neutral"
-        try:
-            conf = max(0.0, min(1.0, float(c.get("confidence", 0.5))))
-        except (TypeError, ValueError):
-            conf = 0.5
-        verdicts.append({"claim": str(c.get("claim", ""))[:300], "relation": rel,
-                         "evidence": str(c.get("evidence", ""))[:300], "confidence": conf})
-    return _summarize(verdicts, backend="groq")
+    return _summarize(_parse_claims(claims), backend="groq")
 
 
 def _judge_heuristic(statement: str, contexts: list[dict[str, Any]]) -> dict[str, Any]:
@@ -154,11 +159,79 @@ def check(statement: str, contexts: list[dict[str, Any]] | None = None,
         return empty
     res = (_judge_groq(statement, contexts, model=model, tenant_id=tenant_id) if llm.available(tenant_id=tenant_id)
            else _judge_heuristic(statement, contexts))
+    return _finish(res, kind)
+
+
+def _finish(res: dict[str, Any], kind: str) -> dict[str, Any]:
     res["flagged"] = res["relation"] == "contradicts"
     res["novel"] = (kind in ("draft", "human_reply")
                     and res["relation"] == "neutral"
                     and any(v["relation"] != "entails" for v in res["verdicts"]))
     return res
+
+
+def check_many(statements: dict[str, str], contexts: list[dict[str, Any]] | None = None,
+               *, kinds: dict[str, str] | None = None, model: str | None = None,
+               tenant_id: str | None = None) -> dict[str, dict[str, Any]]:
+    """Same judge as `check()`, scoring several *different* statements against
+    the *same* context in one Groq call instead of one call per statement --
+    built for `h_draft`, which used to run `check()` twice (the drafted reply,
+    the inbound customer text) against identical `icontexts`. Returns one
+    `check()`-shaped result per key in `statements`.
+
+    Falls back to per-statement `check()` calls (no combined-call savings,
+    but correct) when: fewer than 2 non-empty statements are given, the LLM
+    path is unavailable (the heuristic backend has no multi-statement shape
+    worth building — its calls are free anyway), the JSON fails to parse, or
+    the model's response omits a label entirely -- a real LLM won't always
+    perfectly follow "one entry per label"."""
+    kinds = kinds or {}
+    non_empty = {k: v for k, v in statements.items() if (v or "").strip()}
+
+    def _per_statement() -> dict[str, dict[str, Any]]:
+        return {k: check(v, contexts, kind=kinds.get(k, "draft"), model=model, tenant_id=tenant_id)
+                for k, v in statements.items()}
+
+    if len(non_empty) < 2 or not contexts or not llm.available(tenant_id=tenant_id):
+        return _per_statement()
+
+    raw = llm.complete(
+        system=(
+            "You are a fact-consistency checker for a support knowledge base. "
+            "You will be given several labeled STATEMENTS and CONTEXT passages. "
+            "For EACH statement, list its checkable factual claims, and for each "
+            "claim decide whether the CONTEXT ENTAILS it, CONTRADICTS it, or is "
+            "NEUTRAL (context neither confirms nor denies). Judge each statement "
+            "only against the context, not world knowledge, and not against the "
+            "other statements. Return one entry per label, even if empty. Return "
+            'JSON {"statements": {"<label>": {"claims": [{"claim": string, '
+            '"relation": "entails"|"neutral"|"contradicts", "evidence": string, '
+            '"confidence": number 0..1}]}, ...}}.'
+        ),
+        user=("\n\n".join(f"# STATEMENT[{k}]\n{v}" for k, v in non_empty.items())
+              + f"\n\n# CONTEXT\n{_cap_contexts(contexts)}"),
+        model=model or llm.FAST_MODEL,
+        json_object=True,
+        max_tokens=350 * len(non_empty) + 200,
+        cache=True,
+        tenant_id=tenant_id,
+    )
+    try:
+        by_label = json.loads(raw).get("statements", {})
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        return _per_statement()
+    if not all(k in by_label for k in non_empty):
+        return _per_statement()   # model dropped a label -- don't half-trust this
+
+    out: dict[str, dict[str, Any]] = {}
+    for k, v in statements.items():
+        if k not in non_empty:
+            out[k] = check("", None, kind=kinds.get(k, "draft"))
+            continue
+        claims = (by_label.get(k) or {}).get("claims", [])
+        res = _summarize(_parse_claims(claims), backend="groq")
+        out[k] = _finish(res, kinds.get(k, "draft"))
+    return out
 
 
 def contexts_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:

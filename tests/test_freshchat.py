@@ -120,7 +120,7 @@ def test_save_channel_merges_secret_and_upserts_the_right_conflict_target():
     stored = json.loads(sb._vault["freshchat"])
     assert stored == {"api_token": "tok1", "webhook_public_key": "pem1"}
     assert sb.upserts[-1]["config"] == {"domain": "acme.freshchat.com", "team": "csm",
-                                        "auto_send_enabled": False}
+                                        "auto_send_enabled": False, "oauth_domain": ""}
 
 
 def test_delete_channel_clears_vault_and_row():
@@ -309,3 +309,126 @@ def test_test_connection_never_raises_on_network_error(monkeypatch):
     cfg = FreshchatConfig(tenant_id="t", domain="acme.freshchat.com", api_token="tok")
     out = freshchat.test_connection(cfg)
     assert out["ok"] is False and "dns failure" in out["error"]
+
+
+# ── OAuth ────────────────────────────────────────────────────────────────
+def test_oauth_authorize_url_shape():
+    from interpreter.freshchat import oauth_authorize_url
+
+    url = oauth_authorize_url("acme.myfreshworks.com", "cid", "https://app/cb", "st8")
+    assert url.startswith("https://acme.myfreshworks.com/org/oauth/v2/authorize?")
+    assert "response_type=code" in url and "client_id=cid" in url and "state=st8" in url
+    assert "redirect_uri=https%3A%2F%2Fapp%2Fcb" in url
+    # Freshworks 401s an authorize request with no scope at all (confirmed
+    # live 2026-09-05) -- a default is sent, not omitted, when not given
+    assert "scope=freshchat.conversation.view" in url
+
+
+def test_oauth_authorize_url_can_omit_scope_explicitly():
+    from interpreter.freshchat import oauth_authorize_url
+
+    url = oauth_authorize_url("acme.myfreshworks.com", "cid", "https://app/cb", "st8", scope="")
+    assert "scope=" not in url
+
+
+def test_oauth_authorize_url_strips_scheme_and_includes_scope():
+    from interpreter.freshchat import oauth_authorize_url
+
+    url = oauth_authorize_url("https://acme.myfreshworks.com/", "cid", "https://app/cb", "st8",
+                              scope="conversations:read")
+    assert url.startswith("https://acme.myfreshworks.com/org/oauth/v2/authorize?")
+    assert "scope=conversations%3Aread" in url
+
+
+def test_effective_oauth_domain_falls_back_to_domain():
+    cfg = FreshchatConfig(tenant_id="t", domain="acme.freshchat.com")
+    assert cfg.effective_oauth_domain == "acme.freshchat.com"
+    cfg2 = FreshchatConfig(tenant_id="t", domain="acme.freshchat.com",
+                           oauth_domain="https://acme.myfreshworks.com/")
+    assert cfg2.effective_oauth_domain == "acme.myfreshworks.com"
+
+
+def test_available_recognizes_oauth_mode_without_api_token():
+    incomplete = FreshchatConfig(tenant_id="t", domain="acme.freshchat.com",
+                                 refresh_token="rt", client_id="cid")   # no client_secret
+    assert available(incomplete) is False
+    complete = FreshchatConfig(tenant_id="t", domain="acme.freshchat.com",
+                               refresh_token="rt", client_id="cid", client_secret="sec")
+    assert available(complete) is True
+
+
+def test_oauth_exchange_code_posts_basic_auth_and_form_body(monkeypatch):
+    from interpreter import freshchat
+    import requests as _requests
+
+    captured = {}
+
+    class _Resp:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {"access_token": "at1", "refresh_token": "rt1", "expires_in": 1800}
+
+    def fake_post(url, headers=None, data=None, timeout=None):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["data"] = data
+        return _Resp()
+
+    monkeypatch.setattr(_requests, "post", fake_post)
+    out = freshchat.oauth_exchange_code("acme.myfreshworks.com", "cid", "sec", "code123",
+                                        "https://app/cb")
+    assert out == {"access_token": "at1", "refresh_token": "rt1", "expires_in": 1800}
+    assert captured["url"] == "https://acme.myfreshworks.com/org/oauth/v2/token"
+    assert captured["headers"]["Authorization"].startswith("Basic ")
+    assert captured["data"] == {"grant_type": "authorization_code", "code": "code123",
+                                "redirect_uri": "https://app/cb"}
+
+
+def test_oauth_token_request_raises_when_no_access_token(monkeypatch):
+    from interpreter import freshchat
+    import requests as _requests
+
+    class _Resp:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {"error": "invalid_client"}
+
+    monkeypatch.setattr(_requests, "post", lambda *a, **k: _Resp())
+    with pytest.raises(RuntimeError, match="invalid_client"):
+        freshchat.oauth_exchange_code("acme.myfreshworks.com", "cid", "sec", "code", "https://app/cb")
+
+
+def test_bearer_token_prefers_static_api_token():
+    from interpreter.freshchat import _bearer_token
+
+    cfg = FreshchatConfig(tenant_id="t", api_token="static-tok", refresh_token="rt",
+                          client_id="cid", client_secret="sec")
+    assert _bearer_token(cfg) == "static-tok"
+
+
+def test_bearer_token_mints_and_persists_rotated_refresh_token(monkeypatch):
+    from interpreter import freshchat
+
+    monkeypatch.setattr(
+        freshchat, "oauth_refresh_access_token",
+        lambda domain, cid, sec, rt: {"access_token": "fresh-at", "refresh_token": "rt-new"},
+    )
+    sb = _FakeSB()
+    cfg = FreshchatConfig(tenant_id="t", domain="acme.freshchat.com",
+                          refresh_token="rt-old", client_id="cid", client_secret="sec")
+    tok = freshchat._bearer_token(cfg, sb)
+    assert tok == "fresh-at"
+    assert cfg.refresh_token == "rt-new"    # updated in-memory
+    stored = __import__("json").loads(sb._vault["freshchat"])
+    assert stored["refresh_token"] == "rt-new"    # and persisted
+
+
+def test_bearer_token_raises_without_any_credentials():
+    from interpreter.freshchat import _bearer_token
+
+    with pytest.raises(RuntimeError, match="no api_token"):
+        _bearer_token(FreshchatConfig(tenant_id="t"))

@@ -90,6 +90,39 @@ jobs:
           SF_DOMAIN: ${{ secrets.SF_DOMAIN }}
         run: python -m ingestion.case_graph_sync
 
+      # Scheduled refresh: `ingestion.kb_recrawl` reads every active
+      # `kb_source_connections` row (migration 091 — public_url / gsheets /
+      # gdocs / linear / nolt) and enqueues one `kb_sync` per connection.
+      # Just enqueues; the drain step right after runs them — there's no
+      # always-on worker host, same reason email-automation.yml drains its
+      # own queue in-workflow.
+      - name: Refresh KB sources (re-sync every active connection)
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m ingestion.kb_recrawl
+
+      # KB write-back to Google Docs (docs/KB_SOURCE_CONNECTORS.md §2): poll
+      # the GitHub verification issues each automated doc edit opened —
+      # closed -> `verified`; a `/revert` comment -> undo the doc edit +
+      # re-sync. Per-tenant GitHub tokens come from tenant_integrations; a
+      # revert enqueues a kb_sync the drain step below picks up.
+      - name: Close the loop on KB doc write-backs
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m ingestion.kb_writeback_watch
+
+      - name: Drain the job queue (kb_sync + gdoc_writeback + embed_kb_entry ...)
+        continue-on-error: true
+        if: always()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m api.worker --once
+
       # audit C3 — trim old finished jobs / settled runs
       - name: Purge old jobs + runs
         continue-on-error: true

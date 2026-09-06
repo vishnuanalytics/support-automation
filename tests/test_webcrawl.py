@@ -65,6 +65,8 @@ def crawl_net(monkeypatch):
     class _S:
         headers: dict = {}
         def get(self, url, **kw):
+            if url == "https://help.acme.com/sitemap.xml":
+                return _Resp("", status_code=404)
             if url not in pages:
                 raise AssertionError(f"unexpected fetch {url}")
             return _Resp(pages[url])
@@ -139,34 +141,128 @@ def test_crawl_stays_on_host_and_under_prefix(crawl_net):
     assert guide["title"] == "The Guide" and "Step one" in guide["markdown"]
 
 
+# ── sitemap-first discovery ──────────────────────────────────────────────
+_SITEMAP_URLSET = """<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://help.acme.com/docs/orphan</loc></url>
+  <url><loc>https://help.acme.com/docs/guide</loc></url>
+  <url><loc>https://help.acme.com/pricing</loc></url>
+  <url><loc>https://other.example/docs/x</loc></url>
+  <url><loc>https://help.acme.com/docs/manual.pdf</loc></url>
+</urlset>"""
+
+_SITEMAP_INDEX = """<?xml version="1.0" encoding="UTF-8"?>
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sitemap><loc>https://help.acme.com/sitemap-docs.xml</loc></sitemap>
+</sitemapindex>"""
+
+
+def test_sitemap_urls_filters_to_host_and_prefix_and_skips_assets(monkeypatch):
+    class _S:
+        def get(self, url, **kw):
+            assert url == "https://help.acme.com/sitemap.xml"
+            return _Resp(_SITEMAP_URLSET)
+
+    out = webcrawl._sitemap_urls(_S(), "https://help.acme.com", "help.acme.com", "/docs", timeout=5)
+    assert out == ["https://help.acme.com/docs/orphan", "https://help.acme.com/docs/guide"]
+
+
+def test_sitemap_urls_follows_one_level_of_sitemap_index(monkeypatch):
+    class _S:
+        def get(self, url, **kw):
+            if url == "https://help.acme.com/sitemap.xml":
+                return _Resp(_SITEMAP_INDEX)
+            assert url == "https://help.acme.com/sitemap-docs.xml"
+            return _Resp(_SITEMAP_URLSET)
+
+    out = webcrawl._sitemap_urls(_S(), "https://help.acme.com", "help.acme.com", "/docs", timeout=5)
+    assert "https://help.acme.com/docs/orphan" in out
+
+
+def test_sitemap_urls_missing_or_malformed_never_raises(monkeypatch):
+    class _S404:
+        def get(self, url, **kw):
+            return _Resp("", status_code=404)
+
+    class _SBad:
+        def get(self, url, **kw):
+            return _Resp("not xml at all")
+
+    class _SDown:
+        def get(self, url, **kw):
+            raise __import__("requests").RequestException("down")
+
+    for s in (_S404(), _SBad(), _SDown()):
+        assert webcrawl._sitemap_urls(s, "https://help.acme.com", "help.acme.com", "/docs", timeout=5) == []
+
+
+def test_crawl_finds_an_orphan_page_via_sitemap_that_bfs_never_would(monkeypatch):
+    pages = {
+        "https://help.acme.com/docs": _PAGE_A,
+        "https://help.acme.com/docs/guide": _PAGE_B,
+        "https://help.acme.com/docs/orphan": """<html><head><title>Orphan</title></head>
+        <body><main><h1>Orphan page</h1><p>Nothing on the crawled path links here, only the sitemap knows
+        about this page, which is exactly the gap sitemap-first discovery closes for real sites.</p>
+        </main></body></html>""",
+    }
+
+    class _S:
+        headers: dict = {}
+        def get(self, url, **kw):
+            if url == "https://help.acme.com/sitemap.xml":
+                return _Resp(_SITEMAP_URLSET)
+            if url not in pages:
+                raise AssertionError(f"unexpected fetch {url}")
+            return _Resp(pages[url])
+
+    import requests
+    monkeypatch.setattr(requests, "Session", lambda: _S())
+    monkeypatch.setattr(webcrawl, "RobotFileParser", lambda: None)
+    monkeypatch.setattr(webcrawl.time, "sleep", lambda *_: None)
+
+    pages_out = webcrawl.crawl("https://help.acme.com/docs", max_pages=10, max_depth=2)
+    urls = {p["url"] for p in pages_out}
+    assert "https://help.acme.com/docs/orphan" in urls
+    orphan = next(p for p in pages_out if p["url"].endswith("/orphan"))
+    assert orphan["title"] == "Orphan"
+
+
 def test_crawl_refuses_a_private_start():
     with pytest.raises(ValueError):
         webcrawl.crawl("http://127.0.0.1/docs")
 
 
-def test_worker_crawl_site_enqueues_one_embed_per_page(monkeypatch):
-    from api import worker
+# ── interpreter/kb_connectors: the public_url connector's sync() ──────────
+# The worker-side diff/upsert/embed/archive dance moved to the generic
+# _sync_kb_connection driver (tests/test_kb_connectors.py); this connector is
+# now just a pure producer of KBDocuments.
+from interpreter import kb_connectors  # noqa: E402
 
+
+def _ctx():
+    return kb_connectors.SyncCtx(tenant_id="t", sb=None, collection_name="c")
+
+
+def test_public_url_sync_makes_one_document_per_page(monkeypatch):
     monkeypatch.setattr("ingestion.webcrawl.crawl",
-                        lambda url, **k: [{"url": "u1", "title": "P1", "markdown": "x" * 200},
-                                          {"url": "u2", "title": "P2", "markdown": "y" * 200}])
-    enq = []
-    monkeypatch.setattr("interpreter.jobs.enqueue",
-                        lambda kind, payload, **kw: enq.append((kind, payload["entry_id"])))
+                        lambda url, **k: [{"url": "https://x/a", "title": "P1", "markdown": "x" * 50},
+                                          {"url": "https://x/b", "title": "P2", "markdown": "y" * 50}])
+    res = kb_connectors._sync_public_url({"url": "https://x", "max_pages": 20}, None, _ctx())
+    assert [d.external_id for d in res.documents] == ["P1", "P2"]
+    assert res.documents[0].body_md == "<!-- https://x/a -->\n\n" + "x" * 50
+    assert res.documents[0].origin == "crawl"
+    assert res.exhaustive is True
 
-    class _T:
-        def __init__(s): s.n = 0
-        def select(s, *a, **k): return s
-        def eq(s, *a, **k): return s
-        def limit(s, n): return s
-        def insert(s, row): s._row = row; return s
-        def update(s, row): s._row = row; return s
-        def execute(s):
-            s.n += 1
-            return type("R", (), {"data": [{"entry_id": f"e{s.n}"}]})
 
-    sb = type("SB", (), {"table": lambda self, n: _T()})()
-    out = worker._crawl_site({"source_id": "s", "tenant_id": "t", "collection_name": "c",
-                              "url": "https://x", "max_pages": 5}, sb)
-    assert out["entries"] == 2
-    assert [k for k, _ in enq] == ["embed_kb_entry", "embed_kb_entry"]
+def test_public_url_sync_not_exhaustive_when_truncated(monkeypatch):
+    monkeypatch.setattr("ingestion.webcrawl.crawl",
+                        lambda url, **k: [{"url": "https://x/a", "title": "P1", "markdown": "x" * 50}])
+    res = kb_connectors._sync_public_url({"url": "https://x", "max_pages": 1}, None, _ctx())
+    assert res.exhaustive is False   # pages == max_pages -> can't tell if anything is gone
+
+
+def test_public_url_normalize_rejects_non_http_and_clamps_pages():
+    spec = kb_connectors.get_kb_connector("public_url")
+    assert spec.normalize_config({"url": "https://x", "max_pages": 999})["max_pages"] == 50
+    with pytest.raises(ValueError):
+        spec.normalize_config({"url": "ftp://x"})

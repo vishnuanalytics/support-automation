@@ -192,9 +192,7 @@ def sync(*, since: str | None, limit: int, one_id: str | None, dry: bool) -> int
     if not dry:
         try:
             from ingestion.neo4j_sync import ensure_constraints, get_neo4j_driver
-            _d = get_neo4j_driver()
-            ensure_constraints(_d)
-            _d.close()
+            ensure_constraints(get_neo4j_driver())   # cached singleton — closed at exit
         except Exception as e:  # noqa: BLE001
             log.warning("constraint ensure skipped: %s", e)
         sb = get_supabase()

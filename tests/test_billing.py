@@ -110,22 +110,52 @@ def test_month_bounds_december_rolls_into_next_year():
     assert end.startswith("2027-01-01")
 
 
-def test_token_usage_sums_and_splits_by_model():
+def test_token_usage_sums_and_splits_by_model_and_node():
     trace = [
         {"type": "classify", "data": {"tokens": {"total": 120}, "model": "openai/gpt-oss-20b"}},
         {"type": "draft", "data": {"tokens": {"total": 380}, "model": "claude-sonnet-5"}},
+        {"type": "draft", "data": {"tokens": {"total": 20}, "model": "claude-sonnet-5"}},
         {"type": "sf_writeback", "data": {}},          # no tokens -> ignored
         {"type": "ai_prompt", "data": {"tokens": None, "model": "openai/gpt-oss-20b"}},
     ]
-    total, by_model = _token_usage(trace)
-    assert total == 500
-    assert by_model == {"openai/gpt-oss-20b": 120, "claude-sonnet-5": 380}
+    total, by_model, by_node = _token_usage(trace)
+    assert total == 520
+    assert by_model == {"openai/gpt-oss-20b": 120, "claude-sonnet-5": 400}
+    assert by_node == {"classify": 120, "draft": 400}
 
 
 def test_token_usage_empty_trace_is_zero_not_a_crash():
-    total, by_model = _token_usage([])
+    total, by_model, by_node = _token_usage([])
     assert total == 0
     assert by_model == {}
+    assert by_node == {}
+
+
+def test_usage_summary_by_node_splits_cost_proportionally():
+    rows = [
+        {"tokens_total": 300, "tokens_by_model": {"claude-sonnet-5": 300},
+         "tokens_by_node": {"draft": 200, "classify": 100},
+         "created_at": "2026-09-01T10:00:00+00:00"},
+        {"tokens_total": 100, "tokens_by_model": {"claude-sonnet-5": 100},
+         "tokens_by_node": {"draft": 100},
+         "created_at": "2026-09-02T10:00:00+00:00"},
+    ]
+    s = billing.usage_summary(rows, "pro", "2026-09-01T00:00:00+00:00",
+                              "2026-10-01T00:00:00+00:00")
+    by_node = {n["node"]: n for n in s["by_node"]}
+    assert by_node["draft"]["tokens"] == 300
+    assert by_node["classify"]["tokens"] == 100
+    # sorted tokens desc: draft first
+    assert [n["node"] for n in s["by_node"]] == ["draft", "classify"]
+    overall = s["estimated_cost_usd"]
+    assert by_node["draft"]["estimated_cost_usd"] == round(overall * 300 / 400, 4)
+
+
+def test_usage_summary_by_node_empty_when_no_rows_carry_it():
+    s = billing.usage_summary(
+        [{"tokens_total": 50, "tokens_by_model": {}, "created_at": None}],
+        "pro", "2026-09-01T00:00:00+00:00", "2026-10-01T00:00:00+00:00")
+    assert s["by_node"] == []
 
 
 # ── Phase 28 step 3: check_and_warn (warn-only quota enforcement) ──────

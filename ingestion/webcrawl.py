@@ -8,6 +8,15 @@ Bounded: `max_pages` (default 20), `max_depth` (2), one host, only under the
 start path. HTTP(S) only; obvious private / loopback hosts are refused (SSRF).
 Best-effort robots.txt `Disallow`. Text-only — headings + paragraphs + list
 items become light markdown; scripts/nav/footer stripped.
+
+Sitemap-first discovery (2026-09-05): before the BFS, `crawl()` best-effort
+fetches `/sitemap.xml` (following one level of a sitemap-index's own
+`<sitemap>` entries) and seeds every in-scope URL it finds straight into the
+queue. A pure link-follow BFS misses orphan pages (real content nothing on
+the crawled path links to) — a sitemap is the site's own index of what
+exists, cheaper and more complete than hoping BFS stumbles onto everything.
+Best-effort like robots.txt: a missing/malformed/blocked sitemap never fails
+the crawl, it just falls back to link-discovery alone.
 """
 
 from __future__ import annotations
@@ -17,6 +26,7 @@ import time
 from collections import deque
 from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
+from xml.etree import ElementTree
 
 import requests
 
@@ -28,6 +38,60 @@ _UA = "Mozilla/5.0 (compatible; SupportAutomationKBBot/1.0)"
 _SKIP_EXT = (".pdf", ".zip", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".mp4",
              ".css", ".js", ".ico", ".woff", ".woff2")
 _MAX_REDIRECTS = 5
+_SITEMAP_MAX_URLS = 500     # a pre-filter cap; max_pages still bounds actual fetches
+_SITEMAP_MAX_SUBMAPS = 10   # a sitemap index rarely needs more to find in-scope urls
+
+
+def _sitemap_urls(session: requests.Session, base: str, netloc: str, prefix: str,
+                  *, timeout: float) -> list[str]:
+    """Best-effort `sitemap.xml` discovery. Handles both a plain `<urlset>`
+    and a `<sitemapindex>` (one level of sub-sitemaps, capped) -- never
+    raises; a missing/malformed/blocked sitemap just yields nothing."""
+    def _fetch_xml(url: str) -> ElementTree.Element | None:
+        try:
+            if not _ok_host(url):
+                return None
+            r = session.get(url, timeout=timeout)
+            if r.status_code != 200:
+                return None
+            return ElementTree.fromstring(r.content if hasattr(r, "content") else r.text)
+        except Exception as e:  # noqa: BLE001 -- best-effort, same discipline as robots.txt
+            log.info("sitemap fetch %s: %s", url, e)
+            return None
+
+    root = _fetch_xml(urljoin(base, "/sitemap.xml"))
+    if root is None:
+        return []
+
+    def _locs(el: ElementTree.Element) -> list[str]:
+        # namespace-agnostic -- sitemaps almost always declare the standard
+        # xmlns, but tolerate one that doesn't rather than silently finding zero
+        return [loc.text.strip() for loc in el.iter()
+                if loc.tag.rsplit("}", 1)[-1] == "loc" and loc.text]
+
+    tag = root.tag.rsplit("}", 1)[-1]
+    urls: list[str] = []
+    if tag == "sitemapindex":
+        for sm in _locs(root)[:_SITEMAP_MAX_SUBMAPS]:
+            sub = _fetch_xml(sm)
+            if sub is not None:
+                urls.extend(_locs(sub))
+    else:
+        urls.extend(_locs(root))
+
+    out, seen = [], set()
+    for u in urls[:_SITEMAP_MAX_URLS * 2]:   # trim before the prefix filter, not after
+        u = u.split("#", 1)[0]
+        if u in seen:
+            continue
+        seen.add(u)
+        p = urlparse(u)
+        under = prefix == "/" or p.path == prefix or p.path.startswith(prefix + "/")
+        if p.netloc == netloc and under and not u.lower().endswith(_SKIP_EXT):
+            out.append(u)
+        if len(out) >= _SITEMAP_MAX_URLS:
+            break
+    return out
 
 
 def _ok_host(url: str) -> bool:
@@ -112,6 +176,11 @@ def crawl(start_url: str, *, max_pages: int = 20, max_depth: int = 2,
     pages: list[dict] = []
     s = requests.Session()
     s.headers["User-Agent"] = _UA
+
+    for u in _sitemap_urls(s, f"{start.scheme}://{start.netloc}", start.netloc, prefix,
+                           timeout=timeout):
+        if u not in seen:
+            q.append((u, 0))
 
     while q and len(pages) < max_pages:
         url, depth = q.popleft()

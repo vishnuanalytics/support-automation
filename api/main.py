@@ -1451,7 +1451,8 @@ def billing_usage(tenant_id: str | None = None, period: str | None = None,
     plan = (trows[0].get("plan") if trows else None) or "free"
 
     rows = (
-        c.sb.table("runs").select("flow_id, tokens_total, tokens_by_model, created_at")
+        c.sb.table("runs")
+        .select("flow_id, tokens_total, tokens_by_model, tokens_by_node, created_at")
         .eq("tenant_id", tid)
         .gte("created_at", period_start).lt("created_at", period_end)
         .limit(5000).execute().data
@@ -1464,6 +1465,59 @@ def billing_usage(tenant_id: str | None = None, period: str | None = None,
     }
     return {"period_label": period_label,
             **billing.usage_summary(rows, plan, period_start, period_end, flow_names)}
+
+
+@app.get("/api/billing/flow-deltas")
+def billing_flow_deltas(tenant_id: str | None = None, c: Caller = Depends(caller)) -> list[dict]:
+    """Which flows got more/less expensive per run right after their last
+    published edit — mean tokens/run in the 14 days before the newest
+    `flow_versions.created_at` vs since. Only flows with >= 5 runs on each
+    side are reported; `ratio` > 1 = pricier now. Owner-only."""
+    from datetime import datetime, timedelta, timezone
+
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    now = datetime.now(timezone.utc)
+    window_start = (now - timedelta(days=45)).isoformat()
+
+    flows = {f["flow_id"]: f["name"] for f in
+             (c.sb.table("flows").select("flow_id, name").eq("tenant_id", tid).execute().data or [])}
+    if not flows:
+        return []
+    # newest version per flow
+    latest: dict[str, str] = {}
+    for v in (c.sb.table("flow_versions").select("flow_id, created_at")
+              .in_("flow_id", list(flows)).order("created_at", desc=True)
+              .limit(2000).execute().data or []):
+        latest.setdefault(v["flow_id"], v["created_at"])
+
+    runs = (c.sb.table("runs").select("flow_id, tokens_total, created_at")
+            .eq("tenant_id", tid).gte("created_at", window_start)
+            .limit(8000).execute().data or [])
+
+    agg: dict[str, dict[str, list[int]]] = {}
+    for r in runs:
+        fid, edited = r.get("flow_id"), latest.get(r.get("flow_id"))
+        if not (fid and edited):
+            continue
+        side = "after" if r["created_at"] >= edited else "before"
+        agg.setdefault(fid, {"before": [], "after": []})[side].append(int(r.get("tokens_total") or 0))
+
+    out = []
+    for fid, s in agg.items():
+        if len(s["before"]) < 5 or len(s["after"]) < 5:
+            continue
+        b = sum(s["before"]) / len(s["before"])
+        a = sum(s["after"]) / len(s["after"])
+        out.append({
+            "flow_id": fid, "name": flows.get(fid, fid),
+            "edited_at": latest[fid],
+            "before_avg_tokens": round(b), "after_avg_tokens": round(a),
+            "ratio": round(a / b, 2) if b else None,
+            "runs_before": len(s["before"]), "runs_after": len(s["after"]),
+        })
+    out.sort(key=lambda x: -(x["ratio"] or 0))
+    return out
 
 
 # ── KIL-f: the Knowledge Integrity Loop review queue + metrics ─────────
@@ -1509,6 +1563,127 @@ def kil_metrics_ep(days: int = 30, tenant_id: str | None = None,
     from interpreter import kil_metrics
     tid = _caller_tenant(c, tenant_id)
     return kil_metrics.compute(c.sb, tid, days=min(max(days, 1), 180))
+
+
+@app.get("/api/health/tenant")
+def tenant_health(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    """One 'is my bot healthy' payload for a tenant — the signals that are
+    already tenant-scoped: connected sources failing to sync, the KIL review
+    backlog, reasoning sessions stuck open, doc write-backs still awaiting a
+    human, and the last-24h run-outcome mix (a high handover / need-info rate
+    means the bot is struggling to answer). Read-only, cheap counts."""
+    from datetime import datetime, timedelta, timezone
+
+    tid = _caller_tenant(c, tenant_id)
+    now = datetime.now(timezone.utc)
+    day_ago = (now - timedelta(hours=24)).isoformat()
+    stuck_before = (now - timedelta(hours=6)).isoformat()
+
+    conns = (c.sb.table("kb_source_connections")
+             .select("status, last_result")
+             .eq("tenant_id", tid).neq("status", "archived").execute().data or [])
+    failing = [x for x in conns if x.get("status") == "error"]
+
+    open_tasks = (c.sb.table("review_tasks").select("created_at")
+                  .eq("tenant_id", tid).eq("status", "open").execute().data or [])
+    oldest_days = None
+    if open_tasks:
+        oldest = min(t["created_at"] for t in open_tasks)
+        oldest_days = round((now - datetime.fromisoformat(oldest.replace("Z", "+00:00"))).days, 1)
+
+    reasoning_stuck = len(
+        c.sb.table("reasoning_sessions").select("session_id")
+        .eq("tenant_id", tid).in_("state", ["open", "clarifying", "reasoning"])
+        .lt("updated_at", stuck_before).execute().data or [])
+
+    wb_pending = len(
+        c.sb.table("kb_doc_writebacks").select("id")
+        .eq("tenant_id", tid).in_("status", ["applied", "partial"]).execute().data or [])
+
+    failed_jobs = len(
+        _service.table("jobs").select("job_id")
+        .eq("tenant_id", tid).eq("status", "failed")
+        .gte("updated_at", day_ago).execute().data or [])
+
+    runs = (c.sb.table("runs").select("outcome")
+            .eq("tenant_id", tid).gte("created_at", day_ago).limit(2000).execute().data or [])
+    by_outcome: dict[str, int] = {}
+    for r in runs:
+        by_outcome[r.get("outcome") or "?"] = by_outcome.get(r.get("outcome") or "?", 0) + 1
+    n = len(runs) or 1
+    struggle = by_outcome.get("handover", 0) + by_outcome.get("need_info", 0)
+
+    sys_stale = []
+    for h in (_service.table("system_health").select("component, last_healthy_at")
+              .execute().data or []):
+        lh = h.get("last_healthy_at")
+        if lh:
+            hrs = (now - datetime.fromisoformat(lh.replace("Z", "+00:00"))).total_seconds() / 3600
+            if hrs > 26:
+                sys_stale.append({"component": h["component"], "stale_hours": round(hrs, 1)})
+
+    return {
+        "tenant_id": tid,
+        "connections": {"failing": len(failing),
+                        "sample": ((failing[0].get("last_result") or {}).get("error")
+                                   if failing else None)},
+        "review_backlog": {"open": len(open_tasks), "oldest_days": oldest_days},
+        "reasoning_stuck": reasoning_stuck,
+        "doc_writebacks_pending": wb_pending,
+        "failed_jobs_24h": failed_jobs,
+        "runs_24h": {"total": len(runs), "by_outcome": by_outcome,
+                     "struggle_rate": round(struggle / n, 3)},
+        "system_stale": sys_stale,
+    }
+
+
+@app.get("/api/jobs/failures")
+def job_failures(hours: int = 24, limit: int = 50, tenant_id: str | None = None,
+                 c: Caller = Depends(caller)) -> dict:
+    """Jobs that ran out of retries for this tenant in the last `hours`.
+    Owner-only. Never returns the payload (it can hold case text) — only
+    the kind, attempt count, truncated error and timestamps."""
+    from datetime import datetime, timedelta, timezone
+
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    hours = min(max(hours, 1), 168)
+    limit = min(max(limit, 1), 200)
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
+    rows = (_service.table("jobs")
+            .select("job_id, kind, attempts, max_attempts, error, dedupe_key, "
+                    "created_at, updated_at")
+            .eq("tenant_id", tid).eq("status", "failed")
+            .gte("updated_at", since)
+            .order("updated_at", desc=True).limit(limit).execute().data or [])
+    by_kind: dict[str, int] = {}
+    for r in rows:
+        by_kind[r["kind"]] = by_kind.get(r["kind"], 0) + 1
+    return {"window_hours": hours, "total": len(rows),
+            "by_kind": by_kind, "failures": rows}
+
+
+class GraphAskIn(BaseModel):
+    question: str
+    tenant_id: str | None = None
+
+
+@app.post("/api/graph/ask")
+def graph_ask(body: GraphAskIn, c: Caller = Depends(caller)) -> dict:
+    """Owner-only 'ask the case graph in English'. The question is turned
+    into a bounded JSON query spec by an LLM, then compiled deterministically
+    to a read-only, tenant-scoped Cypher query — the LLM never authors
+    Cypher (see interpreter/graph_query.py). Returns the compiled query
+    alongside the rows for transparency."""
+    from interpreter import graph_query
+
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    try:
+        return graph_query.answer(body.question, tid)
+    except graph_query.GraphQueryError as e:
+        raise HTTPException(422, str(e))
 
 
 @app.get("/api/kil/digest")
@@ -1783,8 +1958,39 @@ def _now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
+# Every tenant has one canonical org-level KB collection — the default target
+# for connected sources, and what a chat flow's `retrieve` node reads when it
+# names no `kb_sources`. Team collections are optional on top of it.
+_ORG_KB_NAME = "Organization knowledge"
+
+
+def _ensure_org_kb(tenant_id: str) -> dict:
+    """Find (or lazily create) the tenant's org KB collection. Never promotes
+    an existing team collection — a tenant that already had collections just
+    gets the org KB added alongside."""
+    rows = (_service.table("sources").select("source_id, name, config, created_at")
+            .eq("kind", "internal_kb").eq("tenant_id", tenant_id)
+            .neq("status", "archived").execute().data or [])
+    for s in rows:
+        if (s.get("config") or {}).get("org_kb"):
+            return s
+    return (_service.table("sources").insert({
+        "kind": "internal_kb", "tenant_id": tenant_id, "name": _ORG_KB_NAME,
+        "config": {"org_kb": True,
+                   "description": "Every connected knowledge source feeds this. "
+                                  "Your chat flows read all of it by default."},
+    }).execute().data)[0]
+
+
 @app.get("/api/kb/collections")
 def kb_list_collections(c: Caller = Depends(caller)) -> list[dict]:
+    for t in [r["tenant_id"] for r in
+              (c.sb.table("tenant_members").select("tenant_id").execute().data or [])]:
+        try:
+            _ensure_org_kb(t)
+        except Exception as e:  # noqa: BLE001
+            log.warning("ensure_org_kb(%s): %s", t, e)
+
     cols = (c.sb.table("sources").select("*")
             .eq("kind", "internal_kb").neq("status", "archived").execute().data or [])
     out = []
@@ -1798,9 +2004,35 @@ def kb_list_collections(c: Caller = Depends(caller)) -> list[dict]:
             "description": (s.get("config") or {}).get("description"),
             "tenant_id": s["tenant_id"], "entry_count": len(active),
             "provisional_count": len(provisional),
+            "org_kb": bool((s.get("config") or {}).get("org_kb")),
             "created_at": s.get("created_at"),
         })
+    out.sort(key=lambda r: (not r["org_kb"], (r["name"] or "").lower()))
     return out
+
+
+@app.get("/api/kb/connections")
+def kb_list_all_connections(tenant_id: str | None = None, c: Caller = Depends(caller)) -> list[dict]:
+    """Every connected source for the caller's tenant, across all collections
+    — the org-wide "what feeds the KB" view (onboarding + the Knowledge
+    panel's org section)."""
+    tid = _caller_tenant(c, tenant_id)
+    conns = (c.sb.table("kb_source_connections").select("*")
+             .eq("tenant_id", tid).neq("status", "archived")
+             .order("created_at").execute().data or [])
+    col_names = {s["source_id"]: s["name"] for s in
+                 (c.sb.table("sources").select("source_id, name")
+                  .eq("kind", "internal_kb").execute().data or [])}
+    counts: dict[str, int] = {}
+    for e in (c.sb.table("kb_entries").select("connection_id, status")
+              .eq("tenant_id", tid).execute().data or []):
+        cid = e.get("connection_id")
+        if cid and e["status"] == "active":
+            counts[cid] = counts.get(cid, 0) + 1
+    for r in conns:
+        r["collection_name"] = col_names.get(r["source_id"])
+        r["entry_count"] = counts.get(r["connection_id"], 0)
+    return conns
 
 
 @app.post("/api/kb/collections", status_code=201)
@@ -1871,7 +2103,8 @@ def kb_list_entries(sid: str, c: Caller = Depends(caller)) -> list[dict]:
     _kb_collection(c, sid)
     rows = (c.sb.table("kb_entries")
             .select("entry_id, title, status, chunk_count, embedded_at, updated_at, "
-                    "updated_by, origin, gdoc_url, synced_at, sync_error, "
+                    "updated_by, origin, quality, gdoc_url, gsheet_id, gsheet_range, gsheet_row, "
+                    "synced_at, sync_error, "
                     "provisional_until, supersedes_entry_id, source_review_task")
             .eq("source_id", sid).neq("status", "archived")
             .order("updated_at", desc=True).execute().data or [])
@@ -1940,21 +2173,383 @@ class KbCrawlIn(BaseModel):
     max_pages: int = 20
 
 
-@app.post("/api/kb/collections/{sid}/crawl", status_code=202)
-def kb_crawl_site(sid: str, body: KbCrawlIn, c: Caller = Depends(caller)) -> dict:
-    """P7c — crawl a public docs site (BFS, same host + path prefix) and turn
-    each page into a KB entry. Async — the worker does the fetching."""
+# ── KB source connections (docs/KB_SOURCE_CONNECTORS.md) ───────────────────
+# A "connected feed" (a crawl root, a Google Sheet/Doc, later Linear/Discourse/
+# Nolt) is a first-class `kb_source_connections` row, not an array buried in
+# `sources.config`. Every connector plugs in through one registry
+# (`interpreter/kb_connectors.py`), one generic sync job (`kb_sync`), and these
+# routes — no per-connector endpoint. `/crawl`, `/gdoc`, `/gsheet`, `/resync`
+# below are kept as thin wrappers over this so old callers don't break.
+
+class KbConnectionIn(BaseModel):
+    connector: str
+    config: dict[str, Any] = {}
+    label: str | None = None
+
+
+class KbConnectionPatch(BaseModel):
+    status: str | None = None            # 'active' | 'paused'
+    label: str | None = None
+    config: dict[str, Any] | None = None  # partial — merged onto the stored config, re-normalized
+
+
+class KbDocDefaultsIn(BaseModel):
+    tenant_id: str | None = None
+    index: bool | None = None
+    on_correction: str | None = None      # 'off' | 'suggest' | 'write_back'
+    github_repo: str | None = None
+
+
+_KB_DOC_SYSTEM_DEFAULTS = {"index": True, "on_correction": "off"}
+
+
+def _validate_kb_doc_defaults(body: "KbDocDefaultsIn") -> dict:
+    """The stored blob is *partial* — only the keys the org actually set.
+    Same rules as a per-connection gdocs config: `on_correction` in the
+    enum, and if it's not 'off' the default must also carry a valid
+    `github_repo` and not force `index` off."""
+    out: dict[str, Any] = {}
+    if body.index is not None:
+        out["index"] = bool(body.index)
+    oc = (body.on_correction or "").strip()
+    if oc:
+        if oc not in ("off", "suggest", "write_back"):
+            raise HTTPException(422, "on_correction must be 'off', 'suggest' or 'write_back'")
+        out["on_correction"] = oc
+    repo = (body.github_repo or "").strip()
+    if repo:
+        if repo.count("/") != 1 or not all(repo.split("/")):
+            raise HTTPException(422, "github_repo must be 'owner/name'")
+        out["github_repo"] = repo
+    if out.get("on_correction", "off") != "off":
+        if out.get("index") is False:
+            raise HTTPException(422, "a 'suggest' / 'write_back' default needs index = true")
+        if "github_repo" not in out:
+            raise HTTPException(422, "a 'suggest' / 'write_back' default needs a github_repo")
+    return out
+
+
+def _kb_doc_defaults(tenant_id: str) -> dict:
+    rows = (_service.table("tenants").select("kb_doc_defaults")
+            .eq("tenant_id", tenant_id).execute().data or [])
+    return (rows[0].get("kb_doc_defaults") if rows else None) or {}
+
+
+@app.get("/api/kb/doc-defaults")
+def kb_get_doc_defaults(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    """The org-level default for a new Google Doc connection's two knobs.
+    `stored` is what was set ({} = none); `effective` = system defaults with
+    `stored` layered on."""
+    tid = _caller_tenant(c, tenant_id)
+    stored = _kb_doc_defaults(tid)
+    return {"tenant_id": tid, "stored": stored,
+            "effective": {**_KB_DOC_SYSTEM_DEFAULTS, **stored}}
+
+
+@app.put("/api/kb/doc-defaults")
+def kb_set_doc_defaults(body: KbDocDefaultsIn, c: Caller = Depends(caller)) -> dict:
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_editor(c, tid)
+    rate_limit(c.user_id, "kb_write", 60)
+    clean = _validate_kb_doc_defaults(body)
+    updated = (_service.table("tenants").update({"kb_doc_defaults": clean})
+               .eq("tenant_id", tid).execute().data)
+    if not updated:   # a pre-`tenants`-table tenant (see set_case_connector)
+        _service.table("tenants").upsert(
+            {"tenant_id": tid, "name": f"workspace {tid[:8]}", "kb_doc_defaults": clean}
+        ).execute()
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="kb.doc_defaults_changed",
+                 actor_id=c.user_id, actor_email=c.email, target_type="tenant", target_id=tid,
+                 summary=f"Google-Doc defaults set to {clean or '(cleared)'}")
+    return {"tenant_id": tid, "stored": clean,
+            "effective": {**_KB_DOC_SYSTEM_DEFAULTS, **clean}}
+
+
+def _kb_connection(c: Caller, cid: str) -> dict:
+    rows = (c.sb.table("kb_source_connections").select("*")
+            .eq("connection_id", cid).neq("status", "archived").execute().data or [])
+    if not rows:
+        raise HTTPException(404, "connection not found or not visible to you")
+    return rows[0]
+
+
+def _kb_pull_secrets(tenant_id: str, connector: str, spec, raw_config: dict) -> dict:
+    """Pop any `secret: true` config field (an API key) out of `raw_config`
+    into Supabase Vault under the connector kind — merged with any prior
+    value, so a blank field reuses the saved one — and return `raw_config`
+    without it. A secret must never reach the `kb_source_connections.config`
+    row (returned to the browser)."""
+    from interpreter import vault_secrets
+
+    raw = dict(raw_config or {})
+    secrets = {f["key"]: str(raw.pop(f["key"], "")).strip()
+               for f in spec.config_fields if f.get("secret")}
+    secrets = {k: v for k, v in secrets.items() if v}
+    if secrets:
+        prior = vault_secrets.get(tenant_id, connector, sb=_service)
+        vault_id = vault_secrets.put(tenant_id, connector, {**prior, **secrets}, sb=_service)
+        row = {"tenant_id": tenant_id, "kind": connector, "secret": {"has_credentials": True}}
+        if vault_id:
+            row["vault_secret_id"] = vault_id   # match the slack/llm integration shape
+        _service.table("tenant_integrations").upsert(row).execute()
+    return raw
+
+
+def _kb_add_connection(c: Caller, col: dict, connector: str, raw_config: dict,
+                       label: str | None) -> dict:
+    """Validate + create a connection row and kick off its first sync. Shared
+    by POST /connections and the /crawl,/gdoc,/gsheet wrappers."""
+    from interpreter import audit
+    from interpreter.kb_connectors import get_kb_connector
+
+    try:
+        spec = get_kb_connector(connector)
+    except KeyError:
+        raise HTTPException(422, f"unknown connector {connector!r}")
+    raw_config = dict(raw_config or {})
+    # gdocs inherits the tenant's org-level default for any knob the caller
+    # didn't set explicitly (the "+ add source" form pre-fills from it, so
+    # this is the backstop for API callers / form gaps).
+    if connector == "gdocs":
+        raw_config = {**_kb_doc_defaults(col["tenant_id"]), **raw_config}
+
+    raw_config = _kb_pull_secrets(col["tenant_id"], connector, spec, raw_config)
+
+    ok, reason = spec.is_available(col["tenant_id"], _service)
+    if not ok:
+        raise HTTPException(400, reason or f"{spec.label} is not available")
+    try:
+        config = spec.normalize_config(raw_config)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+    row = c.sb.table("kb_source_connections").insert({
+        "source_id": col["source_id"], "tenant_id": col["tenant_id"],
+        "connector": connector, "config": config,
+        "label": (label or "").strip() or config.get("url") or config.get("doc_url")
+                 or config.get("sheet_id") or spec.label,
+        "created_by": c.user_id,
+    }).execute().data[0]
+    jobs.enqueue("kb_sync", {"connection_id": row["connection_id"],
+                             "collection_name": col["name"]},
+                 dedupe_key=f"kb_sync:{row['connection_id']}", sb=_service)
+    audit.record(_service, tenant_id=col["tenant_id"], action="kb_connection.created",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="kb_connection", target_id=row["connection_id"],
+                 summary=f"connected {spec.label} to KB collection "
+                         f"{col.get('name', col['source_id'])!r}")
+    return row
+
+
+@app.get("/api/kb/connectors")
+def kb_list_connectors(tenant_id: str | None = None, c: Caller = Depends(caller)) -> list[dict]:
+    """The KB source-connector catalogue for the '+ add source' form, each
+    with whether its auth prerequisite is met for this tenant."""
+    from interpreter.kb_connectors import list_kb_connectors
+
+    tid = _caller_tenant(c, tenant_id)
+    out = []
+    for spec in list_kb_connectors():
+        ok, why = spec.is_available(tid, _service)
+        out.append({"slug": spec.slug, "label": spec.label, "auth": spec.auth,
+                    "config_fields": spec.config_fields, "available": ok, "reason": why})
+    return out
+
+
+class KbConnectorTestIn(BaseModel):
+    tenant_id: str | None = None
+    api_key: str | None = None
+    board_id: str | None = None
+    base_url: str | None = None
+    api_username: str | None = None
+
+
+@app.post("/api/kb/connectors/{slug}/test")
+def kb_test_connector(slug: str, body: KbConnectorTestIn, c: Caller = Depends(caller)) -> dict:
+    """Lightweight authed read against an apikey connector's API — saves
+    nothing. Uses the posted `api_key` (a not-yet-saved key from the form)
+    or falls back to the stored one. -> {ok, detail}."""
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_editor(c, tid)
+    rate_limit(c.user_id, "integration", 20)
+    key = (body.api_key or "").strip() or None
+    if slug == "linear":
+        from interpreter import linear
+        return linear.test_connection(tid, _service, api_key=key)
+    if slug == "nolt":
+        from interpreter import nolt
+        if not (body.board_id or "").strip():
+            raise HTTPException(422, "board_id is required to test Nolt")
+        return nolt.test_connection(tid, _service, body.board_id.strip(), api_key=key)
+    if slug == "discourse":
+        from interpreter import discourse
+        if not (body.base_url or "").strip():
+            raise HTTPException(422, "base_url is required to test a Discourse forum")
+        return discourse.test_connection(tid, _service, body.base_url.strip(),
+                                         api_key=key, api_username=(body.api_username or None))
+    raise HTTPException(422, f"no connection test for connector {slug!r}")
+
+
+@app.get("/api/kb/collections/{sid}/connections")
+def kb_list_connections(sid: str, c: Caller = Depends(caller)) -> list[dict]:
+    _kb_collection(c, sid)
+    conns = (c.sb.table("kb_source_connections").select("*")
+             .eq("source_id", sid).neq("status", "archived")
+             .order("created_at").execute().data or [])
+    counts: dict[str, int] = {}
+    for e in (c.sb.table("kb_entries").select("connection_id, status")
+              .eq("source_id", sid).execute().data or []):
+        cid = e.get("connection_id")
+        if cid and e["status"] == "active":
+            counts[cid] = counts.get(cid, 0) + 1
+    for r in conns:
+        r["entry_count"] = counts.get(r["connection_id"], 0)
+    return conns
+
+
+@app.post("/api/kb/collections/{sid}/connections", status_code=202)
+def kb_create_connection(sid: str, body: KbConnectionIn, c: Caller = Depends(caller)) -> dict:
+    rate_limit(c.user_id, "kb_write", 60)
     col = _kb_collection(c, sid)
     _require_editor(c, col["tenant_id"])
-    if not body.url.startswith(("http://", "https://")):
-        raise HTTPException(422, "url must be http(s)")
+    return _kb_add_connection(c, col, body.connector, body.config, body.label)
+
+
+@app.post("/api/kb/connections/{cid}/sync", status_code=202)
+def kb_sync_connection(cid: str, c: Caller = Depends(caller)) -> dict:
     rate_limit(c.user_id, "kb_write", 60)
-    job_id = jobs.enqueue("crawl_site", {
-        "source_id": sid, "tenant_id": col["tenant_id"], "collection_name": col["name"],
-        "url": body.url, "max_pages": max(1, min(body.max_pages, 50)),
-        "created_by": c.user_id,
-    }, dedupe_key=f"crawl:{sid}:{body.url}", sb=_service)
+    conn = _kb_connection(c, cid)
+    _require_editor(c, conn["tenant_id"])
+    job_id = jobs.enqueue("kb_sync", {"connection_id": cid},
+                          dedupe_key=f"kb_sync:{cid}", sb=_service)
     return {"job_id": job_id, "deduped": job_id is None}
+
+
+@app.patch("/api/kb/connections/{cid}")
+def kb_update_connection(cid: str, body: KbConnectionPatch, c: Caller = Depends(caller)) -> dict:
+    """Change a connection's status (pause/resume), label, and/or `config`.
+    A `config` patch is merged onto the stored config and re-normalized
+    through the connector's spec, then a re-sync is kicked off. Secret
+    fields (an API key) are routed to Vault, not the row."""
+    conn = _kb_connection(c, cid)
+    _require_editor(c, conn["tenant_id"])
+    if body.status not in (None, "active", "paused"):
+        raise HTTPException(422, "status must be 'active' or 'paused'")
+
+    patch: dict[str, Any] = {}
+    resync = False
+    if body.status is not None:
+        patch["status"] = body.status
+    if body.label is not None:
+        patch["label"] = body.label.strip()
+
+    if body.config is not None:
+        from interpreter.kb_connectors import get_kb_connector
+        try:
+            spec = get_kb_connector(conn["connector"])
+        except KeyError:
+            raise HTTPException(422, f"unknown connector {conn['connector']!r}")
+        rate_limit(c.user_id, "kb_write", 60)
+        raw = _kb_pull_secrets(conn["tenant_id"], conn["connector"], spec, body.config)
+        merged = {**(conn.get("config") or {}), **raw}
+        try:
+            patch["config"] = spec.normalize_config(merged)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        patch["status"] = "active"   # a config edit re-activates + re-syncs
+        resync = True
+
+    if not patch:
+        return conn
+    updated = (c.sb.table("kb_source_connections").update(patch)
+               .eq("connection_id", cid).execute().data[0])
+    if resync or patch.get("status") == "active":
+        jobs.enqueue("kb_sync", {"connection_id": cid},
+                     dedupe_key=f"kb_sync:{cid}", sb=_service)
+    if resync:
+        from interpreter import audit
+        audit.record(_service, tenant_id=conn["tenant_id"], action="kb_connection.updated",
+                     actor_id=c.user_id, actor_email=c.email,
+                     target_type="kb_connection", target_id=cid,
+                     summary=f"edited the {conn.get('connector')} connection's config")
+    return updated
+
+
+@app.delete("/api/kb/connections/{cid}", status_code=204)
+def kb_delete_connection(cid: str, c: Caller = Depends(caller)) -> None:
+    from interpreter import audit
+
+    conn = _kb_connection(c, cid)
+    _require_editor(c, conn["tenant_id"])
+    c.sb.table("kb_source_connections").update({"status": "archived"}) \
+        .eq("connection_id", cid).execute()
+    entries = (c.sb.table("kb_entries").select("entry_id, source_id")
+               .eq("connection_id", cid).neq("status", "archived").execute().data or [])
+    for e in entries:
+        c.sb.table("kb_entries").update({"status": "archived"}) \
+            .eq("entry_id", e["entry_id"]).execute()
+        _kb_delete(_service, url=_kb_url(e["source_id"], e["entry_id"]))
+    audit.record(_service, tenant_id=conn["tenant_id"], action="kb_connection.deleted",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="kb_connection", target_id=cid,
+                 summary=f"disconnected {conn.get('connector')} from a KB collection "
+                         f"({len(entries)} entries archived)")
+
+
+@app.get("/api/kb/collections/{sid}/doc-writebacks")
+def kb_list_doc_writebacks(sid: str, c: Caller = Depends(caller)) -> list[dict]:
+    """KB write-back audit (docs/KB_SOURCE_CONNECTORS.md §2) — the automated
+    Google-Doc edits made after a KIL correction was approved, for this
+    collection's connections, newest first."""
+    _kb_collection(c, sid)
+    cids = [r["connection_id"] for r in
+            (c.sb.table("kb_source_connections").select("connection_id")
+             .eq("source_id", sid).execute().data or [])]
+    if not cids:
+        return []
+    return (c.sb.table("kb_doc_writebacks").select("*")
+            .in_("connection_id", cids).order("applied_at", desc=True)
+            .execute().data or [])
+
+
+_KB_WB_OPEN = ("suggested", "applied", "partial", "conflict")
+
+
+@app.get("/api/kb/doc-writebacks")
+def kb_list_all_doc_writebacks(tenant_id: str | None = None, status: str = "open",
+                               c: Caller = Depends(caller)) -> list[dict]:
+    """Tenant-wide KB write-back audit for the review UI. `status`: 'open'
+    (still awaiting a human on GitHub) or 'all'. Each row is enriched with
+    its connection's label + doc url."""
+    tid = _caller_tenant(c, tenant_id)
+    q = (c.sb.table("kb_doc_writebacks").select("*").eq("tenant_id", tid)
+         .order("applied_at", desc=True).limit(200))
+    if status != "all":
+        q = q.in_("status", list(_KB_WB_OPEN))
+    rows = q.execute().data or []
+    conns = {
+        r["connection_id"]: r for r in
+        (c.sb.table("kb_source_connections")
+         .select("connection_id, label, config")
+         .eq("tenant_id", tid).execute().data or [])
+    }
+    for r in rows:
+        cn = conns.get(r.get("connection_id")) or {}
+        r["connection_label"] = cn.get("label")
+        r["doc_url"] = (cn.get("config") or {}).get("doc_url")
+    return rows
+
+
+@app.post("/api/kb/collections/{sid}/crawl", status_code=202)
+def kb_crawl_site(sid: str, body: KbCrawlIn, c: Caller = Depends(caller)) -> dict:
+    """Deprecated — thin wrapper over POST /connections {connector:"public_url"}."""
+    rate_limit(c.user_id, "kb_write", 60)
+    col = _kb_collection(c, sid)
+    _require_editor(c, col["tenant_id"])
+    return _kb_add_connection(c, col, "public_url",
+                              {"url": body.url, "max_pages": body.max_pages}, None)
 
 
 # ── Phase 28 step 6: bulk KB export/import ──────────────────────────────
@@ -2131,66 +2726,45 @@ def google_callback(code: str = "", state: str = "", error: str = "") -> HTMLRes
     return page("Google connected. You can close this window.")
 
 
-@app.post("/api/kb/collections/{sid}/gdoc", status_code=201)
+@app.post("/api/kb/collections/{sid}/gdoc", status_code=202)
 def kb_link_gdoc(sid: str, body: GdocLinkIn, c: Caller = Depends(caller)) -> dict:
+    """Deprecated — thin wrapper over POST /connections {connector:"gdocs"}."""
     rate_limit(c.user_id, "kb_write", 60)
     col = _kb_collection(c, sid)
     _require_editor(c, col["tenant_id"])
-    if not gdrive.connected(col["tenant_id"], _service):
-        raise HTTPException(400, "connect Google for this tenant first")
-    try:
-        doc_id = gdrive.parse_doc_id(body.doc_url)
-        fetched = gdrive.fetch_doc(col["tenant_id"], doc_id, _service)
-    except ValueError as e:
-        raise HTTPException(422, str(e))
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(502, f"Google fetch failed: {e}")
-
-    existing = (c.sb.table("kb_entries").select("entry_id")
-                .eq("source_id", sid).eq("gdoc_id", doc_id).neq("status", "archived")
-                .execute().data or [])
-    row = {
-        "source_id": sid, "tenant_id": col["tenant_id"], "title": fetched["title"],
-        "body_md": fetched["markdown"], "origin": "gdoc", "gdoc_id": doc_id,
-        "gdoc_url": body.doc_url.strip(), "gdoc_modified": fetched["modified_time"],
-        "synced_at": _now_iso(), "sync_error": None,
-        "created_by": c.user_id, "updated_by": c.user_id,
-    }
-    if existing:
-        eid = existing[0]["entry_id"]
-        entry = c.sb.table("kb_entries").update(row).eq("entry_id", eid).execute().data[0]
-        action, verb = "kb_entry.updated", "re-synced"
-    else:
-        entry = c.sb.table("kb_entries").insert(row).execute().data[0]
-        action, verb = "kb_entry.created", "linked"
-
-    from interpreter import audit
-    audit.record(_service, tenant_id=col["tenant_id"], action=action,
-                 actor_id=c.user_id, actor_email=c.email,
-                 target_type="kb_entry", target_id=entry["entry_id"],
-                 summary=f"{verb} Google Doc {fetched['title']!r} into {col.get('name', sid)!r}")
-    return _kb_after_write(entry, col, c)
+    return _kb_add_connection(c, col, "gdocs", {"doc_url": body.doc_url}, None)
 
 
-@app.post("/api/kb/entries/{eid}/resync")
+class GsheetLinkIn(BaseModel):
+    sheet_url: str
+    sheet_name: str | None = None
+
+
+@app.post("/api/kb/collections/{sid}/gsheet", status_code=202)
+def kb_link_gsheet(sid: str, body: GsheetLinkIn, c: Caller = Depends(caller)) -> dict:
+    """Deprecated — thin wrapper over POST /connections {connector:"gsheets"}."""
+    rate_limit(c.user_id, "kb_write", 60)
+    col = _kb_collection(c, sid)
+    _require_editor(c, col["tenant_id"])
+    return _kb_add_connection(c, col, "gsheets",
+                              {"sheet_url": body.sheet_url, "sheet_name": body.sheet_name}, None)
+
+
+@app.post("/api/kb/entries/{eid}/resync", status_code=202)
 def kb_resync_gdoc(eid: str, c: Caller = Depends(caller)) -> dict:
+    """Re-sync the connection that produced this entry (crawl / gsheet / gdoc).
+    A connection re-sync re-fetches every document the feed holds, so a single
+    entry's resync button just kicks off its whole connection."""
     rate_limit(c.user_id, "kb_write", 60)
     entry = _kb_entry(c, eid)
-    if entry.get("origin") != "gdoc":
-        raise HTTPException(400, "not a Google-linked entry")
+    cid = entry.get("connection_id")
+    if not cid:
+        raise HTTPException(400, "not a connected (synced) entry")
     col = _kb_collection(c, entry["source_id"])
     _require_editor(c, col["tenant_id"])
-    try:
-        fetched = gdrive.fetch_doc(col["tenant_id"], entry["gdoc_id"], _service)
-    except Exception as e:  # noqa: BLE001
-        c.sb.table("kb_entries").update({"sync_error": str(e)[:500]}).eq("entry_id", eid).execute()
-        raise HTTPException(502, f"Google fetch failed: {e}")
-    updated = c.sb.table("kb_entries").update({
-        "title": fetched["title"], "body_md": fetched["markdown"],
-        "gdoc_modified": fetched["modified_time"], "synced_at": _now_iso(),
-        "sync_error": None, "updated_by": c.user_id,
-    }).eq("entry_id", eid).execute().data[0]
-    return _kb_after_write(updated, col, c)
+    job_id = jobs.enqueue("kb_sync", {"connection_id": cid, "collection_name": col["name"]},
+                          dedupe_key=f"kb_sync:{cid}", sb=_service)
+    return {"job_id": job_id, "deduped": job_id is None}
 
 
 # ── Phase 20: email channel ─────────────────────────────────────────
@@ -2381,6 +2955,12 @@ def email_google_callback(code: str = "", state: str = "", error: str = "") -> H
 
 
 # ── Multi-provider connectors step 3: connect a Freshchat account ────────
+FRESHCHAT_OAUTH_REDIRECT_URI = os.environ.get(
+    "FRESHCHAT_OAUTH_REDIRECT_URI",
+    "http://localhost:8000/api/integrations/freshchat/oauth/callback",
+)
+
+
 class FreshchatChannelIn(BaseModel):
     domain: str | None = None              # "yourcompany.freshchat.com"
     team: str = "support"
@@ -2388,6 +2968,12 @@ class FreshchatChannelIn(BaseModel):
     webhook_public_key: str | None = None  # write-only PEM, never returned
     auto_send_enabled: bool = False
     tenant_id: str | None = None
+    # OAuth mode (a Custom/External App's credentials) — see
+    # interpreter/freshchat.py's module docstring for why this exists
+    # alongside api_token.
+    oauth_domain: str | None = None
+    client_id: str | None = None           # write-only, never returned; Vault-backed
+    client_secret: str | None = None       # write-only, never returned; Vault-backed
 
 
 def _freshchat_cfg_from_body(tenant_id: str, body: "FreshchatChannelIn", existing):
@@ -2399,6 +2985,7 @@ def _freshchat_cfg_from_body(tenant_id: str, body: "FreshchatChannelIn", existin
         team=body.team or (existing.team if existing else "support"),
         auto_send_enabled=bool(body.auto_send_enabled),
         status=(existing.status if existing else "inactive"),
+        oauth_domain=(body.oauth_domain or (existing.oauth_domain if existing else "")).strip(),
     )
 
 
@@ -2424,14 +3011,19 @@ def freshchat_configure(body: FreshchatChannelIn, c: Caller = Depends(caller)) -
     existing = load_channel(tid, _service)
     if not (body.domain or (existing and existing.domain)):
         raise HTTPException(422, "domain is required")
+    # either auth mode is enough to save (a tenant may save client_id/secret
+    # first, then complete the OAuth browser round-trip in a second step —
+    # see /oauth/authorize below — before a token of either kind exists)
     has_token = bool(body.api_token) or bool(existing and existing.api_token)
-    if not has_token:
-        raise HTTPException(422, "api_token is required")
+    has_oauth_client = bool(body.client_id) or bool(existing and existing.client_id)
+    if not (has_token or has_oauth_client):
+        raise HTTPException(422, "api_token, or an OAuth client_id/client_secret, is required")
 
     cfg = _freshchat_cfg_from_body(tid, body, existing)
     cfg.status = "active"
     save_channel(cfg, _service, api_token=body.api_token,
-                webhook_public_key=body.webhook_public_key)
+                webhook_public_key=body.webhook_public_key,
+                client_id=body.client_id, client_secret=body.client_secret)
 
     from interpreter import audit
     audit.record(_service, tenant_id=tid,
@@ -2440,6 +3032,60 @@ def freshchat_configure(body: FreshchatChannelIn, c: Caller = Depends(caller)) -
                  target_type="freshchat_channel", target_id=tid,
                  summary=f"{'updated' if existing else 'connected'} the Freshchat channel")
     return freshchat_status(tenant_id=tid, c=c)
+
+
+@app.get("/api/integrations/freshchat/oauth/authorize")
+def freshchat_oauth_authorize(tenant_id: str | None = None, scope: str | None = None,
+                              c: Caller = Depends(caller)) -> dict:
+    """Start the OAuth round-trip for a tenant's Freshchat Developer-Profile
+    OAuth client — save client_id/client_secret via PUT first. `scope`
+    lets the caller override `oauth_authorize_url`'s default (Freshworks'
+    own documented read-only example — no confirmed scope exists yet for
+    sending a message or listing agents, see interpreter/freshchat.py)."""
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    from interpreter.freshchat import load_channel, oauth_authorize_url
+
+    cfg = load_channel(tid, _service)
+    if not (cfg and cfg.client_id and cfg.client_secret):
+        raise HTTPException(422, "save a client_id/client_secret before authorizing")
+    if not cfg.effective_oauth_domain:
+        raise HTTPException(422, "domain (or oauth_domain) is required")
+    nonce = secrets.token_urlsafe(24)
+    _oauth_state[nonce] = (time.time() + 600, c.user_id, tid)
+    kwargs = {"scope": scope} if scope is not None else {}
+    return {"url": oauth_authorize_url(cfg.effective_oauth_domain, cfg.client_id,
+                                       FRESHCHAT_OAUTH_REDIRECT_URI, nonce, **kwargs)}
+
+
+@app.get("/api/integrations/freshchat/oauth/callback")
+def freshchat_oauth_callback(code: str = "", state: str = "", error: str = "") -> HTMLResponse:
+    def page(msg: str) -> HTMLResponse:
+        return HTMLResponse(f"<!doctype html><meta charset=utf-8><p>{msg}</p>"
+                            "<script>setTimeout(()=>window.close(),1500)</script>")
+    if error:
+        return page(f"Freshchat authorisation failed: {error}")
+    hit = _oauth_state.pop(state, None)
+    if not hit or hit[0] < time.time():
+        return page("This authorisation link has expired — try again.")
+    _, _uid, tid = hit
+    from interpreter.freshchat import load_channel, oauth_exchange_code, save_channel
+
+    cfg = load_channel(tid, _service)
+    if not (cfg and cfg.client_id and cfg.client_secret):
+        return page("Freshchat client_id/client_secret are no longer saved for this workspace.")
+    try:
+        tok = oauth_exchange_code(cfg.effective_oauth_domain, cfg.client_id, cfg.client_secret,
+                                  code, FRESHCHAT_OAUTH_REDIRECT_URI)
+    except Exception as e:  # noqa: BLE001
+        return page(f"Could not complete Freshchat OAuth: {e}")
+    save_channel(cfg, _service, refresh_token=tok["refresh_token"])
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="freshchat_channel.oauth_connected",
+                 target_type="freshchat_channel", target_id=tid,
+                 summary="completed the Freshchat OAuth authorization")
+    return page("Freshchat connected. You can close this window.")
 
 
 @app.delete("/api/integrations/freshchat", status_code=204)
@@ -2468,7 +3114,10 @@ def freshchat_test(body: FreshchatChannelIn, c: Caller = Depends(caller)) -> dic
     existing = load_channel(tid, _service)
     cfg = _freshchat_cfg_from_body(tid, body, existing)
     cfg.api_token = body.api_token or (existing.api_token if existing else "")
-    return test_connection(cfg)
+    cfg.client_id = body.client_id or (existing.client_id if existing else "")
+    cfg.client_secret = body.client_secret or (existing.client_secret if existing else "")
+    cfg.refresh_token = existing.refresh_token if existing else ""
+    return test_connection(cfg, sb=_service)
 
 
 @app.get("/api/integrations/freshchat/webhook-url")
@@ -2477,6 +3126,94 @@ def freshchat_webhook_url(tenant_id: str | None = None, c: Caller = Depends(call
     tenant — a thin convenience so the web UI doesn't hardcode _public_base()."""
     tid = _caller_tenant(c, tenant_id)
     return {"url": f"{_public_base()}/webhooks/freshchat/{tid}"}
+
+
+# ── Product analytics: PostHog (Phase 30, docs/PRODUCT_ANALYTICS_CONNECTOR.md) ──
+class PostHogIn(BaseModel):
+    tenant_id: str | None = None
+    host: str | None = None
+    project_id: str | None = None
+    milestone_events: list[str] | None = None
+    api_key: str | None = None
+
+
+def _posthog_cfg_from_body(tid: str, body: PostHogIn, existing) -> "object":
+    from interpreter.posthog import PostHogConfig, _clean_host, _clean_milestones
+    return PostHogConfig(
+        tenant_id=tid,
+        host=_clean_host(body.host if body.host is not None
+                         else (existing.host if existing else None)),
+        project_id=str(body.project_id if body.project_id is not None
+                       else (existing.project_id if existing else "")),
+        milestone_events=_clean_milestones(
+            body.milestone_events if body.milestone_events is not None
+            else (existing.milestone_events if existing else [])),
+    )
+
+
+@app.get("/api/integrations/posthog")
+def posthog_status(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    """PostHog connection status for the caller's tenant. Never returns the key."""
+    tid = _caller_tenant(c, tenant_id)
+    from interpreter.posthog import load
+    cfg = load(tid, _service)
+    if not cfg:
+        return {"tenant_id": tid, "configured": False, "status": "none"}
+    return {"tenant_id": tid, **cfg.public_status()}
+
+
+@app.put("/api/integrations/posthog")
+def posthog_configure(body: PostHogIn, c: Caller = Depends(caller)) -> dict:
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    rate_limit(c.user_id, "integration", 30)
+    from interpreter.posthog import load, save
+
+    existing = load(tid, _service)
+    cfg = _posthog_cfg_from_body(tid, body, existing)
+    if not cfg.project_id:
+        raise HTTPException(422, "project_id is required")
+    has_key = bool(body.api_key) or bool(existing and existing.has_credentials)
+    if not has_key:
+        raise HTTPException(422, "an api_key is required")
+    cfg.status = "active"
+    save(cfg, _service, api_key=body.api_key)
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid,
+                 action="posthog.configured" if existing else "posthog.connected",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="integration", target_id=tid,
+                 summary=f"{'updated' if existing else 'connected'} the PostHog connector")
+    return posthog_status(tenant_id=tid, c=c)
+
+
+@app.delete("/api/integrations/posthog", status_code=204)
+def posthog_disconnect(tenant_id: str | None = None, c: Caller = Depends(caller)) -> None:
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    from interpreter import audit
+    from interpreter.posthog import delete
+    delete(tid, _service)
+    audit.record(_service, tenant_id=tid, action="posthog.disconnected",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="integration", target_id=tid,
+                 summary="disconnected the PostHog connector")
+
+
+@app.post("/api/integrations/posthog/test")
+def posthog_test(body: PostHogIn, c: Caller = Depends(caller)) -> dict:
+    """A cheap `SELECT 1` HogQL query — saves nothing. Uses the posted key,
+    falling back to the stored one when the field is blank."""
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    rate_limit(c.user_id, "integration", 20)
+    from interpreter.posthog import load, test_connection
+
+    existing = load(tid, _service)
+    cfg = _posthog_cfg_from_body(tid, body, existing)
+    return test_connection(tid, _service, host=cfg.host, project_id=cfg.project_id,
+                           api_key=body.api_key or None)
 
 
 # ── BYOK: self-serve LLM provider keys + model roster (chunk 3 of the

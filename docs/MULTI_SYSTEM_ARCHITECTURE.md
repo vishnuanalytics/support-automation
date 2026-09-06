@@ -100,16 +100,32 @@ structure (`Claim -[:SUPPORTED_BY]-> Case`, `Claim -[:CONTRADICTS]->
 Claim`), so when KIL-g does get picked up, it's additive to the Neo4j
 schema already described here, not a separate system.
 
-## Future: a tenant's own product analytics (Mixpanel/GA4/GTM), correlated with cases
+## Product analytics (PostHog first), correlated with cases — Phase 30, in progress
 
-Not built, not scoped as an active phase — a validated direction from
-this conversation, recorded so it isn't lost.
+**Now a scoped phase.** Full design in `docs/PRODUCT_ANALYTICS_CONNECTOR.md`
+(2026-09-06); this section keeps only the architecture-level summary.
 
-**Shape:** a new connector category (`product_analytics_connector`),
-workspace-level, same self-serve pattern as every other connector. In
-Neo4j: `(:Event {name, ts, tenant_id})-[:BY_USER]->(:Contact)`, sitting
-next to the `(:Case)-[:FOR_ACCOUNT]->(:Account)` structure that already
-exists — one new node/edge type, not a redesign.
+**Shape:** a new connector category, workspace-level, same self-serve
+pattern as every other connector. **PostHog** is the first provider
+(API-key auth, HogQL); Mixpanel is documented, not built.
+
+**Revision to the original sketch:** *not* `(:Event {name, ts})`
+one-node-per-event — that is a warehouse copy and unbounded, which breaks
+Rule 1. Neo4j holds a **correlation layer**: `(:Contact {email,
+tenant_id})` with recent-activity **rollup properties**, a bounded
+`(:Contact)-[:DID {last_ts,count}]->(:Feature {name})` from the tenant's
+*configured* milestone list, and `(:Contact)-[:AT_ACCOUNT]->(:Account)`.
+The `(:Contact)` node is new (case ingestion only had `ContactId` as a
+`Message` field); it is co-owned — identity + `[:FILED_BY]` from
+`case_graph_sync`, activity rollups from the analytics sync, neither
+writing the other's properties.
+
+**Identity resolution** stays the hard problem and is handled per the
+instruction below: every `(:Contact)` carries an `identity_match`
+(`email` / `domain` / `none`) and each sync computes a per-tenant
+**coverage %** shown on the connector card. The payoff — a
+`product_signal` flow node — degrades to `{available: false}` when there
+is no match and never blocks a run.
 
 **The one hard problem, flagged before any build starts:** identity
 resolution. Mixpanel/GA4 identify users by a pseudonymous
@@ -127,13 +143,34 @@ cleanly.
 
 - Retention window length for `runs.case_payload`/`runs.trace` (needs a
   compliance/support-debugging tradeoff call, not a technical one).
-- Whether a natural-language-to-Cypher "ask the graph anything" tool
-  (discussed as the leaner alternative to building N bespoke reports) is
-  the next Neo4j-facing feature to build, versus fixing the
-  `DUPLICATE_OF`-never-fires gap first (0 edges exist today despite 232
-  `SIMILAR_TO` edges — see `case_memory_sync.py`; likely `account_id`
-  never being set on Salesforce-sourced cases, not investigated further
-  yet).
+- ~~Whether a natural-language-to-Cypher "ask the graph anything" tool is
+  the next Neo4j-facing feature to build~~ — **decided and built
+  2026-09-06 as a composable *spec* compiler, not free-form text-to-Cypher**
+  (`interpreter/graph_query.py`, `docs/GRAPH_QUERY.md`). The reason: this
+  is one shared Community-edition Neo4j with no per-tenant DB and no custom
+  read-only role, so the only tenant boundary is a `tenant_id` predicate
+  per node — a free-form Cypher surface would make one validator gap a
+  cross-tenant breach. Instead the LLM only emits a bounded JSON spec
+  (`{entity, metric, group_by, filters, having, order_by, limit}`); a
+  deterministic compiler produces read-only Cypher with `tenant_id` bolted
+  onto every pattern and a `WITH`-guarded `WHERE`. `Reply`/`Message` text
+  is not exposed. Owner-only. Live-verified: all metric shapes `EXPLAIN`
+  clean on the real graph, and a bogus tenant returns 0. Residual (in the
+  doc): on CE the boundary is app-code-only, and multi-hop path questions
+  need a new compiler branch.
+- The `DUPLICATE_OF`-never-fires gap was **root-caused and fixed
+  2026-09-05, see `PROJECT_SCOPE.md`'s
+  "Immediate next step"**: `account_id` was never set because
+  `_enrich_from_sf`'s selection filter only checked `case_type`, not
+  `account_id`, so a row that already had one (nearly every real row) was
+  wrongly skipped for the other. Confirmed live: 20 case pairs score above
+  the dup threshold, including a 6-case cluster sharing one real Salesforce
+  AccountId, currently invisible to duplicate detection. **Fully fixed and
+  live-verified 2026-09-05**: two more root causes surfaced while actually
+  making it work (a `case_sf_id`-vs-real-Id mismatch, and `case_memory`
+  never having an `account_id` column at all — migration `089`) — see
+  `PROJECT_SCOPE.md`. Re-running the sync now produces all 20 real
+  `DUPLICATE_OF` edges, zero new Case nodes.
 - Whether the product-analytics connector is worth building before or
   after the reporting/exposure layer above — they're independent, but a
   tenant would only value one once the other exists.

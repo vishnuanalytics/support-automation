@@ -15,13 +15,28 @@ function and unit-tested offline.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from typing import Any
 
+log = logging.getLogger("interpreter.gdrive")
+
 SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
     "https://www.googleapis.com/auth/documents.readonly",
+    # 2026-09-05 — Google Sheets KB connector (interpreter/gsheets.py). A
+    # tenant that connected before this shipped needs to reconnect once;
+    # Google doesn't retroactively grant a new scope to an existing token.
+    "https://www.googleapis.com/auth/spreadsheets.readonly",
+    # 2026-09-06 — KB write-back (docs/KB_SOURCE_CONNECTORS.md §2). Only
+    # exercised for a gdocs connection with `config.on_correction in ('suggest','write_back')`;
+    # a read-only tenant never uses it, and an existing token keeps working
+    # with its old (read-only) scopes — the job just fails gracefully until
+    # the tenant re-runs Google consent. `documents` = rewrite the passage;
+    # `drive` = post the verification comment on the doc (best-effort).
+    "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/drive",
 ]
 _AUTH_URI = "https://accounts.google.com/o/oauth2/v2/auth"
 _TOKEN_URI = "https://oauth2.googleapis.com/token"
@@ -50,6 +65,51 @@ def parse_doc_id(url_or_id: str) -> str:
     if re.fullmatch(r"[a-zA-Z0-9_-]{20,}", s):
         return s
     raise ValueError(f"not a Google Doc URL or id: {url_or_id!r}")
+
+
+def parse_folder_id(url_or_id: str) -> str | None:
+    """A Drive folder URL -> its id, or None if this isn't a folder URL
+    (so `_norm_gdocs` can try `parse_doc_id` instead)."""
+    s = (url_or_id or "").strip()
+    m = re.search(r"/folders/([a-zA-Z0-9_-]+)", s)
+    return m.group(1) if m else None
+
+
+def list_folder_docs(tenant_id: str, folder_id: str, sb, *,
+                     recursive: bool = False) -> list[dict[str, Any]]:
+    """Every Google Doc directly in `folder_id` (or its subtree if
+    `recursive`) -> [{id, name, modified_time}], most-recently-modified
+    first. Raises on auth."""
+    drive, _ = _services(tenant_id, sb)
+    out: list[dict[str, Any]] = []
+    queue = [folder_id]
+    seen: set[str] = set()
+    while queue:
+        fid = queue.pop(0)
+        if fid in seen:
+            continue
+        seen.add(fid)
+        page = None
+        while True:
+            resp = drive.files().list(
+                q=(f"'{fid}' in parents and trashed=false and "
+                   "(mimeType='application/vnd.google-apps.document' or "
+                   "mimeType='application/vnd.google-apps.folder')"),
+                fields="nextPageToken, files(id,name,mimeType,modifiedTime)",
+                pageSize=200, pageToken=page,
+            ).execute()
+            for f in resp.get("files", []):
+                if f.get("mimeType") == "application/vnd.google-apps.folder":
+                    if recursive:
+                        queue.append(f["id"])
+                else:
+                    out.append({"id": f["id"], "name": f.get("name") or f["id"],
+                                "modified_time": f.get("modifiedTime")})
+            page = resp.get("nextPageToken")
+            if not page:
+                break
+    out.sort(key=lambda d: d.get("modified_time") or "", reverse=True)
+    return out
 
 
 # ── OAuth ────────────────────────────────────────────────────────────
@@ -141,6 +201,51 @@ def fetch_doc(tenant_id: str, doc_id: str, sb) -> dict[str, Any]:
 def get_modified_time(tenant_id: str, doc_id: str, sb) -> str:
     drive, _ = _services(tenant_id, sb)
     return drive.files().get(fileId=doc_id, fields="modifiedTime").execute()["modifiedTime"]
+
+
+# ── write-back (KB write-back, docs/KB_SOURCE_CONNECTORS.md §2) ──────────
+# Only reached for a gdocs connection with `config.on_correction in ('suggest','write_back')`.
+# Needs the read-write `documents` / `drive` scopes (see SCOPES) — a tenant
+# on an older read-only token gets a clean failure, not a silent no-op.
+def replace_passage(tenant_id: str, doc_id: str, old_text: str, new_text: str,
+                    sb) -> int:
+    """In-place rewrite of one passage via `documents.batchUpdate` /
+    `replaceAllText`. Returns the number of occurrences replaced — 0 means
+    the old text wasn't found verbatim (formatting split the runs, or the
+    doc already changed), and the caller should fall back to flagging the
+    block for a manual edit rather than guessing."""
+    if not (old_text or "").strip():
+        return 0
+    _, docs = _services(tenant_id, sb)
+    resp = docs.documents().batchUpdate(
+        documentId=doc_id,
+        body={"requests": [{
+            "replaceAllText": {
+                "containsText": {"text": old_text, "matchCase": True},
+                "replaceText": new_text,
+            }
+        }]},
+    ).execute()
+    for r in resp.get("replies", []):
+        rat = (r.get("replaceAllText") or {}).get("occurrencesChanged")
+        if rat is not None:
+            return int(rat)
+    return 0
+
+
+def comment(tenant_id: str, doc_id: str, text: str, sb) -> str | None:
+    """Post an (unanchored) comment on the doc for human visibility. Best
+    effort — returns the comment id, or None if the token can't comment
+    (older read-only scope); the caller must not depend on it."""
+    try:
+        drive, _ = _services(tenant_id, sb)
+        c = drive.comments().create(
+            fileId=doc_id, fields="id", body={"content": text},
+        ).execute()
+        return c.get("id")
+    except Exception as e:  # noqa: BLE001
+        log.warning("gdrive.comment(%s): %s", doc_id, e)
+        return None
 
 
 # ── Docs JSON -> Markdown (pure) ─────────────────────────────────────

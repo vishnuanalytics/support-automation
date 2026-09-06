@@ -68,6 +68,7 @@ def usage_summary(rows: list[dict[str, Any]], plan: str,
     runs_count = len(rows)
     tokens_total = 0
     tokens_by_model: dict[str, int] = {}
+    tokens_by_node: dict[str, int] = {}
     daily: dict[str, dict[str, int]] = {}
     by_flow: dict[str, dict[str, Any]] = {}
 
@@ -77,6 +78,8 @@ def usage_summary(rows: list[dict[str, Any]], plan: str,
         row_by_model = r.get("tokens_by_model") or {}
         for model, n in row_by_model.items():
             tokens_by_model[model] = tokens_by_model.get(model, 0) + int(n)
+        for node, n in (r.get("tokens_by_node") or {}).items():
+            tokens_by_node[node] = tokens_by_node.get(node, 0) + int(n)
 
         created = r.get("created_at")
         day = str(created)[:10] if created else None
@@ -103,6 +106,16 @@ def usage_summary(rows: list[dict[str, Any]], plan: str,
     ]
     by_flow_list.sort(key=lambda f: f["tokens"], reverse=True)
 
+    overall_cost = estimate_cost_usd(tokens_by_model)
+    # per-node cost is proportional — the trace doesn't carry a per-node model,
+    # so split the run-level $ by each node's share of the tokens.
+    by_node_list = sorted(
+        ({"node": node, "tokens": n,
+          "estimated_cost_usd": round(overall_cost * n / tokens_total, 4) if tokens_total else 0.0}
+         for node, n in tokens_by_node.items()),
+        key=lambda x: x["tokens"], reverse=True,
+    )
+
     return {
         "period": {"start": period_start, "end": period_end},
         "plan": plan,
@@ -110,8 +123,9 @@ def usage_summary(rows: list[dict[str, Any]], plan: str,
         "runs_count": runs_count,
         "tokens_total": tokens_total,
         "tokens_by_model": tokens_by_model,
+        "by_node": by_node_list,
         "by_flow": by_flow_list,
-        "estimated_cost_usd": estimate_cost_usd(tokens_by_model),
+        "estimated_cost_usd": overall_cost,
         "daily": [{"date": d, **daily[d]} for d in sorted(daily)],
         "pct_runs_used": _pct(runs_count, limits["runs"]),
         "pct_tokens_used": _pct(tokens_total, limits["tokens"]),

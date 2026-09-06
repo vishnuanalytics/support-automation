@@ -25,10 +25,26 @@ _BACKOFF_BASE_SECONDS = int(os.environ.get("JOB_RETRY_BASE_SECONDS", "30"))
 _BACKOFF_CAP_SECONDS = int(os.environ.get("JOB_RETRY_CAP_SECONDS", "900"))
 
 
+def _tenant_from_payload(payload: dict[str, Any]) -> str | None:
+    """Best-effort: most payloads carry the owning tenant directly or one
+    level down (`case` / `context`). The worker back-fills the rest after
+    it has resolved the job's context (api/worker.py::_resolve_job_tenant)."""
+    for v in (payload.get("tenant_id"),
+              (payload.get("case") or {}).get("tenant_id"),
+              (payload.get("context") or {}).get("tenant_id")):
+        if v:
+            return str(v)
+    return None
+
+
 def enqueue(kind: str, payload: dict[str, Any], *, dedupe_key: str | None = None,
-            run_after: str | None = None, sb=None) -> str | None:
+            run_after: str | None = None, tenant_id: str | None = None,
+            sb=None) -> str | None:
     sb = sb or get_supabase()
     row: dict[str, Any] = {"kind": kind, "payload": payload}
+    tid = tenant_id or _tenant_from_payload(payload)
+    if tid:
+        row["tenant_id"] = str(tid)
     if dedupe_key:
         row["dedupe_key"] = dedupe_key
     if run_after:

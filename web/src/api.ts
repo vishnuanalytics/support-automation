@@ -3,6 +3,7 @@ import type {
   AssistResult,
   AuditEvent,
   BillingUsage,
+  FlowCostDelta,
   EmailChannel,
   EmailChannelSave,
   Flow,
@@ -10,6 +11,9 @@ import type {
   FlowMeta,
   FreshchatChannel,
   FreshchatChannelSave,
+  PostHogStatus,
+  PostHogSave,
+  GraphAskResult,
   FlowVersion,
   FlowTrigger,
   Connection,
@@ -19,6 +23,10 @@ import type {
   GoogleStatus,
   Invitation,
   KbCollection,
+  KbConnection,
+  KbConnector,
+  KbDocDefaultsResp,
+  KbDocWriteback,
   KbEntry,
   KbEntryRow,
   KbExportBundle,
@@ -26,8 +34,10 @@ import type {
   PolicyRule,
   NodeTypesResp,
   ReviewTask,
+  JobFailures,
   KilMetrics,
   KilDigest,
+  TenantHealth,
   LlmKeyStatus,
   ModelsResp,
   SfMeta,
@@ -268,7 +278,7 @@ export const api = {
     upload: (id: string, b: { filename: string; content_b64: string }) =>
       req<KbEntry>(`/kb/collections/${id}/upload`, { method: "POST", body: JSON.stringify(b) }),
     crawl: (id: string, url: string, max_pages = 20) =>
-      req<{ job_id: string }>(`/kb/collections/${id}/crawl`, {
+      req<KbConnection>(`/kb/collections/${id}/crawl`, {
         method: "POST",
         body: JSON.stringify({ url, max_pages }),
       }),
@@ -277,9 +287,65 @@ export const api = {
       req<KbEntry>(`/kb/entries/${id}`, { method: "PATCH", body: JSON.stringify(b) }),
     deleteEntry: (id: string) => req<void>(`/kb/entries/${id}`, { method: "DELETE" }),
     linkGdoc: (id: string, doc_url: string) =>
-      req<KbEntry>(`/kb/collections/${id}/gdoc`, { method: "POST", body: JSON.stringify({ doc_url }) }),
+      req<KbConnection>(`/kb/collections/${id}/gdoc`, { method: "POST", body: JSON.stringify({ doc_url }) }),
     resyncGdoc: (entryId: string) =>
-      req<KbEntry>(`/kb/entries/${entryId}/resync`, { method: "POST" }),
+      req<{ job_id: string }>(`/kb/entries/${entryId}/resync`, { method: "POST" }),
+    linkGsheet: (id: string, sheet_url: string, sheet_name?: string) =>
+      req<KbConnection>(`/kb/collections/${id}/gsheet`, {
+        method: "POST",
+        body: JSON.stringify({ sheet_url, sheet_name }),
+      }),
+    // KB source connectors (docs/KB_SOURCE_CONNECTORS.md)
+    listConnectors: (tenantId?: string) =>
+      req<KbConnector[]>(`/kb/connectors${tenantId ? `?tenant_id=${tenantId}` : ""}`),
+    testConnector: (
+      slug: string,
+      b: {
+        tenant_id?: string;
+        api_key?: string;
+        board_id?: string;
+        base_url?: string;
+        api_username?: string;
+      },
+    ) =>
+      req<{ ok: boolean; detail: string }>(`/kb/connectors/${slug}/test`, {
+        method: "POST",
+        body: JSON.stringify(b),
+      }),
+    listConnections: (id: string) =>
+      req<KbConnection[]>(`/kb/collections/${id}/connections`),
+    listAllConnections: (tenantId?: string) =>
+      req<KbConnection[]>(`/kb/connections${tenantId ? `?tenant_id=${tenantId}` : ""}`),
+    addConnection: (id: string, b: { connector: string; config: Record<string, unknown>; label?: string }) =>
+      req<KbConnection>(`/kb/collections/${id}/connections`, {
+        method: "POST",
+        body: JSON.stringify(b),
+      }),
+    syncConnection: (cid: string) =>
+      req<{ job_id: string }>(`/kb/connections/${cid}/sync`, { method: "POST" }),
+    setConnectionStatus: (cid: string, status: "active" | "paused") =>
+      req<KbConnection>(`/kb/connections/${cid}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status }),
+      }),
+    updateConnection: (
+      cid: string,
+      b: { label?: string; config?: Record<string, unknown> },
+    ) => req<KbConnection>(`/kb/connections/${cid}`, { method: "PATCH", body: JSON.stringify(b) }),
+    deleteConnection: (cid: string) =>
+      req<void>(`/kb/connections/${cid}`, { method: "DELETE" }),
+    listDocWritebacks: (id: string) =>
+      req<KbDocWriteback[]>(`/kb/collections/${id}/doc-writebacks`),
+    listAllDocWritebacks: (status: "open" | "all" = "open") =>
+      req<KbDocWriteback[]>(`/kb/doc-writebacks?status=${status}`),
+    getDocDefaults: (tenantId: string) =>
+      req<KbDocDefaultsResp>(`/kb/doc-defaults?tenant_id=${tenantId}`),
+    setDocDefaults: (b: {
+      tenant_id: string;
+      index?: boolean;
+      on_correction?: string;
+      github_repo?: string;
+    }) => req<KbDocDefaultsResp>("/kb/doc-defaults", { method: "PUT", body: JSON.stringify(b) }),
     export: (id: string) => req<KbExportBundle>(`/kb/collections/${id}/export`),
     import: (id: string, entries: { title: string; body_md: string }[]) =>
       req<{ job_id: string; accepted: number; warnings: string[] }>(
@@ -330,6 +396,23 @@ export const api = {
       ),
     webhookUrl: (tenantId?: string) =>
       req<{ url: string }>(`/integrations/freshchat/webhook-url${tenantId ? `?tenant_id=${tenantId}` : ""}`),
+    oauthAuthorize: (tenantId?: string) =>
+      req<{ url: string }>(
+        `/integrations/freshchat/oauth/authorize${tenantId ? `?tenant_id=${tenantId}` : ""}`,
+      ),
+  },
+
+  posthog: {
+    status: (tenantId?: string) =>
+      req<PostHogStatus>(`/integrations/posthog${tenantId ? `?tenant_id=${tenantId}` : ""}`),
+    save: (b: PostHogSave) =>
+      req<PostHogStatus>("/integrations/posthog", { method: "PUT", body: JSON.stringify(b) }),
+    remove: (tenantId?: string) =>
+      req<void>(`/integrations/posthog${tenantId ? `?tenant_id=${tenantId}` : ""}`, { method: "DELETE" }),
+    test: (b: PostHogSave) =>
+      req<{ ok: boolean; detail: string }>(
+        "/integrations/posthog/test", { method: "POST", body: JSON.stringify(b) },
+      ),
   },
 
   salesforce: {
@@ -386,7 +469,15 @@ export const api = {
     metrics: (days = 30) => req<KilMetrics>(`/kil/metrics?days=${days}`),
     digest: (weeks = 4) =>
       req<KilDigest>(`/kil/digest?weeks=${weeks}`),
+    tenantHealth: () => req<TenantHealth>("/health/tenant"),
+    jobFailures: (hours = 24) => req<JobFailures>(`/jobs/failures?hours=${hours}`),
   },
+
+  graphAsk: (question: string, tenantId?: string) =>
+    req<GraphAskResult>("/graph/ask", {
+      method: "POST",
+      body: JSON.stringify({ question, tenant_id: tenantId }),
+    }),
 
   approvals: {
     list: () =>
@@ -416,6 +507,8 @@ export const api = {
     const qs = p.toString();
     return req<BillingUsage>(`/billing/usage${qs ? `?${qs}` : ""}`);
   },
+  billingFlowDeltas: (tenantId?: string) =>
+    req<FlowCostDelta[]>(`/billing/flow-deltas${tenantId ? `?tenant_id=${tenantId}` : ""}`),
 
   listAudit: (q: { tenantId?: string; action?: string; limit?: number } = {}) => {
     const p = new URLSearchParams();

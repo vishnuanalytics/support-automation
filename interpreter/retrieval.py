@@ -58,26 +58,46 @@ def embed_query(text: str) -> list[float]:
 # --------------------------------------------------------------------------
 # Individual stages
 # --------------------------------------------------------------------------
+# A source_id that can't exist — returned instead of `None` for a
+# tenant-scoped call that resolves to zero sources, so retrieval matches
+# nothing (`None` would search *every* tenant's chunks).
+_NO_MATCH = ["00000000-0000-0000-0000-000000000000"]
+
+
 def resolve_sources(names: list[str] | None, sb, tenant_id: str | None = None) -> list[str] | None:
     """
     Map a `retrieve` node's `kb_sources` to source_ids, scoped so a flow can
-    only ever reach **shared** sources + **its own tenant's** — never another
-    tenant's private KB.
+    only ever reach **its own tenant's** sources — plus any **shared/global**
+    source it *explicitly names*.
 
-      names given  -> those names, intersected with (shared | this tenant)
-      names None   -> all (shared | this tenant) sources
-      no tenant_id -> shared sources only (admin/eval callers pass source_ids
-                      directly if they want everything)
+      names given        -> those names, intersected with (shared | this tenant);
+                            if none of them are visible, fall back to the
+                            tenant's own sources (never widen, never leak).
+      names None + tenant -> this tenant's OWN sources only. Shared/global
+                            corpora (e.g. the `zapier-public` demo docs) are
+                            opt-in now: a flow must list them in `kb_sources`
+                            to pull from them — a real org's default RAG is
+                            *its* connected sources, nothing else.
+      names None, no tenant -> shared sources only (eval/admin; those callers
+                            pass source_ids directly if they want everything).
+
+    A tenant-scoped call that resolves to nothing returns `_NO_MATCH`, never
+    `None` — an empty scope must mean "no KB context", not "search all tenants".
     """
     rows = sb.table("sources").select("source_id, name, tenant_id").eq("status", "active").execute().data or []
-    visible = [r for r in rows if r["tenant_id"] is None or r["tenant_id"] == tenant_id]
     if names:
-        named = [r for r in visible if r["name"] in names]
+        visible = [r for r in rows if r["tenant_id"] is None or r["tenant_id"] == tenant_id]
+        named = [r["source_id"] for r in visible if r["name"] in names]
         if named:
-            visible = named
-        # else: the flow named source(s) it can't see -> fall back to its own
-        # legitimate scope (shared + own), never widen, never return nothing.
-    return [r["source_id"] for r in visible] or None
+            return named
+        # named nothing visible -> fall through to the tenant's own scope
+
+    if tenant_id:
+        own = [r["source_id"] for r in rows if r["tenant_id"] == tenant_id]
+        return own or _NO_MATCH
+
+    shared = [r["source_id"] for r in rows if r["tenant_id"] is None]
+    return shared or None
 
 
 def dense_search(sb, query_embedding: list[float], k: int,
@@ -140,24 +160,21 @@ def graph_expand(
     try:
         from ingestion.neo4j_sync import get_neo4j_driver
 
-        driver = get_neo4j_driver()
+        driver = get_neo4j_driver()   # cached singleton — do NOT close here
         db = os.environ.get("NEO4J_DATABASE", "neo4j")
-        try:
-            recs = driver.execute_query(
-                """
-                MATCH (d:Doc)-[:LINKS_TO]->(n:Doc)
-                WHERE d.url IN $urls AND NOT n.url IN $urls
-                  AND coalesce(n.status, 'active') <> 'deleted'
-                RETURN n.url AS url, count(*) AS w
-                ORDER BY w DESC
-                LIMIT $lim
-                """,
-                urls=seed_doc_urls,
-                lim=max_neighbours,
-                database_=db,
-            ).records
-        finally:
-            driver.close()
+        recs = driver.execute_query(
+            """
+            MATCH (d:Doc)-[:LINKS_TO]->(n:Doc)
+            WHERE d.url IN $urls AND NOT n.url IN $urls
+              AND coalesce(n.status, 'active') <> 'deleted'
+            RETURN n.url AS url, count(*) AS w
+            ORDER BY w DESC
+            LIMIT $lim
+            """,
+            urls=seed_doc_urls,
+            lim=max_neighbours,
+            database_=db,
+        ).records
     except Exception as e:  # noqa: BLE001 -- graph expansion is optional
         print(f"  [retrieval] graph-expansion skipped: {e}", file=sys.stderr)
         return []
@@ -199,6 +216,34 @@ def _squash(x: float) -> float:
     return 1.0 / (1.0 + math.exp(-x))
 
 
+_QUALITY_WEIGHT = {"official": 1.15, "community_resolved": 1.0, "unverified": 0.9}
+
+
+def _apply_quality_weights(sb, rows: list[dict[str, Any]]) -> None:
+    """Nudge fused RRF scores by the source-trust signal on each chunk's KB
+    entry (`kb_entries.quality`, set from `KBDocument.quality`): an official
+    help article outranks a random forum reply that scored similarly. In
+    place, then re-sorts. Best-effort — a lookup failure leaves scores as
+    they were. Only KB chunks (`kb://<sid>/<eid>` doc_url) are affected;
+    the shared `zapier-public` corpus and any real-URL doc keep weight 1.0."""
+    try:
+        eids = {u.rsplit("/", 1)[-1] for r in rows
+                if (u := r.get("doc_url") or "").startswith("kb://")}
+        if not eids:
+            return
+        q = {row["entry_id"]: (row.get("quality") or "unverified")
+             for row in (sb.table("kb_entries").select("entry_id, quality")
+                         .in_("entry_id", list(eids)).execute().data or [])}
+        for r in rows:
+            u = r.get("doc_url") or ""
+            if u.startswith("kb://"):
+                w = _QUALITY_WEIGHT.get(q.get(u.rsplit("/", 1)[-1], "unverified"), 1.0)
+                r["_rrf"] = (r.get("_rrf") or 0.0) * w
+        rows.sort(key=lambda r: -(r.get("_rrf") or 0.0))
+    except Exception as e:  # noqa: BLE001
+        print(f"  [retrieval] quality weighting skipped: {e}", file=sys.stderr)
+
+
 # --------------------------------------------------------------------------
 # Orchestration
 # --------------------------------------------------------------------------
@@ -224,6 +269,7 @@ def hybrid_retrieve(
     if use_sparse:
         runs.append(sparse_search(sb, query, sparse_k, source_ids))
     fused = rrf_fuse(runs)
+    _apply_quality_weights(sb, fused)
 
     if use_graph:
         seed_urls = list(dict.fromkeys(r["doc_url"] for r in fused[:5]))

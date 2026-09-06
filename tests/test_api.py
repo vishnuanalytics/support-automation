@@ -52,11 +52,69 @@ def test_kb_endpoints_need_a_token():
     assert client.post("/api/kb/collections", json={"name": "x"}).status_code == 401
 
 
+def test_kb_source_connector_endpoints_need_a_token():
+    assert client.get("/api/kb/connectors").status_code == 401
+    assert client.get("/api/kb/collections/x/connections").status_code == 401
+    assert client.post("/api/kb/collections/x/connections",
+                       json={"connector": "public_url", "config": {}}).status_code == 401
+    assert client.post("/api/kb/connections/x/sync").status_code == 401
+    assert client.patch("/api/kb/connections/x", json={"status": "paused"}).status_code == 401
+    assert client.delete("/api/kb/connections/x").status_code == 401
+    assert client.get("/api/kb/collections/x/doc-writebacks").status_code == 401
+    assert client.get("/api/kb/doc-writebacks").status_code == 401
+    assert client.get("/api/kb/connections").status_code == 401
+    assert client.post("/api/kb/connectors/linear/test", json={}).status_code == 401
+    assert client.get("/api/kb/doc-defaults").status_code == 401
+    assert client.put("/api/kb/doc-defaults", json={"on_correction": "off"}).status_code == 401
+
+
+def test_kb_doc_defaults_validation():
+    from fastapi import HTTPException
+
+    from api.main import KbDocDefaultsIn, _validate_kb_doc_defaults
+
+    # partial blob — only the keys that were set
+    assert _validate_kb_doc_defaults(KbDocDefaultsIn(index=True)) == {"index": True}
+    assert _validate_kb_doc_defaults(
+        KbDocDefaultsIn(on_correction="suggest", github_repo="acme/kb")
+    ) == {"on_correction": "suggest", "github_repo": "acme/kb"}
+
+    for bad in (
+        KbDocDefaultsIn(on_correction="bogus"),
+        KbDocDefaultsIn(on_correction="suggest"),                       # no repo
+        KbDocDefaultsIn(on_correction="write_back", github_repo="nope"),  # bad repo
+        KbDocDefaultsIn(on_correction="suggest", github_repo="a/b", index=False),
+    ):
+        with pytest.raises(HTTPException):
+            _validate_kb_doc_defaults(bad)
+
+
 def test_approvals_endpoints_need_a_token():
     assert client.get("/api/approvals").status_code == 401
     assert client.post("/api/approvals/action-requests/abc",
                        json={"decision": "approve"}).status_code == 401
     assert client.get("/api/review-tasks").status_code == 401
+    assert client.get("/api/health/tenant").status_code == 401
+
+
+def test_billing_endpoints_need_a_token():
+    assert client.get("/api/billing/usage").status_code == 401
+    assert client.get("/api/billing/flow-deltas").status_code == 401
+
+
+def test_graph_ask_needs_a_token():
+    assert client.post("/api/graph/ask", json={"question": "how many cases"}).status_code == 401
+
+
+def test_job_failures_needs_a_token():
+    assert client.get("/api/jobs/failures").status_code == 401
+
+
+def test_posthog_integration_endpoints_need_a_token():
+    assert client.get("/api/integrations/posthog").status_code == 401
+    assert client.put("/api/integrations/posthog", json={"project_id": "1"}).status_code == 401
+    assert client.delete("/api/integrations/posthog").status_code == 401
+    assert client.post("/api/integrations/posthog/test", json={"project_id": "1"}).status_code == 401
 
 
 def test_trigger_endpoint_needs_a_token_and_trigger_is_a_node_type():
@@ -450,6 +508,10 @@ def test_freshchat_channel_endpoints_need_a_token():
     assert client.post("/api/integrations/freshchat/test", json={"domain": "x"}).status_code == 401
     assert client.delete("/api/integrations/freshchat").status_code == 401
     assert client.get("/api/integrations/freshchat/webhook-url").status_code == 401
+    assert client.get("/api/integrations/freshchat/oauth/authorize").status_code == 401
+    # the OAuth callback is public (browser follows a Freshchat redirect)
+    r = client.get("/api/integrations/freshchat/oauth/callback?error=access_denied")
+    assert r.status_code == 200 and "failed" in r.text
 
 
 def test_zendesk_connection_endpoints_need_a_token():
@@ -870,9 +932,58 @@ def test_freshchat_channel_write_is_owner_only(globex_as_viewer, auth_headers):
                             json={"domain": "h", "api_token": "t", "tenant_id": GLOBEX_TENANT}),
         lambda: client.delete("/api/integrations/freshchat", headers=auth_headers,
                               params={"tenant_id": GLOBEX_TENANT}),
+        lambda: client.get("/api/integrations/freshchat/oauth/authorize", headers=auth_headers,
+                           params={"tenant_id": GLOBEX_TENANT}),
     ):
         r = call()
         assert r.status_code == 403, r.text
+
+
+@pytest.mark.integration
+def test_freshchat_channel_configure_with_oauth_client_only(auth_headers):
+    """A tenant can save just client_id/client_secret (no api_token yet) —
+    the browser round-trip to actually mint a refresh_token is a separate,
+    human-driven step (/oauth/authorize), not exercised here."""
+    body = {"domain": "acme.freshchat.com", "oauth_domain": "acme.myfreshworks.com",
+           "client_id": "fw_ext_fake", "client_secret": "fake-secret",
+           "tenant_id": GLOBEX_TENANT}
+    try:
+        r = client.put("/api/integrations/freshchat", headers=auth_headers, json=body)
+        assert r.status_code == 200, r.text
+        got = r.json()
+        assert got["configured"] is False    # no api_token, no refresh_token yet
+        assert got["oauth"] is False
+        assert got["oauth_client_configured"] is True
+        assert "client_secret" not in str(got)
+    finally:
+        client.delete("/api/integrations/freshchat", headers=auth_headers,
+                      params={"tenant_id": GLOBEX_TENANT})
+
+
+@pytest.mark.integration
+def test_freshchat_oauth_authorize_requires_a_saved_client(auth_headers):
+    r = client.get("/api/integrations/freshchat/oauth/authorize", headers=auth_headers,
+                   params={"tenant_id": GLOBEX_TENANT})
+    assert r.status_code == 422
+
+
+@pytest.mark.integration
+def test_freshchat_oauth_authorize_builds_a_real_url(auth_headers):
+    body = {"domain": "acme.freshchat.com", "oauth_domain": "acme.myfreshworks.com",
+           "client_id": "fw_ext_fake", "client_secret": "fake-secret",
+           "tenant_id": GLOBEX_TENANT}
+    try:
+        assert client.put("/api/integrations/freshchat", headers=auth_headers,
+                          json=body).status_code == 200
+        r = client.get("/api/integrations/freshchat/oauth/authorize", headers=auth_headers,
+                       params={"tenant_id": GLOBEX_TENANT})
+        assert r.status_code == 200, r.text
+        url = r.json()["url"]
+        assert url.startswith("https://acme.myfreshworks.com/org/oauth/v2/authorize?")
+        assert "client_id=fw_ext_fake" in url
+    finally:
+        client.delete("/api/integrations/freshchat", headers=auth_headers,
+                      params={"tenant_id": GLOBEX_TENANT})
 
 
 @pytest.mark.integration

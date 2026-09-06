@@ -1063,16 +1063,21 @@ class _FakeSources:
 
 
 def test_resolve_sources_never_leaks_another_tenants_kb():
-    from interpreter.retrieval import resolve_sources
+    from interpreter.retrieval import _NO_MATCH, resolve_sources
     sb = _FakeSources()
-    # Acme flow, no names -> shared + acme only
-    assert set(resolve_sources(None, sb, "ACME")) == {"s-public", "s-acme"}
-    # Globex flow naming its own + shared
+    # Acme flow, no names -> Acme's OWN sources only (shared is opt-in now)
+    assert set(resolve_sources(None, sb, "ACME")) == {"s-acme"}
+    # a flow that still wants the shared demo corpus names it explicitly
     assert set(resolve_sources(["globex-sop", "zapier-public"], sb, "GLOBEX")) == {"s-globex", "s-public"}
-    # Acme flow *naming* globex-sop -> falls back to Acme's legitimate scope, no leak
+    # Acme flow *naming* globex-sop -> falls back to Acme's own scope, no leak
     assert "s-globex" not in resolve_sources(["globex-sop"], sb, "ACME")
-    # no tenant -> shared only
+    assert set(resolve_sources(["globex-sop"], sb, "ACME")) == {"s-acme"}
+    # no tenant -> shared only (eval/admin)
     assert resolve_sources(None, sb, None) == ["s-public"]
+    # a tenant with no sources of its own -> a no-match sentinel, NOT None
+    class _Empty(_FakeSources):
+        _ROWS = [{"source_id": "s-public", "name": "zapier-public", "tenant_id": None}]
+    assert resolve_sources(None, _Empty(), "NEWCO") == _NO_MATCH
 
 
 # --------------------------------------------------------------------------

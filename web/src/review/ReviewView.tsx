@@ -1,6 +1,15 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
-import type { ActionRequest, KilDigest, KilMetrics, ReviewTask } from "../types";
+import type {
+  ActionRequest,
+  GraphAskResult,
+  JobFailures,
+  KbDocWriteback,
+  KilDigest,
+  KilMetrics,
+  ReviewTask,
+  TenantHealth,
+} from "../types";
 
 const STATUS = ["open", "correct", "wrong", "dismissed", "all"] as const;
 
@@ -9,6 +18,10 @@ export function ReviewView() {
   const [digest, setDigest] = useState<KilDigest | null>(null);
   const [rows, setRows] = useState<ReviewTask[]>([]);
   const [ars, setArs] = useState<ActionRequest[]>([]);
+  const [docWb, setDocWb] = useState<KbDocWriteback[]>([]);
+  const [showDocWb, setShowDocWb] = useState(false);
+  const [health, setHealth] = useState<TenantHealth | null>(null);
+  const [jobFails, setJobFails] = useState<JobFailures | null>(null);
   const [status, setStatus] = useState<(typeof STATUS)[number]>("open");
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -21,6 +34,9 @@ export function ReviewView() {
       .list()
       .then((r) => setArs(r.action_requests))
       .catch(() => {});
+    api.kb.listAllDocWritebacks("open").then(setDocWb).catch(() => {});
+    api.review.tenantHealth().then(setHealth).catch(() => {});
+    setJobFails(null);
   };
   useEffect(load, [status]);
 
@@ -69,6 +85,103 @@ export function ReviewView() {
         requests to approve, plus sent replies the contradiction judge flagged
         against the KB or case history.
       </p>
+
+      {health && (
+        <div className="col" style={{ gap: 4 }}>
+          <strong style={{ fontSize: 12, color: "var(--muted, #667)" }}>Bot health (24h)</strong>
+          <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
+            <Tile
+              label="sources failing"
+              value={health.connections.failing}
+              warn={health.connections.failing > 0}
+            />
+            <Tile
+              label="stuck reasoning"
+              value={health.reasoning_stuck}
+              warn={health.reasoning_stuck > 0}
+            />
+            <Tile
+              label="doc write-backs pending"
+              value={health.doc_writebacks_pending}
+              warn={health.doc_writebacks_pending > 0}
+            />
+            <Tile
+              label="failed jobs (24h)"
+              value={health.failed_jobs_24h}
+              warn={health.failed_jobs_24h > 0}
+            />
+            <Tile
+              label="review backlog"
+              value={
+                health.review_backlog.oldest_days != null
+                  ? `${health.review_backlog.open} · ${health.review_backlog.oldest_days}d old`
+                  : health.review_backlog.open
+              }
+              warn={(health.review_backlog.oldest_days ?? 0) > 2}
+            />
+            <Tile label="runs (24h)" value={health.runs_24h.total} />
+            <Tile
+              label="struggle rate"
+              value={pct(health.runs_24h.struggle_rate)}
+              warn={health.runs_24h.struggle_rate > 0.25}
+            />
+            {health.system_stale.length > 0 && (
+              <Tile
+                label="ingestion stale"
+                value={`${health.system_stale.length} job${health.system_stale.length === 1 ? "" : "s"}`}
+                warn
+              />
+            )}
+          </div>
+          {health.connections.sample && (
+            <span style={{ fontSize: 12, color: "var(--crit, #b4432a)" }}>
+              ⚠ {health.connections.sample}
+            </span>
+          )}
+          {health.failed_jobs_24h > 0 && (
+            <button
+              style={{ alignSelf: "flex-start", fontSize: 12 }}
+              onClick={() => {
+                if (jobFails) {
+                  setJobFails(null);
+                } else {
+                  api.review.jobFailures().then(setJobFails).catch((e: ApiError) => setErr(e.message));
+                }
+              }}
+            >
+              {jobFails ? "hide" : "show"} failed jobs
+            </button>
+          )}
+          {jobFails && (
+            <div style={{ overflowX: "auto" }}>
+              <table className="runs-table" style={{ minWidth: 560 }}>
+                <thead>
+                  <tr>
+                    <th>kind</th>
+                    <th>attempts</th>
+                    <th>last error</th>
+                    <th>failed</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {jobFails.failures.map((j) => (
+                    <tr key={j.job_id}>
+                      <td>{j.kind}</td>
+                      <td className="muted">
+                        {j.attempts}/{j.max_attempts}
+                      </td>
+                      <td className="muted" style={{ maxWidth: 360, whiteSpace: "pre-wrap" }}>
+                        {j.error || "—"}
+                      </td>
+                      <td className="muted">{j.updated_at.slice(0, 16).replace("T", " ")}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
 
       {metrics && (
         <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
@@ -132,6 +245,56 @@ export function ReviewView() {
         >
           {digest.markdown.replace(/\*/g, "")}
         </pre>
+      )}
+
+      <GraphAskPanel />
+
+      {metrics && metrics.by_source.length > 0 && (
+        <div className="col" style={{ gap: 4 }}>
+          <h4 style={{ margin: "4px 0" }}>Knowledge health by source</h4>
+          <div style={{ overflowX: "auto" }}>
+            <table className="runs-table" style={{ minWidth: 560 }}>
+              <thead>
+                <tr>
+                  <th>source</th>
+                  <th>flagged</th>
+                  <th>confirmed gap</th>
+                  <th>false-flag rate</th>
+                  <th>median time to correct</th>
+                </tr>
+              </thead>
+              <tbody>
+                {metrics.by_source.map((s) => (
+                  <tr key={s.source}>
+                    <td>{s.source}</td>
+                    <td className="muted">{s.flagged}</td>
+                    <td className="muted">{s.confirmed}</td>
+                    <td className={s.false_flag_rate != null && s.false_flag_rate >= 0.5 ? "warn" : "muted"}>
+                      {pct(s.false_flag_rate)}
+                    </td>
+                    <td className="muted">
+                      {s.median_time_to_correct_h != null ? `${s.median_time_to_correct_h}h` : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {docWb.length > 0 && (
+        <div className="col" style={{ gap: 6 }}>
+          <button
+            style={{ alignSelf: "flex-start" }}
+            onClick={() => setShowDocWb((v) => !v)}
+            title="Automated Google-Doc edits from approved KB corrections, still awaiting a human on GitHub"
+          >
+            {showDocWb ? "hide" : "📄 show"} {docWb.length} doc write-back
+            {docWb.length === 1 ? "" : "s"} awaiting verification
+          </button>
+          {showDocWb && <DocWritebacksTable rows={docWb} />}
+        </div>
       )}
 
       <div className="row" style={{ gap: 4 }}>
@@ -279,6 +442,210 @@ export function ReviewView() {
 
 function pct(v: number | null): string {
   return v == null ? "—" : `${Math.round(v * 100)}%`;
+}
+
+const GRAPH_EXAMPLES = [
+  "How many cases were escalated last month, by module?",
+  "Which accounts have more than 2 duplicate cases?",
+  "Average resolution time by tier for the Billing module",
+  "List open cases about refunds",
+];
+
+function GraphAskPanel() {
+  const [q, setQ] = useState("");
+  const [res, setRes] = useState<GraphAskResult | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [showCypher, setShowCypher] = useState(false);
+
+  const ask = async (question: string) => {
+    const text = question.trim();
+    if (!text) return;
+    setBusy(true);
+    setErr(null);
+    setRes(null);
+    try {
+      setRes(await api.graphAsk(text));
+    } catch (e) {
+      setErr((e as ApiError).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="col" style={{ gap: 6 }}>
+      <h4 style={{ margin: "4px 0" }}>Ask the case graph</h4>
+      <div className="muted" style={{ fontSize: 12 }}>
+        Plain-English questions over your cases, accounts, modules, tiers and agents.
+        The question is compiled to a read-only, workspace-scoped query — shown below the answer.
+      </div>
+      <form
+        className="row"
+        style={{ gap: 6 }}
+        onSubmit={(e) => {
+          e.preventDefault();
+          ask(q);
+        }}
+      >
+        <input
+          style={{ flex: 1 }}
+          placeholder="e.g. how many API-module cases were escalated last week"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+        />
+        <button type="submit" disabled={busy || !q.trim()}>
+          {busy ? "…" : "Ask"}
+        </button>
+      </form>
+      <div className="row" style={{ gap: 4, flexWrap: "wrap" }}>
+        {GRAPH_EXAMPLES.map((ex) => (
+          <button
+            key={ex}
+           
+            style={{ fontSize: 11 }}
+            onClick={() => {
+              setQ(ex);
+              ask(ex);
+            }}
+          >
+            {ex}
+          </button>
+        ))}
+      </div>
+
+      {err && <div className="banner err">{err}</div>}
+
+      {res && (
+        <div className="col" style={{ gap: 4 }}>
+          <div style={{ overflowX: "auto" }}>
+            <table className="runs-table" style={{ minWidth: 360 }}>
+              <thead>
+                <tr>
+                  {res.columns.map((col) => (
+                    <th key={col}>{col}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {res.rows.length === 0 && (
+                  <tr>
+                    <td colSpan={res.columns.length} className="muted">
+                      no matching cases
+                    </td>
+                  </tr>
+                )}
+                {res.rows.map((row, i) => (
+                  <tr key={i}>
+                    {res.columns.map((col) => (
+                      <td key={col} className="muted">
+                        {row[col] == null ? "—" : String(row[col])}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {res.truncated && (
+            <div className="muted" style={{ fontSize: 11 }}>
+              showing the first {res.spec.limit} rows
+            </div>
+          )}
+          <button
+           
+            style={{ alignSelf: "flex-start", fontSize: 11 }}
+            onClick={() => setShowCypher((v) => !v)}
+          >
+            {showCypher ? "hide" : "show"} the compiled query
+          </button>
+          {showCypher && (
+            <pre
+              style={{
+                margin: 0,
+                padding: 8,
+                whiteSpace: "pre-wrap",
+                fontSize: 11,
+                background: "var(--card, #f6f7f9)",
+                borderRadius: 6,
+              }}
+            >
+              {res.cypher}
+            </pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DocWritebacksTable({ rows }: { rows: KbDocWriteback[] }) {
+  const color = (s: string) =>
+    s === "verified"
+      ? "#2b6a2b"
+      : s === "suggested" || s === "applied"
+        ? "#33608a"
+        : s === "partial"
+          ? "#8a5a00"
+          : s === "reverted"
+            ? "#555"
+            : "#9b2c2c";
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table className="runs-table" style={{ minWidth: 640 }}>
+        <thead>
+          <tr>
+            <th>doc</th>
+            <th>status</th>
+            <th>blocks</th>
+            <th>when</th>
+            <th>review issue</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((w) => (
+            <tr key={w.id}>
+              <td style={{ maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis" }}>
+                {w.doc_url ? (
+                  <a href={w.doc_url} target="_blank" rel="noreferrer">
+                    {w.connection_label || "Google Doc"}
+                  </a>
+                ) : (
+                  w.connection_label || "Google Doc"
+                )}
+              </td>
+              <td>
+                <span
+                  title={w.error ?? undefined}
+                  style={{
+                    fontSize: 11, padding: "1px 6px", borderRadius: 8, color: "#fff",
+                    background: color(w.status),
+                  }}
+                >
+                  {w.status}
+                </span>
+              </td>
+              <td style={{ color: "var(--muted, #667)" }}>
+                {w.blocks.filter((b) => b.applied).length}/{w.blocks.length}
+              </td>
+              <td style={{ color: "var(--muted, #667)" }}>
+                {new Date(w.applied_at).toLocaleString()}
+              </td>
+              <td>
+                {w.github_issue_url ? (
+                  <a href={w.github_issue_url} target="_blank" rel="noreferrer">
+                    {w.github_repo}#{w.github_issue_number}
+                  </a>
+                ) : (
+                  <span style={{ color: "var(--muted, #667)" }}>—</span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 function Tile({ label, value, warn }: { label: string; value: number | string; warn?: boolean }) {
