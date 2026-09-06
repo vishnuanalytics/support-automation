@@ -738,7 +738,7 @@ function AddSourceForm({
                 onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
               >
                 {(f.options ?? []).map((o) => (
-                  <option key={o} value={o}>{o}</option>
+                  <option key={o} value={o}>{f.option_labels?.[o] ?? o}</option>
                 ))}
               </select>
             ) : (
@@ -748,6 +748,9 @@ function AddSourceForm({
                 value={values[f.key] ?? ""}
                 onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
               />
+            )}
+            {f.help && (
+              <span className="muted" style={{ fontSize: 11 }}>{f.help}</span>
             )}
           </div>
         ))}

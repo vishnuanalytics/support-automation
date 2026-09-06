@@ -259,14 +259,20 @@ register(KBConnectorSpec(
     config_fields=[
         {"key": "doc_url", "label": "Google Doc URL", "type": "string", "required": True,
          "placeholder": "https://docs.google.com/document/d/…"},
-        {"key": "access", "label": "When the KB is corrected", "type": "select",
-         "required": False,
-         "options": ["read_only", "suggest", "write_back"]},
-        #   read_only  — only the internal KB mirror is updated (default)
-        #   suggest    — open a GitHub issue with the diff; a human edits the doc  (recommended)
-        #   write_back — the bot rewrites the passage; a human verifies / reverts
+        {"key": "access", "label": "When this doc's KB entry is corrected",
+         "type": "select", "required": False,
+         "options": ["read_only", "suggest", "write_back"],
+         "option_labels": {
+             "read_only": "Read only — never change the doc",
+             "suggest": "Suggest edits — open a GitHub issue, a person applies it (recommended)",
+             "write_back": "Auto-write — the bot edits the doc, a person verifies",
+         },
+         "help": ("The doc is always read into the knowledge base. This only controls "
+                  "what happens when a support resolution corrects that content: leave the "
+                  "doc alone, propose the fix for a human to apply, or let the bot apply it.")},
         {"key": "github_repo", "label": "GitHub repo for review issues (owner/name)",
          "type": "string", "required": False, "placeholder": "acme/support-kb",
+         "help": "Where the correction issue is opened. Needs a GitHub connection for this tenant.",
          "show_if": {"key": "access", "ne": "read_only"}},
     ],
     normalize=_norm_gdocs, available=_google_available,

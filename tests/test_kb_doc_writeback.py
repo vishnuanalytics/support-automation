@@ -295,6 +295,18 @@ def test_gdocs_normalize_write_back_requires_a_valid_repo():
         spec.normalize_config({"doc_url": url, "access": "write_back", "github_repo": "not-a-repo"})
 
 
+def test_gdocs_access_field_has_human_labels_and_help_for_the_ui():
+    spec = kb_connectors.get_kb_connector("gdocs")
+    access = next(f for f in spec.config_fields if f["key"] == "access")
+    assert set(access["options"]) == {"read_only", "suggest", "write_back"}
+    # every option carries a plain-language label + the field has help text
+    assert set(access["option_labels"]) == set(access["options"])
+    assert "recommended" in access["option_labels"]["suggest"]
+    assert access.get("help")
+    repo = next(f for f in spec.config_fields if f["key"] == "github_repo")
+    assert repo["show_if"] == {"key": "access", "ne": "read_only"} and repo.get("help")
+
+
 def test_gdocs_normalize_suggest_also_needs_a_repo():
     spec = kb_connectors.get_kb_connector("gdocs")
     url = "https://docs.google.com/document/d/ABCdef123456789012345/edit"

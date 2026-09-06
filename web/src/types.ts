@@ -229,6 +229,8 @@ export interface KbConnectorField {
   required?: boolean;
   placeholder?: string;
   options?: string[];
+  option_labels?: Record<string, string>; // raw value -> human label (select fields)
+  help?: string; // one-line explanation shown under the field
   show_if?: { key: string; eq?: string; ne?: string; in?: string[] };
 }
 

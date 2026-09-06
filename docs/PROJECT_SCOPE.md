@@ -736,7 +736,12 @@ payload; `_gdoc_writeback` branches on `mode` (`suggest` ⇒
 `kb_sync`s the mirror when a `suggested` issue closes. Migration `093`
 widens the `idx_kb_doc_writebacks_open` partial index to include
 `'suggested'` (no table change — `access`/`status` have no CHECK).
-`KnowledgeView` shows a `suggests edits` vs `write-back` badge.
+`KnowledgeView` shows a `suggests edits` vs `write-back` badge, and the
+`access` picker now renders plain-language option labels ("Suggest edits —
+open a GitHub issue, a person applies it (recommended)" …) + one-line help
+text under the field, driven by new `option_labels` / `help` keys on the
+`KBConnectorSpec` `config_fields` (web `fieldVisible` already handles the
+`show_if`).
 
 **Verify:** `tests/test_kb_doc_writeback.py` +5 (`suggest` normalize +
 repo-required, the gate firing with `mode='suggest'`, `_gdoc_writeback`
