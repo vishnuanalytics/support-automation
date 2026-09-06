@@ -336,6 +336,35 @@ def test_gdocs_sync_produces_nothing_when_index_is_off(monkeypatch):
     assert called == []   # not even fetched
 
 
+def test_gdocs_normalize_accepts_a_drive_folder_url():
+    spec = kb_connectors.get_kb_connector("gdocs")
+    cfg = spec.normalize_config(
+        {"doc_url": "https://drive.google.com/drive/folders/FOLDERID123?usp=sharing",
+         "recursive": "yes"})
+    assert cfg["folder_id"] == "FOLDERID123" and cfg["recursive"] is True
+    assert "doc_id" not in cfg
+    # a folder can't do write-back (which doc would it edit?)
+    with pytest.raises(ValueError):
+        spec.normalize_config({"doc_url": "https://drive.google.com/drive/folders/FID",
+                               "on_correction": "suggest", "github_repo": "a/b"})
+
+
+def test_gdocs_sync_folder_makes_one_document_per_doc(monkeypatch):
+    monkeypatch.setattr("interpreter.gdrive.list_folder_docs",
+                        lambda tid, fid, sb, *, recursive: [
+                            {"id": "d1", "name": "One", "modified_time": "2026-01-02T00:00:00Z"},
+                            {"id": "d2", "name": "Two", "modified_time": "2026-01-01T00:00:00Z"}])
+    monkeypatch.setattr("interpreter.gdrive.fetch_doc",
+                        lambda tid, did, sb: {"title": did.upper(), "markdown": f"body {did}",
+                                              "modified_time": "M"})
+    ctx = kb_connectors.SyncCtx(tenant_id="t", sb=None, collection_name="c")
+    res = kb_connectors._sync_gdocs({"folder_id": "F", "recursive": False, "index": True},
+                                    None, ctx)
+    assert [d.external_id for d in res.documents] == ["d1", "d2"]
+    assert res.documents[0].origin == "gdoc" and res.documents[0].extra["gdoc_id"] == "d1"
+    assert res.exhaustive is True and res.watermark["count"] == 2
+
+
 # ── watch_doc_writebacks (chunk 2: close the loop) ───────────────────────
 def _wb_row(**over):
     r = {"id": "wb1", "tenant_id": "t", "connection_id": "c1", "status": "applied",

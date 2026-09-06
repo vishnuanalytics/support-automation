@@ -67,6 +67,51 @@ def parse_doc_id(url_or_id: str) -> str:
     raise ValueError(f"not a Google Doc URL or id: {url_or_id!r}")
 
 
+def parse_folder_id(url_or_id: str) -> str | None:
+    """A Drive folder URL -> its id, or None if this isn't a folder URL
+    (so `_norm_gdocs` can try `parse_doc_id` instead)."""
+    s = (url_or_id or "").strip()
+    m = re.search(r"/folders/([a-zA-Z0-9_-]+)", s)
+    return m.group(1) if m else None
+
+
+def list_folder_docs(tenant_id: str, folder_id: str, sb, *,
+                     recursive: bool = False) -> list[dict[str, Any]]:
+    """Every Google Doc directly in `folder_id` (or its subtree if
+    `recursive`) -> [{id, name, modified_time}], most-recently-modified
+    first. Raises on auth."""
+    drive, _ = _services(tenant_id, sb)
+    out: list[dict[str, Any]] = []
+    queue = [folder_id]
+    seen: set[str] = set()
+    while queue:
+        fid = queue.pop(0)
+        if fid in seen:
+            continue
+        seen.add(fid)
+        page = None
+        while True:
+            resp = drive.files().list(
+                q=(f"'{fid}' in parents and trashed=false and "
+                   "(mimeType='application/vnd.google-apps.document' or "
+                   "mimeType='application/vnd.google-apps.folder')"),
+                fields="nextPageToken, files(id,name,mimeType,modifiedTime)",
+                pageSize=200, pageToken=page,
+            ).execute()
+            for f in resp.get("files", []):
+                if f.get("mimeType") == "application/vnd.google-apps.folder":
+                    if recursive:
+                        queue.append(f["id"])
+                else:
+                    out.append({"id": f["id"], "name": f.get("name") or f["id"],
+                                "modified_time": f.get("modifiedTime")})
+            page = resp.get("nextPageToken")
+            if not page:
+                break
+    out.sort(key=lambda d: d.get("modified_time") or "", reverse=True)
+    return out
+
+
 # ── OAuth ────────────────────────────────────────────────────────────
 def authorize_url(redirect_uri: str, state: str) -> str:
     cid, _ = _need()

@@ -234,10 +234,15 @@ def _norm_gdocs(raw: dict[str, Any]) -> dict[str, Any]:
     from interpreter import gdrive
 
     doc_url = (raw.get("doc_url") or "").strip()
-    cfg: dict[str, Any] = {
-        "doc_id": gdrive.parse_doc_id(doc_url or raw.get("doc_id") or ""),
-        "doc_url": doc_url,
-    }
+    src = doc_url or raw.get("doc_id") or ""
+    cfg: dict[str, Any] = {"doc_url": doc_url}
+
+    folder_id = gdrive.parse_folder_id(src)   # a Drive-folder URL -> sync every Doc in it
+    if folder_id:
+        cfg["folder_id"] = folder_id
+        cfg["recursive"] = _as_yes(raw.get("recursive"), default=False)
+    else:
+        cfg["doc_id"] = gdrive.parse_doc_id(src)
 
     # back-compat: an older single `access` value maps onto the two knobs
     legacy = raw.get("access")
@@ -251,6 +256,9 @@ def _norm_gdocs(raw: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("on_correction must be 'off', 'suggest' or 'write_back'")
     if on_corr != "off" and not index:
         raise ValueError("'suggest' / 'write_back' need the doc read into the KB — set 'Read' to Yes")
+    if on_corr != "off" and cfg.get("folder_id"):
+        raise ValueError("correction write-back needs a single linked Doc, not a whole folder "
+                         "— set correction handling to 'off' for a folder connection")
 
     cfg["index"] = index
     cfg["on_correction"] = on_corr
@@ -262,6 +270,17 @@ def _norm_gdocs(raw: dict[str, Any]) -> dict[str, Any]:
     return cfg
 
 
+def _gdoc_kbdoc(fetched: dict, doc_id: str, doc_url: str | None) -> "KBDocument":
+    return KBDocument(
+        external_id=doc_id, title=fetched["title"], body_md=fetched["markdown"],
+        origin="gdoc", updated_at=fetched.get("modified_time"),
+        extra={"gdoc_id": doc_id,
+               "gdoc_url": doc_url or f"https://docs.google.com/document/d/{doc_id}/edit",
+               "gdoc_modified": fetched.get("modified_time"),
+               "synced_at": _now_iso(), "sync_error": None},
+    )
+
+
 def _sync_gdocs(config: dict, watermark: "dict | None", ctx: SyncCtx) -> KBSyncResult:
     from interpreter import gdrive
 
@@ -271,24 +290,33 @@ def _sync_gdocs(config: dict, watermark: "dict | None", ctx: SyncCtx) -> KBSyncR
     if config.get("index") is False:
         return KBSyncResult(documents=[], exhaustive=True)
 
+    # Folder scope — one KBDocument per Doc in the folder (like gsheets is one
+    # per row). `exhaustive` so the driver archives a Doc removed from the
+    # folder. (Fetches every Doc each run; `changes.list` incremental is a
+    # later optimization — same note the design doc makes.)
+    if config.get("folder_id"):
+        docs = gdrive.list_folder_docs(ctx.tenant_id, config["folder_id"], ctx.sb,
+                                       recursive=bool(config.get("recursive")))
+        out = [_gdoc_kbdoc(gdrive.fetch_doc(ctx.tenant_id, d["id"], ctx.sb), d["id"], None)
+               for d in docs]
+        latest = max((d.get("modified_time") or "" for d in docs), default=None)
+        return KBSyncResult(documents=out, exhaustive=True,
+                            watermark={"modified_time": latest, "count": len(out)})
+
     doc_id = config["doc_id"]
     fetched = gdrive.fetch_doc(ctx.tenant_id, doc_id, ctx.sb)
-    doc = KBDocument(
-        external_id=doc_id, title=fetched["title"], body_md=fetched["markdown"],
-        origin="gdoc", updated_at=fetched.get("modified_time"),
-        extra={"gdoc_id": doc_id, "gdoc_url": config.get("doc_url"),
-               "gdoc_modified": fetched.get("modified_time"),
-               "synced_at": _now_iso(), "sync_error": None},
-    )
-    return KBSyncResult(documents=[doc], exhaustive=True,
+    return KBSyncResult(documents=[_gdoc_kbdoc(fetched, doc_id, config.get("doc_url"))],
+                        exhaustive=True,
                         watermark={"modified_time": fetched.get("modified_time")})
 
 
 register(KBConnectorSpec(
-    slug="gdocs", label="Google Doc", auth="oauth2", writable=True,
+    slug="gdocs", label="Google Doc or Drive folder", auth="oauth2", writable=True,
     config_fields=[
-        {"key": "doc_url", "label": "Google Doc URL", "type": "string", "required": True,
-         "placeholder": "https://docs.google.com/document/d/…"},
+        {"key": "doc_url", "label": "Google Doc or Drive folder URL", "type": "string",
+         "required": True, "placeholder": "https://docs.google.com/document/d/…  or  /drive/folders/…"},
+        {"key": "recursive", "label": "If a folder: include subfolders",
+         "type": "select", "required": False, "options": ["no", "yes"]},
         {"key": "index", "label": "Read this doc into the knowledge base",
          "type": "select", "required": False, "options": ["yes", "no"],
          "option_labels": {
