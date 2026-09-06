@@ -256,6 +256,16 @@ export interface KbConnector {
   writable?: boolean;
 }
 
+export interface TenantHealth {
+  tenant_id: string;
+  connections: { failing: number; sample: string | null };
+  review_backlog: { open: number; oldest_days: number | null };
+  reasoning_stuck: number;
+  doc_writebacks_pending: number;
+  runs_24h: { total: number; by_outcome: Record<string, number>; struggle_rate: number };
+  system_stale: { component: string; stale_hours: number }[];
+}
+
 export interface KbDocDefaults {
   index?: boolean;
   on_correction?: "off" | "suggest" | "write_back";

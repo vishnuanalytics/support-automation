@@ -1511,6 +1511,72 @@ def kil_metrics_ep(days: int = 30, tenant_id: str | None = None,
     return kil_metrics.compute(c.sb, tid, days=min(max(days, 1), 180))
 
 
+@app.get("/api/health/tenant")
+def tenant_health(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    """One 'is my bot healthy' payload for a tenant — the signals that are
+    already tenant-scoped: connected sources failing to sync, the KIL review
+    backlog, reasoning sessions stuck open, doc write-backs still awaiting a
+    human, and the last-24h run-outcome mix (a high handover / need-info rate
+    means the bot is struggling to answer). Read-only, cheap counts."""
+    from datetime import datetime, timedelta, timezone
+
+    tid = _caller_tenant(c, tenant_id)
+    now = datetime.now(timezone.utc)
+    day_ago = (now - timedelta(hours=24)).isoformat()
+    stuck_before = (now - timedelta(hours=6)).isoformat()
+
+    conns = (c.sb.table("kb_source_connections")
+             .select("status, last_result")
+             .eq("tenant_id", tid).neq("status", "archived").execute().data or [])
+    failing = [x for x in conns if x.get("status") == "error"]
+
+    open_tasks = (c.sb.table("review_tasks").select("created_at")
+                  .eq("tenant_id", tid).eq("status", "open").execute().data or [])
+    oldest_days = None
+    if open_tasks:
+        oldest = min(t["created_at"] for t in open_tasks)
+        oldest_days = round((now - datetime.fromisoformat(oldest.replace("Z", "+00:00"))).days, 1)
+
+    reasoning_stuck = len(
+        c.sb.table("reasoning_sessions").select("session_id")
+        .eq("tenant_id", tid).in_("state", ["open", "clarifying", "reasoning"])
+        .lt("updated_at", stuck_before).execute().data or [])
+
+    wb_pending = len(
+        c.sb.table("kb_doc_writebacks").select("id")
+        .eq("tenant_id", tid).in_("status", ["applied", "partial"]).execute().data or [])
+
+    runs = (c.sb.table("runs").select("outcome")
+            .eq("tenant_id", tid).gte("created_at", day_ago).limit(2000).execute().data or [])
+    by_outcome: dict[str, int] = {}
+    for r in runs:
+        by_outcome[r.get("outcome") or "?"] = by_outcome.get(r.get("outcome") or "?", 0) + 1
+    n = len(runs) or 1
+    struggle = by_outcome.get("handover", 0) + by_outcome.get("need_info", 0)
+
+    sys_stale = []
+    for h in (_service.table("system_health").select("component, last_healthy_at")
+              .execute().data or []):
+        lh = h.get("last_healthy_at")
+        if lh:
+            hrs = (now - datetime.fromisoformat(lh.replace("Z", "+00:00"))).total_seconds() / 3600
+            if hrs > 26:
+                sys_stale.append({"component": h["component"], "stale_hours": round(hrs, 1)})
+
+    return {
+        "tenant_id": tid,
+        "connections": {"failing": len(failing),
+                        "sample": ((failing[0].get("last_result") or {}).get("error")
+                                   if failing else None)},
+        "review_backlog": {"open": len(open_tasks), "oldest_days": oldest_days},
+        "reasoning_stuck": reasoning_stuck,
+        "doc_writebacks_pending": wb_pending,
+        "runs_24h": {"total": len(runs), "by_outcome": by_outcome,
+                     "struggle_rate": round(struggle / n, 3)},
+        "system_stale": sys_stale,
+    }
+
+
 @app.get("/api/kil/digest")
 def kil_digest_ep(weeks: int = 4, tenant_id: str | None = None,
                   format: str = "json", c: Caller = Depends(caller)) -> Any:

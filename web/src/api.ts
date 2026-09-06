@@ -32,6 +32,7 @@ import type {
   ReviewTask,
   KilMetrics,
   KilDigest,
+  TenantHealth,
   LlmKeyStatus,
   ModelsResp,
   SfMeta,
@@ -441,6 +442,7 @@ export const api = {
     metrics: (days = 30) => req<KilMetrics>(`/kil/metrics?days=${days}`),
     digest: (weeks = 4) =>
       req<KilDigest>(`/kil/digest?weeks=${weeks}`),
+    tenantHealth: () => req<TenantHealth>("/health/tenant"),
   },
 
   approvals: {

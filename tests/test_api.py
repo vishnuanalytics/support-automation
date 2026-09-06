@@ -94,6 +94,7 @@ def test_approvals_endpoints_need_a_token():
     assert client.post("/api/approvals/action-requests/abc",
                        json={"decision": "approve"}).status_code == 401
     assert client.get("/api/review-tasks").status_code == 401
+    assert client.get("/api/health/tenant").status_code == 401
 
 
 def test_trigger_endpoint_needs_a_token_and_trigger_is_a_node_type():

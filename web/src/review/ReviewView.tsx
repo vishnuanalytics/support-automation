@@ -6,6 +6,7 @@ import type {
   KilDigest,
   KilMetrics,
   ReviewTask,
+  TenantHealth,
 } from "../types";
 
 const STATUS = ["open", "correct", "wrong", "dismissed", "all"] as const;
@@ -17,6 +18,7 @@ export function ReviewView() {
   const [ars, setArs] = useState<ActionRequest[]>([]);
   const [docWb, setDocWb] = useState<KbDocWriteback[]>([]);
   const [showDocWb, setShowDocWb] = useState(false);
+  const [health, setHealth] = useState<TenantHealth | null>(null);
   const [status, setStatus] = useState<(typeof STATUS)[number]>("open");
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -30,6 +32,7 @@ export function ReviewView() {
       .then((r) => setArs(r.action_requests))
       .catch(() => {});
     api.kb.listAllDocWritebacks("open").then(setDocWb).catch(() => {});
+    api.review.tenantHealth().then(setHealth).catch(() => {});
   };
   useEffect(load, [status]);
 
@@ -78,6 +81,56 @@ export function ReviewView() {
         requests to approve, plus sent replies the contradiction judge flagged
         against the KB or case history.
       </p>
+
+      {health && (
+        <div className="col" style={{ gap: 4 }}>
+          <strong style={{ fontSize: 12, color: "var(--muted, #667)" }}>Bot health (24h)</strong>
+          <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
+            <Tile
+              label="sources failing"
+              value={health.connections.failing}
+              warn={health.connections.failing > 0}
+            />
+            <Tile
+              label="stuck reasoning"
+              value={health.reasoning_stuck}
+              warn={health.reasoning_stuck > 0}
+            />
+            <Tile
+              label="doc write-backs pending"
+              value={health.doc_writebacks_pending}
+              warn={health.doc_writebacks_pending > 0}
+            />
+            <Tile
+              label="review backlog"
+              value={
+                health.review_backlog.oldest_days != null
+                  ? `${health.review_backlog.open} · ${health.review_backlog.oldest_days}d old`
+                  : health.review_backlog.open
+              }
+              warn={(health.review_backlog.oldest_days ?? 0) > 2}
+            />
+            <Tile label="runs (24h)" value={health.runs_24h.total} />
+            <Tile
+              label="struggle rate"
+              value={pct(health.runs_24h.struggle_rate)}
+              warn={health.runs_24h.struggle_rate > 0.25}
+            />
+            {health.system_stale.length > 0 && (
+              <Tile
+                label="ingestion stale"
+                value={`${health.system_stale.length} job${health.system_stale.length === 1 ? "" : "s"}`}
+                warn
+              />
+            )}
+          </div>
+          {health.connections.sample && (
+            <span style={{ fontSize: 12, color: "var(--crit, #b4432a)" }}>
+              ⚠ {health.connections.sample}
+            </span>
+          )}
+        </div>
+      )}
 
       {metrics && (
         <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
