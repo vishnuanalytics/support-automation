@@ -14,10 +14,12 @@ and a unified **"Connected sources"** panel in `KnowledgeView.tsx` (add /
 re-sync / pause / disconnect, one registry-driven form for every connector).
 Three connectors are registered behind it: `public_url` (§1), `gsheets` (§3),
 `gdocs` (§2, now including **Drive-folder scope** — one entry per Doc in a
-folder), **`linear`** (§4) and **`nolt`** (§6). Forums (§5) are **not
-built**. Adding one is just "register a `KBConnectorSpec` + a `sync()`" — no
-new worker/endpoint/UI code (an `apikey` connector's key field is marked
-`"secret": true` and `api/main.py::_kb_add_connection` routes it to Vault).
+folder), **`linear`** (§4), **`nolt`** (§6) and **`discourse`** (§5). A
+non-Discourse forum (phpBB, custom) still isn't built — it would fall back
+to the `public_url` crawler. Adding a connector is just "register a
+`KBConnectorSpec` + a `sync()`" — no new worker/endpoint/UI code (an
+`apikey` connector's key field is marked `"secret": true` and
+`api/main.py::_kb_add_connection` routes it to Vault).
 
 ## The actual insight: this is not five problems
 
@@ -221,7 +223,22 @@ worth treating differently:
   first, OAuth later mirrors how Zendesk shipped before Freshchat's OAuth
   did.
 
-### 5. Forums — not built; prefer the platform's API over HTML scraping
+### 5. Forums — Discourse built 2026-09-06
+`interpreter/discourse.py` + the `discourse` connector (`auth="apikey"`, key
+optional — a public forum needs none). Lists `/latest.json` (or
+`/c/<category>.json`), pulls each topic's posts from `/t/<id>.json`. With
+`resolved_only=yes` (default) only a thread with an accepted answer (Solved
+plugin's `accepted_answer`) is kept — `quality="community_resolved"`,
+body = question + accepted answer; `resolved_only=no` keeps every thread as
+`quality="unverified"` with the first couple of replies as context.
+`origin="discourse"`, `external_id="topic:<id>"`, `exhaustive=False` always
+(a `/latest` listing is a window — never archive a thread that scrolled
+off). A gated forum takes an `Api-Key` (→ Vault, kind='discourse') +
+`api_username` (→ config). `POST /api/kb/connectors/discourse/test` hits
+`/site.json`.
+
+Original design notes:
+### 5b. Other forums — not built; prefer the platform's API over HTML scraping
 "Forum" isn't one shape — Discourse, a Zendesk Community, a custom phpBB,
 etc. Discourse (the common case) has a real JSON API
 (`/c/<category>.json`, `/t/<topic_id>.json`) — **use it, don't screen-scrape

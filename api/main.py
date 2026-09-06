@@ -2253,6 +2253,8 @@ class KbConnectorTestIn(BaseModel):
     tenant_id: str | None = None
     api_key: str | None = None
     board_id: str | None = None
+    base_url: str | None = None
+    api_username: str | None = None
 
 
 @app.post("/api/kb/connectors/{slug}/test")
@@ -2272,6 +2274,12 @@ def kb_test_connector(slug: str, body: KbConnectorTestIn, c: Caller = Depends(ca
         if not (body.board_id or "").strip():
             raise HTTPException(422, "board_id is required to test Nolt")
         return nolt.test_connection(tid, _service, body.board_id.strip(), api_key=key)
+    if slug == "discourse":
+        from interpreter import discourse
+        if not (body.base_url or "").strip():
+            raise HTTPException(422, "base_url is required to test a Discourse forum")
+        return discourse.test_connection(tid, _service, body.base_url.strip(),
+                                         api_key=key, api_username=(body.api_username or None))
     raise HTTPException(422, f"no connection test for connector {slug!r}")
 
 

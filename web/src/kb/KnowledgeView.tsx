@@ -873,6 +873,8 @@ function AddSourceForm({
         tenant_id: tenantId,
         api_key: (values.api_key ?? "").trim() || undefined,
         board_id: (values.board_id ?? "").trim() || undefined,
+        base_url: (values.base_url ?? "").trim() || undefined,
+        api_username: (values.api_username ?? "").trim() || undefined,
       });
       setTestMsg(r);
     } catch (e) {

@@ -369,6 +369,11 @@ def _nolt_available(t: "str | None", s: Any) -> "tuple[bool, str | None]":
     return nolt.available(t, s)
 
 
+def _discourse_available(t: "str | None", s: Any) -> "tuple[bool, str | None]":
+    from interpreter import discourse
+    return discourse.available(t, s)
+
+
 def _norm_linear(raw: dict[str, Any]) -> dict[str, Any]:
     inc = (raw.get("include") or "both").strip()
     if inc not in ("documents", "issues", "both"):
@@ -475,6 +480,83 @@ def _sync_nolt(config: dict, watermark: "dict | None", ctx: SyncCtx) -> KBSyncRe
                             quality="community_resolved"))
     return KBSyncResult(documents=docs, exhaustive=len(docs) < cap,
                         watermark={"count": len(docs)})
+
+
+# ---- 5b. discourse — resolved forum threads (interpreter/discourse.py) ----
+def _norm_discourse(raw: dict[str, Any]) -> dict[str, Any]:
+    base = (raw.get("base_url") or "").strip().rstrip("/")
+    if not base.startswith(("http://", "https://")):
+        raise ValueError("base_url must be the forum's http(s) URL")
+    cfg: dict[str, Any] = {
+        "base_url": base,
+        "resolved_only": _as_yes(raw.get("resolved_only"), default=True),
+        "max_items": _clamp_int(raw.get("max_items"), 300, 1, 2000),
+    }
+    cat = (raw.get("category") or "").strip()
+    if cat:
+        cfg["category"] = cat
+    user = (raw.get("api_username") or "").strip()
+    if user:
+        cfg["api_username"] = user
+    return cfg
+
+
+def _sync_discourse(config: dict, watermark: "dict | None", ctx: SyncCtx) -> KBSyncResult:
+    from interpreter import discourse
+
+    cap = int(config.get("max_items") or 300)
+    resolved_only = config.get("resolved_only", True)
+    topics = discourse.fetch_topics(
+        ctx.tenant_id, ctx.sb, config["base_url"],
+        category=config.get("category"), resolved_only=resolved_only, limit=cap,
+        api_username=config.get("api_username"))
+
+    docs: list[KBDocument] = []
+    for t in topics:
+        posts = t.get("posts") or []
+        parts = [f"# {t.get('title', '')}".strip()]
+        if posts:
+            parts.append(f"**Question ({posts[0].get('username') or 'a user'}):** "
+                         f"{(posts[0].get('text') or '').strip()}")
+        for p in posts[1:]:
+            if p.get("accepted"):
+                parts.append(f"**Accepted answer ({p.get('username') or 'a user'}):** "
+                             f"{(p.get('text') or '').strip()}")
+        # if nothing was marked accepted, keep the next 2 replies as context
+        if not any(p.get("accepted") for p in posts):
+            for p in posts[1:3]:
+                if (p.get("text") or "").strip():
+                    parts.append(f"**{p.get('username') or 'a user'}:** {p['text'].strip()}")
+        docs.append(_kb_doc(
+            f"topic:{t['id']}", t.get("title") or "Forum thread", "\n\n".join(parts),
+            origin="discourse", url=t.get("url", ""),
+            quality="community_resolved" if t.get("solved") else "unverified"))
+
+    # `/latest` (and even a category listing) is a window, not the whole
+    # forum — never archive a thread just because it dropped off the page.
+    return KBSyncResult(documents=docs, exhaustive=False,
+                        watermark={"count": len(docs)})
+
+
+register(KBConnectorSpec(
+    slug="discourse", label="Discourse forum", auth="apikey",
+    config_fields=[
+        {"key": "base_url", "label": "Forum URL", "type": "string", "required": True,
+         "placeholder": "https://forum.acme.com"},
+        {"key": "resolved_only", "label": "Only threads with an accepted answer",
+         "type": "select", "required": False, "options": ["yes", "no"]},
+        {"key": "category", "label": "Category slug/id (optional — blank = latest)",
+         "type": "string", "required": False, "placeholder": "support"},
+        {"key": "api_key", "label": "API key (only for a private forum)", "type": "string",
+         "required": False, "secret": True,
+         "help": "Public forums need none. A gated one: Admin → API → new key."},
+        {"key": "api_username", "label": "API username (with the key)", "type": "string",
+         "required": False, "placeholder": "system"},
+        _MAX_ITEMS_FIELD,
+    ],
+    normalize=_norm_discourse, available=_discourse_available,
+    sync=_sync_discourse,
+))
 
 
 register(KBConnectorSpec(

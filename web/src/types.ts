@@ -215,7 +215,8 @@ export interface KbEntryRow {
     | "import"
     | "review_writeback"
     | "linear"
-    | "nolt";
+    | "nolt"
+    | "discourse";
   gdoc_url?: string | null;
   gsheet_id?: string | null;
   gsheet_range?: string | null;

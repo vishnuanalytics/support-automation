@@ -293,7 +293,16 @@ export const api = {
     // KB source connectors (docs/KB_SOURCE_CONNECTORS.md)
     listConnectors: (tenantId?: string) =>
       req<KbConnector[]>(`/kb/connectors${tenantId ? `?tenant_id=${tenantId}` : ""}`),
-    testConnector: (slug: string, b: { tenant_id?: string; api_key?: string; board_id?: string }) =>
+    testConnector: (
+      slug: string,
+      b: {
+        tenant_id?: string;
+        api_key?: string;
+        board_id?: string;
+        base_url?: string;
+        api_username?: string;
+      },
+    ) =>
       req<{ ok: boolean; detail: string }>(`/kb/connectors/${slug}/test`, {
         method: "POST",
         body: JSON.stringify(b),
