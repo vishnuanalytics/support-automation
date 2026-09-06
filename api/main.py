@@ -2182,6 +2182,32 @@ def kb_list_connectors(tenant_id: str | None = None, c: Caller = Depends(caller)
     return out
 
 
+class KbConnectorTestIn(BaseModel):
+    tenant_id: str | None = None
+    api_key: str | None = None
+    board_id: str | None = None
+
+
+@app.post("/api/kb/connectors/{slug}/test")
+def kb_test_connector(slug: str, body: KbConnectorTestIn, c: Caller = Depends(caller)) -> dict:
+    """Lightweight authed read against an apikey connector's API — saves
+    nothing. Uses the posted `api_key` (a not-yet-saved key from the form)
+    or falls back to the stored one. -> {ok, detail}."""
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_editor(c, tid)
+    rate_limit(c.user_id, "integration", 20)
+    key = (body.api_key or "").strip() or None
+    if slug == "linear":
+        from interpreter import linear
+        return linear.test_connection(tid, _service, api_key=key)
+    if slug == "nolt":
+        from interpreter import nolt
+        if not (body.board_id or "").strip():
+            raise HTTPException(422, "board_id is required to test Nolt")
+        return nolt.test_connection(tid, _service, body.board_id.strip(), api_key=key)
+    raise HTTPException(422, f"no connection test for connector {slug!r}")
+
+
 @app.get("/api/kb/collections/{sid}/connections")
 def kb_list_connections(sid: str, c: Caller = Depends(caller)) -> list[dict]:
     _kb_collection(c, sid)

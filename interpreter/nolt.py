@@ -25,7 +25,9 @@ log = logging.getLogger("interpreter.nolt")
 _RESOLVED = ("done", "complete", "completed", "shipped", "released", "live")
 
 
-def _key(tenant_id: str, sb) -> str:
+def _key(tenant_id: str, sb, override: str | None = None) -> str:
+    if override:
+        return override
     from . import vault_secrets
 
     k = (vault_secrets.get(tenant_id, KIND, sb=sb) or {}).get("api_key")
@@ -45,16 +47,27 @@ def available(tenant_id: str | None, sb) -> "tuple[bool, str | None]":
     return False, "Add a Nolt board API key (board admin → API)"
 
 
-def _get(tenant_id: str, sb, path: str, params: dict | None = None) -> "list | dict":
+def _get(tenant_id: str, sb, path: str, params: dict | None = None,
+         *, api_key: str | None = None) -> "list | dict":
     import requests
 
     r = requests.get(
         f"{_API}{path}", params=params or {},
-        headers={"Authorization": _key(tenant_id, sb)}, timeout=30,
+        headers={"Authorization": _key(tenant_id, sb, api_key)}, timeout=30,
     )
     if r.status_code >= 300:
         raise RuntimeError(f"Nolt API {r.status_code} on {path}: {r.text[:300]}")
     return r.json()
+
+
+def test_connection(tenant_id: str | None, sb, board_id: str, *,
+                    api_key: str | None = None) -> dict:
+    """One authed read of the board's first post — saves nothing. -> {ok, detail}."""
+    try:
+        _get(tenant_id, sb, f"/v1/boards/{board_id}/posts", {"limit": 1}, api_key=api_key)
+        return {"ok": True, "detail": "board reachable"}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "detail": str(e)[:300]}
 
 
 def _is_resolved(post: dict) -> bool:

@@ -566,6 +566,28 @@ function ConnectedSources({
 
       {err && <div className="err" style={{ fontSize: 12 }}>{err}</div>}
 
+      {(() => {
+        const failing = conns.filter((c) => c.status === "error");
+        if (failing.length === 0) return null;
+        return (
+          <div
+            className="err"
+            style={{
+              fontSize: 12, display: "flex", gap: 8, alignItems: "center",
+              justifyContent: "space-between",
+            }}
+          >
+            <span>
+              ⚠ {failing.length} source{failing.length === 1 ? "" : "s"} failing to sync
+              {failing[0].last_result?.error ? ` — ${failing[0].last_result.error}` : ""}
+            </span>
+            <button onClick={() => failing.forEach((c) => void sync(c.connection_id))}>
+              retry all
+            </button>
+          </div>
+        );
+      })()}
+
       {editDefaults && (
         <DocDefaultsForm
           tenantId={col.tenant_id}
@@ -580,6 +602,7 @@ function ConnectedSources({
       {adding && (
         <AddSourceForm
           collectionId={col.source_id}
+          tenantId={col.tenant_id}
           catalogue={catalogue}
           gdocDefaults={docDefaults}
           onDone={() => {
@@ -778,11 +801,13 @@ function ConnStatus({ c }: { c: KbConnection }) {
 
 function AddSourceForm({
   collectionId,
+  tenantId,
   catalogue,
   gdocDefaults,
   onDone,
 }: {
   collectionId: string;
+  tenantId: string;
   catalogue: KbConnector[];
   gdocDefaults: KbDocDefaults;
   onDone: () => void;
@@ -791,6 +816,7 @@ function AddSourceForm({
   const [values, setValues] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [testMsg, setTestMsg] = useState<{ ok: boolean; detail: string } | null>(null);
 
   useEffect(() => {
     if (!slug && catalogue.length) setSlug(catalogue[0].slug);
@@ -838,6 +864,24 @@ function AddSourceForm({
     }
   }
 
+  async function test() {
+    setBusy(true);
+    setTestMsg(null);
+    setErr(null);
+    try {
+      const r = await api.kb.testConnector(slug, {
+        tenant_id: tenantId,
+        api_key: (values.api_key ?? "").trim() || undefined,
+        board_id: (values.board_id ?? "").trim() || undefined,
+      });
+      setTestMsg(r);
+    } catch (e) {
+      setTestMsg({ ok: false, detail: e instanceof ApiError ? String(e.detail) : String(e) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="col" style={{ gap: 8, background: "var(--panel, #00000008)", padding: 10, borderRadius: 6 }}>
       <div className="field">
@@ -873,15 +917,28 @@ function AddSourceForm({
         ))}
 
       {err && <div className="err" style={{ fontSize: 12 }}>{err}</div>}
+      {testMsg && (
+        <div
+          style={{ fontSize: 12, color: testMsg.ok ? "#2b6a2b" : "var(--crit, #b4432a)" }}
+        >
+          {testMsg.ok ? "✓ " : "✗ "}
+          {testMsg.detail}
+        </div>
+      )}
 
       <div className="row">
         <button
           className="primary"
           onClick={submit}
-          disabled={busy || !spec || !spec.available}
+          disabled={busy || !spec || (!spec.available && spec.auth !== "apikey")}
         >
           {busy ? "connecting…" : "connect & sync"}
         </button>
+        {spec?.auth === "apikey" && (
+          <button onClick={test} disabled={busy}>
+            {busy ? "…" : "test connection"}
+          </button>
+        )}
       </div>
     </div>
   );

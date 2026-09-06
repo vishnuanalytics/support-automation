@@ -140,3 +140,35 @@ def test_sync_nolt_builds_a_doc_per_resolved_post(monkeypatch):
 def test_registry_lists_linear_and_nolt():
     slugs = {s.slug for s in kb_connectors.list_kb_connectors()}
     assert {"linear", "nolt"} <= slugs
+
+
+# ── test_connection ─────────────────────────────────────────────────────
+def test_linear_test_connection_ok(monkeypatch):
+    monkeypatch.setattr(linear, "_gql",
+                        lambda t, s, q, **k: {"viewer": {"id": "u1", "name": "Ada"}})
+    assert linear.test_connection("t", None) == {"ok": True, "detail": "connected as Ada"}
+
+
+def test_linear_test_connection_passes_the_override_key(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(linear, "_gql",
+                        lambda t, s, q, **k: seen.update(k) or {"viewer": {"name": "x"}})
+    linear.test_connection("t", None, api_key="lin_OVERRIDE")
+    assert seen["api_key"] == "lin_OVERRIDE"
+
+
+def test_linear_test_connection_reports_failure(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("Linear API 401: bad key")
+    monkeypatch.setattr(linear, "_gql", boom)
+    r = linear.test_connection("t", None)
+    assert r["ok"] is False and "401" in r["detail"]
+
+
+def test_nolt_test_connection(monkeypatch):
+    monkeypatch.setattr(nolt, "_get", lambda *a, **k: [])
+    assert nolt.test_connection("t", None, "b1") == {"ok": True, "detail": "board reachable"}
+    def boom(*a, **k):
+        raise RuntimeError("Nolt API 403")
+    monkeypatch.setattr(nolt, "_get", boom)
+    assert nolt.test_connection("t", None, "b1")["ok"] is False

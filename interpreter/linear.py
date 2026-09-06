@@ -27,7 +27,9 @@ _GQL = "https://api.linear.app/graphql"
 log = logging.getLogger("interpreter.linear")
 
 
-def _key(tenant_id: str, sb) -> str:
+def _key(tenant_id: str, sb, override: str | None = None) -> str:
+    if override:
+        return override
     from . import vault_secrets
 
     k = (vault_secrets.get(tenant_id, KIND, sb=sb) or {}).get("api_key")
@@ -47,12 +49,14 @@ def available(tenant_id: str | None, sb) -> "tuple[bool, str | None]":
     return False, "Add a Linear API key (Settings → API → Personal API keys)"
 
 
-def _gql(tenant_id: str, sb, query: str, variables: dict | None = None) -> dict:
+def _gql(tenant_id: str, sb, query: str, variables: dict | None = None,
+         *, api_key: str | None = None) -> dict:
     import requests
 
     r = requests.post(
         _GQL, json={"query": query, "variables": variables or {}},
-        headers={"Authorization": _key(tenant_id, sb), "Content-Type": "application/json"},
+        headers={"Authorization": _key(tenant_id, sb, api_key),
+                 "Content-Type": "application/json"},
         timeout=30,
     )
     if r.status_code >= 300:
@@ -61,6 +65,17 @@ def _gql(tenant_id: str, sb, query: str, variables: dict | None = None) -> dict:
     if body.get("errors"):
         raise RuntimeError(f"Linear GraphQL error: {str(body['errors'])[:300]}")
     return body["data"]
+
+
+def test_connection(tenant_id: str | None, sb, *, api_key: str | None = None) -> dict:
+    """A trivial authed read (`{ viewer { id name } }`) — saves nothing.
+    Uses `api_key` if given (not-yet-saved key from the form), else the
+    stored one. -> {ok, detail}."""
+    try:
+        v = (_gql(tenant_id, sb, "{ viewer { id name } }", api_key=api_key) or {}).get("viewer") or {}
+        return {"ok": True, "detail": f"connected as {v.get('name') or v.get('id') or 'a user'}"}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "detail": str(e)[:300]}
 
 
 _DOCS_Q = """
