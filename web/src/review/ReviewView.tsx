@@ -196,6 +196,40 @@ export function ReviewView() {
         </pre>
       )}
 
+      {metrics && metrics.by_source.length > 0 && (
+        <div className="col" style={{ gap: 4 }}>
+          <h4 style={{ margin: "4px 0" }}>Knowledge health by source</h4>
+          <div style={{ overflowX: "auto" }}>
+            <table className="runs-table" style={{ minWidth: 560 }}>
+              <thead>
+                <tr>
+                  <th>source</th>
+                  <th>flagged</th>
+                  <th>confirmed gap</th>
+                  <th>false-flag rate</th>
+                  <th>median time to correct</th>
+                </tr>
+              </thead>
+              <tbody>
+                {metrics.by_source.map((s) => (
+                  <tr key={s.source}>
+                    <td>{s.source}</td>
+                    <td className="muted">{s.flagged}</td>
+                    <td className="muted">{s.confirmed}</td>
+                    <td className={s.false_flag_rate != null && s.false_flag_rate >= 0.5 ? "warn" : "muted"}>
+                      {pct(s.false_flag_rate)}
+                    </td>
+                    <td className="muted">
+                      {s.median_time_to_correct_h != null ? `${s.median_time_to_correct_h}h` : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {docWb.length > 0 && (
         <div className="col" style={{ gap: 6 }}>
           <button

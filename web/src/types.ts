@@ -486,6 +486,14 @@ export interface KilMetrics {
     promotion_rate: number | null;
   };
   knowledge_freshness_days: number | null;
+  by_source: {
+    source: string;
+    flagged: number;
+    confirmed: number;
+    dismissed: number;
+    false_flag_rate: number | null;
+    median_time_to_correct_h: number | null;
+  }[];
   weekly: { week: string; flagged: number }[];
 }
 

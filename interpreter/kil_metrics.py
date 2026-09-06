@@ -43,6 +43,89 @@ def _age_days(s: str | None, now: datetime) -> float | None:
     return None if d is None else max(0.0, (now - d).total_seconds() / 86400)
 
 
+def _domain(url: str) -> str:
+    try:
+        from urllib.parse import urlparse
+        return (urlparse(url).netloc or url).lower().removeprefix("www.")
+    except Exception:  # noqa: BLE001
+        return url
+
+
+def source_health(sb, tid: str, tasks: list[dict]) -> list[dict]:
+    """Per-KB-source contradiction health: for each source that a
+    contradiction/novel review task was raised against (attributed via the
+    task's top KB context `ref`), how many flags, how many the human
+    confirmed as a real gap, the false-flag rate, and the median time from
+    flag to resolution ("time to correct"). Feeds the "Knowledge health by
+    source" panel in ReviewView. Best-effort; every read degrades to zero."""
+    kt = [t for t in tasks if t.get("trigger") in ("contradicts", "novel")]
+    if not kt:
+        return []
+
+    entry_ids = {
+        (c.get("ref") or "")[5:]
+        for t in kt for c in (t.get("contexts") or [])
+        if (c.get("ref") or "").startswith("kb://")
+    }
+    conn_by_entry: dict[str, str | None] = {}
+    if entry_ids:
+        try:
+            rows = (sb.table("kb_entries").select("entry_id, connection_id")
+                    .eq("tenant_id", tid).in_("entry_id", list(entry_ids))
+                    .limit(5000).execute().data or [])
+            conn_by_entry = {r["entry_id"]: r.get("connection_id") for r in rows}
+        except Exception as e:  # noqa: BLE001
+            log.warning("kil_metrics source_health kb_entries: %s", e)
+
+    conn_label: dict[str, str] = {}
+    try:
+        for r in (sb.table("kb_source_connections")
+                  .select("connection_id, connector, config")
+                  .eq("tenant_id", tid).limit(500).execute().data or []):
+            conn_label[r["connection_id"]] = (
+                (r.get("config") or {}).get("label")
+                or (r.get("connector") or "source"))
+    except Exception as e:  # noqa: BLE001
+        log.warning("kil_metrics source_health connections: %s", e)
+
+    def _key(t: dict) -> tuple[str, str]:
+        for c in (t.get("contexts") or []):
+            ref = c.get("ref") or ""
+            if ref.startswith("kb://"):
+                cid = conn_by_entry.get(ref[5:])
+                return ("Internal KB (manual)" if not cid
+                        else conn_label.get(cid, "KB source"), cid or "internal")
+            if ref.startswith(("http://", "https://")):
+                return (_domain(ref), "web:" + _domain(ref))
+        return ("Unattributed", "unknown")
+
+    buckets: dict[str, dict] = {}
+    for t in kt:
+        label, key = _key(t)
+        b = buckets.setdefault(key, {"source": label, "flagged": 0,
+                                     "confirmed": 0, "dismissed": 0, "_ttc": []})
+        b["flagged"] += 1
+        st = t.get("status")
+        if st in ("correct", "wrong"):
+            b["confirmed"] += 1
+            cr, rv = _dt(t.get("created_at")), _dt(t.get("reviewed_at"))
+            if cr and rv:
+                b["_ttc"].append((rv - cr).total_seconds() / 3600)
+        elif st == "dismissed":
+            b["dismissed"] += 1
+
+    out = []
+    for b in buckets.values():
+        ttc = b.pop("_ttc")
+        out.append({
+            **b,
+            "false_flag_rate": round(b["dismissed"] / b["flagged"], 3) if b["flagged"] else None,
+            "median_time_to_correct_h": round(statistics.median(ttc), 1) if ttc else None,
+        })
+    out.sort(key=lambda x: x["flagged"], reverse=True)
+    return out
+
+
 def compute(sb, tenant_id: str, *, days: int = 30) -> dict:
     now = datetime.now(timezone.utc)
     since = (now - timedelta(days=days)).isoformat()
@@ -114,6 +197,7 @@ def compute(sb, tenant_id: str, *, days: int = 30) -> dict:
                               if (wb_active + wb_prov) else None,
         },
         "knowledge_freshness_days": round(statistics.median(fresh), 1) if fresh else None,
+        "by_source": source_health(sb, tid, tasks),
         "weekly": weekly,
     }
 

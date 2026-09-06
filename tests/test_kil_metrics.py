@@ -31,6 +31,9 @@ class _Q:
     def lt(self, *a, **k):
         return self
 
+    def in_(self, *a, **k):
+        return self
+
     def order(self, *a, **k):
         return self
 
@@ -97,6 +100,63 @@ def test_empty_tenant_is_all_zeros_not_a_crash():
     assert m["review"]["flag_precision"] is None
     assert m["kb_writeback"]["entries"] == 0
     assert m["knowledge_freshness_days"] is None
+    assert m["by_source"] == []
+
+
+def test_source_health_attributes_flags_to_kb_source_and_domain():
+    tasks = [
+        # two flags against a connector-backed entry; one confirmed (24h), one dismissed
+        {"trigger": "contradicts", "status": "correct", "created_at": _iso(10),
+         "reviewed_at": _iso(9),
+         "contexts": [{"ref": "kb://e1", "kind": "kb"}]},
+        {"trigger": "contradicts", "status": "dismissed", "created_at": _iso(8),
+         "reviewed_at": _iso(7),
+         "contexts": [{"ref": "kb://e1", "kind": "kb"}]},
+        # one flag against a manual (no connection) entry
+        {"trigger": "novel", "status": "wrong", "created_at": _iso(6),
+         "reviewed_at": _iso(5),
+         "contexts": [{"ref": "kb://e2", "kind": "kb"}]},
+        # one flag whose top context is an external URL
+        {"trigger": "contradicts", "status": "open", "created_at": _iso(3),
+         "contexts": [{"ref": "https://www.help.acme.com/faq", "kind": "kb"}]},
+        # a plain sample task carries no source signal -> ignored
+        {"trigger": "sample", "status": "correct", "created_at": _iso(2),
+         "reviewed_at": _iso(1), "contexts": []},
+    ]
+    kb_entries = [
+        {"entry_id": "e1", "connection_id": "c1", "status": "active",
+         "origin": "discourse", "created_at": _iso(20), "supersedes_entry_id": None},
+        {"entry_id": "e2", "connection_id": None, "status": "active",
+         "origin": "manual", "created_at": _iso(15), "supersedes_entry_id": None},
+    ]
+    conns = [{"connection_id": "c1", "connector": "discourse",
+              "config": {"label": "Community forum"}}]
+    m = kil_metrics.compute(
+        _SB({"review_tasks": tasks, "kb_entries": kb_entries,
+             "kb_source_connections": conns}),
+        "00000000-0000-0000-0000-000000000000", days=30)
+
+    by = {s["source"]: s for s in m["by_source"]}
+    assert set(by) == {"Community forum", "Internal KB (manual)", "help.acme.com"}
+    forum = by["Community forum"]
+    assert forum["flagged"] == 2 and forum["confirmed"] == 1 and forum["dismissed"] == 1
+    assert forum["false_flag_rate"] == 0.5
+    assert forum["median_time_to_correct_h"] is not None
+    assert by["Internal KB (manual)"]["confirmed"] == 1
+    assert by["help.acme.com"]["flagged"] == 1
+    # sorted by flagged desc -> the 2-flag source is first
+    assert m["by_source"][0]["source"] == "Community forum"
+
+
+def test_source_health_empty_when_no_kb_contexts():
+    tasks = [{"trigger": "contradicts", "status": "correct", "created_at": _iso(2),
+              "reviewed_at": _iso(1), "contexts": [{"ref": "case 12345", "kind": "resolution"}]}]
+    m = kil_metrics.compute(_SB({"review_tasks": tasks}), "t", days=30)
+    assert by_source_unattributed(m) == 1
+
+
+def by_source_unattributed(m):
+    return sum(s["flagged"] for s in m["by_source"] if s["source"] == "Unattributed")
 
 
 # ── P8a: the weekly learning report ────────────────────────────────────

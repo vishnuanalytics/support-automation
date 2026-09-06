@@ -739,13 +739,25 @@ sequence of commits on `browser-verified-picker-fixes`:
   each side, `ratio` desc. `BillingView` renders a "by node type" table and
   a warning banner for any flow with `ratio > 1.5`. Per-tenant spend caps
   that *enforce* (vs. today's warn-only `check_and_warn`) — not done.
+- **Knowledge-quality loop — health by source** (this commit, no migration)
+  — `kil_metrics.compute` gains `by_source`: each contradiction/novel
+  `review_task` is attributed to a KB source via its top KB context `ref`
+  (`kb://<eid>` → `kb_entries.connection_id` → `kb_source_connections`
+  label; `http(s)://` → domain; else "Unattributed"), then per source:
+  `flagged`, `confirmed` (human said real gap), `dismissed`,
+  `false_flag_rate`, `median_time_to_correct_h`. Surfaced as a "Knowledge
+  health by source" table in `ReviewView` (returned straight through the
+  existing `/api/kil/metrics`). The offline **retrieval eval harness**
+  already exists (`ingestion/eval/run_eval.py`, recall@k/MRR over
+  `qrels.jsonl`); wiring it as a CI regression gate needs a seeded fixture
+  DB — still open.
 
-**886 offline tests green** (was 876). `098` applied live, drift clean, tsc
+**888 offline tests green** (was 876). `098` applied live, drift clean, tsc
 clean.
 
 **Still open** (product-review list): shared rate limiting (in-memory →
-DB), a real per-tenant failed-*jobs* view (`jobs.tenant_id`), a retrieval
-eval harness + knowledge-health per source, enforcing spend caps,
+DB), a real per-tenant failed-*jobs* view (`jobs.tenant_id`), the retrieval
+eval harness as a CI gate, enforcing spend caps,
 Confluence/Notion/SharePoint connectors, and the `multiple_permissive_
 policies` RLS cleanup. Plus the always-on worker (needs a host — guide in
 `docs/DEPLOY_WEB_AND_API.md`).
