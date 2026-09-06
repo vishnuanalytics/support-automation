@@ -60,11 +60,11 @@ def test_apikey_fields_are_marked_secret():
 
 # ── _sync_linear ─────────────────────────────────────────────────────────
 def test_sync_linear_both_documents_and_resolved_issues(monkeypatch):
-    monkeypatch.setattr(linear, "fetch_documents", lambda t, s, *, limit=None: [
+    monkeypatch.setattr(linear, "fetch_documents", lambda t, s, *, limit=None, updated_after=None: [
         {"id": "D1", "title": "Runbook", "content": "# Runbook\nsteps", "updatedAt": "u", "url": "http://l/d1"},
         {"id": "D2", "title": "Empty", "content": "   ", "updatedAt": "u", "url": "x"},  # skipped
     ])
-    monkeypatch.setattr(linear, "fetch_resolved_issues", lambda t, s, *, team_key=None, limit=None: [
+    monkeypatch.setattr(linear, "fetch_resolved_issues", lambda t, s, *, team_key=None, limit=None, updated_after=None: [
         {"id": "I1", "identifier": "ENG-1", "title": "Proxy timeout", "description": "root cause: pool",
          "url": "http://l/i1", "updatedAt": "u",
          "comments": {"nodes": [{"body": "fixed by raising the pool", "user": {"name": "Ana"}}]}},
@@ -81,7 +81,7 @@ def test_sync_linear_both_documents_and_resolved_issues(monkeypatch):
 
 
 def test_sync_linear_include_documents_only(monkeypatch):
-    monkeypatch.setattr(linear, "fetch_documents", lambda t, s, *, limit=None: [
+    monkeypatch.setattr(linear, "fetch_documents", lambda t, s, *, limit=None, updated_after=None: [
         {"id": "D1", "title": "R", "content": "x", "updatedAt": "u", "url": ""}])
     called = []
     monkeypatch.setattr(linear, "fetch_resolved_issues",
@@ -93,10 +93,10 @@ def test_sync_linear_include_documents_only(monkeypatch):
 def test_sync_linear_max_items_is_passed_down_and_marks_not_exhaustive(monkeypatch):
     seen = {}
     monkeypatch.setattr(linear, "fetch_documents",
-                        lambda t, s, *, limit=None: seen.__setitem__("docs_limit", limit) or
+                        lambda t, s, *, limit=None, updated_after=None: seen.update(docs_after=updated_after) or seen.__setitem__("docs_limit", limit) or
                         [{"id": f"D{i}", "title": "d", "content": "x", "url": ""} for i in range(2)])
     monkeypatch.setattr(linear, "fetch_resolved_issues",
-                        lambda t, s, *, team_key=None, limit=None:
+                        lambda t, s, *, team_key=None, limit=None, updated_after=None:
                         seen.__setitem__("iss_limit", limit) or [])
     res = kb_connectors._sync_linear({"include": "both", "max_items": 2}, None, _ctx())
     assert seen["docs_limit"] == 2 and seen["iss_limit"] == 2
@@ -172,3 +172,50 @@ def test_nolt_test_connection(monkeypatch):
         raise RuntimeError("Nolt API 403")
     monkeypatch.setattr(nolt, "_get", boom)
     assert nolt.test_connection("t", None, "b1")["ok"] is False
+
+
+# ── incremental (watermark) ────────────────────────────────────────────
+def test_sync_linear_incremental_uses_updated_after_and_does_not_archive(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(linear, "fetch_documents",
+                        lambda t, s, *, limit=None, updated_after=None:
+                        seen.__setitem__("d_after", updated_after) or
+                        [{"id": "D9", "title": "d", "content": "x", "url": "", "updatedAt": "2026-02-02"}])
+    monkeypatch.setattr(linear, "fetch_resolved_issues",
+                        lambda t, s, *, team_key=None, limit=None, updated_after=None:
+                        seen.__setitem__("i_after", updated_after) or [])
+    res = kb_connectors._sync_linear(
+        {"include": "both", "max_items": 300}, {"since": "2026-01-01"}, _ctx())
+    assert seen["d_after"] == "2026-01-01" and seen["i_after"] == "2026-01-01"
+    assert res.exhaustive is False                      # incremental -> never archive
+    assert res.watermark["since"] == "2026-02-02"       # advanced to the newest seen
+
+
+def test_sync_linear_first_run_is_full_and_records_a_since(monkeypatch):
+    monkeypatch.setattr(linear, "fetch_documents",
+                        lambda t, s, *, limit=None, updated_after=None:
+                        [{"id": "D1", "title": "d", "content": "x", "url": "", "updatedAt": "2026-03-03"}])
+    monkeypatch.setattr(linear, "fetch_resolved_issues",
+                        lambda *a, **k: [])
+    res = kb_connectors._sync_linear({"include": "both", "max_items": 300}, None, _ctx())
+    assert res.exhaustive is True                       # first run: full, may archive
+    assert res.watermark["since"] == "2026-03-03"
+
+
+def test_gdocs_folder_reuses_a_stored_body_when_modifiedtime_matches(monkeypatch):
+    monkeypatch.setattr("interpreter.gdrive.list_folder_docs",
+                        lambda *a, **k: [{"id": "d1", "name": "One", "modified_time": "M1"},
+                                         {"id": "d2", "name": "Two", "modified_time": "M2-new"}])
+    fetched = []
+    monkeypatch.setattr("interpreter.gdrive.fetch_doc",
+                        lambda tid, did, sb: fetched.append(did) or
+                        {"title": did, "markdown": f"fresh {did}", "modified_time": "M2-new"})
+    ctx = kb_connectors.SyncCtx(
+        tenant_id="t", sb=None, collection_name="c",
+        existing={"d1": {"body_md": "stored d1", "gdoc_modified": "M1"},
+                  "d2": {"body_md": "stored d2", "gdoc_modified": "M2-old"}})
+    res = kb_connectors._sync_gdocs({"folder_id": "F", "index": True}, None, ctx)
+    assert fetched == ["d2"]                            # d1 reused, only d2 re-fetched
+    by_id = {d.external_id: d.body_md for d in res.documents}
+    assert by_id["d1"] == "stored d1" and by_id["d2"] == "fresh d2"
+    assert res.watermark["reused"] == 1

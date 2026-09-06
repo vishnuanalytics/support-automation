@@ -365,9 +365,16 @@ def _sync_kb_connection(payload: dict, sb) -> dict:
         s = sb.table("sources").select("name").eq("source_id", sid).limit(1).execute().data
         col_name = (s[0]["name"] if s else "")
 
+    existing = {
+        r["external_id"]: r for r in (
+            sb.table("kb_entries").select("entry_id, external_id, body_md, gdoc_modified")
+            .eq("connection_id", cid).eq("status", "active").execute().data or [])
+        if r.get("external_id") is not None
+    }
+
     try:
         spec = get_kb_connector(conn["connector"])
-        ctx = SyncCtx(tenant_id=tid, sb=sb, collection_name=col_name)
+        ctx = SyncCtx(tenant_id=tid, sb=sb, collection_name=col_name, existing=existing)
         res = spec.sync(conn.get("config") or {}, conn.get("watermark"), ctx)
     except Exception as e:  # noqa: BLE001
         err = str(e)[:500]
@@ -375,13 +382,6 @@ def _sync_kb_connection(payload: dict, sb) -> dict:
             "status": "error", "last_synced_at": "now()", "last_result": {"error": err},
         }).eq("connection_id", cid).execute()
         return {"connection_id": cid, "error": err}
-
-    existing = {
-        r["external_id"]: r for r in (
-            sb.table("kb_entries").select("entry_id, external_id, body_md")
-            .eq("connection_id", cid).eq("status", "active").execute().data or [])
-        if r.get("external_id") is not None
-    }
 
     made = skipped = 0
     seen: set[str] = set()

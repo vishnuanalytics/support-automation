@@ -69,6 +69,11 @@ class SyncCtx:
     tenant_id: str | None
     sb: Any
     collection_name: str = ""
+    # {external_id: {body_md, gdoc_modified, ...}} for the connection's current
+    # active entries — lets a `sync()` skip re-fetching an item it can tell is
+    # unchanged (incremental). The generic driver still byte-compares bodies,
+    # so reusing a stored body here just avoids the fetch/API call.
+    existing: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 SyncFn = Callable[[dict[str, Any], "dict[str, Any] | None", "SyncCtx"], KBSyncResult]
@@ -320,11 +325,24 @@ def _sync_gdocs(config: dict, watermark: "dict | None", ctx: SyncCtx) -> KBSyncR
         found = gdrive.list_folder_docs(ctx.tenant_id, config["folder_id"], ctx.sb,
                                         recursive=bool(config.get("recursive")))
         docs = found[:cap]
-        out = [_gdoc_kbdoc(gdrive.fetch_doc(ctx.tenant_id, d["id"], ctx.sb), d["id"], None)
-               for d in docs]
+        out, reused = [], 0
+        for d in docs:
+            prev = ctx.existing.get(d["id"])
+            # incremental: the folder listing is cheap; the per-Doc fetch is
+            # not. If Drive's modifiedTime matches what we stored, reuse the
+            # stored body and skip the fetch entirely.
+            if prev and prev.get("gdoc_modified") and prev["gdoc_modified"] == d.get("modified_time"):
+                out.append(_gdoc_kbdoc(
+                    {"title": d.get("name") or d["id"],
+                     "markdown": prev.get("body_md") or "",
+                     "modified_time": d.get("modified_time")},
+                    d["id"], None))
+                reused += 1
+            else:
+                out.append(_gdoc_kbdoc(gdrive.fetch_doc(ctx.tenant_id, d["id"], ctx.sb), d["id"], None))
         latest = max((d.get("modified_time") or "" for d in docs), default=None)
         return KBSyncResult(documents=out, exhaustive=len(found) <= cap,
-                            watermark={"modified_time": latest, "count": len(out)})
+                            watermark={"modified_time": latest, "count": len(out), "reused": reused})
 
     doc_id = config["doc_id"]
     fetched = gdrive.fetch_doc(ctx.tenant_id, doc_id, ctx.sb)
@@ -369,10 +387,13 @@ def _sync_linear(config: dict, watermark: "dict | None", ctx: SyncCtx) -> KBSync
     inc = config.get("include", "both")
     team_key = (config.get("team_key") or "").strip() or None
     cap = int(config.get("max_items") or 300)
+    since = (watermark or {}).get("since")   # incremental after the first run
+    newest = since or ""
     docs: list[KBDocument] = []
 
     if inc in ("documents", "both"):
-        for d in linear.fetch_documents(ctx.tenant_id, ctx.sb, limit=cap):
+        for d in linear.fetch_documents(ctx.tenant_id, ctx.sb, limit=cap, updated_after=since):
+            newest = max(newest, d.get("updatedAt") or "")
             body = (d.get("content") or "").strip()
             if not body:
                 continue
@@ -381,8 +402,9 @@ def _sync_linear(config: dict, watermark: "dict | None", ctx: SyncCtx) -> KBSync
                                 updated_at=d.get("updatedAt"), quality="official"))
 
     if inc in ("issues", "both"):
-        for it in linear.fetch_resolved_issues(ctx.tenant_id, ctx.sb,
-                                               team_key=team_key, limit=cap):
+        for it in linear.fetch_resolved_issues(ctx.tenant_id, ctx.sb, team_key=team_key,
+                                               limit=cap, updated_after=since):
+            newest = max(newest, it.get("updatedAt") or "")
             desc = (it.get("description") or "").strip()
             comments = [c for c in ((it.get("comments") or {}).get("nodes") or [])
                         if (c.get("body") or "").strip()]
@@ -397,9 +419,13 @@ def _sync_linear(config: dict, watermark: "dict | None", ctx: SyncCtx) -> KBSync
                                 origin="linear", url=it.get("url", ""),
                                 updated_at=it.get("updatedAt"), quality="community_resolved"))
 
-    cap = int(config.get("max_items") or 300)
-    return KBSyncResult(documents=docs, exhaustive=len(docs) < cap,
-                        watermark={"count": len(docs)})
+    # An incremental run only sees *changed* items, so it must NOT archive
+    # everything else. A first (full) run still archives + can truncate.
+    return KBSyncResult(
+        documents=docs,
+        exhaustive=(since is None) and len(docs) < cap,
+        watermark={"since": newest or None, "count": len(docs)},
+    )
 
 
 register(KBConnectorSpec(

@@ -79,8 +79,8 @@ def test_connection(tenant_id: str | None, sb, *, api_key: str | None = None) ->
 
 
 _DOCS_Q = """
-query Docs($after: String) {
-  documents(first: 50, after: $after) {
+query Docs($after: String, $filter: DocumentFilter) {
+  documents(first: 50, after: $after, filter: $filter) {
     pageInfo { hasNextPage endCursor }
     nodes { id title content updatedAt url }
   }
@@ -112,13 +112,18 @@ def _page(tenant_id, sb, query, key, variables, *, limit: int | None = None):
         after = conn["pageInfo"]["endCursor"]
 
 
-def fetch_documents(tenant_id: str, sb, *, limit: int | None = None) -> list[dict]:
-    return _page(tenant_id, sb, _DOCS_Q, "documents", {}, limit=limit)
+def fetch_documents(tenant_id: str, sb, *, limit: int | None = None,
+                    updated_after: str | None = None) -> list[dict]:
+    filt = {"updatedAt": {"gt": updated_after}} if updated_after else None
+    return _page(tenant_id, sb, _DOCS_Q, "documents", {"filter": filt}, limit=limit)
 
 
 def fetch_resolved_issues(tenant_id: str, sb, *, team_key: str | None = None,
-                          limit: int | None = None) -> list[dict]:
+                          limit: int | None = None,
+                          updated_after: str | None = None) -> list[dict]:
     filt: dict = {"state": {"type": {"eq": "completed"}}}
     if team_key:
         filt["team"] = {"key": {"eq": team_key}}
+    if updated_after:
+        filt["updatedAt"] = {"gt": updated_after}
     return _page(tenant_id, sb, _ISSUES_Q, "issues", {"filter": filt}, limit=limit)
