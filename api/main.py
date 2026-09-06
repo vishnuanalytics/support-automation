@@ -2013,7 +2013,9 @@ class KbConnectionIn(BaseModel):
 
 
 class KbConnectionPatch(BaseModel):
-    status: str | None = None   # 'active' | 'paused'
+    status: str | None = None            # 'active' | 'paused'
+    label: str | None = None
+    config: dict[str, Any] | None = None  # partial — merged onto the stored config, re-normalized
 
 
 class KbDocDefaultsIn(BaseModel):
@@ -2098,6 +2100,27 @@ def _kb_connection(c: Caller, cid: str) -> dict:
     return rows[0]
 
 
+def _kb_pull_secrets(tenant_id: str, connector: str, spec, raw_config: dict) -> dict:
+    """Pop any `secret: true` config field (an API key) out of `raw_config`
+    into Supabase Vault under the connector kind — merged with any prior
+    value, so a blank field reuses the saved one — and return `raw_config`
+    without it. A secret must never reach the `kb_source_connections.config`
+    row (returned to the browser)."""
+    from interpreter import vault_secrets
+
+    raw = dict(raw_config or {})
+    secrets = {f["key"]: str(raw.pop(f["key"], "")).strip()
+               for f in spec.config_fields if f.get("secret")}
+    secrets = {k: v for k, v in secrets.items() if v}
+    if secrets:
+        prior = vault_secrets.get(tenant_id, connector, sb=_service)
+        vault_secrets.put(tenant_id, connector, {**prior, **secrets}, sb=_service)
+        _service.table("tenant_integrations").upsert(
+            {"tenant_id": tenant_id, "kind": connector,
+             "secret": {"has_credentials": True}}).execute()
+    return raw
+
+
 def _kb_add_connection(c: Caller, col: dict, connector: str, raw_config: dict,
                        label: str | None) -> dict:
     """Validate + create a connection row and kick off its first sync. Shared
@@ -2116,20 +2139,7 @@ def _kb_add_connection(c: Caller, col: dict, connector: str, raw_config: dict,
     if connector == "gdocs":
         raw_config = {**_kb_doc_defaults(col["tenant_id"]), **raw_config}
 
-    # `secret: true` config fields (an API key for an apikey connector) go to
-    # Supabase Vault under the connector's kind — never into the row, which is
-    # returned to the browser. Merged with any prior key so a blank field on a
-    # 2nd source reuses the saved one.
-    from interpreter import vault_secrets
-    secrets = {f["key"]: str(raw_config.pop(f["key"], "")).strip()
-               for f in spec.config_fields if f.get("secret")}
-    secrets = {k: v for k, v in secrets.items() if v}
-    if secrets:
-        prior = vault_secrets.get(col["tenant_id"], connector, sb=_service)
-        vault_secrets.put(col["tenant_id"], connector, {**prior, **secrets}, sb=_service)
-        _service.table("tenant_integrations").upsert(
-            {"tenant_id": col["tenant_id"], "kind": connector,
-             "secret": {"has_credentials": True}}).execute()
+    raw_config = _kb_pull_secrets(col["tenant_id"], connector, spec, raw_config)
 
     ok, reason = spec.is_available(col["tenant_id"], _service)
     if not ok:
@@ -2209,17 +2219,51 @@ def kb_sync_connection(cid: str, c: Caller = Depends(caller)) -> dict:
 
 @app.patch("/api/kb/connections/{cid}")
 def kb_update_connection(cid: str, body: KbConnectionPatch, c: Caller = Depends(caller)) -> dict:
+    """Change a connection's status (pause/resume), label, and/or `config`.
+    A `config` patch is merged onto the stored config and re-normalized
+    through the connector's spec, then a re-sync is kicked off. Secret
+    fields (an API key) are routed to Vault, not the row."""
     conn = _kb_connection(c, cid)
     _require_editor(c, conn["tenant_id"])
     if body.status not in (None, "active", "paused"):
         raise HTTPException(422, "status must be 'active' or 'paused'")
-    if body.status is None:
+
+    patch: dict[str, Any] = {}
+    resync = False
+    if body.status is not None:
+        patch["status"] = body.status
+    if body.label is not None:
+        patch["label"] = body.label.strip()
+
+    if body.config is not None:
+        from interpreter.kb_connectors import get_kb_connector
+        try:
+            spec = get_kb_connector(conn["connector"])
+        except KeyError:
+            raise HTTPException(422, f"unknown connector {conn['connector']!r}")
+        rate_limit(c.user_id, "kb_write", 60)
+        raw = _kb_pull_secrets(conn["tenant_id"], conn["connector"], spec, body.config)
+        merged = {**(conn.get("config") or {}), **raw}
+        try:
+            patch["config"] = spec.normalize_config(merged)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        patch["status"] = "active"   # a config edit re-activates + re-syncs
+        resync = True
+
+    if not patch:
         return conn
-    updated = (c.sb.table("kb_source_connections").update({"status": body.status})
+    updated = (c.sb.table("kb_source_connections").update(patch)
                .eq("connection_id", cid).execute().data[0])
-    if body.status == "active":
+    if resync or patch.get("status") == "active":
         jobs.enqueue("kb_sync", {"connection_id": cid},
                      dedupe_key=f"kb_sync:{cid}", sb=_service)
+    if resync:
+        from interpreter import audit
+        audit.record(_service, tenant_id=conn["tenant_id"], action="kb_connection.updated",
+                     actor_id=c.user_id, actor_email=c.email,
+                     target_type="kb_connection", target_id=cid,
+                     summary=f"edited the {conn.get('connector')} connection's config")
     return updated
 
 

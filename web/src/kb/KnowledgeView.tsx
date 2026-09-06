@@ -400,6 +400,56 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
   );
 }
 
+// show_if evaluation, shared by the add + edit connector forms
+function kbFieldVisible(
+  f: KbConnector["config_fields"][number],
+  values: Record<string, string>,
+): boolean {
+  const s = f.show_if;
+  if (!s) return true;
+  const v = values[s.key] ?? "";
+  if (s.eq !== undefined) return v === s.eq;
+  if (s.ne !== undefined) return v !== s.ne;
+  if (s.in !== undefined) return s.in.includes(v);
+  return true;
+}
+
+// one config-field <input>/<select> — shared by the add + edit forms
+function KbConfigField({
+  f,
+  value,
+  onChange,
+}: {
+  f: KbConnector["config_fields"][number];
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div className="field">
+      <label>
+        {f.label}
+        {f.required ? " *" : ""}
+      </label>
+      {f.type === "select" ? (
+        <select value={value || f.options?.[0] || ""} onChange={(e) => onChange(e.target.value)}>
+          {(f.options ?? []).map((o) => (
+            <option key={o} value={o}>{f.option_labels?.[o] ?? o}</option>
+          ))}
+        </select>
+      ) : (
+        <input
+          type={f.secret ? "password" : f.type === "number" ? "number" : "text"}
+          autoComplete={f.secret ? "off" : undefined}
+          placeholder={f.secret ? "leave blank to keep the saved key" : f.placeholder}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      )}
+      {f.help && <span className="muted" style={{ fontSize: 11 }}>{f.help}</span>}
+    </div>
+  );
+}
+
 // ── Connected sources (docs/KB_SOURCE_CONNECTORS.md) ──────────────────────
 function ConnectedSources({
   col,
@@ -417,6 +467,7 @@ function ConnectedSources({
   const [writebacks, setWritebacks] = useState<KbDocWriteback[]>([]);
   const [docDefaults, setDocDefaults] = useState<KbDocDefaults>({});
   const [showWb, setShowWb] = useState(false);
+  const [editId, setEditId] = useState<string | null>(null);
   const [editDefaults, setEditDefaults] = useState(false);
   const [adding, setAdding] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -560,7 +611,8 @@ function ConnectedSources({
           </thead>
           <tbody>
             {conns.map((c) => (
-              <tr key={c.connection_id}>
+              <Fragment key={c.connection_id}>
+              <tr>
                 <td style={{ maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis" }}>
                   {c.label}
                   {docMode(c) && (
@@ -601,12 +653,33 @@ function ConnectedSources({
                 </td>
                 <td className="row" style={{ gap: 4 }}>
                   <button onClick={() => sync(c.connection_id)}>re-sync</button>
+                  <button
+                    onClick={() => setEditId((id) => (id === c.connection_id ? null : c.connection_id))}
+                  >
+                    {editId === c.connection_id ? "close" : "edit"}
+                  </button>
                   <button onClick={() => toggle(c)}>
                     {c.status === "paused" ? "resume" : "pause"}
                   </button>
                   <button className="err" onClick={() => remove(c)}>remove</button>
                 </td>
               </tr>
+              {editId === c.connection_id && (
+                <tr>
+                  <td colSpan={6}>
+                    <ConnectionEditForm
+                      conn={c}
+                      spec={catalogue.find((s) => s.slug === c.connector)}
+                      onDone={() => {
+                        setEditId(null);
+                        void load();
+                        onChange();
+                      }}
+                    />
+                  </td>
+                </tr>
+              )}
+              </Fragment>
             ))}
           </tbody>
         </table>
@@ -736,23 +809,13 @@ function AddSourceForm({
 
   const spec = catalogue.find((c) => c.slug === slug);
 
-  const fieldVisible = (f: KbConnector["config_fields"][number]) => {
-    const s = f.show_if;
-    if (!s) return true;
-    const v = values[s.key] ?? "";
-    if (s.eq !== undefined) return v === s.eq;
-    if (s.ne !== undefined) return v !== s.ne;
-    if (s.in !== undefined) return s.in.includes(v);
-    return true;
-  };
-
   async function submit() {
     if (!spec) return;
     setBusy(true);
     setErr(null);
     const config: Record<string, unknown> = {};
     for (const f of spec.config_fields) {
-      if (!fieldVisible(f)) continue;
+      if (!kbFieldVisible(f, values)) continue;
       const raw = (values[f.key] ?? "").trim();
       if (!raw) {
         if (f.required) {
@@ -799,35 +862,14 @@ function AddSourceForm({
       )}
 
       {spec?.config_fields
-        .filter(fieldVisible)
+        .filter((f) => kbFieldVisible(f, values))
         .map((f) => (
-          <div className="field" key={f.key}>
-            <label>
-              {f.label}
-              {f.required ? " *" : ""}
-            </label>
-            {f.type === "select" ? (
-              <select
-                value={values[f.key] ?? f.options?.[0] ?? ""}
-                onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
-              >
-                {(f.options ?? []).map((o) => (
-                  <option key={o} value={o}>{f.option_labels?.[o] ?? o}</option>
-                ))}
-              </select>
-            ) : (
-              <input
-                type={f.secret ? "password" : f.type === "number" ? "number" : "text"}
-                autoComplete={f.secret ? "off" : undefined}
-                placeholder={f.placeholder}
-                value={values[f.key] ?? ""}
-                onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
-              />
-            )}
-            {f.help && (
-              <span className="muted" style={{ fontSize: 11 }}>{f.help}</span>
-            )}
-          </div>
+          <KbConfigField
+            key={f.key}
+            f={f}
+            value={values[f.key] ?? ""}
+            onChange={(v) => setValues((prev) => ({ ...prev, [f.key]: v }))}
+          />
         ))}
 
       {err && <div className="err" style={{ fontSize: 12 }}>{err}</div>}
@@ -909,6 +951,82 @@ function DocDefaultsForm({
       <div className="row">
         <button className="primary" onClick={save} disabled={busy}>
           {busy ? "saving…" : "save defaults"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ConnectionEditForm({
+  conn,
+  spec,
+  onDone,
+}: {
+  conn: KbConnection;
+  spec: KbConnector | undefined;
+  onDone: () => void;
+}) {
+  const seed = () => {
+    const v: Record<string, string> = {};
+    for (const f of spec?.config_fields ?? []) {
+      if (f.secret) continue; // never round-trip a key through the browser
+      const raw = (conn.config as Record<string, unknown>)[f.key];
+      if (raw !== undefined && raw !== null) v[f.key] = String(raw);
+    }
+    return v;
+  };
+  const [values, setValues] = useState<Record<string, string>>(seed);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  if (!spec) {
+    return (
+      <div className="muted" style={{ fontSize: 12, padding: 8 }}>
+        “{conn.connector}” isn’t a known connector on this server — can’t edit its config here.
+      </div>
+    );
+  }
+
+  async function save() {
+    setBusy(true);
+    setErr(null);
+    const config: Record<string, unknown> = {};
+    for (const f of spec!.config_fields) {
+      if (!kbFieldVisible(f, values)) continue;
+      const raw = (values[f.key] ?? "").trim();
+      if (!raw) continue; // blank secret => keep saved; blank non-secret => leave stored value
+      config[f.key] = f.type === "number" ? Number(raw) : raw;
+    }
+    try {
+      await api.kb.updateConnection(conn.connection_id, { config });
+      onDone();
+    } catch (e) {
+      setErr(e instanceof ApiError ? String(e.detail) : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="col" style={{ gap: 8, background: "var(--panel, #00000008)", padding: 10, borderRadius: 6 }}>
+      <span className="muted" style={{ fontSize: 12 }}>
+        Editing the {spec.label} connection — saving re-syncs it. Leave a field blank to keep its
+        current value.
+      </span>
+      {spec.config_fields
+        .filter((f) => kbFieldVisible(f, values))
+        .map((f) => (
+          <KbConfigField
+            key={f.key}
+            f={f}
+            value={values[f.key] ?? ""}
+            onChange={(v) => setValues((prev) => ({ ...prev, [f.key]: v }))}
+          />
+        ))}
+      {err && <div className="err" style={{ fontSize: 12 }}>{err}</div>}
+      <div className="row">
+        <button className="primary" onClick={save} disabled={busy}>
+          {busy ? "saving…" : "save & re-sync"}
         </button>
       </div>
     </div>

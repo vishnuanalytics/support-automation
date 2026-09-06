@@ -308,6 +308,10 @@ export const api = {
         method: "PATCH",
         body: JSON.stringify({ status }),
       }),
+    updateConnection: (
+      cid: string,
+      b: { label?: string; config?: Record<string, unknown> },
+    ) => req<KbConnection>(`/kb/connections/${cid}`, { method: "PATCH", body: JSON.stringify(b) }),
     deleteConnection: (cid: string) =>
       req<void>(`/kb/connections/${cid}`, { method: "DELETE" }),
     listDocWritebacks: (id: string) =>
