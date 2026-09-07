@@ -38,9 +38,8 @@ def _now_iso() -> str:
 @dataclass
 class KBDocument:
     """One logical document a connector produces. `external_id` is this
-    document's stable identity *within its connection* (a crawl keys on page
-    title — parity with the pre-registry `_crawl_site` — a sheet on row
-    number, a gdoc on doc id)."""
+    document's stable identity *within its connection* (a crawl keys on the
+    page URL, a sheet on row number, a gdoc on doc id)."""
     external_id: str
     title: str
     body_md: str
@@ -144,7 +143,12 @@ def _sync_public_url(config: dict, watermark: "dict | None", ctx: SyncCtx) -> KB
     pages = crawl(config["url"], max_pages=max_pages)
     docs = [
         KBDocument(
-            external_id=pg["title"], title=pg["title"],
+            # the URL is a page's stable identity — NOT its <title>. Many doc
+            # systems (GitBook, Docusaurus, …) render a section-scoped or
+            # templated <title> that repeats across pages, which would
+            # collapse distinct pages onto one entry (last write wins) and
+            # then archive the rest as "missing".
+            external_id=pg["url"], title=pg["title"],
             body_md=f"<!-- {pg['url']} -->\n\n{pg['markdown']}",
             origin="crawl", quality="official",
         )

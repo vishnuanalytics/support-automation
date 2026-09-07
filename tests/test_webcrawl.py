@@ -299,10 +299,13 @@ def _ctx():
 
 def test_public_url_sync_makes_one_document_per_page(monkeypatch):
     monkeypatch.setattr("ingestion.webcrawl.crawl",
-                        lambda url, **k: [{"url": "https://x/a", "title": "P1", "markdown": "x" * 50},
-                                          {"url": "https://x/b", "title": "P2", "markdown": "y" * 50}])
+                        lambda url, **k: [{"url": "https://x/a", "title": "Shared", "markdown": "x" * 50},
+                                          {"url": "https://x/b", "title": "Shared", "markdown": "y" * 50}])
     res = kb_connectors._sync_public_url({"url": "https://x", "max_pages": 20}, None, _ctx())
-    assert [d.external_id for d in res.documents] == ["P1", "P2"]
+    # external_id is the URL, not the <title> — two pages that happen to
+    # share a templated title must stay two entries
+    assert [d.external_id for d in res.documents] == ["https://x/a", "https://x/b"]
+    assert [d.title for d in res.documents] == ["Shared", "Shared"]
     assert res.documents[0].body_md == "<!-- https://x/a -->\n\n" + "x" * 50
     assert res.documents[0].origin == "crawl"
     assert res.exhaustive is True
