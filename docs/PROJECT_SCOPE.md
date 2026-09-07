@@ -831,9 +831,17 @@ Delivered one BUILD-BRIEF chunk at a time, checkpointed with the user:
     `Banner`, background syncs → `useToast`. `prompt()` + both
     `confirm()` in `KnowledgeView`/`Collection`/`EntryEditor` gone.
     `tsc` + `vite build` + `vitest` green.
-  - **5b — connector forms.** `ConnectedSources`, `AddSourceForm`
-    (→ `SlideOver`), `DocDefaultsForm`, `ConnectionEditForm` re-skin;
-    their ~6 remaining `alert()`s → `Banner`/`useToast`.
+  - **5b — connector forms (DONE).** `KbConfigField` → `Field` +
+    `Input`/`Select`. `ConnStatus` and the doc-mode / not-indexed /
+    write-back-status badges → `Tag`. `ConnectedSources`: header on
+    `Button`s, the failing-sync strip → `Banner` with "Retry all",
+    connections table → `DataTable`; Add source / Google Docs defaults /
+    edit connection each open in a 520px `SlideOver`; disconnect → a
+    `Dialog`. `AddSourceForm` / `DocDefaultsForm` / `ConnectionEditForm`
+    lost their inline card wrappers (they're slide-over bodies now) and
+    use the primitives. Every `alert()` in `kb/` is gone — `kb/` is now
+    completely free of `prompt`/`confirm`/`alert`. `tsc` + `vite build`
+    + `vitest` green.
 - **Chunks 6–8** — Connections + Channels, Billing/Team/Activity,
   Setup + Login. Existing API wiring preserved throughout.
 

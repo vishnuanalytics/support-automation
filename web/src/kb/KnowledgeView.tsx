@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, ApiError } from "../api";
 import type {
   KbCollection,
@@ -18,6 +18,7 @@ import {
   Field,
   Input,
   Textarea,
+  Select,
   DataTable,
   EmptyState,
   useToast,
@@ -517,19 +518,15 @@ function KbConfigField({
   onChange: (v: string) => void;
 }) {
   return (
-    <div className="field">
-      <label>
-        {f.label}
-        {f.required ? " *" : ""}
-      </label>
+    <Field label={`${f.label}${f.required ? " *" : ""}`} hint={f.help}>
       {f.type === "select" ? (
-        <select value={value || f.options?.[0] || ""} onChange={(e) => onChange(e.target.value)}>
-          {(f.options ?? []).map((o) => (
-            <option key={o} value={o}>{f.option_labels?.[o] ?? o}</option>
-          ))}
-        </select>
+        <Select
+          value={value || f.options?.[0] || ""}
+          onChange={(e) => onChange(e.target.value)}
+          options={(f.options ?? []).map((o) => ({ value: o, label: f.option_labels?.[o] ?? o }))}
+        />
       ) : (
-        <input
+        <Input
           type={f.secret ? "password" : f.type === "number" ? "number" : "text"}
           autoComplete={f.secret ? "off" : undefined}
           placeholder={f.secret ? "leave blank to keep the saved key" : f.placeholder}
@@ -537,8 +534,7 @@ function KbConfigField({
           onChange={(e) => onChange(e.target.value)}
         />
       )}
-      {f.help && <span className="muted" style={{ fontSize: 11 }}>{f.help}</span>}
-    </div>
+    </Field>
   );
 }
 
@@ -559,10 +555,10 @@ function ConnectedSources({
   const [writebacks, setWritebacks] = useState<KbDocWriteback[]>([]);
   const [docDefaults, setDocDefaults] = useState<KbDocDefaults>({});
   const [showWb, setShowWb] = useState(false);
-  const [editId, setEditId] = useState<string | null>(null);
-  const [editDefaults, setEditDefaults] = useState(false);
-  const [adding, setAdding] = useState(false);
+  const [panel, setPanel] = useState<null | "add" | "defaults" | { edit: KbConnection }>(null);
+  const [removeTarget, setRemoveTarget] = useState<KbConnection | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const toast = useToast();
 
   const load = useCallback(async () => {
     try {
@@ -597,33 +593,30 @@ function ConnectedSources({
   async function sync(cid: string) {
     try {
       await api.kb.syncConnection(cid);
-      alert("Re-syncing in the background.");
+      toast("Re-syncing in the background");
       await load();
     } catch (e) {
-      alert(e instanceof ApiError ? String(e.detail) : String(e));
+      setErr(e instanceof ApiError ? String(e.detail) : String(e));
     }
   }
 
   async function toggle(c: KbConnection) {
     try {
-      await api.kb.setConnectionStatus(
-        c.connection_id,
-        c.status === "paused" ? "active" : "paused",
-      );
+      await api.kb.setConnectionStatus(c.connection_id, c.status === "paused" ? "active" : "paused");
       await load();
     } catch (e) {
-      alert(e instanceof ApiError ? String(e.detail) : String(e));
+      setErr(e instanceof ApiError ? String(e.detail) : String(e));
     }
   }
 
-  async function remove(c: KbConnection) {
-    if (!confirm(`disconnect "${c.label}" and archive the entries it produced?`)) return;
+  async function runRemove(c: KbConnection) {
+    setRemoveTarget(null);
     try {
       await api.kb.deleteConnection(c.connection_id);
       await load();
       onChange();
     } catch (e) {
-      alert(e instanceof ApiError ? String(e.detail) : String(e));
+      setErr(e instanceof ApiError ? String(e.detail) : String(e));
     }
   }
 
@@ -631,184 +624,142 @@ function ConnectedSources({
     (c) => c.auth === "oauth2" && !c.available && google.configured && !google.connected,
   );
 
+  const failing = conns.filter((c) => c.status === "error");
+
+  const connColumns: Column<KbConnection>[] = [
+    {
+      key: "source",
+      header: "source",
+      cell: (c) => (
+        <span>
+          {c.label}
+          {docMode(c) && (
+            <span
+              style={{ marginLeft: 6 }}
+              title={
+                docMode(c) === "suggest"
+                  ? "An approved KB correction opens a GitHub issue with the diff — a human applies it"
+                  : "An approved KB correction is written into the doc, then a GitHub issue opens for verification"
+              }
+            >
+              <Tag tone="accent">{docMode(c) === "suggest" ? "suggests edits" : "write-back"}</Tag>
+            </span>
+          )}
+          {notIndexed(c) && (
+            <span style={{ marginLeft: 6 }} title="Connected but not read into the knowledge base">
+              <Tag tone="neutral">not indexed</Tag>
+            </span>
+          )}
+        </span>
+      ),
+    },
+    { key: "type", header: "type", cell: (c) => <span className="muted">{c.connector}</span> },
+    { key: "status", header: "status", cell: (c) => <ConnStatus c={c} /> },
+    {
+      key: "entries",
+      header: "entries",
+      align: "right",
+      cell: (c) => <span className="muted" style={{ font: "var(--type-mono)" }}>{c.entry_count}</span>,
+    },
+    {
+      key: "synced",
+      header: "last synced",
+      align: "right",
+      cell: (c) => (
+        <span className="muted" style={{ font: "var(--type-mono)" }}>
+          {c.last_synced_at ? new Date(c.last_synced_at).toLocaleString() : "—"}
+        </span>
+      ),
+    },
+    {
+      key: "act",
+      header: "",
+      align: "right",
+      cell: (c) => (
+        <span className="row" style={{ gap: 4, justifyContent: "flex-end" }}>
+          <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); void sync(c.connection_id); }}>
+            re-sync
+          </Button>
+          <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); void toggle(c); }}>
+            {c.status === "paused" ? "resume" : "pause"}
+          </Button>
+          <Button variant="danger" size="sm" onClick={(e) => { e.stopPropagation(); setRemoveTarget(c); }}>
+            remove
+          </Button>
+        </span>
+      ),
+    },
+  ];
+
   return (
-    <div
-      className="col"
-      style={{ gap: 8, border: "1px solid var(--border)", borderRadius: 6, padding: 12 }}
-    >
-      <div className="row" style={{ justifyContent: "space-between" }}>
+    <div className="kb-sources">
+      <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
         <strong style={{ fontSize: 13 }}>Connected sources</strong>
         <div className="row" style={{ gap: 6 }}>
-          <button
-            onClick={() => setEditDefaults((v) => !v)}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setPanel("defaults")}
             title="Org-wide default for a new Google Doc's read / correction behaviour"
           >
-            {editDefaults ? "close" : "Google Docs defaults"}
-          </button>
+            Google Docs defaults
+          </Button>
           {needsGoogle && (
-            <button onClick={onConnectGoogle} title="OAuth so Google Docs / Sheets can sync">
+            <Button variant="secondary" size="sm" onClick={onConnectGoogle} title="OAuth so Google Docs / Sheets can sync">
               Connect Google
-            </button>
+            </Button>
           )}
-          <button className="primary" onClick={() => setAdding((v) => !v)}>
-            {adding ? "close" : "＋ add source"}
-          </button>
+          <Button variant="primary" size="sm" onClick={() => setPanel("add")}>
+            ＋ Add source
+          </Button>
         </div>
       </div>
 
-      {err && <div className="err" style={{ fontSize: 12 }}>{err}</div>}
-
-      {(() => {
-        const failing = conns.filter((c) => c.status === "error");
-        if (failing.length === 0) return null;
-        return (
-          <div
-            className="err"
-            style={{
-              fontSize: 12, display: "flex", gap: 8, alignItems: "center",
-              justifyContent: "space-between",
-            }}
-          >
-            <span>
-              ⚠ {failing.length} source{failing.length === 1 ? "" : "s"} failing to sync
-              {failing[0].last_result?.error ? ` — ${failing[0].last_result.error}` : ""}
-            </span>
-            <button onClick={() => failing.forEach((c) => void sync(c.connection_id))}>
-              retry all
-            </button>
-          </div>
-        );
-      })()}
-
-      {editDefaults && (
-        <DocDefaultsForm
-          tenantId={col.tenant_id}
-          current={docDefaults}
-          onDone={(eff) => {
-            setDocDefaults(eff);
-            setEditDefaults(false);
-          }}
+      {err && (
+        <Banner
+          tone="exception"
+          title={err}
+          actions={<Button variant="ghost" size="sm" onClick={() => setErr(null)}>Dismiss</Button>}
         />
       )}
 
-      {adding && (
-        <AddSourceForm
-          collectionId={col.source_id}
-          tenantId={col.tenant_id}
-          catalogue={catalogue}
-          gdocDefaults={docDefaults}
-          onDone={() => {
-            setAdding(false);
-            void load();
-            onChange();
-          }}
+      {failing.length > 0 && (
+        <Banner
+          tone="exception"
+          title={`${failing.length} source${failing.length === 1 ? "" : "s"} failing to sync`}
+          detail={failing[0].last_result?.error ?? undefined}
+          actions={
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => failing.forEach((c) => void sync(c.connection_id))}
+            >
+              Retry all
+            </Button>
+          }
         />
       )}
 
-      {conns.length === 0 && !adding && (
+      {conns.length === 0 ? (
         <div className="muted" style={{ fontSize: 12 }}>
-          nothing connected — “＋ add source” to crawl a docs site or sync a Google Sheet / Doc.
-          The chat flow’s retrieval reads every connected source together.
+          Nothing connected — “Add source” to crawl a docs site or sync a Google Sheet / Doc. The
+          chat flow’s retrieval reads every connected source together.
         </div>
-      )}
-
-      {conns.length > 0 && (
-        <table className="runs-table">
-          <thead>
-            <tr>
-              <th>source</th>
-              <th>type</th>
-              <th>status</th>
-              <th>entries</th>
-              <th>last synced</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {conns.map((c) => (
-              <Fragment key={c.connection_id}>
-              <tr>
-                <td style={{ maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis" }}>
-                  {c.label}
-                  {docMode(c) && (
-                    <span
-                      title={
-                        docMode(c) === "suggest"
-                          ? "An approved KB correction opens a GitHub issue with the diff — a human applies it to the doc"
-                          : "An approved KB correction is written into the doc, then a GitHub issue opens for verification"
-                      }
-                      style={{
-                        fontSize: 11, marginLeft: 6, padding: "1px 6px", borderRadius: 8,
-                        background: docMode(c) === "suggest" ? "#33608a" : "#5a3a8a",
-                        color: "#fff", whiteSpace: "nowrap",
-                      }}
-                    >
-                      {docMode(c) === "suggest" ? "suggests edits" : "write-back"}
-                    </span>
-                  )}
-                  {notIndexed(c) && (
-                    <span
-                      title="Connected but not read into the knowledge base — the bot won't use it to answer"
-                      style={{
-                        fontSize: 11, marginLeft: 6, padding: "1px 6px", borderRadius: 8,
-                        background: "#555", color: "#fff", whiteSpace: "nowrap",
-                      }}
-                    >
-                      not indexed
-                    </span>
-                  )}
-                </td>
-                <td className="muted">{c.connector}</td>
-                <td>
-                  <ConnStatus c={c} />
-                </td>
-                <td className="muted">{c.entry_count}</td>
-                <td className="muted">
-                  {c.last_synced_at ? new Date(c.last_synced_at).toLocaleString() : "—"}
-                </td>
-                <td className="row" style={{ gap: 4 }}>
-                  <button onClick={() => sync(c.connection_id)}>re-sync</button>
-                  <button
-                    onClick={() => setEditId((id) => (id === c.connection_id ? null : c.connection_id))}
-                  >
-                    {editId === c.connection_id ? "close" : "edit"}
-                  </button>
-                  <button onClick={() => toggle(c)}>
-                    {c.status === "paused" ? "resume" : "pause"}
-                  </button>
-                  <button className="err" onClick={() => remove(c)}>remove</button>
-                </td>
-              </tr>
-              {editId === c.connection_id && (
-                <tr>
-                  <td colSpan={6}>
-                    <ConnectionEditForm
-                      conn={c}
-                      spec={catalogue.find((s) => s.slug === c.connector)}
-                      onDone={() => {
-                        setEditId(null);
-                        void load();
-                        onChange();
-                      }}
-                    />
-                  </td>
-                </tr>
-              )}
-              </Fragment>
-            ))}
-          </tbody>
-        </table>
+      ) : (
+        <DataTable
+          columns={connColumns}
+          rows={conns}
+          rowId={(c) => c.connection_id}
+          selectedId={typeof panel === "object" && panel ? panel.edit.connection_id : null}
+          onSelect={(c) => setPanel({ edit: c })}
+        />
       )}
 
       {writebacks.length > 0 && (
-        <div className="col" style={{ gap: 6 }}>
-          <button
-            style={{ alignSelf: "flex-start", fontSize: 12 }}
-            onClick={() => setShowWb((v) => !v)}
-          >
-            {showWb ? "hide" : "show"} {writebacks.length} doc write-back
-            {writebacks.length === 1 ? "" : "s"}
-          </button>
+        <div style={{ display: "grid", gap: 6 }}>
+          <Button variant="ghost" size="sm" style={{ alignSelf: "flex-start" }} onClick={() => setShowWb((v) => !v)}>
+            {showWb ? "Hide" : "Show"} {writebacks.length} doc write-back{writebacks.length === 1 ? "" : "s"}
+          </Button>
           {showWb && (
             <table className="runs-table">
               <thead>
@@ -820,73 +771,122 @@ function ConnectedSources({
                 </tr>
               </thead>
               <tbody>
-                {writebacks.map((w) => (
-                  <tr key={w.id}>
-                    <td className="muted">{new Date(w.applied_at).toLocaleString()}</td>
-                    <td>
-                      <span
-                        title={w.error ?? undefined}
-                        style={{
-                          fontSize: 11, padding: "1px 6px", borderRadius: 8, color: "#fff",
-                          background:
-                            w.status === "applied" || w.status === "verified"
-                              ? "#2b6a2b"
-                              : w.status === "suggested"
-                                ? "#33608a"
-                                : w.status === "partial"
-                                  ? "#8a5a00"
-                                  : w.status === "reverted"
-                                    ? "#555"
-                                    : "#9b2c2c",
-                        }}
-                      >
-                        {w.status}
-                      </span>
-                    </td>
-                    <td className="muted">
-                      {w.blocks.filter((b) => b.applied).length}/{w.blocks.length}
-                    </td>
-                    <td>
-                      {w.github_issue_url ? (
-                        <a href={w.github_issue_url} target="_blank" rel="noreferrer">
-                          {w.github_repo}#{w.github_issue_number}
-                        </a>
-                      ) : (
-                        <span className="muted">—</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                {writebacks.map((w) => {
+                  const tone: TagTone =
+                    w.status === "applied" || w.status === "verified"
+                      ? "accent"
+                      : w.status === "suggested"
+                        ? "accent"
+                        : w.status === "partial"
+                          ? "warn"
+                          : w.status === "reverted"
+                            ? "neutral"
+                            : "exception";
+                  return (
+                    <tr key={w.id}>
+                      <td className="muted">{new Date(w.applied_at).toLocaleString()}</td>
+                      <td>
+                        <span title={w.error ?? undefined}>
+                          <Tag tone={tone}>{w.status}</Tag>
+                        </span>
+                      </td>
+                      <td className="muted">
+                        {w.blocks.filter((b) => b.applied).length}/{w.blocks.length}
+                      </td>
+                      <td>
+                        {w.github_issue_url ? (
+                          <a href={w.github_issue_url} target="_blank" rel="noreferrer">
+                            {w.github_repo}#{w.github_issue_number}
+                          </a>
+                        ) : (
+                          <span className="muted">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           )}
         </div>
       )}
+
+      <SlideOver open={panel === "add"} onClose={() => setPanel(null)} width={520} title="Add a source">
+        <AddSourceForm
+          collectionId={col.source_id}
+          tenantId={col.tenant_id}
+          catalogue={catalogue}
+          gdocDefaults={docDefaults}
+          onDone={() => {
+            setPanel(null);
+            void load();
+            onChange();
+          }}
+        />
+      </SlideOver>
+
+      <SlideOver
+        open={panel === "defaults"}
+        onClose={() => setPanel(null)}
+        width={520}
+        title="Google Docs defaults"
+      >
+        <DocDefaultsForm
+          tenantId={col.tenant_id}
+          current={docDefaults}
+          onDone={(eff) => {
+            setDocDefaults(eff);
+            setPanel(null);
+          }}
+        />
+      </SlideOver>
+
+      <SlideOver
+        open={typeof panel === "object" && panel != null}
+        onClose={() => setPanel(null)}
+        width={520}
+        title={typeof panel === "object" && panel ? `Edit ${panel.edit.label}` : "Edit source"}
+      >
+        {typeof panel === "object" && panel && (
+          <ConnectionEditForm
+            conn={panel.edit}
+            spec={catalogue.find((s) => s.slug === panel.edit.connector)}
+            onDone={() => {
+              setPanel(null);
+              void load();
+              onChange();
+            }}
+          />
+        )}
+      </SlideOver>
+
+      <Dialog
+        open={removeTarget != null}
+        onClose={() => setRemoveTarget(null)}
+        title={removeTarget ? `Disconnect "${removeTarget.label}"?` : ""}
+        actions={[
+          { label: "Cancel", variant: "ghost", onClick: () => setRemoveTarget(null) },
+          {
+            label: "Disconnect",
+            variant: "danger",
+            onClick: () => removeTarget && runRemove(removeTarget),
+          },
+        ]}
+      >
+        The connection is removed and the entries it produced are archived.
+      </Dialog>
     </div>
   );
 }
 
 function ConnStatus({ c }: { c: KbConnection }) {
-  const map: Record<string, string> = {
-    active: "#2b6a2b",
-    paused: "#555",
-    error: "#9b2c2c",
-    archived: "#555",
-  };
-  const title =
-    c.status === "error" ? c.last_result?.error ?? "last sync failed" : undefined;
+  const tone: TagTone = c.status === "error" ? "exception" : c.status === "active" ? "accent" : "neutral";
+  const title = c.status === "error" ? c.last_result?.error ?? "last sync failed" : undefined;
   return (
-    <span
-      title={title}
-      style={{
-        fontSize: 11,
-        padding: "1px 6px",
-        borderRadius: 8,
-        background: map[c.status] ?? "#555",
-        color: "#fff",
-      }}
-    >
-      {c.status}
+    <span title={title}>
+      <Tag tone={tone} dot>
+        {c.status}
+      </Tag>
     </span>
   );
 }
@@ -909,6 +909,7 @@ function AddSourceForm({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [testMsg, setTestMsg] = useState<{ ok: boolean; detail: string } | null>(null);
+  const toast = useToast();
 
   useEffect(() => {
     if (!slug && catalogue.length) setSlug(catalogue[0].slug);
@@ -947,7 +948,7 @@ function AddSourceForm({
     }
     try {
       await api.kb.addConnection(collectionId, { connector: slug, config });
-      alert("Syncing in the background — entries will appear as they're embedded.");
+      toast("Syncing in the background — entries appear as they're embedded");
       onDone();
     } catch (e) {
       setErr(e instanceof ApiError ? String(e.detail) : String(e));
@@ -977,27 +978,22 @@ function AddSourceForm({
   }
 
   return (
-    <div className="col" style={{ gap: 8, background: "var(--panel, #00000008)", padding: 10, borderRadius: 6 }}>
-      <div className="field">
-        <label>source type</label>
-        <select value={slug} onChange={(e) => { setSlug(e.target.value); setValues({}); }}>
-          {catalogue.map((c) => {
-            // an apikey connector stays pickable even with no key yet — you
-            // enter it in the form; oauth2 ones need the OAuth done first.
-            const pickable = c.available || c.auth === "apikey";
-            return (
-              <option key={c.slug} value={c.slug} disabled={!pickable}>
-                {c.label}
-                {!c.available && c.reason ? ` — ${c.reason}` : ""}
-              </option>
-            );
-          })}
-        </select>
-      </div>
+    <div style={{ display: "grid", gap: 12 }}>
+      <Field label="Source type">
+        <Select
+          value={slug}
+          onChange={(e) => {
+            setSlug(e.target.value);
+            setValues({});
+          }}
+          options={catalogue.map((c) => ({
+            value: c.slug,
+            label: c.label + (!c.available && c.reason ? ` — ${c.reason}` : ""),
+          }))}
+        />
+      </Field>
 
-      {spec && !spec.available && (
-        <div className="err" style={{ fontSize: 12 }}>{spec.reason ?? "not available"}</div>
-      )}
+      {spec && !spec.available && <Banner tone="warn" title={spec.reason ?? "not available"} />}
 
       {spec?.config_fields
         .filter((f) => kbFieldVisible(f, values))
@@ -1010,28 +1006,27 @@ function AddSourceForm({
           />
         ))}
 
-      {err && <div className="err" style={{ fontSize: 12 }}>{err}</div>}
+      {err && <Banner tone="exception" title={err} />}
       {testMsg && (
-        <div
-          style={{ fontSize: 12, color: testMsg.ok ? "#2b6a2b" : "var(--crit, #b4432a)" }}
-        >
+        <div style={{ fontSize: 12, color: testMsg.ok ? "var(--accent)" : "var(--exception-text)" }}>
           {testMsg.ok ? "✓ " : "✗ "}
           {testMsg.detail}
         </div>
       )}
 
-      <div className="row">
-        <button
-          className="primary"
+      <div className="row" style={{ gap: 8 }}>
+        <Button
+          variant="primary"
           onClick={submit}
-          disabled={busy || !spec || (!spec.available && spec.auth !== "apikey")}
+          loading={busy}
+          disabled={!spec || (!spec.available && spec.auth !== "apikey")}
         >
-          {busy ? "connecting…" : "connect & sync"}
-        </button>
+          Connect &amp; sync
+        </Button>
         {spec?.auth === "apikey" && (
-          <button onClick={test} disabled={busy}>
-            {busy ? "…" : "test connection"}
-          </button>
+          <Button variant="secondary" onClick={test} disabled={busy}>
+            Test connection
+          </Button>
         )}
       </div>
     </div>
@@ -1072,37 +1067,42 @@ function DocDefaultsForm({
   }
 
   return (
-    <div className="col" style={{ gap: 8, background: "var(--panel, #00000008)", padding: 10, borderRadius: 6 }}>
+    <div style={{ display: "grid", gap: 12 }}>
       <span className="muted" style={{ fontSize: 12 }}>
-        Default for every <strong>new</strong> Google Doc connection in this workspace. A
-        per-doc choice in the form below still overrides it.
+        Default for every <strong>new</strong> Google Doc connection in this workspace. A per-doc
+        choice in the Add-source form still overrides it.
       </span>
-      <div className="field">
-        <label>Read new docs into the knowledge base</label>
-        <select value={index} onChange={(e) => setIndex(e.target.value)}>
-          <option value="yes">Yes — the bot can use them to answer</option>
-          <option value="no">No — connected but not used for answers</option>
-        </select>
-      </div>
-      <div className="field">
-        <label>When a support resolution corrects a doc's content</label>
-        <select value={onCorr} onChange={(e) => setOnCorr(e.target.value)}>
-          <option value="off">Do nothing to the doc</option>
-          <option value="suggest">Open a GitHub issue — a person applies it (recommended)</option>
-          <option value="write_back">Let the bot edit the doc — a person verifies</option>
-        </select>
-      </div>
+      <Field label="Read new docs into the knowledge base">
+        <Select
+          value={index}
+          onChange={(e) => setIndex(e.target.value)}
+          options={[
+            { value: "yes", label: "Yes — the bot can use them to answer" },
+            { value: "no", label: "No — connected but not used for answers" },
+          ]}
+        />
+      </Field>
+      <Field label="When a support resolution corrects a doc's content">
+        <Select
+          value={onCorr}
+          onChange={(e) => setOnCorr(e.target.value)}
+          options={[
+            { value: "off", label: "Do nothing to the doc" },
+            { value: "suggest", label: "Open a GitHub issue — a person applies it (recommended)" },
+            { value: "write_back", label: "Let the bot edit the doc — a person verifies" },
+          ]}
+        />
+      </Field>
       {onCorr !== "off" && (
-        <div className="field">
-          <label>GitHub repo for review issues (owner/name)</label>
-          <input value={repo} onChange={(e) => setRepo(e.target.value)} placeholder="acme/support-kb" />
-        </div>
+        <Field label="GitHub repo for review issues (owner/name)">
+          <Input value={repo} onChange={(e) => setRepo(e.target.value)} placeholder="acme/support-kb" />
+        </Field>
       )}
-      {err && <div className="err" style={{ fontSize: 12 }}>{err}</div>}
+      {err && <Banner tone="exception" title={err} />}
       <div className="row">
-        <button className="primary" onClick={save} disabled={busy}>
-          {busy ? "saving…" : "save defaults"}
-        </button>
+        <Button variant="primary" onClick={save} loading={busy}>
+          Save defaults
+        </Button>
       </div>
     </div>
   );
@@ -1132,7 +1132,7 @@ function ConnectionEditForm({
 
   if (!spec) {
     return (
-      <div className="muted" style={{ fontSize: 12, padding: 8 }}>
+      <div className="muted" style={{ fontSize: 12 }}>
         “{conn.connector}” isn’t a known connector on this server — can’t edit its config here.
       </div>
     );
@@ -1159,7 +1159,7 @@ function ConnectionEditForm({
   }
 
   return (
-    <div className="col" style={{ gap: 8, background: "var(--panel, #00000008)", padding: 10, borderRadius: 6 }}>
+    <div style={{ display: "grid", gap: 12 }}>
       <span className="muted" style={{ fontSize: 12 }}>
         Editing the {spec.label} connection — saving re-syncs it. Leave a field blank to keep its
         current value.
@@ -1174,11 +1174,11 @@ function ConnectionEditForm({
             onChange={(v) => setValues((prev) => ({ ...prev, [f.key]: v }))}
           />
         ))}
-      {err && <div className="err" style={{ fontSize: 12 }}>{err}</div>}
+      {err && <Banner tone="exception" title={err} />}
       <div className="row">
-        <button className="primary" onClick={save} disabled={busy}>
-          {busy ? "saving…" : "save & re-sync"}
-        </button>
+        <Button variant="primary" onClick={save} loading={busy}>
+          Save &amp; re-sync
+        </Button>
       </div>
     </div>
   );
