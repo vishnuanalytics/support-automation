@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
+import { Banner } from "../ui";
 import type {
   ActionRequest,
   GraphAskResult,
@@ -78,7 +79,7 @@ export function ReviewView() {
   };
 
   return (
-    <div className="view-scroll col" style={{ gap: 16, maxWidth: 900, padding: 16 }}>
+    <div className="view-scroll col" style={{ gap: 16, padding: "var(--content-pad)" }}>
       <h2 style={{ margin: 0 }}>Approvals</h2>
       <p style={{ margin: 0, color: "var(--muted, #667)" }}>
         Everything waiting on a human — knowledge-base changes and internal task
@@ -305,8 +306,8 @@ export function ReviewView() {
         ))}
       </div>
 
-      {note && <div className="banner">{note}</div>}
-      {err && <div className="banner err">{err}</div>}
+      {note && <Banner tone="accent" title={note} />}
+      {err && <Banner tone="exception" title={err} />}
 
       {ars.length > 0 && (
         <div className="col" style={{ gap: 10 }}>
@@ -514,7 +515,7 @@ function GraphAskPanel() {
         ))}
       </div>
 
-      {err && <div className="banner err">{err}</div>}
+      {err && <Banner tone="exception" title={err} />}
 
       {res && (
         <div className="col" style={{ gap: 4 }}>

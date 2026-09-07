@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
 import type { ActionRequest, FlowMeta, PolicyRule } from "../types";
+import { Banner, Dialog, Field, Input, ConfirmButton } from "../ui";
 
 /**
  * Phase 16 — structured policy rules + the approval queue.
@@ -58,8 +59,10 @@ export function RulesView({ tenantId }: { tenantId: string }) {
     }, 800);
   }
 
+  const [addOpen, setAddOpen] = useState(false);
+  const [addName, setAddName] = useState("");
   async function addRule() {
-    const name = prompt("rule name")?.trim();
+    const name = addName.trim();
     if (!name || !team) return;
     try {
       await api.rules.create({
@@ -70,9 +73,11 @@ export function RulesView({ tenantId }: { tenantId: string }) {
         when: { field: "tier", op: "eq", value: "premium" },
         then: { type: "route", action: "ask_human" },
       });
+      setAddOpen(false);
+      setAddName("");
       void refresh();
     } catch (e) {
-      alert(e instanceof ApiError ? String(e.detail) : String(e));
+      setErr(e instanceof ApiError ? String(e.detail) : String(e));
     }
   }
 
@@ -86,7 +91,7 @@ export function RulesView({ tenantId }: { tenantId: string }) {
               <option key={t}>{t}</option>
             ))}
           </select>
-          <button onClick={addRule}>＋ rule</button>
+          <button onClick={() => { setAddName(""); setAddOpen(true); }}>＋ rule</button>
         </div>
         <div className="row">
           {slack.configured &&
@@ -97,7 +102,21 @@ export function RulesView({ tenantId }: { tenantId: string }) {
             ))}
         </div>
       </div>
-      {err && <div className="err" style={{ fontSize: 12 }}>{err}</div>}
+      {err && <Banner tone="exception" title={err} />}
+
+      <Dialog
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+        title="New policy rule"
+        actions={[
+          { label: "Cancel", variant: "ghost", onClick: () => setAddOpen(false) },
+          { label: "Create", variant: "primary", onClick: addRule },
+        ]}
+      >
+        <Field label="Rule name" hint="Starts from a premium → ask_human template you can then edit.">
+          <Input value={addName} autoFocus onChange={(e) => setAddName(e.target.value)} />
+        </Field>
+      </Dialog>
 
       <div className="col" style={{ gap: 10 }}>
         {rules.map((r) => (
@@ -221,7 +240,6 @@ function RuleEditor({ rule, onChange }: { rule: PolicyRule; onChange: () => void
   }
 
   async function remove() {
-    if (!confirm(`delete rule "${rule.name}"?`)) return;
     await api.rules.remove(rule.rule_id);
     onChange();
   }
@@ -250,7 +268,13 @@ function RuleEditor({ rule, onChange }: { rule: PolicyRule; onChange: () => void
         <div style={{ flex: 1 }} />
         <button onClick={toggleRaw} title="edit the raw JSON">{raw ? "form" : "JSON"}</button>
         <button className="primary" onClick={save} disabled={busy || (raw && !rawParsed.ok)}>save</button>
-        <button className="err" onClick={remove}>delete</button>
+        <ConfirmButton
+          label="delete"
+          size="sm"
+          title={`Delete rule "${rule.name}"?`}
+          confirmLabel="Delete"
+          onConfirm={remove}
+        />
       </div>
 
       {raw ? (

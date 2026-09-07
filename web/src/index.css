@@ -368,6 +368,54 @@ code { font-family: var(--font-mono); }
 .login { max-width: 340px; margin: 12vh auto; }
 .login h1 { font: var(--type-view-title); }
 
+/* setup wizard — checklist in the standard frame */
+.setup-shell { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.setup-shell > .app-toolbar { flex: none; }
+.setup-body { flex: 1; min-height: 0; overflow-y: auto; padding: 36px var(--content-pad); }
+.setup-step { border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); }
+.setup-step--open { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(98, 197, 238, 0.35); }
+.setup-step__head { display: flex; align-items: center; gap: 15px; width: 100%; background: 0; border: 0; padding: 16px; cursor: pointer; text-align: left; }
+.setup-step__mark {
+  width: 24px; height: 24px; flex: none; border-radius: 50%;
+  border: 1px solid var(--border-button); color: var(--text-muted);
+  display: grid; place-items: center; font: 600 12px/1 var(--font-body);
+}
+.setup-step--done .setup-step__mark { background: var(--accent); border-color: var(--accent); color: var(--accent-on); }
+.setup-step--open .setup-step__mark { border-color: var(--accent); color: var(--accent); }
+.setup-step__title { font: 600 15px/1.3 var(--font-body); }
+.setup-step--done .setup-step__title { color: var(--text-secondary); }
+.setup-step__body { display: grid; gap: 12px; padding: 0 16px 16px 55px; }
+
+/* login — split panel (Screen 01) */
+.login-split {
+  display: grid; grid-template-columns: 1fr 1fr;
+  max-width: 720px; margin: 10vh auto;
+  border: 1px solid var(--line); border-radius: var(--radius-md);
+  overflow: hidden; background: var(--surface);
+}
+.login-split__form { padding: 40px 36px; display: grid; gap: 12px; align-content: center; }
+.login-split__aside {
+  background: var(--surface-raised); border-left: 1px solid var(--line);
+  padding: 36px; display: flex; flex-direction: column; justify-content: flex-end; gap: 10px;
+}
+.login-bars { display: flex; gap: 3px; height: 52px; align-items: flex-end; opacity: 0.9; margin-bottom: 4px; }
+.login-bars span { flex: 1; }
+@media (max-width: 640px) {
+  .login-split { grid-template-columns: 1fr; }
+  .login-split__aside { display: none; }
+}
+
+/* workspace picker */
+.picker { max-width: 400px; margin: 12vh auto; display: grid; gap: 12px; padding: 0 20px; }
+.picker__list { display: grid; gap: 8px; max-height: 320px; overflow-y: auto; }
+.picker__item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-md);
+  background: 0; color: var(--text); cursor: pointer; text-align: left; width: 100%;
+}
+.picker__item:hover { border-color: var(--accent); }
+.picker__item--active { border-color: var(--accent); background: var(--accent-wash); }
+
 /* runs view */
 .runs-shell { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .runs-shell > .app-toolbar { flex: none; }

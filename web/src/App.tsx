@@ -16,6 +16,7 @@ import { FlowGuideView } from "./guide/FlowGuideView";
 import { OnboardingWizard } from "./onboarding/OnboardingWizard";
 import { AppShell } from "./ui/AppShell";
 import { Sidebar } from "./ui/Sidebar";
+import { Button, Dialog, Field, Input, Banner } from "./ui";
 
 type View =
   | "setup"
@@ -76,6 +77,9 @@ export function App() {
   const [flowId, setFlowId] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [view, setView] = useState<View>("editor");
+  const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
+  const [newWorkspaceName, setNewWorkspaceName] = useState("");
+  const [workspaceErr, setWorkspaceErr] = useState<string | null>(null);
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({
     build: true,
     knowledge: true,
@@ -163,16 +167,38 @@ export function App() {
   const isOwner = role === "owner";
 
   async function createWorkspace() {
-    const name = prompt("Workspace name (e.g. your company)")?.trim();
+    const name = newWorkspaceName.trim();
     if (!name) return;
+    setWorkspaceErr(null);
     try {
       const created = await api.createTenant(name);
       if (storageKey) localStorage.setItem(storageKey, created.tenant_id);
+      setNewWorkspaceOpen(false);
+      setNewWorkspaceName("");
       load();
     } catch (e) {
-      alert(String(e));
+      setWorkspaceErr(String(e));
     }
   }
+
+  const newWorkspaceDialog = (
+    <Dialog
+      open={newWorkspaceOpen}
+      onClose={() => setNewWorkspaceOpen(false)}
+      title="New workspace"
+      actions={[
+        { label: "Cancel", variant: "ghost", onClick: () => setNewWorkspaceOpen(false) },
+        { label: "Create", variant: "primary", onClick: createWorkspace },
+      ]}
+    >
+      <div style={{ display: "grid", gap: 12 }}>
+        <Field label="Name" hint="e.g. your company">
+          <Input value={newWorkspaceName} autoFocus onChange={(e) => setNewWorkspaceName(e.target.value)} />
+        </Field>
+        {workspaceErr && <Banner tone="exception" title={workspaceErr} />}
+      </div>
+    </Dialog>
+  );
 
   if (session === undefined) return <div style={{ padding: 20 }}>…</div>;
   if (session === null) return <Login />;
@@ -180,38 +206,43 @@ export function App() {
 
   if (tenants.length === 0) {
     return (
-      <div className="login col">
-        <h1>Set up your workspace</h1>
-        <p className="muted">
-          You're signed in as <strong>{session.user.email}</strong>. Create a
-          workspace to start building flows — or ask an owner to invite this
-          email to an existing one.
+      <div className="picker">
+        <h1 style={{ font: "var(--type-view-title)", margin: 0 }}>Set up your workspace</h1>
+        <p className="muted" style={{ margin: 0 }}>
+          You're signed in as <strong>{session.user.email}</strong>. Create a workspace to start
+          building flows — or ask an owner to invite this email to an existing one.
         </p>
-        <button className="primary" onClick={createWorkspace}>
-          Create a workspace
-        </button>
-        <button onClick={() => supabase.auth.signOut()}>sign out</button>
+        <Button variant="primary" onClick={() => { setNewWorkspaceName(""); setNewWorkspaceOpen(true); }}>
+          ＋ Create a workspace
+        </Button>
+        <Button variant="ghost" onClick={() => supabase.auth.signOut()}>Sign out</Button>
+        {newWorkspaceDialog}
       </div>
     );
   }
 
   if (!tenantId) {
     return (
-      <div className="login col">
-        <h1>Choose a workspace</h1>
-        <p className="muted">
-          You're signed in as <strong>{session.user.email}</strong>, a member of
-          {" "}{tenants.length} workspaces. Pick one to continue — you can switch
-          later from the header.
-        </p>
-        <div className="col" style={{ gap: 8 }}>
+      <div className="picker">
+        <span className="muted" style={{ font: "var(--type-kicker)", textTransform: "uppercase", letterSpacing: ".16em" }}>
+          Signed in as {session.user.email}
+        </span>
+        <h1 style={{ font: "var(--type-view-title)", margin: 0 }}>Choose a workspace</h1>
+        <div className="picker__list">
           {tenants.map((t) => (
-            <button key={t.tenant_id} onClick={() => chooseTenant(t.tenant_id)}>
-              {tenantLabel(t)} <span className="muted">— {t.role}</span>
+            <button key={t.tenant_id} className="picker__item" onClick={() => chooseTenant(t.tenant_id)}>
+              <span style={{ flex: 1, fontWeight: 600 }}>{tenantLabel(t)}</span>
+              <span className="muted" style={{ fontSize: 11 }}>{t.role}</span>
             </button>
           ))}
         </div>
-        <button onClick={() => supabase.auth.signOut()}>sign out</button>
+        <div className="row" style={{ gap: 10, alignItems: "center" }}>
+          <Button variant="secondary" size="sm" onClick={() => { setNewWorkspaceName(""); setNewWorkspaceOpen(true); }}>
+            ＋ New workspace
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => supabase.auth.signOut()}>Sign out</Button>
+        </div>
+        {newWorkspaceDialog}
       </div>
     );
   }

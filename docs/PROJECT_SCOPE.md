@@ -874,9 +874,37 @@ Delivered one BUILD-BRIEF chunk at a time, checkpointed with the user:
   `EmptyState`. Activity rows linking to the object they mention needs a
   router the app doesn't have yet — deferred. `tsc` + `vite build` +
   `vitest` green.
-- **Chunk 8** — Setup + Login (+ a sweep of the remaining
-  `prompt`/`confirm`/`alert` in `rules/`, `onboarding/`, `App.tsx`).
-  Existing API wiring preserved throughout.
+- **Chunk 8 — Setup + Login + the last overlays (DONE).**
+  `onboarding/OnboardingWizard.tsx` rebuilt as a checklist inside the
+  standard frame (`.setup-shell` = `Toolbar` + scrolling `.setup-body`):
+  exactly one step open at a time (the first incomplete, unless you pick
+  another), a progress bar from real state, each step's action a
+  `Button` / `Dialog` / real screen. `createFirstFlow`'s `prompt`/`alert`
+  → a team `Dialog`. `auth/Login.tsx` → the Screen 01 split panel
+  (`.login-split`, form + process-ink aside) on `Field`/`Input`/`Button`.
+  `App.tsx`'s `tenants===0` / `!tenantId` branches → real `.picker`
+  screens with a scrolling workspace list; "New workspace" is a `Dialog`
+  (kills `App.tsx`'s `prompt`+`alert`). `rules/RulesView.tsx`: add-rule
+  `prompt` → `Dialog`, delete `confirm` → `ConfirmButton`, `.err` →
+  `Banner`. `review/ReviewView.tsx`: view-level `max-width` dropped,
+  `.banner` → `Banner`. **`web/src` is now completely free of
+  `prompt()`/`confirm()`/`alert()`** (only doc-comments in the ui
+  primitives mention them). `tsc` + `vite build` + `vitest` green.
+
+**Web redesign complete (chunks 1–8, branch `web-redesign-broadsheet`,
+~18 commits off `main`).** The app is on the Broadsheet-on-dark system
+end to end: token `:root` + `AppShell`/`Sidebar`/`Toolbar`, a
+~25-component `web/src/ui/` kit, and every view — flow editor (canvas
+visuals, toolbar, inspector slide-over), Runs + Trace, Knowledge
+(three-pane + connector slide-overs), Connections/Channels (one shell +
+segmented switch), Billing/Team/Activity (one admin frame), Setup, Login
+— rebuilt on it. Three overlay kinds only; no `prompt`/`confirm`/`alert`
+anywhere. Existing API wiring preserved throughout. Not yet
+browser-verified in this environment (sandbox Playwright can't launch
+Chromium — `libnspr4.so`); `cd web && npm run dev` runs it. Deferred
+polish noted inline: Screen 05's health-bucketed connector cards,
+Activity rows linking to their object (needs a router), literal
+file-per-node-kind split of `Inspector.tsx`.
 
 **Older note, superseded by the above as "most recent," kept for its
 own history:**
