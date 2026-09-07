@@ -1990,7 +1990,7 @@ def _ensure_org_kb(tenant_id: str) -> dict:
 
 
 @app.get("/api/kb/collections")
-def kb_list_collections(c: Caller = Depends(caller)) -> list[dict]:
+def kb_list_collections(tenant_id: str | None = None, c: Caller = Depends(caller)) -> list[dict]:
     for t in [r["tenant_id"] for r in
               (c.sb.table("tenant_members").select("tenant_id").execute().data or [])]:
         try:
@@ -1998,8 +1998,11 @@ def kb_list_collections(c: Caller = Depends(caller)) -> list[dict]:
         except Exception as e:  # noqa: BLE001
             log.warning("ensure_org_kb(%s): %s", t, e)
 
-    cols = (c.sb.table("sources").select("*")
-            .eq("kind", "internal_kb").neq("status", "archived").execute().data or [])
+    q = (c.sb.table("sources").select("*")
+         .eq("kind", "internal_kb").neq("status", "archived"))
+    if tenant_id:
+        q = q.eq("tenant_id", tenant_id)   # scope to one workspace (RLS still applies)
+    cols = q.execute().data or []
     out = []
     for s in cols:
         entries = (c.sb.table("kb_entries").select("entry_id, status")

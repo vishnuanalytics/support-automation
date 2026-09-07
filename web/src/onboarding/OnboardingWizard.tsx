@@ -45,8 +45,13 @@ export function OnboardingWizard({
   const [kbMsg, setKbMsg] = useState<string | null>(null);
 
   const loadKb = () => {
-    api.kb.listCollections()
-      .then((cs) => setOrgKbId(cs.find((c) => c.org_kb)?.source_id ?? cs[0]?.source_id ?? null))
+    // scope to this workspace — otherwise a Setup crawl can upload into
+    // another workspace's "Organization knowledge" (same name, cross-tenant)
+    api.kb.listCollections(tenantId)
+      .then((cs) => {
+        const mine = cs.filter((c) => c.tenant_id === tenantId);
+        setOrgKbId(mine.find((c) => c.org_kb)?.source_id ?? mine[0]?.source_id ?? null);
+      })
       .catch(() => {});
     api.kb.listAllConnections(tenantId).then((r) => setKbSourceCount(r.length)).catch(() => setKbSourceCount(0));
   };
