@@ -29,7 +29,7 @@ import { ZoomControl } from "./ZoomControl";
 import { EdgeInspector, NodeInspector } from "./Inspector";
 import { RunPanel } from "./RunPanel";
 import { TriggersPanel } from "./TriggersPanel";
-import { Popover } from "../ui";
+import { Popover, Toolbar, Button, Banner, Dialog, SlideOver, Field, Input, Textarea, Toggle, useToast } from "../ui";
 
 export function FlowEditor(props: {
   flowId: string;
@@ -44,7 +44,7 @@ export function FlowEditor(props: {
   );
 }
 
-type Banner = { kind: "ok" | "err"; text: string; list?: string[] };
+type EditorBanner = { kind: "ok" | "err"; text: string; list?: string[] };
 
 function Inner({ flowId, canEdit, onSaved, onDeleted }: {
   flowId: string;
@@ -59,7 +59,7 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
   const [types, setTypes] = useState<NodeTypesResp | null>(null);
   const [selNode, setSelNode] = useState<string | null>(null);
   const [selEdge, setSelEdge] = useState<string | null>(null);
-  const [banner, setBanner] = useState<Banner | null>(null);
+  const [banner, setBanner] = useState<EditorBanner | null>(null);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [versions, setVersions] = useState<{ version: number; created_at: string }[]>([]);
@@ -73,6 +73,17 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [nodeFilter, setNodeFilter] = useState("");
   const paletteBtnRef = useRef<HTMLButtonElement>(null);
+
+  const toast = useToast();
+  // overlay chrome — three kinds only (popover / slide-over / dialog); no
+  // prompt()/confirm()/alert() anywhere in this component.
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreBtnRef = useRef<HTMLButtonElement>(null);
+  const [rollbackOpen, setRollbackOpen] = useState(false);
+  const rollbackBtnRef = useRef<HTMLButtonElement>(null);
+  const [dialog, setDialog] = useState<null | "publish" | "delete" | "template" | { rollback: number }>(null);
+  const [tplName, setTplName] = useState("");
+  const [tplDesc, setTplDesc] = useState("");
 
   // Law 3 — the canvas viewport is persisted per flow id. Read once at mount
   // (Inner is keyed by flowId in App, so it remounts per flow).
@@ -342,11 +353,12 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
     setBusy(true);
     try {
       const r = await api.validateFlow(flowId, payload());
-      setBanner(
-        r.valid
-          ? { kind: "ok", text: "valid" }
-          : { kind: "err", text: "invalid", list: r.errors },
-      );
+      if (r.valid) {
+        setBanner(null);
+        toast("Flow is valid");
+      } else {
+        setBanner({ kind: "err", text: "This flow won't run yet", list: r.errors });
+      }
     } catch (e) {
       setBanner({ kind: "err", text: (e as ApiError).message });
     }
@@ -369,48 +381,58 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
       const f = await api.saveFlow(flowId, payload());
       setFlow(f);
       setDirty(false);
-      setBanner({ kind: "ok", text: `saved · draft v${f.version}` });
+      setBanner(null);
+      toast(`Saved · draft v${f.version}`);
       onSaved();
     } catch (e) {
       const ae = e as ApiError;
       if (ae.status === 409) {
         await reload();
-        setBanner({ kind: "err", text: "someone else saved this flow — reloaded their version" });
+        setBanner({
+          kind: "err",
+          text: "Someone else saved this flow while you were editing. Their version is now loaded — re-apply your changes and save again.",
+        });
       } else {
-        setBanner({ kind: "err", text: ae.errors ? "save blocked" : ae.message, list: ae.errors ?? undefined });
+        setBanner({
+          kind: "err",
+          text: ae.errors ? "This flow won't save yet" : ae.message,
+          list: ae.errors ?? undefined,
+        });
       }
     }
     setBusy(false);
   }
 
-  async function doPublish() {
-    if (dirty && !confirm("Save first, then publish the draft?")) return;
+  async function runPublish() {
+    setDialog(null);
     setBusy(true);
     try {
       if (dirty) await api.saveFlow(flowId, payload());
       const { published_version } = await api.publishFlow(flowId);
       await reload();
       setVersions(await api.listVersions(flowId));
-      setBanner({ kind: "ok", text: `published v${published_version}` });
+      setBanner(null);
+      toast(`Published v${published_version}`);
       onSaved();
     } catch (e) {
       const ae = e as ApiError;
-      setBanner({ kind: "err", text: ae.errors ? "can't publish — flow is invalid" : ae.message, list: ae.errors ?? undefined });
+      setBanner({
+        kind: "err",
+        text: ae.errors ? "Can't publish — this flow is invalid" : ae.message,
+        list: ae.errors ?? undefined,
+      });
     }
     setBusy(false);
   }
 
-  async function doSaveAsTemplate() {
-    if (!flow) return;
-    if (dirty && !confirm("Save the draft first, then save it as a template?")) return;
-    const name = prompt("template name", flow.name)?.trim();
-    if (!name) return;
-    const description = prompt("description (optional)", "")?.trim() || undefined;
+  async function runSaveTemplate() {
+    if (!flow || !tplName.trim()) return;
+    setDialog(null);
     setBusy(true);
     try {
       if (dirty) await api.saveFlow(flowId, payload());
-      await api.templates.save(flowId, { name, description });
-      setBanner({ kind: "ok", text: `saved as template "${name}"` });
+      await api.templates.save(flowId, { name: tplName.trim(), description: tplDesc.trim() || undefined });
+      toast(`Saved as template "${tplName.trim()}"`);
     } catch (e) {
       setBanner({ kind: "err", text: (e as ApiError).message });
     }
@@ -422,10 +444,7 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
     try {
       await api.setSfEntry(flowId, on);
       await reload();
-      setBanner({
-        kind: "ok",
-        text: on ? "this flow now runs on new Salesforce Cases" : "disconnected from Salesforce",
-      });
+      toast(on ? "This flow now runs on new Salesforce Cases" : "Disconnected from Salesforce");
       onSaved();
     } catch (e) {
       setBanner({ kind: "err", text: (e as ApiError).message });
@@ -433,13 +452,13 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
     setBusy(false);
   }
 
-  async function doRollback(v: number) {
-    if (!confirm(`Roll back the draft + published pointer to v${v}?`)) return;
+  async function runRollback(v: number) {
+    setDialog(null);
     setBusy(true);
     try {
       await api.rollbackFlow(flowId, v);
       await reload();
-      setBanner({ kind: "ok", text: `rolled back to v${v}` });
+      toast(`Rolled back to v${v}`);
       onSaved();
     } catch (e) {
       setBanner({ kind: "err", text: (e as ApiError).message });
@@ -447,8 +466,8 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
     setBusy(false);
   }
 
-  async function doDelete() {
-    if (!confirm("Delete this flow and its nodes/edges?")) return;
+  async function runDelete() {
+    setDialog(null);
     try {
       await api.deleteFlow(flowId);
       onDeleted();
@@ -464,90 +483,133 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
 
   return (
     <>
-      <div className="toolbar">
-        <input
-          style={{ width: 260 }}
-          value={flow.name}
-          onChange={(e) => {
-            setFlow({ ...flow, name: e.target.value });
-            mark();
-          }}
-        />
-        <span
-          className={`pill ${flow.published_version ? "published" : "draft"}`}
-          title="what a run executes"
-        >
-          {flow.published_version ? `published v${flow.published_version}` : "unpublished"}
-        </span>
-        <span className="muted" title="draft revision (optimistic-concurrency token)">
-          draft rev {flow.version}
-        </span>
-        {!canEdit && (
-          <span className="pill" title="your access is view-only">view-only</span>
-        )}
-        {canEdit ? (
-          <label
-            className={`pill ${flow.sf_entry ? "published" : ""}`}
-            title="when on, POST /api/hooks/salesforce/case runs this flow for every new Case (one flow per workspace)"
-            style={{ cursor: busy ? "wait" : "pointer" }}
-          >
+      <div className="app-toolbar">
+        <Toolbar
+          title={
             <input
-              type="checkbox"
-              checked={!!flow.sf_entry}
-              disabled={busy}
-              onChange={(e) => doSetSfEntry(e.target.checked)}
-              style={{ marginRight: 4 }}
+              className="toolbar__name"
+              value={flow.name}
+              disabled={!canEdit}
+              aria-label="Flow name"
+              onChange={(e) => {
+                setFlow({ ...flow, name: e.target.value });
+                mark();
+              }}
             />
-            Salesforce entry
-          </label>
-        ) : (
-          flow.sf_entry && (
-            <span className="pill published" title="the Salesforce Case hook runs this flow">
-              Salesforce entry
-            </span>
-          )
-        )}
-        {canEdit && versions.length > 0 && (
-          <select
-            value=""
-            onChange={(e) => e.target.value && doRollback(Number(e.target.value))}
-            title="roll back to a published version"
-            style={{ width: "auto" }}
-          >
-            <option value="">rollback…</option>
-            {versions.map((v) => (
-              <option key={v.version} value={v.version}>
-                v{v.version} · {new Date(v.created_at).toLocaleDateString()}
-              </option>
-            ))}
-          </select>
-        )}
-        <div style={{ flex: 1 }} />
-        {dirty && <span className="muted" title="unsaved changes">●</span>}
-        <button onClick={doValidate} disabled={busy}>Validate</button>
-        {canEdit && (
-          <>
-            <button onClick={() => setNodes((ns) => layout(ns, edges))}>Re-layout</button>
-            <button
-              onClick={() => { setAssist("mermaid"); setAssistText(""); setAssistErr(null); }}
-              title="replace the canvas with a Mermaid flowchart"
-            >
-              Import Mermaid
-            </button>
-            <button
-              onClick={() => { setAssist("ai-edit"); setAssistText(""); setAssistErr(null); }}
-              title="describe a change; AI rewrites the graph for you to review"
-            >
-              ✨ AI edit
-            </button>
-            <button className="primary" onClick={doSave} disabled={busy || !dirty}>Save draft</button>
-            <button onClick={doPublish} disabled={busy}>Publish</button>
-            <button onClick={doSaveAsTemplate} disabled={busy} title="save this flow as a reusable template">
-              💾 Save as template
-            </button>
-            <button className="err" onClick={doDelete}>Delete</button>
-          </>
-        )}
+          }
+          meta={
+            <>
+              <span
+                className={`pill ${flow.published_version ? "published" : ""}`}
+                title="what a run executes"
+              >
+                {flow.published_version ? `published v${flow.published_version}` : "unpublished"}
+              </span>
+              <span title="draft revision (optimistic-concurrency token)">draft rev {flow.version}</span>
+              {dirty && <span title="unsaved changes" style={{ color: "var(--accent)" }}>● unsaved</span>}
+              {!canEdit && (
+                <span className="pill" title="your access is view-only">view-only</span>
+              )}
+              {canEdit ? (
+                <Toggle checked={!!flow.sf_entry} disabled={busy} onChange={(on) => doSetSfEntry(on)}>
+                  <span
+                    className="muted"
+                    title="when on, POST /api/hooks/salesforce/case runs this flow for every new Case (one flow per workspace)"
+                  >
+                    Salesforce entry
+                  </span>
+                </Toggle>
+              ) : (
+                flow.sf_entry && (
+                  <span className="pill published" title="the Salesforce Case hook runs this flow">
+                    Salesforce entry
+                  </span>
+                )
+              )}
+            </>
+          }
+        >
+          <Button variant="ghost" onClick={doValidate} disabled={busy}>
+            Validate
+          </Button>
+          {canEdit && (
+            <>
+              <Button variant="primary" onClick={doSave} disabled={busy || !dirty}>
+                Save draft
+              </Button>
+              <Button variant="secondary" onClick={() => setDialog("publish")} disabled={busy}>
+                Publish
+              </Button>
+              <Button
+                ref={moreBtnRef}
+                variant="secondary"
+                aria-haspopup="menu"
+                aria-expanded={moreOpen}
+                onClick={() => setMoreOpen((o) => !o)}
+              >
+                More ▾
+              </Button>
+              <Popover anchorRef={moreBtnRef} open={moreOpen} onClose={() => setMoreOpen(false)} width={220} align="end">
+                <div className="palette__list">
+                  <button className="palette__item" onClick={() => { setMoreOpen(false); setNodes((ns) => layout(ns, edges)); }}>
+                    Re-layout
+                  </button>
+                  <button className="palette__item" onClick={() => { setMoreOpen(false); setAssist("mermaid"); setAssistText(""); setAssistErr(null); }}>
+                    Import Mermaid
+                  </button>
+                  <button className="palette__item" onClick={() => { setMoreOpen(false); setAssist("ai-edit"); setAssistText(""); setAssistErr(null); }}>
+                    ✨ AI edit
+                  </button>
+                  <button
+                    className="palette__item"
+                    onClick={() => { setMoreOpen(false); setTplName(flow.name); setTplDesc(""); setDialog("template"); }}
+                  >
+                    Save as template
+                  </button>
+                  <button className="palette__item" style={{ color: "var(--exception-text)" }} onClick={() => { setMoreOpen(false); setDialog("delete"); }}>
+                    Delete flow
+                  </button>
+                </div>
+              </Popover>
+              {versions.length > 0 && (
+                <>
+                  <Button
+                    ref={rollbackBtnRef}
+                    variant="secondary"
+                    aria-haspopup="menu"
+                    aria-expanded={rollbackOpen}
+                    onClick={() => setRollbackOpen((o) => !o)}
+                  >
+                    rollback ▾
+                  </Button>
+                  <Popover
+                    anchorRef={rollbackBtnRef}
+                    open={rollbackOpen}
+                    onClose={() => setRollbackOpen(false)}
+                    width={220}
+                    align="end"
+                  >
+                    <div className="palette__kicker">restore a version</div>
+                    <div className="palette__list">
+                      {versions.map((v) => (
+                        <button
+                          key={v.version}
+                          className="palette__item"
+                          onClick={() => { setRollbackOpen(false); setDialog({ rollback: v.version }); }}
+                        >
+                          v{v.version}
+                          <span className="muted" style={{ fontSize: 11 }}>
+                            {new Date(v.created_at).toLocaleDateString()}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </Popover>
+                </>
+              )}
+            </>
+          )}
+        </Toolbar>
       </div>
 
       <TriggersPanel flowId={flowId} canEdit={canEdit} />
@@ -671,18 +733,46 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
           )}
 
           {banner && (
-            <div
-              style={{ position: "absolute", right: 10, bottom: 10, maxWidth: 420 }}
-              className={`banner ${banner.kind}`}
-            >
-              {banner.text}
-              {banner.list && (
-                <ul style={{ margin: "4px 0 0 16px" }}>
-                  {banner.list.map((x, i) => (
-                    <li key={i}>{x}</li>
-                  ))}
-                </ul>
-              )}
+            <div style={{ position: "absolute", right: 15, bottom: 15, maxWidth: 460, zIndex: 6 }}>
+              <Banner
+                tone={banner.kind === "err" ? "exception" : "warn"}
+                title={banner.text}
+                detail={
+                  banner.list && banner.list.length > 0 ? (
+                    <ul style={{ margin: "4px 0 0", paddingLeft: 16 }}>
+                      {banner.list.map((x, i) => {
+                        const hit = nodes.find(
+                          (n) => x.includes(n.id) || (n.data.label && x.includes(n.data.label)),
+                        );
+                        return (
+                          <li key={i}>
+                            {hit ? (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                style={{ padding: 0, height: "auto", font: "inherit" }}
+                                onClick={() => {
+                                  setSelNode(hit.id);
+                                  setSelEdge(null);
+                                }}
+                              >
+                                {x}
+                              </Button>
+                            ) : (
+                              x
+                            )}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  ) : undefined
+                }
+                actions={
+                  <Button variant="ghost" size="sm" onClick={() => setBanner(null)}>
+                    Dismiss
+                  </Button>
+                }
+              />
             </div>
           )}
         </div>
@@ -722,44 +812,108 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
         </div>
       </div>
 
-      {assist && (
-        <div className="assist-overlay" onClick={() => !assistBusy && setAssist(null)}>
-          <div className="assist-modal col" onClick={(e) => e.stopPropagation()}>
-            <h4>
-              {assist === "mermaid"
-                ? "Import a Mermaid flowchart"
-                : "Edit this flow with AI"}
-            </h4>
-            <div className="muted" style={{ fontSize: 12 }}>
-              {assist === "mermaid"
-                ? "Paste a flowchart. It replaces the canvas as an unsaved draft — node types are matched by label, edge labels become warnings to wire up, nothing saves until you hit Save draft."
-                : "Describe the change in plain English (e.g. “add a clarify step when the gate fails for non-billing topics”). The AI rewrites the graph for you to review on the canvas; nothing saves until you hit Save draft."}
-            </div>
-            <textarea
-              rows={assist === "mermaid" ? 12 : 4}
-              value={assistText}
-              autoFocus
-              placeholder={
-                assist === "mermaid"
-                  ? "flowchart TD\n  R[retrieve] --> C[classify] --> D[draft]\n  D --> G{confidence gate}\n  G -->|pass| A[auto reply]\n  G -->|fail| H[ask human]"
-                  : "add an identify step before classify, and route unknown senders to a clarify node"
-              }
-              onChange={(e) => setAssistText(e.target.value)}
-            />
-            {assistErr && <div className="err" style={{ fontSize: 12 }}>{assistErr}</div>}
-            <div className="row" style={{ justifyContent: "flex-end", gap: 6 }}>
-              <button onClick={() => setAssist(null)} disabled={assistBusy}>cancel</button>
-              <button
-                className="primary"
-                onClick={runAssist}
-                disabled={assistBusy || !assistText.trim()}
-              >
-                {assistBusy ? "…" : assist === "mermaid" ? "Import" : "Generate"}
-              </button>
-            </div>
-          </div>
+      <SlideOver
+        open={!!assist}
+        onClose={() => !assistBusy && setAssist(null)}
+        title={assist === "mermaid" ? "Import a Mermaid flowchart" : "Edit this flow with AI"}
+        width={assist === "mermaid" ? 520 : 380}
+        footer={
+          <>
+            <Button
+              variant="primary"
+              onClick={runAssist}
+              loading={assistBusy}
+              disabled={!assistText.trim()}
+            >
+              {assist === "mermaid" ? "Import" : "Generate"}
+            </Button>
+            <Button variant="ghost" onClick={() => setAssist(null)} disabled={assistBusy}>
+              Cancel
+            </Button>
+          </>
+        }
+      >
+        <p className="muted" style={{ margin: "0 0 12px", fontSize: 12.5, lineHeight: 1.6 }}>
+          {assist === "mermaid"
+            ? "Paste a flowchart. It replaces the canvas as an unsaved draft — node types are matched by label, edge labels become warnings to wire up, nothing saves until you hit Save draft."
+            : "Describe the change in plain English (e.g. “add a clarify step when the gate fails for non-billing topics”). The AI rewrites the graph for you to review on the canvas; nothing saves until you hit Save draft."}
+        </p>
+        <Textarea
+          rows={assist === "mermaid" ? 14 : 5}
+          value={assistText}
+          autoFocus
+          placeholder={
+            assist === "mermaid"
+              ? "flowchart TD\n  R[retrieve] --> C[classify] --> D[draft]\n  D --> G{confidence gate}\n  G -->|pass| A[auto reply]\n  G -->|fail| H[ask human]"
+              : "add an identify step before classify, and route unknown senders to a clarify node"
+          }
+          onChange={(e) => setAssistText(e.target.value)}
+        />
+        {assistErr && <div className="err" style={{ fontSize: 12, marginTop: 8 }}>{assistErr}</div>}
+      </SlideOver>
+
+      <Dialog
+        open={dialog === "publish"}
+        onClose={() => setDialog(null)}
+        title={`Publish v${(flow.published_version ?? 0) + 1}?`}
+        actions={[
+          { label: "Cancel", variant: "ghost", onClick: () => setDialog(null) },
+          { label: "Publish", variant: "primary", onClick: runPublish },
+        ]}
+      >
+        Runs switch to this snapshot immediately
+        {dirty ? " — your unsaved draft is saved first" : ""}. The working draft is
+        unaffected.
+      </Dialog>
+
+      <Dialog
+        open={dialog === "delete"}
+        onClose={() => setDialog(null)}
+        title="Delete this flow?"
+        actions={[
+          { label: "Cancel", variant: "ghost", onClick: () => setDialog(null) },
+          { label: "Delete flow", variant: "danger", onClick: runDelete },
+        ]}
+      >
+        This removes the flow and all of its nodes and edges. This can't be undone.
+      </Dialog>
+
+      <Dialog
+        open={typeof dialog === "object" && dialog !== null}
+        onClose={() => setDialog(null)}
+        title={`Roll back to v${typeof dialog === "object" && dialog ? dialog.rollback : ""}?`}
+        actions={[
+          { label: "Cancel", variant: "ghost", onClick: () => setDialog(null) },
+          {
+            label: "Roll back",
+            variant: "primary",
+            onClick: () => {
+              if (typeof dialog === "object" && dialog) runRollback(dialog.rollback);
+            },
+          },
+        ]}
+      >
+        The working draft and the published pointer both move to this version.
+      </Dialog>
+
+      <Dialog
+        open={dialog === "template"}
+        onClose={() => setDialog(null)}
+        title="Save as template"
+        actions={[
+          { label: "Cancel", variant: "ghost", onClick: () => setDialog(null) },
+          { label: "Save template", variant: "primary", onClick: runSaveTemplate },
+        ]}
+      >
+        <div style={{ display: "grid", gap: 12 }}>
+          <Field label="Template name">
+            <Input value={tplName} autoFocus onChange={(e) => setTplName(e.target.value)} />
+          </Field>
+          <Field label="Description" hint="optional">
+            <Input value={tplDesc} onChange={(e) => setTplDesc(e.target.value)} />
+          </Field>
         </div>
-      )}
+      </Dialog>
     </>
   );
 }

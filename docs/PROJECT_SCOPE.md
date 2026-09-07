@@ -764,11 +764,19 @@ Delivered one BUILD-BRIEF chunk at a time, checkpointed with the user:
     `defaultViewport`). Palette is now a searchable `Popover` off an
     "＋ Add node" fab, not an always-open panel. Default `<Controls>`
     dropped. `tsc` + `vite build` + `vitest` green.
-  - **3b — editor toolbar + overlays.** `Toolbar` primitive; rollback
-    → `Popover`; publish / save-as-template / delete / AI-edit /
-    Mermaid → `Dialog`/`SlideOver`; remove `confirm()`/`prompt()` from
-    `FlowEditor.tsx`; 422/save-blocked → `Banner` with per-node links,
-    409 → reload explanation.
+  - **3b — editor toolbar + overlays (DONE).** Editor bar rebuilt on
+    `Toolbar` + `Button`; flow name is an inline text field; secondary
+    actions (Re-layout / Import Mermaid / AI edit / Save as template /
+    Delete) fold into a "More ▾" `Popover`; rollback is a `Popover` of
+    versions. Publish / delete / rollback / save-as-template are
+    `Dialog`s; Mermaid + AI-edit are one `SlideOver`. Every
+    `confirm()`/`prompt()` gone from `FlowEditor.tsx`. Success →
+    `useToast` (provider added in `main.tsx`); errors + 422 validation
+    → `Banner` (exception/warn), with each error string that names a
+    node rendered as a button that selects it; 409 → a plain-words
+    reload explanation. SF-entry is a `Toggle`. `.editor` is now
+    flex-column so the 44px bar is fixed and the workarea fills the
+    rest. `tsc` + `vite build` + `vitest` green.
   - **3c — Inspector → slide-over.** Wrap `NodeInspector`/`EdgeInspector`
     in `SlideOver` with Config / JSON (shared `JsonEditor`) /
     Recent-runs tabs + sticky Apply bar; canvas is full width when

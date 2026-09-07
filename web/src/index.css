@@ -77,6 +77,8 @@
   --muted: var(--text-muted);
   --ok: var(--accent);
   --err: var(--exception);
+  --hair: var(--line);
+  --surface-2: var(--surface-raised);
 }
 
 * { box-sizing: border-box; }
@@ -196,8 +198,15 @@ code { font-family: var(--font-mono); }
   background: var(--surface);
 }
 .app-toolbar .app-toolbar-title { font: var(--type-section); white-space: nowrap; }
-.app-toolbar .app-toolbar-meta { font: var(--type-mono); color: var(--text-faint); }
-.app-toolbar .app-toolbar-actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.app-toolbar .app-toolbar-meta {
+  font: var(--type-mono);
+  color: var(--text-faint);
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.app-toolbar .app-toolbar-actions { margin-left: auto; display: flex; gap: 8px; align-items: center; flex: none; }
 
 .app-sidebar {
   min-width: 0;
@@ -254,7 +263,9 @@ code { font-family: var(--font-mono); }
   font-weight: 600;
 }
 
-.editor { display: grid; grid-template-rows: var(--toolbar-h) 1fr; height: 100%; min-width: 0; min-height: 0; }
+.editor { display: flex; flex-direction: column; height: 100%; min-width: 0; min-height: 0; }
+.editor > .app-toolbar { flex: none; }
+.editor > .workarea { flex: 1; }
 /* right pane for the non-editor views — they manage their own internal
    scroll, so this must NOT be the 44px/1fr grid */
 .pane { height: 100%; min-width: 0; min-height: 0; overflow: hidden; }

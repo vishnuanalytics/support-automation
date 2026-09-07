@@ -444,6 +444,19 @@ select.ui-select { appearance: none; padding-right: 26px; }
 }
 .canvas-fab:hover { border-color: var(--accent); color: var(--accent-hover); }
 
+.toolbar__name {
+  width: 240px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  padding: 5px 8px;
+  font: var(--type-section);
+  color: var(--text);
+}
+.toolbar__name:hover:not(:disabled) { border-color: var(--line-strong); }
+.toolbar__name:focus { background: var(--ground-sunk); border-color: var(--accent); outline: none; }
+.toolbar__name:disabled { opacity: 1; }
+
 .palette__kicker {
   font: 600 10.5px/1 var(--font-body);
   letter-spacing: 0.12em;
