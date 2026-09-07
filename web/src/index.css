@@ -92,6 +92,11 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
    manage their own internal scroll, so this must NOT be the 44px/1fr grid */
 .pane { height: 100%; min-width: 0; min-height: 0; overflow: hidden; }
 .pane-empty { display: grid; place-items: center; height: 100%; }
+/* a non-editor view that scrolls its own content inside the fixed .pane
+   frame — the standard for every view that isn't a self-managed grid
+   (Runs) or split-rail (Knowledge). height:100% so overflow-y actually
+   engages; min-height:0 so a flex child can't push it taller. */
+.view-scroll { height: 100%; min-height: 0; overflow-y: auto; overflow-x: hidden; }
 .toolbar { display: flex; gap: 8px; align-items: center; padding: 0 10px; border-bottom: 1px solid var(--border); background: var(--panel); }
 .workarea { display: grid; grid-template-columns: 1fr 360px; min-height: 0; }
 .canvas-wrap { position: relative; min-width: 0; overflow: hidden; }
@@ -156,7 +161,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .runs-table tbody tr:hover { background: var(--panel-2); }
 .runs-table tbody tr.active { background: var(--panel-2); outline: 1px solid var(--accent); }
 /* billing view */
-.billing-view { padding: 12px; overflow: auto; max-width: 640px; }
+.billing-view { height: 100%; min-height: 0; padding: 12px; overflow-y: auto; max-width: 640px; }
 .quota-row { display: flex; flex-direction: column; gap: 3px; }
 .quota-bar { height: 8px; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--border); overflow: hidden; }
 .quota-bar-fill { height: 100%; background: var(--accent); }

@@ -164,37 +164,60 @@ def crawl(start_url: str, *, max_pages: int = 20, max_depth: int = 2,
     start = urlparse(start_url)
     prefix = (start.path or "/").rstrip("/") or "/"    # "this section": /docs, /docs/x — not /docs-other
 
-    rp = RobotFileParser()
-    try:
-        rp.set_url(f"{start.scheme}://{start.netloc}/robots.txt")
-        rp.read()
-    except Exception:  # noqa: BLE001
-        rp = None
-
     seen: set[str] = set()
     q: deque[tuple[str, int]] = deque([(start_url.split("#", 1)[0], 0)])
     pages: list[dict] = []
     s = requests.Session()
     s.headers["User-Agent"] = _UA
 
+    # robots.txt through our own session + real UA — NOT RobotFileParser.read(),
+    # which fetches with urllib's "Python-urllib/x.y" UA that Cloudflare and
+    # other WAFs routinely answer with 403. RobotFileParser treats that 403 as
+    # "disallow all", which silently skips every URL on the site (the site's
+    # real robots.txt may well allow everything). A missing / unreadable /
+    # challenge-page robots.txt means "no restrictions" here — the same
+    # best-effort discipline this module's docstring already promises.
+    rp = RobotFileParser()
+    try:
+        rr = _get_no_ssrf(s, f"{start.scheme}://{start.netloc}/robots.txt", timeout=timeout)
+        ct = (rr.headers.get("content-type") or "").lower()
+        if rp is not None and rr.status_code == 200 and "html" not in ct:
+            rp.parse(rr.text.splitlines())
+        else:
+            rp = None
+    except Exception as e:  # noqa: BLE001 -- best-effort, same as the old read()
+        log.info("robots.txt %s: %s", start.netloc, e)
+        rp = None
+
     for u in _sitemap_urls(s, f"{start.scheme}://{start.netloc}", start.netloc, prefix,
                            timeout=timeout):
         if u not in seen:
             q.append((u, 0))
 
+    start_norm = start_url.split("#", 1)[0]
+    start_err: "str | None" = None   # why the start URL itself failed, if it did
+
     while q and len(pages) < max_pages:
         url, depth = q.popleft()
+        is_start = url == start_norm
         if url in seen:
             continue
         seen.add(url)
         if rp is not None and not rp.can_fetch(_UA, url):
+            if is_start:
+                start_err = "robots.txt disallows it"
             continue
         try:
             r = _get_no_ssrf(s, url, timeout=timeout)
         except requests.RequestException as e:
             log.warning("crawl %s: %s", url, e)
+            if is_start:
+                start_err = str(e)
             continue
         if r.status_code != 200 or "html" not in (r.headers.get("content-type") or "").lower():
+            if is_start:
+                start_err = (f"returned {r.status_code} {r.headers.get('content-type', '')} "
+                             "— not crawlable HTML (the site may be behind a bot filter)")
             continue
         title, md = _clean_markdown(r.text)
         if len(md) >= 80:                        # skip near-empty pages
@@ -207,4 +230,12 @@ def crawl(start_url: str, *, max_pages: int = 20, max_depth: int = 2,
                         and nxt not in seen and _ok_host(nxt)):
                     q.append((nxt, depth + 1))
         time.sleep(delay)
+
+    # A crawl that captured nothing *and* couldn't even load its own start
+    # URL is an error, not a clean empty run — otherwise it lands as a
+    # silent "0 pages" success with no hint of why (bot filter, dead URL,
+    # robots block). If the start URL was fine but the site genuinely had
+    # no in-scope content, [] is still the right answer.
+    if not pages and start_err:
+        raise RuntimeError(f"crawl of {start_url!r} found nothing — start URL {start_err}")
     return pages

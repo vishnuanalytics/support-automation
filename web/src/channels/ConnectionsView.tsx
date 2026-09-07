@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
 import type {
   CaseTaxonomy, Connection, ConnectionAction, SalesforceOrg, SalesforceOrgSchema,
@@ -51,7 +51,7 @@ export function ConnectionsView({ tenantId }: { tenantId: string }) {
   };
 
   return (
-    <div className="pane col" style={{ gap: 16, maxWidth: 760 }}>
+    <div className="view-scroll col" style={{ gap: 16, maxWidth: 760, padding: 16 }}>
       <h2 style={{ margin: 0 }}>Connections</h2>
       <p style={{ margin: 0, color: "var(--muted, #667)" }}>
         A named base URL + credentials an <code>http_request</code> flow node can call.
@@ -72,14 +72,14 @@ export function ConnectionsView({ tenantId }: { tenantId: string }) {
         </thead>
         <tbody>
           {rows?.map((c) => (
-            <>
-              <tr key={c.slug}>
+            <Fragment key={c.slug}>
+              <tr>
                 <td>
                   <code>{c.slug}</code>
                 </td>
                 <td>{c.base_url}</td>
                 <td>
-                  {c.auth.type || "none"}
+                  {c.auth?.type || "none"}
                   {c.has_secret && " 🔒"}
                 </td>
                 <td>
@@ -97,13 +97,13 @@ export function ConnectionsView({ tenantId }: { tenantId: string }) {
                 </td>
               </tr>
               {expanded === c.slug && (
-                <tr key={`${c.slug}-actions`}>
+                <tr>
                   <td colSpan={5}>
                     <ConnectionActionsPanel slug={c.slug} tenantId={tenantId} />
                   </td>
                 </tr>
               )}
-            </>
+            </Fragment>
           ))}
           {rows && rows.length === 0 && (
             <tr>

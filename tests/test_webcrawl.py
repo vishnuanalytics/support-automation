@@ -65,7 +65,7 @@ def crawl_net(monkeypatch):
     class _S:
         headers: dict = {}
         def get(self, url, **kw):
-            if url == "https://help.acme.com/sitemap.xml":
+            if url in ("https://help.acme.com/sitemap.xml", "https://help.acme.com/robots.txt"):
                 return _Resp("", status_code=404)
             if url not in pages:
                 raise AssertionError(f"unexpected fetch {url}")
@@ -75,6 +75,60 @@ def crawl_net(monkeypatch):
     monkeypatch.setattr(requests, "Session", lambda: _S())
     monkeypatch.setattr(webcrawl, "RobotFileParser", lambda: None)
     monkeypatch.setattr(webcrawl.time, "sleep", lambda *_: None)
+
+
+def test_crawl_ignores_robots_when_the_fetch_is_blocked(monkeypatch):
+    """A WAF (Cloudflare et al.) that 403s the robots.txt request must NOT
+    turn into a site-wide 'disallow all' — the pre-fix code used
+    RobotFileParser.read() (urllib UA -> 403 -> disallow_all=True) and
+    silently crawled zero pages of an otherwise-open site."""
+    real_rp = webcrawl.RobotFileParser  # not the fixture's stub — the real class
+
+    class _S:
+        headers: dict = {}
+        def get(self, url, **kw):
+            if url == "https://help.acme.com/robots.txt":
+                return _Resp("<html>Attention Required! | Cloudflare</html>",
+                             status_code=403, headers={"content-type": "text/html"})
+            if url == "https://help.acme.com/sitemap.xml":
+                return _Resp("", status_code=404)
+            if url == "https://help.acme.com/docs":
+                return _Resp(_PAGE_A)
+            if url == "https://help.acme.com/docs/guide":
+                return _Resp(_PAGE_B)
+            raise AssertionError(f"unexpected fetch {url}")
+
+    import requests
+    monkeypatch.setattr(requests, "Session", lambda: _S())
+    monkeypatch.setattr(webcrawl, "RobotFileParser", real_rp)
+    monkeypatch.setattr(webcrawl.time, "sleep", lambda *_: None)
+
+    out = webcrawl.crawl("https://help.acme.com/docs", max_pages=10)
+    assert {p["url"] for p in out} == {
+        "https://help.acme.com/docs", "https://help.acme.com/docs/guide",
+    }
+
+
+def test_crawl_raises_when_the_start_url_itself_is_blocked(monkeypatch):
+    """A crawl that captures nothing because its start URL 403s should be a
+    loud failure, not a silent 0-page 'success' the caller can't diagnose."""
+    class _S:
+        headers: dict = {}
+        def get(self, url, **kw):
+            if url == "https://help.acme.com/robots.txt":
+                return _Resp("", status_code=404)
+            if url == "https://help.acme.com/sitemap.xml":
+                return _Resp("", status_code=404)
+            return _Resp("<html>blocked</html>", status_code=403,
+                         headers={"content-type": "text/html"})
+
+    import requests
+    monkeypatch.setattr(requests, "Session", lambda: _S())
+    monkeypatch.setattr(webcrawl, "RobotFileParser", lambda: None)
+    monkeypatch.setattr(webcrawl.time, "sleep", lambda *_: None)
+
+    with pytest.raises(RuntimeError, match="403"):
+        webcrawl.crawl("https://help.acme.com/docs", max_pages=10)
 
 
 def test_ok_host_blocks_private_and_non_http():

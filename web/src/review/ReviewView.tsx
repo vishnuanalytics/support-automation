@@ -78,7 +78,7 @@ export function ReviewView() {
   };
 
   return (
-    <div className="pane col" style={{ gap: 16, maxWidth: 900 }}>
+    <div className="view-scroll col" style={{ gap: 16, maxWidth: 900, padding: 16 }}>
       <h2 style={{ margin: 0 }}>Approvals</h2>
       <p style={{ margin: 0, color: "var(--muted, #667)" }}>
         Everything waiting on a human — knowledge-base changes and internal task

@@ -707,8 +707,65 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-07 (UI functionality sweep — branch
+`browser-verified-picker-fixes`). Most recent work in this file; runs
+alongside the Phase 31 mainline below, not a new phase.**
+
+A pass through the flow-editor web app checking each view actually works.
+
+- **Tab-switch reset — FIXED** (`98f5275`). `@supabase/auth-js` re-emits
+  `SIGNED_IN` on every `visibilitychange→visible` (its `_recoverAndRefresh`
+  path) with a fresh session object. `App.tsx` took every one via
+  `setSession`, and the `[session]` effect then re-ran `load()`, whose
+  `setTenants(null)` short-circuits render to the `…` placeholder —
+  unmounting the whole shell (FlowEditor + unsaved edits included) and
+  remounting on the default view. Felt like a full reload to the start
+  page on every tab switch. Fix: dedupe in `onAuthStateChange` (keep the
+  prior session unless `access_token`/`user.id` changed) + key the
+  tenant-load effect on `session?.user.id`, not the session object.
+- **`ConnectionsView` missing list key** — the per-connection table row
+  used a bare `<>` fragment with the `key` on the inner `<tr>`; React
+  logged a key warning for any workspace with ≥1 HTTP connection. Now a
+  keyed `<Fragment>`.
+- **4 views clipped their content — FIXED.** Activity, Approvals
+  (`ReviewView`), Connections and Billing rendered content taller than the
+  viewport with no working scroll container, so `.pane`'s
+  `overflow:hidden` clipped everything past the fold (Approvals content
+  measured 7149px in a 720px frame — the bottom was unreachable). New
+  `.view-scroll` utility (`height:100% + min-height:0 + overflow-y:auto`)
+  is the standard for any view that isn't a self-managed grid (Runs) or
+  split-rail (Knowledge); applied to those roots, plus `height:100%` on
+  the `.billing-view` rule. `ConnectionsView` also crashed on a
+  connection row with no `auth` object (`c.auth?.type`).
+- **New: `web/e2e/ui-walk.spec.ts`** — opens all 12 nav views + Setup
+  under fully-mocked network, fails on any uncaught error / console error
+  / blank pane; a "no view clips its content" test with tall mocked lists;
+  and a regression guard that a simulated tab switch keeps the current
+  view and does not refetch `/api/tenants`. All 6 web e2e specs green.
+- **KB "Public docs site (crawl)" connector — diagnosed & FIXED**
+  (`94c707e`). The `gunner` workspace's crawl of `https://help.urbanpiper.com/`
+  recorded `{"pages": 0, "entries": 0}`, no error, in ~250 ms.
+  `ingestion/webcrawl.py`'s `crawl()` called `RobotFileParser.read()`,
+  which fetches `robots.txt` with urllib's `Python-urllib/x.y` UA;
+  Cloudflare 403s that UA, and `RobotFileParser` turns a 403 into
+  `disallow_all=True` → `can_fetch()` returns False for every URL → the
+  crawl skips the whole site silently. (The site's real robots.txt is
+  `Allow: /`.) Fix: fetch robots.txt via the crawler's own session + real
+  UA; a non-200 / challenge / missing file = "no restrictions". Also:
+  a crawl that captures nothing *and* couldn't fetch its start URL now
+  raises instead of returning `[]`, so the connector records
+  `status=error` with a message. Verified: same URL now crawls 80 pages.
+  NB the deployed worker ran the pre-registry `crawl_site` shim (no
+  `kb_source_connections` row created) — a redeploy to this branch is
+  needed for crawls to go through the connector path + surface errors in
+  the KB UI. Whether the fix unblocks the *deployed* host also depends on
+  whether Cloudflare challenges that host's datacenter IP itself.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
 **2026-09-06 (Phase 31 — Zendesk parity, chunk 4: the resolution-memory
-sync — PHASE 31 COMPLETE). This is the most recent work in this file.**
+sync — PHASE 31 COMPLETE).**
 
 The last gap: `case_memory_sync` (the pgvector resolution memory that
 feeds `draft` / `case_lookup`, plus the `RESOLVED_BY` / `SIMILAR_TO` /

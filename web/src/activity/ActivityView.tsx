@@ -20,7 +20,7 @@ export function ActivityView({ tenantId }: { tenantId: string }) {
   );
 
   return (
-    <div className="activity-view col" style={{ padding: 12, overflow: "auto" }}>
+    <div className="activity-view view-scroll col" style={{ padding: 12 }}>
       <div className="row" style={{ gap: 4, flexWrap: "wrap" }}>
         <button className={filter === "" ? "primary" : ""} onClick={() => setFilter("")}>
           all
