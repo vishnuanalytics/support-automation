@@ -40,6 +40,16 @@
   animation: ui-spin 0.7s linear infinite;
 }
 @keyframes ui-spin { to { transform: rotate(360deg); } }
+.ui-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  animation: ui-spin 0.7s linear infinite;
+  vertical-align: -1px;
+}
 
 /* Tag */
 .ui-tag {

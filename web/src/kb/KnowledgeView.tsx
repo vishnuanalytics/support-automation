@@ -21,10 +21,44 @@ import {
   Select,
   DataTable,
   EmptyState,
+  Skeleton,
   useToast,
   type Column,
   type TagTone,
 } from "../ui";
+
+/** A connection's real state, derived from status + last_synced_at +
+ *  last_result — so a crawl that's still running, silently found nothing,
+ *  or failed all read differently in the table. */
+type ConnPhase = "progress" | "failed" | "synced" | "paused";
+function connState(c: KbConnection): { phase: ConnPhase; label: string; detail?: string } {
+  if (c.status === "paused") return { phase: "paused", label: "Paused" };
+  if (c.status === "error" || c.last_result?.error) {
+    return { phase: "failed", label: "Failed", detail: c.last_result?.error ?? "sync failed" };
+  }
+  if (c.last_synced_at) {
+    const docs = c.last_result?.documents;
+    const ents = c.entry_count;
+    return {
+      phase: "synced",
+      label: "Synced",
+      detail:
+        docs != null
+          ? `${docs} page${docs === 1 ? "" : "s"} · ${ents} entr${ents === 1 ? "y" : "ies"}`
+          : `${ents} entr${ents === 1 ? "y" : "ies"}`,
+    };
+  }
+  // active, never synced, no error recorded → still running (or hasn't started)
+  const startedMs = c.created_at ? Date.now() - new Date(c.created_at).getTime() : 0;
+  return {
+    phase: "progress",
+    label: "In progress",
+    detail:
+      startedMs > 90_000
+        ? "taking longer than usual — the site may be blocking the crawler or returned nothing"
+        : "crawling in the background",
+  };
+}
 
 /**
  * Self-serve knowledge base (Phase 14). Every tenant has one **org-level
@@ -558,6 +592,7 @@ function ConnectedSources({
   const [panel, setPanel] = useState<null | "add" | "defaults" | { edit: KbConnection }>(null);
   const [removeTarget, setRemoveTarget] = useState<KbConnection | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const toast = useToast();
 
   const load = useCallback(async () => {
@@ -574,12 +609,23 @@ function ConnectedSources({
       if (dd) setDocDefaults(dd.effective);
     } catch (e) {
       setErr(e instanceof ApiError ? String(e.detail) : String(e));
+    } finally {
+      setLoading(false);
     }
   }, [col.source_id, col.tenant_id]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  // while any source is still crawling, poll so the row flips to Synced /
+  // Failed on its own — the user doesn't have to guess or refresh.
+  const anyInProgress = conns.some((c) => connState(c).phase === "progress");
+  useEffect(() => {
+    if (!anyInProgress) return;
+    const t = setInterval(() => void load(), 5000);
+    return () => clearInterval(t);
+  }, [anyInProgress, load]);
 
   const docMode = (c: KbConnection): "suggest" | "write_back" | null => {
     if (c.connector !== "gdocs") return null;
@@ -624,7 +670,8 @@ function ConnectedSources({
     (c) => c.auth === "oauth2" && !c.available && google.configured && !google.connected,
   );
 
-  const failing = conns.filter((c) => c.status === "error");
+  const failing = conns.filter((c) => connState(c).phase === "failed");
+  const crawling = conns.filter((c) => connState(c).phase === "progress");
 
   const connColumns: Column<KbConnection>[] = [
     {
@@ -654,12 +701,38 @@ function ConnectedSources({
       ),
     },
     { key: "type", header: "type", cell: (c) => <span className="muted">{c.connector}</span> },
-    { key: "status", header: "status", cell: (c) => <ConnStatus c={c} /> },
     {
-      key: "entries",
-      header: "entries",
-      align: "right",
-      cell: (c) => <span className="muted" style={{ font: "var(--type-mono)" }}>{c.entry_count}</span>,
+      key: "status",
+      header: "status",
+      cell: (c) => {
+        const s = connState(c);
+        const tone: TagTone =
+          s.phase === "failed"
+            ? "exception"
+            : s.phase === "synced"
+              ? "accent"
+              : s.phase === "progress"
+                ? "warn"
+                : "neutral";
+        return (
+          <span style={{ display: "grid", gap: 2 }}>
+            <span title={s.detail}>
+              <Tag tone={tone}>
+                {s.phase === "progress" && <span className="ui-spinner" aria-hidden />}
+                {s.label}
+              </Tag>
+            </span>
+            {s.detail && (
+              <span
+                className={s.phase === "failed" ? "err" : "muted"}
+                style={{ fontSize: 11, maxWidth: 320, whiteSpace: "normal" }}
+              >
+                {s.detail}
+              </span>
+            )}
+          </span>
+        );
+      },
     },
     {
       key: "synced",
@@ -723,11 +796,24 @@ function ConnectedSources({
         />
       )}
 
+      {crawling.length > 0 && (
+        <Banner
+          tone="warn"
+          title={
+            <>
+              <span className="ui-spinner" aria-hidden />{" "}
+              {crawling.length} source{crawling.length === 1 ? "" : "s"} still importing
+            </>
+          }
+          detail="Pages appear as they're crawled and embedded — this refreshes on its own."
+        />
+      )}
+
       {failing.length > 0 && (
         <Banner
           tone="exception"
-          title={`${failing.length} source${failing.length === 1 ? "" : "s"} failing to sync`}
-          detail={failing[0].last_result?.error ?? undefined}
+          title={`${failing.length} source${failing.length === 1 ? "" : "s"} failed to sync`}
+          detail={connState(failing[0]).detail}
           actions={
             <Button
               variant="ghost"
@@ -740,19 +826,31 @@ function ConnectedSources({
         />
       )}
 
-      {conns.length === 0 ? (
-        <div className="muted" style={{ fontSize: 12 }}>
-          Nothing connected — “Add source” to crawl a docs site or sync a Google Sheet / Doc. The
-          chat flow’s retrieval reads every connected source together.
+      {loading ? (
+        <Skeleton variant="row" lines={3} />
+      ) : conns.length === 0 ? (
+        <div className="row" style={{ gap: 10, alignItems: "center" }}>
+          <span className="muted" style={{ fontSize: 12, flex: 1 }}>
+            Nothing connected — “Add source” to crawl a docs site or sync a Google Sheet / Doc. The
+            chat flow’s retrieval reads every connected source together.
+          </span>
+          <Button variant="ghost" size="sm" onClick={() => void load()}>
+            Refresh
+          </Button>
         </div>
       ) : (
-        <DataTable
-          columns={connColumns}
-          rows={conns}
-          rowId={(c) => c.connection_id}
-          selectedId={typeof panel === "object" && panel ? panel.edit.connection_id : null}
-          onSelect={(c) => setPanel({ edit: c })}
-        />
+        <>
+          <DataTable
+            columns={connColumns}
+            rows={conns}
+            rowId={(c) => c.connection_id}
+            selectedId={typeof panel === "object" && panel ? panel.edit.connection_id : null}
+            onSelect={(c) => setPanel({ edit: c })}
+          />
+          <Button variant="ghost" size="sm" style={{ justifySelf: "start" }} onClick={() => void load()}>
+            Refresh
+          </Button>
+        </>
       )}
 
       {writebacks.length > 0 && (
@@ -879,18 +977,6 @@ function ConnectedSources({
   );
 }
 
-function ConnStatus({ c }: { c: KbConnection }) {
-  const tone: TagTone = c.status === "error" ? "exception" : c.status === "active" ? "accent" : "neutral";
-  const title = c.status === "error" ? c.last_result?.error ?? "last sync failed" : undefined;
-  return (
-    <span title={title}>
-      <Tag tone={tone} dot>
-        {c.status}
-      </Tag>
-    </span>
-  );
-}
-
 function AddSourceForm({
   collectionId,
   tenantId,
@@ -948,7 +1034,7 @@ function AddSourceForm({
     }
     try {
       await api.kb.addConnection(collectionId, { connector: slug, config });
-      toast("Syncing in the background — entries appear as they're embedded");
+      toast("Import started — follow its status in the sources table");
       onDone();
     } catch (e) {
       setErr(e instanceof ApiError ? String(e.detail) : String(e));
