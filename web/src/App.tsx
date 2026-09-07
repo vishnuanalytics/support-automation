@@ -17,6 +17,8 @@ import { FlowGuideView } from "./guide/FlowGuideView";
 import { BillingView } from "./billing/BillingView";
 import { ActivityView } from "./activity/ActivityView";
 import { OnboardingWizard } from "./onboarding/OnboardingWizard";
+import { AppShell } from "./ui/AppShell";
+import { Sidebar } from "./ui/Sidebar";
 
 type View =
   | "setup"
@@ -219,9 +221,9 @@ export function App() {
     );
   }
 
-  return (
-    <div className="shell">
-      <div className="sidebar col">
+  const sidebar = (
+    <Sidebar
+      head={
         <div className="row" style={{ justifyContent: "space-between", flexWrap: "wrap" }}>
           {tenants.length > 1 && (
             <select
@@ -239,10 +241,22 @@ export function App() {
           {role && !canEdit && (
             <span className="pill" title="your access is view-only">view-only</span>
           )}
-          <button onClick={() => supabase.auth.signOut()} title={session.user.email ?? ""}>
-            sign out
-          </button>
         </div>
+      }
+      foot={
+        <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
+          <span
+            className="muted"
+            style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12 }}
+            title={session.user.email ?? ""}
+          >
+            {session.user.email}
+          </span>
+          <button onClick={() => supabase.auth.signOut()}>Sign out</button>
+        </div>
+      }
+    >
+      <div className="col">
         <nav className="nav-list col">
           <button
             className={"nav-item" + (view === "setup" ? " active" : "")}
@@ -322,6 +336,11 @@ export function App() {
           </div>
         )}
       </div>
+    </Sidebar>
+  );
+
+  return (
+    <AppShell sidebar={sidebar}>
       <div className={view === "editor" && flowId ? "editor" : "pane"}>
         {view === "setup" ? (
           <OnboardingWizard
@@ -372,6 +391,6 @@ export function App() {
           <div className="pane-empty muted">select or create a flow</div>
         )}
       </div>
-    </div>
+    </AppShell>
   );
 }

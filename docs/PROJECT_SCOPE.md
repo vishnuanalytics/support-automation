@@ -707,9 +707,53 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-07 (Web UI redesign — "Broadsheet on dark" — branch
+`web-redesign-broadsheet`, off `main`. Most recent work in this file.
+A visual + structural rebuild of `web/` from a Claude Design handoff
+bundle in `ui-mockups-for-forms/`; not a backend phase.)**
+
+The bundle (`ui-mockups-for-forms/project/`) ships `tokens.json`,
+`components.json`, a component sheet (`UI Kit.dc.html`) and 8 composed
+screens (`Screens.dc.html`) with a per-screen `BUILD-BRIEF.md`. Visual
+system: Source Serif 4 everywhere (no sans-serif), process cyan
+`#62c5ee` + magenta `#ff458e` + press-yellow `#edbb00` on a warm dark
+ground `#1a1918`, 2px radius, 5/10/15/20/30/40 spacing, six fixed type
+steps. Four laws: one frame (240 sidebar + 44 toolbar + body, no
+view-level width/padding/font), scroll belongs to the pane, explicit
+canvas zoom, three overlay kinds only (popover / slide-over / dialog —
+no `prompt()`/`confirm()`/`alert()`).
+
+Delivered one BUILD-BRIEF chunk at a time, checkpointed with the user:
+
+- **Chunk 1 — tokens + shell (DONE, this commit).** `web/src/index.css`
+  `:root` rewritten from `tokens.json` (canonical token names + the old
+  `--bg/--panel/--accent/...` names kept as aliases so un-redesigned
+  views inherit the palette). Base element styles moved to serif / 2px /
+  token colours; global `:focus-visible` ring (2px accent, 2px offset)
+  with the browser default suppressed; shell-never-scrolls enforced on
+  `html,body,#root`. New `web/src/ui/AppShell.tsx` (240 + 44 + body
+  frame, body clips, panes own their scroll), `ui/Sidebar.tsx`
+  (head / scrolling middle / pinned account foot), `ui/Toolbar.tsx`
+  (presentational 44px bar, not yet wired into views). `App.tsx`
+  adopts `AppShell` + `Sidebar` for the authenticated shell; sign-out
+  moved to the pinned account row. No view internals touched. `tsc`,
+  `vite build` and `vitest` all green.
+- **Chunk 2 — `web/src/ui/` primitives.** Button, Tag, Field (+Input/
+  Textarea/Select/Segmented/Radio/Toggle/Slider/JsonEditor), DataTable,
+  StatTile, QuotaBar, GateStrip, TraceStep, Banner, Toast, EmptyState,
+  Skeleton, Popover, SlideOver, Dialog — props/states per
+  `components.json`. NEXT.
+- **Chunks 3–8** — Editor (incl. splitting the 1883-line
+  `Inspector.tsx` into one panel per node kind), Runs + Trace,
+  Knowledge, Connections + Channels, Billing/Team/Activity, Setup +
+  Login. Existing API wiring preserved throughout.
+
+**Older note, superseded by the above as "most recent," kept for its
+own history:**
+
 **2026-09-07 (UI functionality sweep — branch
-`browser-verified-picker-fixes`). Most recent work in this file; runs
-alongside the Phase 31 mainline below, not a new phase.**
+`browser-verified-picker-fixes`). Runs alongside the Phase 31 mainline
+below, not a new phase.**
 
 A pass through the flow-editor web app checking each view actually works.
 
