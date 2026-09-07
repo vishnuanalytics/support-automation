@@ -446,7 +446,8 @@ select.ui-select { appearance: none; padding-right: 26px; }
 .canvas-fab:hover { border-color: var(--accent); color: var(--accent-hover); }
 
 .toolbar__name {
-  width: 240px;
+  width: clamp(120px, 18vw, 240px);
+  min-width: 0;
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--radius-md);

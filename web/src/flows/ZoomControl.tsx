@@ -55,10 +55,18 @@ export function ZoomControl() {
       <button type="button" aria-label="Zoom in" onClick={() => step(1)}>
         ＋
       </button>
-      <button type="button" onClick={() => fitView({ duration: 200 })}>
+      <button
+        type="button"
+        onClick={() => fitView({ duration: 200 })}
+        title="Fit all nodes in view (reset)"
+      >
         Fit
       </button>
-      <button type="button" onClick={() => zoomTo(1, { duration: 120 })}>
+      <button
+        type="button"
+        onClick={() => zoomTo(1, { duration: 120 })}
+        title="Reset zoom to 100%"
+      >
         100%
       </button>
     </div>
