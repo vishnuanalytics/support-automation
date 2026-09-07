@@ -208,6 +208,15 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
     setEntries(await api.kb.listEntries(col.source_id));
   }, [col.source_id]);
 
+  // a document with no chunks and no embedded_at is still being embedded in
+  // the background — poll until it settles so the count fills in on its own.
+  const pendingEmbed = entries.filter((e) => e.chunk_count === 0 && !e.embedded_at);
+  useEffect(() => {
+    if (pendingEmbed.length === 0) return;
+    const t = setInterval(() => void load(), 5000);
+    return () => clearInterval(t);
+  }, [pendingEmbed.length, load]);
+
   const loadGoogle = useCallback(async () => {
     try {
       const s = await api.google.status();
@@ -331,7 +340,27 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
       key: "chunks",
       header: "chunks",
       align: "right",
-      cell: (e) => <span className="muted" style={{ font: "var(--type-mono)" }}>{e.chunk_count}</span>,
+      cell: (e) => {
+        if (e.chunk_count > 0) {
+          return <span className="muted" style={{ font: "var(--type-mono)" }}>{e.chunk_count}</span>;
+        }
+        if (!e.embedded_at) {
+          return (
+            <span className="muted" style={{ fontSize: 11 }} title="Ingested — the background embedder hasn't processed this page yet">
+              <span className="ui-spinner" aria-hidden /> embedding
+            </span>
+          );
+        }
+        return (
+          <span
+            className="err"
+            style={{ fontSize: 11 }}
+            title="Embedded but produced no chunks — the page had no extractable text (e.g. a JavaScript-rendered page). It won't be retrieved."
+          >
+            empty
+          </span>
+        );
+      },
     },
     {
       key: "updated",
@@ -436,6 +465,31 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
             actions={<Button variant="ghost" size="sm" onClick={() => setErr(null)}>Dismiss</Button>}
           />
         )}
+
+        {pendingEmbed.length > 0 && (
+          <Banner
+            tone="warn"
+            title={
+              <>
+                <span className="ui-spinner" aria-hidden />{" "}
+                {pendingEmbed.length} of {entries.length} document
+                {entries.length === 1 ? "" : "s"} still embedding
+              </>
+            }
+            detail="A page isn't retrievable until it has chunks. This refreshes on its own; big crawls can take a few minutes."
+          />
+        )}
+        {pendingEmbed.length === 0 &&
+          entries.length > 0 &&
+          entries.filter((e) => e.chunk_count === 0 && e.embedded_at).length > 0 && (
+            <Banner
+              tone="warn"
+              title={`${entries.filter((e) => e.chunk_count === 0 && e.embedded_at).length} document${
+                entries.filter((e) => e.chunk_count === 0 && e.embedded_at).length === 1 ? "" : "s"
+              } produced no chunks`}
+              detail="Those pages had no extractable text — usually a JavaScript-rendered docs site. They won't be used to answer. Try a different source type or the docs' underlying files."
+            />
+          )}
 
         <ConnectedSources
           col={col}
