@@ -398,8 +398,15 @@ code { font-family: var(--font-mono); }
 .runs-table tbody tr:hover { background: var(--surface); }
 .runs-table tbody tr.active { background: var(--surface); outline: 1px solid var(--accent); }
 
+/* admin frame — billing / team / activity, one shell */
+.admin-shell { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.admin-shell > .app-toolbar { flex: none; }
+.admin-body { flex: 1; min-height: 0; overflow-y: auto; padding: var(--content-pad); }
+.admin-body h5 { margin: 18px 0 8px; color: var(--text-faint); font: 600 10.5px/1.4 var(--font-body); text-transform: uppercase; letter-spacing: 0.12em; }
+.admin-body h5:first-child { margin-top: 0; }
+
 /* billing view */
-.billing-view { height: 100%; min-height: 0; padding: var(--content-pad); overflow-y: auto; }
+.billing-view { display: grid; gap: 16px; }
 .quota-row { display: flex; flex-direction: column; gap: 5px; }
 .quota-bar { height: 8px; border-radius: var(--radius-md); background: var(--surface-raised); border: 1px solid var(--line-strong); overflow: hidden; }
 .quota-bar-fill { height: 100%; background: var(--accent); }

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
 import type { BillingUsage, FlowCostDelta } from "../types";
+import { Button, Tag, Banner, StatTile, QuotaBar } from "../ui";
 
 function shiftPeriod(period: string, delta: number): string {
   const [y, m] = period.split("-").map(Number);
@@ -30,66 +31,65 @@ export function BillingView({ tenantId }: { tenantId: string }) {
   const maxDailyTokens = Math.max(1, ...(usage?.daily.map((d) => d.tokens) ?? [0]));
 
   return (
-    <div className="billing-view col">
+    <div className="billing-view">
       <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
         <div className="row" style={{ gap: 6 }}>
-          <button onClick={() => setPeriod((p) => shiftPeriod(p, -1))}>← prev</button>
-          <strong>{period}</strong>
-          <button disabled={period === currentPeriod} onClick={() => setPeriod((p) => shiftPeriod(p, 1))}>
+          <Button variant="ghost" size="sm" onClick={() => setPeriod((p) => shiftPeriod(p, -1))}>
+            ← prev
+          </Button>
+          <strong style={{ font: "var(--type-mono)" }}>{period}</strong>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={period === currentPeriod}
+            onClick={() => setPeriod((p) => shiftPeriod(p, 1))}
+          >
             next →
-          </button>
+          </Button>
         </div>
-        {usage && <span className="pill">{usage.plan} plan</span>}
+        {usage && <Tag tone="neutral">{usage.plan} plan</Tag>}
       </div>
 
       {err && (
-        <div className="banner err">
-          {err}
-          {err.toLowerCase().includes("owner") && (
-            <> — only a workspace owner can view billing.</>
-          )}
-        </div>
+        <Banner
+          tone="exception"
+          title={err}
+          detail={err.toLowerCase().includes("owner") ? "Only a workspace owner can view billing." : undefined}
+        />
       )}
 
       {deltas.filter((d) => (d.ratio ?? 0) > 1.5).length > 0 && (
-        <div className="banner warn col" style={{ gap: 2 }}>
-          <strong>Cost per run jumped after a recent edit</strong>
-          {deltas
-            .filter((d) => (d.ratio ?? 0) > 1.5)
-            .map((d) => (
-              <div key={d.flow_id} style={{ fontSize: 12 }}>
-                {d.name}: ×{d.ratio!.toFixed(1)} tokens/run since {String(d.edited_at).slice(0, 10)} (
-                {d.before_avg_tokens.toLocaleString()} → {d.after_avg_tokens.toLocaleString()},{" "}
-                {d.runs_before}/{d.runs_after} runs before/after)
-              </div>
-            ))}
-        </div>
+        <Banner
+          tone="warn"
+          title="Cost per run jumped after a recent edit"
+          detail={
+            <div style={{ display: "grid", gap: 2 }}>
+              {deltas
+                .filter((d) => (d.ratio ?? 0) > 1.5)
+                .map((d) => (
+                  <div key={d.flow_id} style={{ fontSize: 12 }}>
+                    {d.name}: ×{d.ratio!.toFixed(1)} tokens/run since {String(d.edited_at).slice(0, 10)} (
+                    {d.before_avg_tokens.toLocaleString()} → {d.after_avg_tokens.toLocaleString()},{" "}
+                    {d.runs_before}/{d.runs_after} runs before/after)
+                  </div>
+                ))}
+            </div>
+          }
+        />
       )}
 
       {usage && (
         <>
-          <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
-            <div className="tile">
-              <div className="v">{usage.runs_count}</div>
-              <div className="l">runs</div>
-            </div>
-            <div className="tile">
-              <div className="v">{usage.tokens_total.toLocaleString()}</div>
-              <div className="l">tokens</div>
-            </div>
-            <div className="tile">
-              <div className="v">${usage.estimated_cost_usd.toFixed(2)}</div>
-              <div className="l">est. cost (illustrative)</div>
-            </div>
+          <div className="row" style={{ flexWrap: "wrap", gap: 10 }}>
+            <StatTile label="runs" value={usage.runs_count} />
+            <StatTile label="tokens" value={usage.tokens_total.toLocaleString()} />
+            <StatTile label="est. cost" value={`$${usage.estimated_cost_usd.toFixed(2)}`} tone="accent" />
           </div>
 
-          <QuotaBar label="runs" used={usage.runs_count} limit={usage.limits.runs} pct={usage.pct_runs_used} />
-          <QuotaBar
-            label="tokens"
-            used={usage.tokens_total}
-            limit={usage.limits.tokens}
-            pct={usage.pct_tokens_used}
-          />
+          <div style={{ display: "grid", gap: 16, maxWidth: 520 }}>
+            <QuotaLine label="runs" used={usage.runs_count} limit={usage.limits.runs} />
+            <QuotaLine label="tokens" used={usage.tokens_total} limit={usage.limits.tokens} />
+          </div>
 
           <h5>daily usage (tokens)</h5>
           <div className="usage-bars">
@@ -180,35 +180,14 @@ export function BillingView({ tenantId }: { tenantId: string }) {
   );
 }
 
-function QuotaBar({
-  label,
-  used,
-  limit,
-  pct,
-}: {
-  label: string;
-  used: number;
-  limit: number | null;
-  pct: number | null;
-}) {
-  if (limit == null || pct == null) {
+/** Wraps the shared QuotaBar; a null limit reads as "unlimited". */
+function QuotaLine({ label, used, limit }: { label: string; used: number; limit: number | null }) {
+  if (limit == null) {
     return (
-      <div className="quota-row">
-        <div className="muted" style={{ fontSize: 12 }}>
-          {label}: {used.toLocaleString()} (unlimited)
-        </div>
+      <div className="muted" style={{ fontSize: 12 }}>
+        {label}: {used.toLocaleString()} (unlimited)
       </div>
     );
   }
-  const cls = pct >= 100 ? "err" : pct >= 80 ? "warn" : "ok";
-  return (
-    <div className="quota-row">
-      <div className="muted" style={{ fontSize: 12 }}>
-        {label}: {used.toLocaleString()} / {limit.toLocaleString()} ({pct}%)
-      </div>
-      <div className="quota-bar">
-        <div className={`quota-bar-fill ${cls}`} style={{ width: `${Math.min(100, pct)}%` }} />
-      </div>
-    </div>
-  );
+  return <QuotaBar label={label} used={used} limit={limit} />;
 }

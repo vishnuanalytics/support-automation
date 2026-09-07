@@ -858,8 +858,25 @@ Delivered one BUILD-BRIEF chunk at a time, checkpointed with the user:
   (live / needs attention / available) from Screen 05 are a later polish
   pass — this chunk is the shell + overlay-law + card grouping.
   `tsc` + `vite build` + `vitest` green.
-- **Chunks 7–8** — Billing/Team/Activity, Setup + Login. Existing API
-  wiring preserved throughout.
+- **Chunk 7 — Billing · Team · Activity (DONE).** New
+  `admin/AdminView.tsx` — one frame, a 44px `Toolbar` + a `Segmented`
+  Billing / Team / Activity switch over one 24px `.admin-body`. `App.tsx`
+  routes all three views to it (nav items kept, `tab` synced). No
+  view-level `max-width` anywhere: `.billing-view` is a plain grid.
+  BillingView: period nav on `Button`s, plan → `Tag`, `.tile` →
+  `StatTile`, the local quota bar → the shared `QuotaBar` (yellow ≥80%,
+  magenta ≥100%) via a thin `QuotaLine` that handles "unlimited", both
+  cost banners → `Banner`. TeamView: root de-`max-width`ed, invite is a
+  `Dialog` (`Field` + `Input` + `Select`), remove/revoke →
+  `ConfirmButton`, `pill` → `Tag`. ActivityView: `DataTable` (new
+  `flush` prop — no own scroll context, so the sticky header sticks to
+  the shared body), filter chips are `Button`s, `pill` → `Tag`, empty →
+  `EmptyState`. Activity rows linking to the object they mention needs a
+  router the app doesn't have yet — deferred. `tsc` + `vite build` +
+  `vitest` green.
+- **Chunk 8** — Setup + Login (+ a sweep of the remaining
+  `prompt`/`confirm`/`alert` in `rules/`, `onboarding/`, `App.tsx`).
+  Existing API wiring preserved throughout.
 
 **Older note, superseded by the above as "most recent," kept for its
 own history:**

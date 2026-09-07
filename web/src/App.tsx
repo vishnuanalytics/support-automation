@@ -10,11 +10,9 @@ import { ReviewView } from "./review/ReviewView";
 import { TraceView } from "./trace/TraceView";
 import { KnowledgeView } from "./kb/KnowledgeView";
 import { RulesView } from "./rules/RulesView";
-import { TeamView } from "./team/TeamView";
 import { IntegrationsView } from "./channels/IntegrationsView";
+import { AdminView } from "./admin/AdminView";
 import { FlowGuideView } from "./guide/FlowGuideView";
-import { BillingView } from "./billing/BillingView";
-import { ActivityView } from "./activity/ActivityView";
 import { OnboardingWizard } from "./onboarding/OnboardingWizard";
 import { AppShell } from "./ui/AppShell";
 import { Sidebar } from "./ui/Sidebar";
@@ -351,12 +349,10 @@ export function App() {
             }}
             onDismiss={dismissOnboarding}
           />
-        ) : view === "billing" ? (
-          <BillingView key={tenantId} tenantId={tenantId} />
+        ) : view === "billing" || view === "team" || view === "activity" ? (
+          <AdminView key={tenantId} tenantId={tenantId} tab={view} />
         ) : view === "connections" ? (
           <IntegrationsView key={tenantId} tenantId={tenantId} />
-        ) : view === "team" ? (
-          <TeamView key={tenantId} tenantId={tenantId} />
         ) : view === "guide" ? (
           <FlowGuideView />
         ) : view === "rules" ? (
@@ -365,8 +361,6 @@ export function App() {
           <KnowledgeView key={tenantId} tenantId={tenantId} />
         ) : view === "runs" ? (
           <RunsView />
-        ) : view === "activity" ? (
-          <ActivityView key={tenantId} tenantId={tenantId} />
         ) : view === "review" ? (
           <ReviewView />
         ) : view === "trace" ? (

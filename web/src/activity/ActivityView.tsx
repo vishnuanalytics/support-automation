@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
 import type { AuditEvent } from "../types";
+import { Button, Tag, Banner, DataTable, EmptyState, type Column } from "../ui";
 
 export function ActivityView({ tenantId }: { tenantId: string }) {
   const [rows, setRows] = useState<AuditEvent[]>([]);
@@ -14,60 +15,64 @@ export function ActivityView({ tenantId }: { tenantId: string }) {
       .catch((e: ApiError) => setErr(e.message));
   }, [filter, tenantId]);
 
-  const actions = useMemo(
-    () => Array.from(new Set(rows.map((r) => r.action))).sort(),
-    [rows],
-  );
+  const actions = useMemo(() => Array.from(new Set(rows.map((r) => r.action))).sort(), [rows]);
+
+  const columns: Column<AuditEvent>[] = [
+    {
+      key: "when",
+      header: "when",
+      cell: (r) => (
+        <span className="muted" style={{ font: "var(--type-mono)" }}>
+          {new Date(r.created_at).toLocaleString()}
+        </span>
+      ),
+    },
+    { key: "actor", header: "actor", cell: (r) => <span className="muted">{r.actor_email ?? "system"}</span> },
+    { key: "action", header: "action", cell: (r) => <Tag tone="neutral">{r.action}</Tag> },
+    {
+      key: "target",
+      header: "target",
+      cell: (r) => (
+        <span className="muted" style={{ font: "var(--type-mono)" }}>
+          {r.target_type ? `${r.target_type}${r.target_id ? ` · ${r.target_id}` : ""}` : "—"}
+        </span>
+      ),
+    },
+    { key: "summary", header: "summary", cell: (r) => r.summary ?? "" },
+  ];
 
   return (
-    <div className="activity-view view-scroll col" style={{ padding: 12 }}>
+    <div style={{ display: "grid", gap: 12 }}>
       <div className="row" style={{ gap: 4, flexWrap: "wrap" }}>
-        <button className={filter === "" ? "primary" : ""} onClick={() => setFilter("")}>
+        <Button variant={filter === "" ? "primary" : "ghost"} size="sm" onClick={() => setFilter("")}>
           all
-        </button>
+        </Button>
         {actions.map((a) => (
-          <button key={a} className={filter === a ? "primary" : ""} onClick={() => setFilter(a)}>
+          <Button
+            key={a}
+            variant={filter === a ? "primary" : "ghost"}
+            size="sm"
+            onClick={() => setFilter(a)}
+          >
             {a}
-          </button>
+          </Button>
         ))}
       </div>
 
-      {err && <div className="banner err">{err}</div>}
+      {err && <Banner tone="exception" title={err} />}
 
-      <table className="runs-table">
-        <thead>
-          <tr>
-            <th>when</th>
-            <th>actor</th>
-            <th>action</th>
-            <th>target</th>
-            <th>summary</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={r.event_id}>
-              <td className="muted">{new Date(r.created_at).toLocaleString()}</td>
-              <td className="muted">{r.actor_email ?? "system"}</td>
-              <td>
-                <span className="pill">{r.action}</span>
-              </td>
-              <td className="muted">
-                {r.target_type ? `${r.target_type}${r.target_id ? ` · ${r.target_id}` : ""}` : "—"}
-              </td>
-              <td>{r.summary ?? ""}</td>
-            </tr>
-          ))}
-          {rows.length === 0 && (
-            <tr>
-              <td colSpan={5} className="muted">
-                no activity yet — publishing a flow, approving a KB change, or managing
-                connections/members will show up here
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
+      <DataTable
+        flush
+        columns={columns}
+        rows={rows}
+        rowId={(r) => String(r.event_id)}
+        empty={
+          <EmptyState
+            title="No activity yet"
+            body="Publishing a flow, approving a KB change, or managing connections and members shows up here."
+          />
+        }
+      />
     </div>
   );
 }

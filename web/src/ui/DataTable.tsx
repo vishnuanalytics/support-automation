@@ -18,6 +18,7 @@ export function DataTable<Row>({
   selectedId = null,
   onSelect,
   empty,
+  flush = false,
 }: {
   columns: Column<Row>[];
   rows: Row[];
@@ -25,12 +26,16 @@ export function DataTable<Row>({
   selectedId?: string | null;
   onSelect?: (row: Row) => void;
   empty?: ReactNode;
+  /** don't create an own scroll context — the sticky header then sticks to
+   *  the nearest scrolling ancestor (e.g. a shared page body). */
+  flush?: boolean;
 }) {
+  const wrapCls = "ui-table-wrap" + (flush ? " ui-table-wrap--flush" : "");
   if (rows.length === 0 && empty != null) {
-    return <div className="ui-table-wrap"><div className="ui-table__empty">{empty}</div></div>;
+    return <div className={wrapCls}><div className="ui-table__empty">{empty}</div></div>;
   }
   return (
-    <div className="ui-table-wrap">
+    <div className={wrapCls}>
       <table className="ui-table">
         <thead>
           <tr>

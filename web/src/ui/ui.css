@@ -192,6 +192,7 @@ select.ui-select { appearance: none; padding-right: 26px; }
 
 /* DataTable */
 .ui-table-wrap { height: 100%; min-height: 0; overflow: auto; }
+.ui-table-wrap--flush { height: auto; overflow: visible; }
 .ui-table { width: 100%; border-collapse: collapse; }
 .ui-table th {
   position: sticky;
