@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
 import type {
   CaseTaxonomy, Connection, ConnectionAction, SalesforceOrg, SalesforceOrgSchema,
@@ -72,8 +72,8 @@ export function ConnectionsView({ tenantId }: { tenantId: string }) {
         </thead>
         <tbody>
           {rows?.map((c) => (
-            <>
-              <tr key={c.slug}>
+            <Fragment key={c.slug}>
+              <tr>
                 <td>
                   <code>{c.slug}</code>
                 </td>
@@ -97,13 +97,13 @@ export function ConnectionsView({ tenantId }: { tenantId: string }) {
                 </td>
               </tr>
               {expanded === c.slug && (
-                <tr key={`${c.slug}-actions`}>
+                <tr>
                   <td colSpan={5}>
                     <ConnectionActionsPanel slug={c.slug} tenantId={tenantId} />
                   </td>
                 </tr>
               )}
-            </>
+            </Fragment>
           ))}
           {rows && rows.length === 0 && (
             <tr>

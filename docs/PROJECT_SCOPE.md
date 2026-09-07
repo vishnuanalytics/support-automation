@@ -707,8 +707,37 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-07 (UI functionality sweep — branch
+`browser-verified-picker-fixes`). Most recent work in this file; runs
+alongside the Phase 31 mainline below, not a new phase.**
+
+A pass through the flow-editor web app checking each view actually works.
+
+- **Tab-switch reset — FIXED** (`98f5275`). `@supabase/auth-js` re-emits
+  `SIGNED_IN` on every `visibilitychange→visible` (its `_recoverAndRefresh`
+  path) with a fresh session object. `App.tsx` took every one via
+  `setSession`, and the `[session]` effect then re-ran `load()`, whose
+  `setTenants(null)` short-circuits render to the `…` placeholder —
+  unmounting the whole shell (FlowEditor + unsaved edits included) and
+  remounting on the default view. Felt like a full reload to the start
+  page on every tab switch. Fix: dedupe in `onAuthStateChange` (keep the
+  prior session unless `access_token`/`user.id` changed) + key the
+  tenant-load effect on `session?.user.id`, not the session object.
+- **`ConnectionsView` missing list key** — the per-connection table row
+  used a bare `<>` fragment with the `key` on the inner `<tr>`; React
+  logged a key warning for any workspace with ≥1 HTTP connection. Now a
+  keyed `<Fragment>`.
+- **New: `web/e2e/ui-walk.spec.ts`** — opens all 12 nav views + Setup
+  under fully-mocked network, fails on any uncaught error / console error
+  / blank pane; plus a regression guard that a simulated tab switch keeps
+  the current view and does not refetch `/api/tenants`. All 5 web e2e
+  specs green.
+
+**Older note, superseded by the above as "most recent," kept for its own
+history:**
+
 **2026-09-06 (Phase 31 — Zendesk parity, chunk 4: the resolution-memory
-sync — PHASE 31 COMPLETE). This is the most recent work in this file.**
+sync — PHASE 31 COMPLETE).**
 
 The last gap: `case_memory_sync` (the pgvector resolution memory that
 feeds `draft` / `case_lookup`, plus the `RESOLVED_BY` / `SIMILAR_TO` /
