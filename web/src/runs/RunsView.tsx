@@ -1,13 +1,43 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
-import type { RunDetail, RunRow, RunStats, TraceStep } from "../types";
+import type { RunDetail, RunRow, RunStats, TraceStep as TraceStepData } from "../types";
+import {
+  Toolbar,
+  StatTile,
+  Segmented,
+  DataTable,
+  Tag,
+  valueToTone,
+  Banner,
+  GateStrip,
+  TraceStep,
+  EmptyState,
+  type Column,
+} from "../ui";
 
-const OUTCOMES = ["", "auto_reply", "ask_human", "need_info", "handover"] as const;
+const OUTCOMES = [
+  { value: "", label: "All" },
+  { value: "auto_reply", label: "auto_reply" },
+  { value: "ask_human", label: "ask_human" },
+  { value: "need_info", label: "need_info" },
+  { value: "handover", label: "handover" },
+];
+
+function tileTone(key: string): "neutral" | "accent" | "warn" | "exception" {
+  const t = valueToTone(key);
+  return t === "warn-soft" ? "warn" : t;
+}
+
+function humanCell(r: RunRow): string {
+  if (!r.human_action) return "—";
+  if (r.human_action === "pending") return "…";
+  return r.human_action + (r.edit_distance != null ? ` (${r.edit_distance.toFixed(2)})` : "");
+}
 
 export function RunsView() {
   const [stats, setStats] = useState<RunStats | null>(null);
   const [rows, setRows] = useState<RunRow[]>([]);
-  const [filter, setFilter] = useState<(typeof OUTCOMES)[number]>("");
+  const [filter, setFilter] = useState("");
   const [sel, setSel] = useState<RunDetail | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -21,203 +51,254 @@ export function RunsView() {
       .catch((e: ApiError) => setErr(e.message));
   }, [filter]);
 
+  const columns: Column<RunRow>[] = [
+    {
+      key: "when",
+      header: "when",
+      cell: (r) => (
+        <span className="muted" style={{ font: "var(--type-mono)" }}>
+          {new Date(r.created_at).toLocaleString()}
+        </span>
+      ),
+    },
+    { key: "team", header: "team", cell: (r) => r.team },
+    { key: "tier", header: "tier", cell: (r) => <span className="muted">{r.tier ?? "—"}</span> },
+    {
+      key: "outcome",
+      header: "outcome",
+      cell: (r) =>
+        r.outcome ? <Tag tone={valueToTone(r.outcome)}>{r.outcome}</Tag> : <span className="muted">—</span>,
+    },
+    {
+      key: "score",
+      header: "score",
+      align: "right",
+      cell: (r) => (
+        <span
+          style={{
+            font: "var(--type-mono)",
+            color: (r.confidence ?? 1) < 0.4 ? "var(--exception-text)" : "var(--text-secondary)",
+          }}
+        >
+          {r.confidence?.toFixed(3) ?? "—"}
+        </span>
+      ),
+    },
+    { key: "human", header: "human", cell: (r) => <span className="muted">{humanCell(r)}</span> },
+    {
+      key: "subject",
+      header: "subject",
+      cell: (r) => (
+        <span
+          className="muted"
+          style={{ display: "block", maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+        >
+          {r.subject ?? ""}
+        </span>
+      ),
+    },
+  ];
+
   return (
-    <div className="runs-view">
-      <div className="runs-list col">
-        {stats && (
-          <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
-            <Tile label="runs" value={stats.total} />
-            {Object.entries(stats.by_outcome).map(([k, v]) => (
-              <Tile key={k} label={k} value={v} />
-            ))}
-            <Tile label="low-confidence" value={stats.low_confidence} warn />
-            {stats.draft_acceptance != null && (
-              <div className="tile">
-                <div className="v">{Math.round(stats.draft_acceptance * 100)}%</div>
-                <div className="l">draft kept</div>
+    <div className="runs-shell">
+      <div className="app-toolbar">
+        <Toolbar title="Runs" meta={`last 100 · ${filter || "all outcomes"}`} />
+      </div>
+      <div className="runs-view">
+        <div className="runs-list">
+          <div className="runs-summary">
+            {stats && (
+              <div className="row" style={{ flexWrap: "wrap", gap: 10 }}>
+                <StatTile label="runs" value={stats.total} />
+                {Object.entries(stats.by_outcome).map(([k, v]) => (
+                  <StatTile key={k} label={k} value={v} tone={tileTone(k)} />
+                ))}
+                <StatTile
+                  label="low-confidence"
+                  value={stats.low_confidence}
+                  tone={stats.low_confidence > 0 ? "warn" : "neutral"}
+                />
+                {stats.draft_acceptance != null && (
+                  <StatTile
+                    label="draft kept"
+                    value={`${Math.round(stats.draft_acceptance * 100)}%`}
+                    tone="accent"
+                  />
+                )}
+                {(stats.by_human_action?.pending ?? 0) > 0 && (
+                  <StatTile label="awaiting human" value={stats.by_human_action.pending} tone="warn" />
+                )}
               </div>
             )}
-            {(stats.by_human_action?.pending ?? 0) > 0 && (
-              <Tile label="awaiting human" value={stats.by_human_action.pending} />
-            )}
           </div>
-        )}
-
-        <div className="row" style={{ gap: 4 }}>
-          {OUTCOMES.map((o) => (
-            <button
-              key={o || "all"}
-              className={filter === o ? "primary" : ""}
-              onClick={() => setFilter(o)}
-            >
-              {o || "all"}
-            </button>
-          ))}
+          <div className="runs-filter">
+            <Segmented options={OUTCOMES} value={filter} onChange={setFilter} aria-label="Filter by outcome" />
+          </div>
+          {err && (
+            <div style={{ padding: "0 20px 12px" }}>
+              <Banner tone="exception" title={err} />
+            </div>
+          )}
+          <div style={{ flex: 1, minHeight: 0 }}>
+            <DataTable
+              columns={columns}
+              rows={rows}
+              rowId={(r) => r.run_id}
+              selectedId={sel?.run_id ?? null}
+              onSelect={(r) => api.getRun(r.run_id).then(setSel).catch(() => {})}
+              empty={
+                <EmptyState
+                  title="No runs yet"
+                  body="Run a flow from the editor's Run panel, or from the CLI."
+                />
+              }
+            />
+          </div>
         </div>
 
-        {err && <div className="banner err">{err}</div>}
-
-        <table className="runs-table">
-          <thead>
-            <tr>
-              <th>when</th>
-              <th>team</th>
-              <th>tier</th>
-              <th>outcome</th>
-              <th>conf.</th>
-              <th>human</th>
-              <th>subject</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr
-                key={r.run_id}
-                className={sel?.run_id === r.run_id ? "active" : ""}
-                onClick={() => api.getRun(r.run_id).then(setSel)}
-              >
-                <td className="muted">{new Date(r.created_at).toLocaleString()}</td>
-                <td>{r.team}</td>
-                <td>{r.tier ?? "—"}</td>
-                <td>
-                  <span className={`pill ${r.outcome ?? ""}`}>{r.outcome ?? "—"}</span>
-                </td>
-                <td className={(r.confidence ?? 1) < 0.4 ? "err" : ""}>
-                  {r.confidence?.toFixed(3) ?? "—"}
-                </td>
-                <td className="muted">
-                  {r.human_action
-                    ? r.human_action === "pending"
-                      ? "…"
-                      : `${r.human_action}${r.edit_distance != null ? ` (${r.edit_distance.toFixed(2)})` : ""}`
-                    : "—"}
-                </td>
-                <td className="muted" style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {r.subject ?? ""}
-                </td>
-              </tr>
-            ))}
-            {rows.length === 0 && (
-              <tr>
-                <td colSpan={7} className="muted">
-                  no runs — run a flow from the editor or `python -m interpreter.run`
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+        <div className="run-detail">
+          {sel ? (
+            <Detail run={sel} />
+          ) : (
+            <EmptyState title="Pick a run" body="Select a row to see why the bot decided what it did." />
+          )}
+        </div>
       </div>
-
-      <div className="run-detail">
-        {sel ? <Detail run={sel} /> : <div className="muted">select a run to see why the bot decided</div>}
-      </div>
-    </div>
-  );
-}
-
-function Tile({ label, value, warn }: { label: string; value: number; warn?: boolean }) {
-  return (
-    <div className={`tile${warn && value > 0 ? " warn" : ""}`}>
-      <div className="v">{value}</div>
-      <div className="l">{label}</div>
     </div>
   );
 }
 
 function Detail({ run }: { run: RunDetail }) {
-  const gate = run.gate as
-    | { pass?: boolean; score?: number; threshold?: number; tier?: string; retrieval_score?: number; draft_confidence?: number }
-    | null;
+  const gate = run.gate as {
+    pass?: boolean;
+    score?: number;
+    threshold?: number;
+    tier?: string;
+    retrieval_score?: number;
+    draft_confidence?: number;
+  } | null;
+
   return (
-    <div className="col">
-      <h4>
-        <span className="muted">{run.team}</span> · {run.subject ?? "(no subject)"}
-      </h4>
-      <div className="muted" style={{ fontSize: 12 }}>
-        {run.source} · {new Date(run.created_at).toLocaleString()} · tier {run.tier ?? "—"} ·{" "}
-        outcome <strong>{run.outcome ?? "—"}</strong>
+    <div style={{ display: "grid", gap: 16 }}>
+      <div>
+        <div className="row" style={{ gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
+          <span style={{ font: "var(--type-section)" }}>{run.subject ?? "(no subject)"}</span>
+          {run.outcome && <Tag tone={valueToTone(run.outcome)}>{run.outcome}</Tag>}
+        </div>
+        <div className="muted" style={{ font: "var(--type-mono)", marginTop: 5 }}>
+          {run.source} · {new Date(run.created_at).toLocaleString()} · {run.team} · tier {run.tier ?? "—"}
+        </div>
       </div>
 
-      {run.outcome === "need_info" && (() => {
-        const c = run.trace.find((s) => s.type === "clarify")?.data as
-          | { questions?: string[]; ask_identity?: boolean; auto_sent?: boolean }
-          | undefined;
-        const qs = c?.questions ?? [];
-        return qs.length ? (
-          <div className="banner warn">
-            waiting on the customer {c?.ask_identity ? "(+ identity check) " : ""}—{" "}
-            {c?.auto_sent ? "questions sent" : "for an agent to send"}:
-            <ol style={{ margin: "4px 0 0 18px" }}>
-              {qs.map((q, i) => (
-                <li key={i}>{q}</li>
-              ))}
-            </ol>
-          </div>
-        ) : null;
-      })()}
+      {run.outcome === "need_info" &&
+        (() => {
+          const c = run.trace.find((s) => s.type === "clarify")?.data as
+            | { questions?: string[]; ask_identity?: boolean; auto_sent?: boolean }
+            | undefined;
+          const qs = c?.questions ?? [];
+          return qs.length ? (
+            <Banner
+              tone="warn"
+              title={`Waiting on the customer${c?.ask_identity ? " (+ identity check)" : ""} — ${
+                c?.auto_sent ? "questions sent" : "for an agent to send"
+              }`}
+              detail={
+                <ol style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+                  {qs.map((q, i) => (
+                    <li key={i}>{q}</li>
+                  ))}
+                </ol>
+              }
+            />
+          ) : null;
+        })()}
 
-      <h5>why</h5>
-      {run.trace.map((s: TraceStep, i) => (
-        <details key={i} className="trace-step">
-          <summary>
-            <span className="ty">{s.type}</span> — {s.summary}
-          </summary>
-          <pre style={{ fontSize: 11, overflow: "auto" }}>{JSON.stringify(s.data, null, 2)}</pre>
-        </details>
-      ))}
-
-      {gate && (
-        <div className="banner ok">
-          gate: {gate.retrieval_score?.toFixed(3)} retrieval · {gate.draft_confidence?.toFixed(2)} draft →
-          score <strong>{gate.score?.toFixed(3)}</strong> vs threshold {gate.threshold} ({gate.tier}) →{" "}
-          {gate.pass ? "PASS" : "FAIL"}
+      {gate && gate.score != null && (
+        <div>
+          <h5>The gate</h5>
+          <GateStrip
+            retrieval={gate.retrieval_score ?? 0}
+            draft={gate.draft_confidence ?? 0}
+            score={gate.score ?? 0}
+            threshold={gate.threshold ?? 0}
+            passed={!!gate.pass}
+          />
+          {gate.tier && (
+            <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
+              tier {gate.tier}
+            </div>
+          )}
         </div>
       )}
 
-      {run.retrieval?.length > 0 && (
-        <div className="col">
-          <h5>retrieved</h5>
-          {run.retrieval.map((r, i) => (
-            <div key={i} style={{ fontSize: 12 }}>
-              <a href={r.doc_url} target="_blank" rel="noreferrer">
-                {r.doc_url.replace("https://docs.zapier.com", "")}
-              </a>{" "}
-              <span className="muted">
-                {r.heading_path ?? ""} {r.rerank_score != null ? `(${r.rerank_score.toFixed(2)})` : ""}
-              </span>
-            </div>
+      <div>
+        <h5>Trace</h5>
+        <div style={{ display: "grid", gap: 4 }}>
+          {run.trace.map((s: TraceStepData, i) => (
+            <TraceStep
+              key={i}
+              name={s.type}
+              summary={s.summary}
+              data={s.data}
+              status={
+                typeof (s.data as { error?: unknown }).error === "string"
+                  ? "failed"
+                  : s.type.includes("gate") && (s.data as { pass?: boolean }).pass === false
+                    ? "warn"
+                    : "ok"
+              }
+            />
           ))}
+        </div>
+      </div>
+
+      {run.retrieval?.length > 0 && (
+        <div>
+          <h5>Retrieved</h5>
+          <div style={{ display: "grid", gap: 4, fontSize: 12 }}>
+            {run.retrieval.map((r, i) => (
+              <div key={i}>
+                <a href={r.doc_url} target="_blank" rel="noreferrer">
+                  {r.doc_url.replace("https://docs.zapier.com", "")}
+                </a>{" "}
+                <span className="muted">
+                  {r.heading_path ?? ""} {r.rerank_score != null ? `(${r.rerank_score.toFixed(2)})` : ""}
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
       {run.sf_writeback && (
         <div className="muted" style={{ fontSize: 12 }}>
-          salesforce: {JSON.stringify(run.sf_writeback)}
+          salesforce: <code>{JSON.stringify(run.sf_writeback)}</code>
         </div>
       )}
 
       {run.human_action && run.human_action !== "pending" && (
-        <>
-          <h5>human resolution</h5>
-          <div className="banner ok">
-            <strong>{run.human_action}</strong>
-            {run.edit_distance != null ? ` · edit distance ${run.edit_distance.toFixed(2)}` : ""}
-          </div>
+        <div>
+          <h5>Human resolution</h5>
+          <Banner
+            tone="accent"
+            title={`${run.human_action}${
+              run.edit_distance != null ? ` · edit distance ${run.edit_distance.toFixed(2)}` : ""
+            }`}
+          />
           {run.draft && (
-            <details className="trace-step">
-              <summary>bot draft vs. what the human sent</summary>
-              <div style={{ fontSize: 12 }}>
-                <div className="muted">draft</div>
-                <pre style={{ whiteSpace: "pre-wrap" }}>{run.draft}</pre>
-                <div className="muted">sent</div>
-                <pre style={{ whiteSpace: "pre-wrap" }}>{run.human_reply ?? "(none)"}</pre>
-              </div>
-            </details>
+            <div style={{ marginTop: 8 }}>
+              <TraceStep
+                name="bot draft vs. what the human sent"
+                data={{ draft: run.draft, sent: run.human_reply ?? "(none)" }}
+              />
+            </div>
           )}
-        </>
+        </div>
       )}
       {run.human_action === "pending" && (
-        <div className="muted" style={{ fontSize: 12 }}>awaiting human resolution…</div>
+        <div className="muted" style={{ fontSize: 12 }}>
+          Awaiting human resolution…
+        </div>
       )}
     </div>
   );

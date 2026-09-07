@@ -805,7 +805,20 @@ Delivered one BUILD-BRIEF chunk at a time, checkpointed with the user:
   slide-over. Remaining `prompt`/`confirm`/`alert` in `web/src` are all
   outside `flows/` (kb, channels, rules, onboarding, App) and fall to
   their own chunks.
-- **Chunks 4–8** — Runs + Trace, Knowledge, Connections + Channels,
+- **Chunk 4 — Runs + Trace (DONE).** `runs/RunsView.tsx`: a 44px
+  `Toolbar`, then a `1fr / 420px` split — left is a flex column of a
+  `StatTile` row + `Segmented` outcome filter (both fixed) + a
+  `DataTable` that scrolls with a sticky header; right is the 420px
+  `.run-detail` rail with its own scroll. Row click loads the run into
+  the rail (never navigates). The rail uses `GateStrip` for the gate
+  arithmetic and `TraceStep` for each trace step + the draft-vs-sent
+  diff; outcomes are `Tag`s; empty states are `EmptyState`.
+  `trace/TraceView.tsx`: `Toolbar` with the identifier `Input` + Trace /
+  Copy / Raw / Retry `Button`s; the summary card and timeline re-skinned,
+  `chip()` replaced by `Tag`, every timeline row is a shared `TraceStep`
+  (node rows indented), messages are `Banner`s. `tsc` + `vite build` +
+  `vitest` green.
+- **Chunks 5–8** — Knowledge, Connections + Channels,
   Billing/Team/Activity, Setup + Login. Existing API wiring preserved
   throughout.
 
