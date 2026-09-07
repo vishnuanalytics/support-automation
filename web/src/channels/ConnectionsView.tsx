@@ -51,7 +51,7 @@ export function ConnectionsView({ tenantId }: { tenantId: string }) {
   };
 
   return (
-    <div className="pane col" style={{ gap: 16, maxWidth: 760 }}>
+    <div className="view-scroll col" style={{ gap: 16, maxWidth: 760, padding: 16 }}>
       <h2 style={{ margin: 0 }}>Connections</h2>
       <p style={{ margin: 0, color: "var(--muted, #667)" }}>
         A named base URL + credentials an <code>http_request</code> flow node can call.
@@ -79,7 +79,7 @@ export function ConnectionsView({ tenantId }: { tenantId: string }) {
                 </td>
                 <td>{c.base_url}</td>
                 <td>
-                  {c.auth.type || "none"}
+                  {c.auth?.type || "none"}
                   {c.has_secret && " 🔒"}
                 </td>
                 <td>

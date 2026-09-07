@@ -230,6 +230,76 @@ test("every nav view opens without a crash or console error", async ({ page }) =
   expect(errors, `errors after Setup:\n${errors.join("\n")}`).toEqual([]);
 });
 
+test("no view clips its content — tall content scrolls inside the fixed frame", async ({ page }) => {
+  // Same mocks as the walk, but list endpoints return enough rows to
+  // overflow the viewport, so we can tell a real scroll container from a
+  // view that just lets .pane's overflow:hidden clip it.
+  const many = (n: number) => Array.from({ length: n }, (_, i) => i);
+  await seedFakeSession(page);
+  await page.route("**/api/**", (route) => {
+    const req = route.request();
+    if (req.method() !== "GET") return route.fulfill({ json: { ok: true } });
+    const path = new URL(req.url()).pathname.replace(/^\/api/, "");
+    const base = jsonFor(req.url());
+    // fatten the specific lists that feed the clip-prone views
+    if (path.startsWith("/audit"))
+      return route.fulfill({
+        json: many(80).map((i) => ({
+          event_id: i, tenant_id: FAKE_TENANT_ID, actor_id: null, actor_email: `u${i}@x.com`,
+          action: "flow.publish", target_type: "flow", target_id: `f${i}`,
+          summary: `event ${i}`, metadata: {}, created_at: NOW,
+        })),
+      });
+    if (path.startsWith("/review-tasks"))
+      return route.fulfill({
+        json: many(30).map((i) => ({
+          id: `t${i}`, trigger: "sample", case_number: `c${i}`, case_sf_id: null,
+          created_at: NOW, status: "open", statement: `flagged statement ${i} `.repeat(6),
+          verdict: { salient: [`claim ${i}`] }, contexts: [],
+        })),
+      });
+    if (path.startsWith("/connections") && !path.includes("/actions"))
+      return route.fulfill({
+        json: many(10).map((i) => ({
+          slug: `vendor-${i}`, base_url: `https://api.vendor${i}.com`,
+          auth: { type: "bearer" }, has_secret: true,
+        })),
+      });
+    if (path.startsWith("/billing/usage")) {
+      const u = base as Record<string, unknown>;
+      u.by_flow = many(12).map((i) => ({ flow_id: `f${i}`, name: `Flow ${i}`, runs: i, tokens: i * 100, estimated_cost_usd: i * 0.1 }));
+      u.by_node = many(12).map((i) => ({ node: `node_${i}`, tokens: i * 100, estimated_cost_usd: i * 0.1 }));
+      u.tokens_by_model = { "gpt-oss-120b": 5000, "gpt-oss-20b": 2500 };
+      return route.fulfill({ json: u as object });
+    }
+    return route.fulfill({ json: base as object });
+  });
+
+  await page.goto("/");
+  await expect(page.locator(".sidebar")).toBeVisible();
+  await page.getByRole("button", { name: /Admin/ }).click();
+
+  for (const label of ["Activity", "Approvals", "Connections", "Billing", "Knowledge", "Runs"]) {
+    await page.getByRole("button", { name: label, exact: true }).click();
+    await page.waitForTimeout(300);
+    const verdict = await page.evaluate(() => {
+      const frame = document.querySelector(".pane") as HTMLElement | null;
+      if (!frame) return { clipped: true, reason: "no .pane" };
+      let contentBottom = 0;
+      frame.querySelectorAll<HTMLElement>("*").forEach((e) => {
+        contentBottom = Math.max(contentBottom, e.getBoundingClientRect().bottom);
+      });
+      let scrolls = false;
+      frame.querySelectorAll<HTMLElement>("*").forEach((e) => {
+        const oy = getComputedStyle(e).overflowY;
+        if ((oy === "auto" || oy === "scroll") && e.scrollHeight - e.clientHeight > 8) scrolls = true;
+      });
+      return { clipped: contentBottom > window.innerHeight + 4 && !scrolls, contentBottom };
+    });
+    expect(verdict.clipped, `"${label}" clips its overflow (content ${verdict.contentBottom}px, no scroll container)`).toBe(false);
+  }
+});
+
 test("switching browser tab away and back keeps the current view", async ({ page }) => {
   await seedFakeSession(page);
   await installWalkMocks(page);
