@@ -727,11 +727,26 @@ A pass through the flow-editor web app checking each view actually works.
   used a bare `<>` fragment with the `key` on the inner `<tr>`; React
   logged a key warning for any workspace with ≥1 HTTP connection. Now a
   keyed `<Fragment>`.
+- **4 views clipped their content — FIXED.** Activity, Approvals
+  (`ReviewView`), Connections and Billing rendered content taller than the
+  viewport with no working scroll container, so `.pane`'s
+  `overflow:hidden` clipped everything past the fold (Approvals content
+  measured 7149px in a 720px frame — the bottom was unreachable). New
+  `.view-scroll` utility (`height:100% + min-height:0 + overflow-y:auto`)
+  is the standard for any view that isn't a self-managed grid (Runs) or
+  split-rail (Knowledge); applied to those roots, plus `height:100%` on
+  the `.billing-view` rule. `ConnectionsView` also crashed on a
+  connection row with no `auth` object (`c.auth?.type`).
 - **New: `web/e2e/ui-walk.spec.ts`** — opens all 12 nav views + Setup
   under fully-mocked network, fails on any uncaught error / console error
-  / blank pane; plus a regression guard that a simulated tab switch keeps
-  the current view and does not refetch `/api/tenants`. All 5 web e2e
-  specs green.
+  / blank pane; a "no view clips its content" test with tall mocked lists;
+  and a regression guard that a simulated tab switch keeps the current
+  view and does not refetch `/api/tenants`. All 6 web e2e specs green.
+- **Open / not yet diagnosed:** user reports the KB "Public docs site
+  (crawl)" connector (`public_url` → `ingestion/webcrawl.py`) "not
+  working" — needs the specific symptom (not in the dropdown / connect
+  errors / connects but no entries appear / crawl produces junk) before a
+  fix. Backend + worker not run this session.
 
 **Older note, superseded by the above as "most recent," kept for its own
 history:**
