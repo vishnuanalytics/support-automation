@@ -73,27 +73,35 @@ def resolve_sources(names: list[str] | None, sb, tenant_id: str | None = None) -
       names given        -> those names, intersected with (shared | this tenant);
                             if none of them are visible, fall back to the
                             tenant's own sources (never widen, never leak).
-      names None + tenant -> this tenant's OWN sources only. Shared/global
-                            corpora (e.g. the `zapier-public` demo docs) are
-                            opt-in now: a flow must list them in `kb_sources`
-                            to pull from them — a real org's default RAG is
-                            *its* connected sources, nothing else.
+      names None + tenant -> this tenant's own **org-level** sources only
+                            (a collection with `config.org_level == false` is
+                            node-scoped: it's read only when a node names it).
+                            Shared/global corpora (e.g. the `zapier-public`
+                            demo docs) are opt-in — a flow must list them.
       names None, no tenant -> shared sources only (eval/admin; those callers
                             pass source_ids directly if they want everything).
 
     A tenant-scoped call that resolves to nothing returns `_NO_MATCH`, never
     `None` — an empty scope must mean "no KB context", not "search all tenants".
     """
-    rows = sb.table("sources").select("source_id, name, tenant_id").eq("status", "active").execute().data or []
+    rows = (sb.table("sources").select("source_id, name, tenant_id, config")
+            .eq("status", "active").execute().data or [])
     if names:
         visible = [r for r in rows if r["tenant_id"] is None or r["tenant_id"] == tenant_id]
         named = [r["source_id"] for r in visible if r["name"] in names]
         if named:
             return named
-        # named nothing visible -> fall through to the tenant's own scope
+        # named nothing visible -> fall through to the tenant's org-level scope
+
+    def _org_level(r: dict) -> bool:
+        cfg = r.get("config") or {}
+        # the org KB is always org-level; every other collection is unless it
+        # was explicitly toggled off. Missing flag == on (back-compat).
+        return bool(cfg.get("org_kb")) or cfg.get("org_level", True) is not False
 
     if tenant_id:
-        own = [r["source_id"] for r in rows if r["tenant_id"] == tenant_id]
+        own = [r["source_id"] for r in rows
+               if r["tenant_id"] == tenant_id and _org_level(r)]
         return own or _NO_MATCH
 
     shared = [r["source_id"] for r in rows if r["tenant_id"] is None]

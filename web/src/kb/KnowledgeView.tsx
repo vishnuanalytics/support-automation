@@ -163,6 +163,15 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
     onChange();
   }
 
+  async function setOrgLevel(next: boolean) {
+    try {
+      await api.kb.updateCollection(col.source_id, { org_level: next });
+      onChange();
+    } catch (e) {
+      alert(e instanceof ApiError ? String(e.detail) : String(e));
+    }
+  }
+
   async function connectGoogle() {
     const { url } = await api.google.authorize(col.tenant_id);
     const w = window.open(url, "google-oauth", "width=520,height=640");
@@ -262,6 +271,19 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
             )}
           </h3>
           {col.description && <span className="muted">{col.description}</span>}
+          {!col.org_kb && (
+            <label className="row" style={{ gap: 6, fontSize: 12, marginTop: 2, color: "var(--muted)" }}>
+              <input
+                type="checkbox"
+                style={{ width: "auto" }}
+                checked={col.org_level !== false}
+                onChange={(e) => void setOrgLevel(e.target.checked)}
+              />
+              {col.org_level === false
+                ? "Node-level only — a flow reads this only when a retrieve / kb_lookup node names it"
+                : "Feed the organization knowledge base — every flow's default retrieval reads this"}
+            </label>
+          )}
           {heldCount > 0 && (
             <span className="muted" style={{ fontSize: 12 }}>
               {heldCount} entr{heldCount === 1 ? "y is" : "ies are"} <strong>held: disputed</strong> —

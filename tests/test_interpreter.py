@@ -1062,6 +1062,28 @@ class _FakeSources:
         return type("R", (), {"data": list(self._ROWS)})()
 
 
+def test_resolve_sources_skips_node_level_collections_in_the_default_scope():
+    """A collection with config.org_level == false is node-scoped: the
+    default (no kb_sources) retrieval skips it, but a node that *names* it
+    still reads it."""
+    from interpreter.retrieval import resolve_sources
+
+    class _Mixed(_FakeSources):
+        _ROWS = [
+            {"source_id": "s-org", "name": "org-kb", "tenant_id": "ACME",
+             "config": {"org_kb": True}},
+            {"source_id": "s-team", "name": "billing-runbook", "tenant_id": "ACME",
+             "config": {"org_level": False}},
+            {"source_id": "s-plain", "name": "acme-notes", "tenant_id": "ACME", "config": {}},
+        ]
+
+    sb = _Mixed()
+    # default scope -> org-level only (the node-level one is left out)
+    assert set(resolve_sources(None, sb, "ACME")) == {"s-org", "s-plain"}
+    # naming the node-level collection pulls it in
+    assert set(resolve_sources(["billing-runbook"], sb, "ACME")) == {"s-team"}
+
+
 def test_resolve_sources_never_leaks_another_tenants_kb():
     from interpreter.retrieval import _NO_MATCH, resolve_sources
     sb = _FakeSources()

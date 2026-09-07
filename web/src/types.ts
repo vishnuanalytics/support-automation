@@ -195,6 +195,7 @@ export interface KbCollection {
   entry_count: number;
   provisional_count?: number;
   org_kb?: boolean; // the one org-level collection every source feeds by default
+  org_level?: boolean; // does a flow's default (unnamed) retrieval read this collection?
   created_at?: string;
 }
 

@@ -267,9 +267,9 @@ export const api = {
   kb: {
     listCollections: (tenantId?: string) =>
       req<KbCollection[]>(`/kb/collections${tenantId ? `?tenant_id=${tenantId}` : ""}`),
-    createCollection: (b: { name: string; description?: string; tenant_id?: string }) =>
+    createCollection: (b: { name: string; description?: string; tenant_id?: string; org_level?: boolean }) =>
       req<{ source_id: string }>("/kb/collections", { method: "POST", body: JSON.stringify(b) }),
-    updateCollection: (id: string, b: { name?: string; description?: string }) =>
+    updateCollection: (id: string, b: { name?: string; description?: string; org_level?: boolean }) =>
       req<KbCollection>(`/kb/collections/${id}`, { method: "PATCH", body: JSON.stringify(b) }),
     deleteCollection: (id: string) =>
       req<void>(`/kb/collections/${id}`, { method: "DELETE" }),

@@ -784,6 +784,22 @@ A pass through the flow-editor web app checking each view actually works.
   `_ensure_org_kb` has no uniqueness guard, so concurrent
   `GET /api/kb/collections` could create a real in-tenant duplicate — a
   partial unique index would close it.
+- **Org-level vs. node-level KB collections (new capability).** Until
+  now a flow's default (no `kb_sources`) retrieval read *every* one of a
+  tenant's collections — there was no way to keep a collection out of the
+  org-wide RAG and reserve it for a node that names it. Added a
+  per-collection `config.org_level` flag (default on; the `org_kb`
+  collection is always on and can't be turned off):
+  - `retrieval.resolve_sources(kb_sources=None, tenant_id)` now returns
+    only `org_level` collections; a node that explicitly names a
+    node-level collection still reads it.
+  - `KbCollectionIn.org_level` / `KbCollectionPatch.org_level`;
+    `kb_list_collections` returns `org_level`; `kb_update_collection`
+    rejects turning it off for the org KB.
+  - Knowledge UI: a checkbox per additional collection — "Feed the
+    organization knowledge base" / "Node-level only".
+  - Config-only, no migration; a missing flag == on, so nothing changes
+    for existing tenants.
 - **Can't recreate a deleted collection** — `sources` had a full
   `unique (tenant_id, name)`, and a frontend collection delete is a
   soft-delete (`status='archived'`), so an archived "help" permanently

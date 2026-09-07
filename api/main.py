@@ -280,11 +280,15 @@ class KbCollectionIn(BaseModel):
     name: str
     description: str | None = None
     tenant_id: str | None = None      # required only if the caller is in >1 tenant
+    # False => node-scoped: only a retrieve/kb_lookup node that names this
+    # collection reads it; a flow's default (no kb_sources) retrieval skips it.
+    org_level: bool = True
 
 
 class KbCollectionPatch(BaseModel):
     name: str | None = None
     description: str | None = None
+    org_level: bool | None = None
 
 
 class KbEntryIn(BaseModel):
@@ -2021,12 +2025,16 @@ def kb_list_collections(tenant_id: str | None = None, c: Caller = Depends(caller
                    .eq("source_id", s["source_id"]).execute().data or [])
         active = [e for e in entries if e["status"] == "active"]
         provisional = [e for e in entries if e["status"] == "provisional"]
+        cfg = s.get("config") or {}
+        is_org_kb = bool(cfg.get("org_kb"))
         out.append({
             "source_id": s["source_id"], "name": s["name"],
-            "description": (s.get("config") or {}).get("description"),
+            "description": cfg.get("description"),
             "tenant_id": s["tenant_id"], "entry_count": len(active),
             "provisional_count": len(provisional),
-            "org_kb": bool((s.get("config") or {}).get("org_kb")),
+            "org_kb": is_org_kb,
+            # the org KB is always org-level; others default on, off if toggled
+            "org_level": is_org_kb or cfg.get("org_level", True) is not False,
             "created_at": s.get("created_at"),
         })
     out.sort(key=lambda r: (not r["org_kb"], (r["name"] or "").lower()))
@@ -2062,10 +2070,12 @@ def kb_create_collection(body: KbCollectionIn, c: Caller = Depends(caller)) -> d
     rate_limit(c.user_id, "kb_write", 60)
     tenant_id = _caller_tenant(c, body.tenant_id)
     _require_editor(c, tenant_id)
-    row = {
-        "kind": "internal_kb", "tenant_id": tenant_id, "name": body.name,
-        "config": {"description": body.description} if body.description else {},
-    }
+    cfg: dict[str, Any] = {}
+    if body.description:
+        cfg["description"] = body.description
+    if not body.org_level:            # default True -> only store the opt-out
+        cfg["org_level"] = False
+    row = {"kind": "internal_kb", "tenant_id": tenant_id, "name": body.name, "config": cfg}
     try:
         created = c.sb.table("sources").insert(row).execute().data[0]
     except Exception as e:  # noqa: BLE001
@@ -2088,10 +2098,24 @@ def kb_update_collection(sid: str, body: KbCollectionPatch, c: Caller = Depends(
     col = _kb_collection(c, sid)
     _require_editor(c, col["tenant_id"])
     patch: dict[str, Any] = {}
+    cfg = dict(col.get("config") or {})
+    cfg_touched = False
     if body.name is not None:
         patch["name"] = body.name
     if body.description is not None:
-        patch["config"] = {**(col.get("config") or {}), "description": body.description}
+        cfg["description"] = body.description
+        cfg_touched = True
+    if body.org_level is not None:
+        if cfg.get("org_kb"):
+            raise HTTPException(422, "the organization knowledge base is always org-level")
+        # store only the opt-out; drop the key when turning it back on
+        if body.org_level:
+            cfg.pop("org_level", None)
+        else:
+            cfg["org_level"] = False
+        cfg_touched = True
+    if cfg_touched:
+        patch["config"] = cfg
     if not patch:
         return col
     updated = c.sb.table("sources").update(patch).eq("source_id", sid).execute().data[0]
