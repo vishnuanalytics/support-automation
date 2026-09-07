@@ -1,4 +1,8 @@
 # Phase 1 scraper (ingestion/scraper.py) — runs on GitHub Actions
-# (daily-sync.yml), never in the Docker services. Kept out of the image.
+# (daily-sync.yml), never in the Docker services.
+# NB beautifulsoup4 is now ALSO in requirements.txt (the KB "Public docs
+# site" connector runs in the worker and hard-imports bs4); kept listed
+# here too so the Actions job is self-contained. trafilatura stays
+# scraper-only — the worker's crawler uses bs4 directly, not trafilatura.
 beautifulsoup4
 trafilatura

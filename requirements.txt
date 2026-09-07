@@ -1,6 +1,6 @@
 # Runtime deps for the Docker services (poller / worker / cdc / api / slackbot).
 # Split off, NOT here:
-#   requirements-ingest.txt      Phase 1 scraper (Actions only)
+#   requirements-ingest.txt      Phase 1 scraper `scraper.py` (Actions only)
 #   requirements-connectors.txt  Google Docs / Gmail-OAuth (lazy, optional)
 #   requirements-media.txt       image OCR / video (build with MEDIA=1)
 #   requirements-dev.txt         pytest
@@ -43,3 +43,13 @@ fastapi
 uvicorn
 httptools                # uvicorn HTTP parser (the useful half of [standard])
 httpx
+
+# --- KB source connectors (Phase 14+) — these run IN the worker/api
+# (_crawl_site / _sync_kb_connection job handlers, POST /api/kb/... ), so
+# unlike the Actions-only scraper their deps must be in the image. bs4 is a
+# hard import in ingestion/webcrawl.py (the "Public docs site" connector);
+# pypdf / python-docx back the .pdf / .docx path of KB file upload. lxml
+# (bs4's parser) is already declared above for simple-salesforce.
+beautifulsoup4
+pypdf>=4.0
+python-docx>=1.1
