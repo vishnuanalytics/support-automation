@@ -1971,22 +1971,34 @@ def _now_iso() -> str:
 _ORG_KB_NAME = "Organization knowledge"
 
 
+def _org_kb_row(tenant_id: str) -> "dict | None":
+    for s in (_service.table("sources").select("source_id, name, config, created_at")
+              .eq("kind", "internal_kb").eq("tenant_id", tenant_id)
+              .neq("status", "archived").execute().data or []):
+        if (s.get("config") or {}).get("org_kb"):
+            return s
+    return None
+
+
 def _ensure_org_kb(tenant_id: str) -> dict:
     """Find (or lazily create) the tenant's org KB collection. Never promotes
     an existing team collection — a tenant that already had collections just
     gets the org KB added alongside."""
-    rows = (_service.table("sources").select("source_id, name, config, created_at")
-            .eq("kind", "internal_kb").eq("tenant_id", tenant_id)
-            .neq("status", "archived").execute().data or [])
-    for s in rows:
-        if (s.get("config") or {}).get("org_kb"):
-            return s
-    return (_service.table("sources").insert({
-        "kind": "internal_kb", "tenant_id": tenant_id, "name": _ORG_KB_NAME,
-        "config": {"org_kb": True,
-                   "description": "Every connected knowledge source feeds this. "
-                                  "Your chat flows read all of it by default."},
-    }).execute().data)[0]
+    existing = _org_kb_row(tenant_id)
+    if existing:
+        return existing
+    try:
+        return (_service.table("sources").insert({
+            "kind": "internal_kb", "tenant_id": tenant_id, "name": _ORG_KB_NAME,
+            "config": {"org_kb": True,
+                       "description": "Every connected knowledge source feeds this. "
+                                      "Your chat flows read all of it by default."},
+        }).execute().data)[0]
+    except Exception:  # noqa: BLE001 -- lost the create race (partial-unique on name)
+        row = _org_kb_row(tenant_id)
+        if row:
+            return row
+        raise
 
 
 @app.get("/api/kb/collections")
@@ -2056,7 +2068,10 @@ def kb_create_collection(body: KbCollectionIn, c: Caller = Depends(caller)) -> d
     }
     try:
         created = c.sb.table("sources").insert(row).execute().data[0]
-    except Exception as e:  # noqa: BLE001  (unique (tenant_id, name) etc.)
+    except Exception as e:  # noqa: BLE001
+        if "sources_tenant_id_name_active_key" in str(e) or "23505" in str(e):
+            raise HTTPException(409, f"a collection named {body.name!r} already exists "
+                                     "in this workspace")
         raise HTTPException(409, f"could not create collection: {e}")
 
     from interpreter import audit

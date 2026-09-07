@@ -784,6 +784,16 @@ A pass through the flow-editor web app checking each view actually works.
   `_ensure_org_kb` has no uniqueness guard, so concurrent
   `GET /api/kb/collections` could create a real in-tenant duplicate — a
   partial unique index would close it.
+- **Can't recreate a deleted collection** — `sources` had a full
+  `unique (tenant_id, name)`, and a frontend collection delete is a
+  soft-delete (`status='archived'`), so an archived "help" permanently
+  reserved the name: recreating it 409'd with `duplicate key … constraint
+  "sources_tenant_id_name_key"`. **Migration `101`** replaces it with a
+  partial unique index `(tenant_id, name) where status <> 'archived'` —
+  archived rows no longer block reuse, and it also closes the
+  `_ensure_org_kb` double-insert race. `kb_create_collection` returns a
+  plain "a collection named X already exists" on a genuine live clash;
+  `_ensure_org_kb` re-selects if it loses the create race.
 - **Crawl: sample vs. deep.** The onboarding wizard's "crawl a site" and
   Knowledge's "＋ add source" shared one 20-page / depth-2 / 50-cap
   path, so a real crawl only scraped the top layer. Split: the wizard is
