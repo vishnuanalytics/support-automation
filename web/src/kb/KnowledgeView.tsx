@@ -25,14 +25,22 @@ export function KnowledgeView({ tenantId }: { tenantId: string }) {
 
   const refresh = useCallback(async () => {
     try {
-      const c = await api.kb.listCollections();
+      // GET /api/kb/collections returns the org KB of *every* workspace the
+      // caller belongs to (all named "Organization knowledge") — scope to
+      // the active one, like the flow-editor sidebar does.
+      const c = (await api.kb.listCollections()).filter((x) => x.tenant_id === tenantId);
       setCols(c);
-      // default to the org KB (server sorts it first)
-      setSel((s) => s ?? c.find((x) => x.org_kb)?.source_id ?? c[0]?.source_id ?? null);
+      // default to this workspace's org KB (server sorts it first)
+      setSel((s) =>
+        (s && c.some((x) => x.source_id === s) ? s : null) ??
+        c.find((x) => x.org_kb)?.source_id ??
+        c[0]?.source_id ??
+        null,
+      );
     } catch (e) {
       setErr(e instanceof ApiError ? String(e.detail) : String(e));
     }
-  }, []);
+  }, [tenantId]);
 
   useEffect(() => {
     void refresh();
