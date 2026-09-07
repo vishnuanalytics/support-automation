@@ -738,11 +738,16 @@ Delivered one BUILD-BRIEF chunk at a time, checkpointed with the user:
   adopts `AppShell` + `Sidebar` for the authenticated shell; sign-out
   moved to the pinned account row. No view internals touched. `tsc`,
   `vite build` and `vitest` all green.
-- **Chunk 2 — `web/src/ui/` primitives.** Button, Tag, Field (+Input/
-  Textarea/Select/Segmented/Radio/Toggle/Slider/JsonEditor), DataTable,
-  StatTile, QuotaBar, GateStrip, TraceStep, Banner, Toast, EmptyState,
-  Skeleton, Popover, SlideOver, Dialog — props/states per
-  `components.json`. NEXT.
+- **Chunk 2 — `web/src/ui/` primitives (DONE).** Button, Tag (+`valueToTone`),
+  Field, Input/Textarea, Select, Segmented, Radio, Toggle, Slider,
+  JsonEditor (generic Form/JSON tabs — per-node-kind schema forms come in
+  chunk 3), DataTable, StatTile, QuotaBar, GateStrip, TraceStep, Banner,
+  Toast (+`ToastProvider`/`useToast`), EmptyState, Skeleton, Popover,
+  SlideOver, Dialog. Shared `overlay.ts` (`useOverlay` = Esc + focus-trap
+  + focus-return; `useOutsideClick`). Styles in `web/src/ui/ui.css`
+  (imported from `main.tsx`); barrel at `web/src/ui/index.ts`. Not wired
+  into any view yet — that starts in chunk 3; `tsc` + `vite build` +
+  `vitest` green, JS bundle unchanged (all tree-shaken until used).
 - **Chunks 3–8** — Editor (incl. splitting the 1883-line
   `Inspector.tsx` into one panel per node kind), Runs + Trace,
   Knowledge, Connections + Channels, Billing/Team/Activity, Setup +
