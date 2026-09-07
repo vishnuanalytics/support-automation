@@ -1,8 +1,17 @@
 import Dagre from "@dagrejs/dagre";
 import type { Edge, Node } from "@xyflow/react";
 import type { Flow, FlowEdge, FlowNode } from "../types";
+import { summarize } from "./nodeSummary";
 
-export type RFNode = Node<{ label: string; nodeType: string; terminal: boolean }>;
+export type RFNode = Node<{
+  label: string;
+  nodeType: string;
+  terminal: boolean;
+  /** line 2 of the card — the one config value that decides behaviour */
+  summary?: string;
+  /** type is not in the loaded registry */
+  invalid?: boolean;
+}>;
 export type RFEdge = Edge<{ condition: Record<string, unknown> }>;
 
 // Node types that can end a path — each produces a final `outcome` (or, for
@@ -21,7 +30,12 @@ export function toReactFlow(flow: Flow): { nodes: RFNode[]; edges: RFEdge[] } {
   let nodes: RFNode[] = flow.nodes.map((n) => ({
     id: n.node_id,
     position: { x: n.position_x ?? 0, y: n.position_y ?? 0 },
-    data: { label: n.label || n.type, nodeType: n.type, terminal: TERMINAL.has(n.type) },
+    data: {
+      label: n.label || n.type,
+      nodeType: n.type,
+      terminal: TERMINAL.has(n.type),
+      summary: summarize(n.type, n.config ?? {}),
+    },
     type: "flowNode",
   }));
 

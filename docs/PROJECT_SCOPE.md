@@ -748,10 +748,38 @@ Delivered one BUILD-BRIEF chunk at a time, checkpointed with the user:
   (imported from `main.tsx`); barrel at `web/src/ui/index.ts`. Not wired
   into any view yet — that starts in chunk 3; `tsc` + `vite build` +
   `vitest` green, JS bundle unchanged (all tree-shaken until used).
-- **Chunks 3–8** — Editor (incl. splitting the 1883-line
-  `Inspector.tsx` into one panel per node kind), Runs + Trace,
-  Knowledge, Connections + Channels, Billing/Team/Activity, Setup +
-  Login. Existing API wiring preserved throughout.
+- **Chunk 3 — Flow editor.** Sequenced into sub-chunks (each its own
+  commit + checkpoint):
+  - **3a — canvas & node visuals (DONE).** `NodeCard` rewritten: left
+    rule carries the kind (cyan work / yellow terminal / magenta
+    invalid), line 2 is the deciding config value from new
+    `flows/nodeSummary.ts` (`summarize` + `nodeKind`). `summary` +
+    `invalid` added to `RFNode` data, stamped in `toReactFlow`,
+    `addNode`, `setConfig`, and a post-load effect once the type
+    registry resolves. New `flows/EdgeLabel.tsx` (custom `default`
+    edge — conditional edges always print their expression, pass=cyan
+    / fail=magenta) and `flows/ZoomControl.tsx` (% readout, Fit, 100%,
+    steps 25/50/80/100/150/200, `mod +/-/0`; viewport persisted to
+    `localStorage` per `flow-viewport:<id>` via `onMoveEnd` +
+    `defaultViewport`). Palette is now a searchable `Popover` off an
+    "＋ Add node" fab, not an always-open panel. Default `<Controls>`
+    dropped. `tsc` + `vite build` + `vitest` green.
+  - **3b — editor toolbar + overlays.** `Toolbar` primitive; rollback
+    → `Popover`; publish / save-as-template / delete / AI-edit /
+    Mermaid → `Dialog`/`SlideOver`; remove `confirm()`/`prompt()` from
+    `FlowEditor.tsx`; 422/save-blocked → `Banner` with per-node links,
+    409 → reload explanation.
+  - **3c — Inspector → slide-over.** Wrap `NodeInspector`/`EdgeInspector`
+    in `SlideOver` with Config / JSON (shared `JsonEditor`) /
+    Recent-runs tabs + sticky Apply bar; canvas is full width when
+    nothing is selected. The per-kind `*Form` components already exist
+    inside `Inspector.tsx` — extract to `flows/panels/*` only if it
+    stays low-risk.
+  - **3d — `FlowList` overlays.** Its 6 `prompt()`/`confirm()`/`alert()`
+    → `Dialog` + `useToast`.
+- **Chunks 4–8** — Runs + Trace, Knowledge, Connections + Channels,
+  Billing/Team/Activity, Setup + Login. Existing API wiring preserved
+  throughout.
 
 **Older note, superseded by the above as "most recent," kept for its
 own history:**

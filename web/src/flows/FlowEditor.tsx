@@ -2,13 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   addEdge,
   Background,
-  Controls,
   MiniMap,
   ReactFlow,
   ReactFlowProvider,
   useEdgesState,
   useNodesState,
   type Connection,
+  type Viewport,
 } from "@xyflow/react";
 import { api, ApiError } from "../api";
 import type { Flow, FlowCandidate, NodeTypesResp } from "../types";
@@ -22,10 +22,14 @@ import {
   type RFEdge,
   type RFNode,
 } from "./graph";
+import { summarize } from "./nodeSummary";
 import { NodeCard } from "./NodeCard";
+import { EdgeLabel } from "./EdgeLabel";
+import { ZoomControl } from "./ZoomControl";
 import { EdgeInspector, NodeInspector } from "./Inspector";
 import { RunPanel } from "./RunPanel";
 import { TriggersPanel } from "./TriggersPanel";
+import { Popover } from "../ui";
 
 export function FlowEditor(props: {
   flowId: string;
@@ -65,8 +69,21 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
   const [assistBusy, setAssistBusy] = useState(false);
 
   const nodeTypes = useMemo(() => ({ flowNode: NodeCard }), []);
+  const edgeTypes = useMemo(() => ({ default: EdgeLabel }), []);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [nodeFilter, setNodeFilter] = useState("");
+  const paletteBtnRef = useRef<HTMLButtonElement>(null);
+
+  // Law 3 — the canvas viewport is persisted per flow id. Read once at mount
+  // (Inner is keyed by flowId in App, so it remounts per flow).
+  const savedViewport = useMemo<Viewport | null>(() => {
+    try {
+      const s = localStorage.getItem(`flow-viewport:${flowId}`);
+      return s ? (JSON.parse(s) as Viewport) : null;
+    } catch {
+      return null;
+    }
+  }, [flowId]);
 
   // ── undo / redo (Ctrl/Cmd+Z) ───────────────────────────────────────
   type Snap = { nodes: RFNode[]; edges: RFEdge[]; cfg: Record<string, Record<string, unknown>> };
@@ -200,6 +217,21 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
     };
   }, [flowId, setNodes, setEdges, putCandidate]);
 
+  // once the type registry has loaded, flag any node whose type isn't in it
+  useEffect(() => {
+    if (!types) return;
+    setNodes((ns) => {
+      let changed = false;
+      const next = ns.map((n) => {
+        const invalid = !types.types.includes(n.data.nodeType);
+        if (invalid === !!n.data.invalid) return n;
+        changed = true;
+        return { ...n, data: { ...n.data, invalid } };
+      });
+      return changed ? next : ns;
+    });
+  }, [types, setNodes]);
+
   async function runAssist() {
     if (!flow) return;
     setAssistBusy(true);
@@ -254,12 +286,19 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
           type: "flowNode",
           // spread new nodes on a clear grid away from the palette / controls
           position: { x: 220 + (k % 4) * 210, y: 90 + (k % 6) * 90 },
-          data: { label: t, nodeType: t, terminal: TERMINAL.has(t) },
+          data: {
+            label: t,
+            nodeType: t,
+            terminal: TERMINAL.has(t),
+            summary: summarize(t, types?.defaults[t] ?? {}),
+            invalid: types ? !types.types.includes(t) : false,
+          },
         },
       ];
     });
     setConfigById((m) => ({ ...m, [id]: structuredClone(types?.defaults[t] ?? {}) }));
     setSelNode(id);
+    setPaletteOpen(false);
   }
 
   const onNodesDelete = useCallback(
@@ -280,6 +319,11 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
   }
   function setConfig(id: string, v: Record<string, unknown>) {
     setConfigById((m) => ({ ...m, [id]: v }));
+    setNodes((ns) =>
+      ns.map((n) =>
+        n.id === id ? { ...n, data: { ...n.data, summary: summarize(n.data.nodeType, v) } } : n,
+      ),
+    );
     mark();
   }
   function setEdgeCond(id: string, c: Record<string, unknown>) {
@@ -514,6 +558,7 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
             nodes={nodes}
             edges={edges}
             nodeTypes={nodeTypes}
+            edgeTypes={edgeTypes}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
@@ -538,66 +583,78 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
             defaultEdgeOptions={{ interactionWidth: 24 }}
             onNodeDragStart={() => canEdit && snapshot()}
             onNodeDragStop={() => canEdit && setDirty(true)}
+            onMoveEnd={(_, vp) => {
+              try {
+                localStorage.setItem(`flow-viewport:${flowId}`, JSON.stringify(vp));
+              } catch {
+                /* private mode — persistence is best-effort */
+              }
+            }}
             deleteKeyCode={canEdit ? ["Backspace", "Delete"] : null}
-            fitView
+            defaultViewport={savedViewport ?? undefined}
+            fitView={!savedViewport}
+            minZoom={0.25}
+            maxZoom={2}
             proOptions={{ hideAttribution: true }}
           >
-            <Background />
-            <Controls />
+            <Background gap={18} />
             <MiniMap pannable zoomable />
           </ReactFlow>
 
+          <ZoomControl />
+
           {canEdit && (
-            <div
-              style={{
-                position: "absolute",
-                left: 10,
-                top: 10,
-                width: paletteOpen ? 210 : "auto",
-                maxHeight: "calc(100% - 20px)",
-                display: "flex",
-                flexDirection: "column",
-                gap: 6,
-                padding: 8,
-                borderRadius: 8,
-                background: "color-mix(in srgb, var(--panel) 96%, transparent)",
-                border: "1px solid var(--border)",
-                zIndex: 5,
-              }}
-            >
-              <div className="row" style={{ gap: 6, justifyContent: "space-between" }}>
-                <button
-                  className={paletteOpen ? "primary" : ""}
-                  onClick={() => setPaletteOpen((o) => !o)}
-                >
-                  {paletteOpen ? "✕ close" : "＋ add node"}
-                </button>
-              </div>
-              {paletteOpen && (
-                <>
-                  <input
-                    autoFocus
-                    value={nodeFilter}
-                    placeholder="filter…"
-                    onChange={(e) => setNodeFilter(e.target.value)}
-                  />
-                  <div style={{ overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
-                    {(types?.types ?? [])
-                      .filter((t) => t.includes(nodeFilter.trim().toLowerCase()))
-                      .map((t) => (
-                        <button
-                          key={t}
-                          onClick={() => addNode(t)}
-                          title={`add a ${t} node`}
-                          style={{ textAlign: "left" }}
-                        >
-                          ＋ {t}
-                        </button>
-                      ))}
-                  </div>
-                </>
-              )}
-            </div>
+            <>
+              <button
+                type="button"
+                ref={paletteBtnRef}
+                className="canvas-fab"
+                aria-haspopup="menu"
+                aria-expanded={paletteOpen}
+                onClick={() => setPaletteOpen((o) => !o)}
+              >
+                ＋ Add node ▾
+              </button>
+              <Popover
+                anchorRef={paletteBtnRef}
+                open={paletteOpen}
+                onClose={() => setPaletteOpen(false)}
+                width={240}
+              >
+                <div className="palette__kicker">Node types</div>
+                <input
+                  autoFocus
+                  className="ui-input"
+                  value={nodeFilter}
+                  placeholder="filter…"
+                  onChange={(e) => setNodeFilter(e.target.value)}
+                  style={{ margin: "0 2px 4px" }}
+                />
+                <div className="palette__list">
+                  {(types?.types ?? [])
+                    .filter((t) => t.includes(nodeFilter.trim().toLowerCase()))
+                    .map((t) => (
+                      <button
+                        key={t}
+                        type="button"
+                        className="palette__item"
+                        onClick={() => addNode(t)}
+                        title={`add a ${t} node`}
+                      >
+                        {t}
+                        <span className="muted" style={{ fontSize: 10.5 }}>
+                          {TERMINAL.has(t) ? "terminal" : "node"}
+                        </span>
+                      </button>
+                    ))}
+                  {(types?.types ?? []).filter((t) => t.includes(nodeFilter.trim().toLowerCase())).length === 0 && (
+                    <div className="muted" style={{ padding: "8px 10px", fontSize: 12 }}>
+                      no match
+                    </div>
+                  )}
+                </div>
+              </Popover>
+            </>
           )}
 
           {canEdit && (past.current.length > 0 || future.current.length > 0) && (
