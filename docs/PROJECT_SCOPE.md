@@ -777,6 +777,25 @@ A pass through the flow-editor web app checking each view actually works.
   `max_pages=80` yields 80 (site has ~115 sitemap URLs; depth-2 BFS + the
   ≥80-char body filter drop the rest — a `max_depth` tuning call, not a
   bug).
+- **Knowledge view listed every workspace's collections** — a user in
+  two workspaces saw two identical "Organization knowledge" rows.
+  `KnowledgeView` now filters `cols` to the active `tenantId` (same
+  scoping the flow-editor sidebar got in `c129d1f`). Latent, not fixed:
+  `_ensure_org_kb` has no uniqueness guard, so concurrent
+  `GET /api/kb/collections` could create a real in-tenant duplicate — a
+  partial unique index would close it.
+- **Crawl: sample vs. deep.** The onboarding wizard's "crawl a site" and
+  Knowledge's "＋ add source" shared one 20-page / depth-2 / 50-cap
+  path, so a real crawl only scraped the top layer. Split: the wizard is
+  now an explicit **sample** (`KbCrawlIn` max_pages 20, max_depth 2,
+  button "Sample crawl (~20 pages)"); the `public_url` connector used by
+  "＋ add source" defaults to **500 pages / depth 8** (ceilings
+  5000 / 20), exposes both as optional fields, and `_sync_public_url`
+  passes depth through. `webcrawl` sitemap pre-filter 500→5000, submap
+  cap 10→50, delay 0.3→0.2s. `api/worker.py` gives `crawl_site` /
+  `kb_sync` a **1800s** per-job budget (`WORKER_CRAWL_TIMEOUT`) vs the
+  120s default. Not built: a resumable/paged crawl for sites bigger than
+  one 1800s job.
 - **KB connected-source buttons (edit/re-sync/pause/remove) appeared
   dead** (`a11d5d3`). `kb_delete_connection` / `kb_delete_collection`
   archived entries in a per-entry loop (3 PostgREST round-trips each), so
