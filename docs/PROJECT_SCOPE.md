@@ -750,16 +750,32 @@ A pass through the flow-editor web app checking each view actually works.
   Cloudflare 403s that UA, and `RobotFileParser` turns a 403 into
   `disallow_all=True` → `can_fetch()` returns False for every URL → the
   crawl skips the whole site silently. (The site's real robots.txt is
-  `Allow: /`.) Fix: fetch robots.txt via the crawler's own session + real
-  UA; a non-200 / challenge / missing file = "no restrictions". Also:
-  a crawl that captures nothing *and* couldn't fetch its start URL now
-  raises instead of returning `[]`, so the connector records
-  `status=error` with a message. Verified: same URL now crawls 80 pages.
-  NB the deployed worker ran the pre-registry `crawl_site` shim (no
-  `kb_source_connections` row created) — a redeploy to this branch is
-  needed for crawls to go through the connector path + surface errors in
-  the KB UI. Whether the fix unblocks the *deployed* host also depends on
-  whether Cloudflare challenges that host's datacenter IP itself.
+  `Allow: /`.) Three bugs stacked, all now fixed and **verified end to
+  end against the live docker-compose stack** (that IS the deployment —
+  the Oracle VM is still parked):
+  1. **robots.txt** (`94c707e`) — fetch it via the crawler's own session
+     + real UA (Cloudflare answers that UA 200, urllib's UA 403); a
+     non-200 / challenge / missing file = "no restrictions". A crawl that
+     captures nothing *and* couldn't fetch its start URL now raises
+     instead of returning `[]`.
+  2. **`external_id` = page `<title>`** (`c2ae52e`) — GitBook/Docusaurus
+     reuse a templated `<title>` across pages, so distinct URLs collapsed
+     onto one entry (last-write-wins) and the rest got archived. Key on
+     the URL.
+  3. **`beautifulsoup4` not in the Docker image** (`81e8aaa`) — the
+     crawl connector runs in the worker and hard-imports `bs4`, but that
+     dep lived only in `requirements-ingest.txt` ("Actions only"). Every
+     crawl in the stack died `ModuleNotFoundError: bs4` — masked until
+     now by bug #1 (crawl skipped every URL before reaching
+     `_clean_markdown`). Moved `beautifulsoup4` + `pypdf` +
+     `python-docx` into `requirements.txt`.
+  After rebuilding the worker image and re-running the crawl: the
+  `gunner` "help" collection went **0 → 60 KB entries** (`max_pages` cap),
+  all `status=active`, all tenant-scoped to `ee4102db`, 60 distinct URL
+  keys, embeddings filling in via `embed_kb_entry`; the
+  `kb_source_connections` row shows `status=active`,
+  `last_result={documents:60,entries:60}`. A second run at
+  `max_pages=150` tops it up to the whole sitemap.
 
 **Older note, superseded by the above as "most recent," kept for its own
 history:**
