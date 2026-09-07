@@ -106,7 +106,16 @@ export function App() {
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
+    // auth-js re-emits SIGNED_IN on every tab focus (visibilitychange →
+    // _recoverAndRefresh) with a fresh session object. Only take the new one
+    // when the identity or token actually changed — otherwise a plain tab
+    // switch churns `session`, which cascades into a full `load()` + shell
+    // unmount below.
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) =>
+      setSession((prev) =>
+        prev?.access_token === s?.access_token && prev?.user.id === s?.user.id ? prev : s,
+      ),
+    );
     return () => sub.subscription.unsubscribe();
   }, []);
 
@@ -138,8 +147,11 @@ export function App() {
 
   useEffect(() => {
     if (session) load();
+    // key on the stable user id, not the session object — a genuine
+    // TOKEN_REFRESHED (new access_token, same user) must not blow away
+    // `tenants` and unmount the shell.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session]);
+  }, [session?.user.id]);
 
   function chooseTenant(id: string) {
     setTenantId(id);
