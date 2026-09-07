@@ -742,11 +742,24 @@ A pass through the flow-editor web app checking each view actually works.
   / blank pane; a "no view clips its content" test with tall mocked lists;
   and a regression guard that a simulated tab switch keeps the current
   view and does not refetch `/api/tenants`. All 6 web e2e specs green.
-- **Open / not yet diagnosed:** user reports the KB "Public docs site
-  (crawl)" connector (`public_url` → `ingestion/webcrawl.py`) "not
-  working" — needs the specific symptom (not in the dropdown / connect
-  errors / connects but no entries appear / crawl produces junk) before a
-  fix. Backend + worker not run this session.
+- **KB "Public docs site (crawl)" connector — diagnosed & FIXED**
+  (`94c707e`). The `gunner` workspace's crawl of `https://help.urbanpiper.com/`
+  recorded `{"pages": 0, "entries": 0}`, no error, in ~250 ms.
+  `ingestion/webcrawl.py`'s `crawl()` called `RobotFileParser.read()`,
+  which fetches `robots.txt` with urllib's `Python-urllib/x.y` UA;
+  Cloudflare 403s that UA, and `RobotFileParser` turns a 403 into
+  `disallow_all=True` → `can_fetch()` returns False for every URL → the
+  crawl skips the whole site silently. (The site's real robots.txt is
+  `Allow: /`.) Fix: fetch robots.txt via the crawler's own session + real
+  UA; a non-200 / challenge / missing file = "no restrictions". Also:
+  a crawl that captures nothing *and* couldn't fetch its start URL now
+  raises instead of returning `[]`, so the connector records
+  `status=error` with a message. Verified: same URL now crawls 80 pages.
+  NB the deployed worker ran the pre-registry `crawl_site` shim (no
+  `kb_source_connections` row created) — a redeploy to this branch is
+  needed for crawls to go through the connector path + surface errors in
+  the KB UI. Whether the fix unblocks the *deployed* host also depends on
+  whether Cloudflare challenges that host's datacenter IP itself.
 
 **Older note, superseded by the above as "most recent," kept for its own
 history:**
