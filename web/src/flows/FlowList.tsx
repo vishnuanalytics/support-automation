@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
 import type { FlowCandidate, FlowMeta, TemplateMeta } from "../types";
+import { Button, Dialog, Field, Input, Textarea, Banner, useToast } from "../ui";
+
+type Handoff = { candidate?: FlowCandidate; mermaidPrompt?: boolean };
 
 export function FlowList({
   tenantId,
@@ -18,42 +21,23 @@ export function FlowList({
   const [flows, setFlows] = useState<FlowMeta[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [templates, setTemplates] = useState<TemplateMeta[]>([]);
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+
+  // ── overlays: no prompt()/confirm()/alert() ──
+  const [newFlow, setNewFlow] = useState<{ defaultName: string; handoff: Handoff; from: string } | null>(null);
+  const [nfTeam, setNfTeam] = useState("support");
+  const [nfName, setNfName] = useState("");
+  const [promptOpen, setPromptOpen] = useState(false);
+  const [promptText, setPromptText] = useState("");
+  const [promptTeam, setPromptTeam] = useState("support");
+  const [manageOpen, setManageOpen] = useState(false);
+  const [confirmDel, setConfirmDel] = useState<string | null>(null);
 
   function reloadTemplates() {
     api.templates.list().then(setTemplates).catch(() => {});
   }
   useEffect(reloadTemplates, []);
-
-  async function fromTemplate(id: string) {
-    if (!id) return;
-    try {
-      const cand = await api.templates.graph(id);
-      await createWithHandoff(cand.name || "New flow", { candidate: cand });
-    } catch (e) {
-      alert((e as ApiError).message);
-    }
-  }
-
-  async function deleteCustomTemplate() {
-    const custom = templates.filter((t) => t.source === "custom");
-    if (custom.length === 0) return;
-    const which = prompt(
-      "Delete which custom template? (type its name)\n\n" + custom.map((t) => `- ${t.name}`).join("\n"),
-    );
-    if (!which?.trim()) return;
-    const match = custom.find((t) => t.name.toLowerCase() === which.trim().toLowerCase());
-    if (!match) {
-      alert(`no custom template named "${which.trim()}"`);
-      return;
-    }
-    if (!confirm(`Delete template "${match.name}"? This can't be undone.`)) return;
-    try {
-      await api.templates.remove(match.id);
-      reloadTemplates();
-    } catch (e) {
-      alert((e as ApiError).message);
-    }
-  }
 
   useEffect(() => {
     api
@@ -62,54 +46,73 @@ export function FlowList({
       .catch((e: ApiError) => setErr(e.message));
   }, []);
 
-  async function newFlow() {
-    const team = prompt("team (support / csm / offboarding / …)", "support");
-    if (!team?.trim()) return;
-    const name = (prompt("flow name", "Untitled flow") || "Untitled flow").trim();
-    try {
-      const { flow_id } = await api.createFlow({ team: team.trim(), name, tenant_id: tenantId });
-      onCreated(flow_id);
-    } catch (e) {
-      alert((e as ApiError).message);
-    }
+  function openNewFlow(defaultName: string, handoff: Handoff, from: string) {
+    setNfTeam("support");
+    setNfName(defaultName);
+    setErr(null);
+    setNewFlow({ defaultName, handoff, from });
   }
 
-  /** create an empty flow, stash a proposed graph for the editor to load
-   *  as an unsaved draft (Phase 19). */
-  async function createWithHandoff(
-    defaultName: string,
-    handoff: { candidate?: FlowCandidate; mermaidPrompt?: boolean },
-  ) {
-    const team = prompt("team (support / csm / offboarding / …)", "support");
-    if (!team?.trim()) return;
-    const name = (prompt("flow name", defaultName) || defaultName).trim();
+  async function submitNewFlow() {
+    if (!newFlow || !nfTeam.trim()) return;
+    setBusy(true);
     try {
-      const { flow_id } = await api.createFlow({ team: team.trim(), name, tenant_id: tenantId });
-      if (handoff.candidate) {
-        sessionStorage.setItem(
-          `pendingCandidate:${flow_id}`,
-          JSON.stringify(handoff.candidate),
-        );
-      } else if (handoff.mermaidPrompt) {
+      const { flow_id } = await api.createFlow({
+        team: nfTeam.trim(),
+        name: nfName.trim() || newFlow.defaultName,
+        tenant_id: tenantId,
+      });
+      if (newFlow.handoff.candidate) {
+        sessionStorage.setItem(`pendingCandidate:${flow_id}`, JSON.stringify(newFlow.handoff.candidate));
+      } else if (newFlow.handoff.mermaidPrompt) {
         sessionStorage.setItem(`pendingAssistMode:${flow_id}`, "mermaid");
       }
+      setNewFlow(null);
       onCreated(flow_id);
     } catch (e) {
-      alert((e as ApiError).message);
+      setErr((e as ApiError).message);
+    }
+    setBusy(false);
+  }
+
+  async function fromTemplate(id: string) {
+    if (!id) return;
+    try {
+      const cand = await api.templates.graph(id);
+      openNewFlow(cand.name || "New flow", { candidate: cand }, "template");
+    } catch (e) {
+      setErr((e as ApiError).message);
     }
   }
 
-  async function fromPrompt() {
-    const p = prompt(
-      "Describe the support flow you want — e.g. “retrieve docs, triage by tier, " +
-        "draft a reply, auto-send only if confident, otherwise ask a human”",
-    );
-    if (!p?.trim()) return;
+  async function submitPrompt() {
+    if (!promptText.trim()) return;
+    setBusy(true);
     try {
-      const res = await api.assistNewFlow(p.trim());
-      await createWithHandoff(res.name || "AI flow", { candidate: res });
+      const res = await api.assistNewFlow(promptText.trim());
+      const { flow_id } = await api.createFlow({
+        team: promptTeam.trim() || "support",
+        name: res.name || "AI flow",
+        tenant_id: tenantId,
+      });
+      sessionStorage.setItem(`pendingCandidate:${flow_id}`, JSON.stringify(res));
+      setPromptOpen(false);
+      setPromptText("");
+      onCreated(flow_id);
     } catch (e) {
-      alert((e as ApiError).message);
+      setErr((e as ApiError).message);
+    }
+    setBusy(false);
+  }
+
+  async function removeTemplate(id: string, name: string) {
+    setConfirmDel(null);
+    try {
+      await api.templates.remove(id);
+      reloadTemplates();
+      toast(`Deleted template "${name}"`);
+    } catch (e) {
+      setErr((e as ApiError).message);
     }
   }
 
@@ -117,21 +120,41 @@ export function FlowList({
   // tenant the caller belongs to (fine for the cross-tenant runs view), so the
   // editor sidebar filters here, like every other tenant-scoped view.
   const visible = flows.filter((f) => f.tenant_id === tenantId);
+  const customTemplates = templates.filter((t) => t.source === "custom");
+  const handoffNote =
+    newFlow?.from === "template"
+      ? "Starts from the template draft — review and Save in the editor."
+      : newFlow?.from === "mermaid"
+        ? "Opens the Mermaid importer once the flow is created."
+        : null;
 
   return (
     <div className="col">
       {canEdit && (
-        <div className="row" style={{ flexWrap: "wrap", gap: 4 }}>
-          <button onClick={newFlow}>＋ New flow</button>
-          <button onClick={fromPrompt} title="describe it in plain English, AI drafts the graph">
+        <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
+          <Button variant="secondary" size="sm" onClick={() => openNewFlow("Untitled flow", {}, "blank")}>
+            ＋ New flow
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setPromptText("");
+              setErr(null);
+              setPromptOpen(true);
+            }}
+            title="describe it in plain English, AI drafts the graph"
+          >
             ✨ From prompt
-          </button>
-          <button
-            onClick={() => createWithHandoff("Imported flow", { mermaidPrompt: true })}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => openNewFlow("Imported flow", { mermaidPrompt: true }, "mermaid")}
             title="start from a Mermaid flowchart"
           >
             ⬇ From Mermaid
-          </button>
+          </Button>
           {templates.length > 0 && (
             <select
               value=""
@@ -144,41 +167,49 @@ export function FlowList({
               <option value="">📋 From template…</option>
               {templates.map((t) => (
                 <option key={t.id} value={t.id} title={t.description}>
-                  {t.name}{t.source === "custom" ? " (custom)" : ""}
+                  {t.name}
+                  {t.source === "custom" ? " (custom)" : ""}
                 </option>
               ))}
             </select>
           )}
-          {templates.some((t) => t.source === "custom") && (
-            <button onClick={deleteCustomTemplate} title="delete one of your saved templates">
-              🗑 delete a custom template
-            </button>
+          {customTemplates.length > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setManageOpen(true)}
+              title="delete one of your saved templates"
+            >
+              🗑 Manage templates
+            </Button>
           )}
         </div>
       )}
-      {err && <div className="err">{err}</div>}
+
+      {err && (
+        <Banner
+          tone="exception"
+          title={err}
+          actions={
+            <Button variant="ghost" size="sm" onClick={() => setErr(null)}>
+              Dismiss
+            </Button>
+          }
+        />
+      )}
 
       {canEdit && visible.length === 0 && !err && (
         <div
           className="col"
-          style={{
-            gap: 6,
-            border: "1px solid var(--hair, #ddd)",
-            borderRadius: 10,
-            padding: 12,
-            fontSize: 13,
-          }}
+          style={{ gap: 6, border: "1px solid var(--line)", borderRadius: 2, padding: 12, fontSize: 13 }}
         >
           <strong>Get started</strong>
           <ol style={{ margin: 0, paddingLeft: 18, lineHeight: 1.7 }}>
             <li>
               Start from a template —{" "}
-              <button
-                onClick={() => fromTemplate("support-autoreply")}
-                style={{ padding: "0 4px" }}
-              >
+              <Button variant="ghost" size="sm" onClick={() => fromTemplate("support-autoreply")}>
                 Support auto-reply
-              </button>
+              </Button>
             </li>
             <li>Add knowledge in the Knowledge tab (upload a file or crawl your docs)</li>
             <li>Open the flow, send a test in the Run panel, then Publish</li>
@@ -202,6 +233,94 @@ export function FlowList({
         </div>
       ))}
       {visible.length === 0 && !err && <div className="muted">no flows in this workspace</div>}
+
+      <Dialog
+        open={!!newFlow}
+        onClose={() => setNewFlow(null)}
+        title={newFlow?.from === "blank" ? "New flow" : "New flow from a draft"}
+        actions={[
+          { label: "Cancel", variant: "ghost", onClick: () => setNewFlow(null) },
+          { label: busy ? "Creating…" : "Create", variant: "primary", onClick: submitNewFlow },
+        ]}
+      >
+        <div style={{ display: "grid", gap: 12 }}>
+          {handoffNote && <div className="muted" style={{ fontSize: 12 }}>{handoffNote}</div>}
+          <Field label="Team" hint="support / csm / offboarding / …">
+            <Input value={nfTeam} autoFocus onChange={(e) => setNfTeam(e.target.value)} />
+          </Field>
+          <Field label="Name">
+            <Input
+              value={nfName}
+              placeholder={newFlow?.defaultName}
+              onChange={(e) => setNfName(e.target.value)}
+            />
+          </Field>
+        </div>
+      </Dialog>
+
+      <Dialog
+        open={promptOpen}
+        onClose={() => setPromptOpen(false)}
+        title="Describe the flow"
+        actions={[
+          { label: "Cancel", variant: "ghost", onClick: () => setPromptOpen(false) },
+          { label: busy ? "Generating…" : "Generate", variant: "primary", onClick: submitPrompt },
+        ]}
+      >
+        <div style={{ display: "grid", gap: 12 }}>
+          <Field
+            label="What should this flow do?"
+            hint="e.g. retrieve docs, triage by tier, draft a reply, auto-send only if confident, otherwise ask a human"
+          >
+            <Textarea
+              rows={4}
+              autoFocus
+              value={promptText}
+              onChange={(e) => setPromptText(e.target.value)}
+            />
+          </Field>
+          <Field label="Team">
+            <Input value={promptTeam} onChange={(e) => setPromptTeam(e.target.value)} />
+          </Field>
+        </div>
+      </Dialog>
+
+      <Dialog
+        open={manageOpen}
+        onClose={() => {
+          setManageOpen(false);
+          setConfirmDel(null);
+        }}
+        title="Custom templates"
+        actions={[{ label: "Close", variant: "secondary", onClick: () => setManageOpen(false) }]}
+      >
+        <div style={{ display: "grid", gap: 1 }}>
+          {customTemplates.length === 0 && <div className="muted">No custom templates saved.</div>}
+          {customTemplates.map((t) => (
+            <div
+              key={t.id}
+              className="row"
+              style={{ justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid var(--surface-raised)" }}
+            >
+              <span title={t.description}>{t.name}</span>
+              {confirmDel === t.id ? (
+                <span className="row" style={{ gap: 6 }}>
+                  <Button variant="ghost" size="sm" onClick={() => setConfirmDel(null)}>
+                    Cancel
+                  </Button>
+                  <Button variant="danger" size="sm" onClick={() => removeTemplate(t.id, t.name)}>
+                    Delete
+                  </Button>
+                </span>
+              ) : (
+                <Button variant="ghost" size="sm" onClick={() => setConfirmDel(t.id)}>
+                  Delete
+                </Button>
+              )}
+            </div>
+          ))}
+        </div>
+      </Dialog>
     </div>
   );
 }

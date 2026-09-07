@@ -791,8 +791,20 @@ Delivered one BUILD-BRIEF chunk at a time, checkpointed with the user:
     column is gone. The per-kind `*Form` components stay inside
     `Inspector.tsx` (already one component per kind). `tsc` + `vite
     build` + `vitest` green.
-  - **3d — `FlowList` overlays.** Its 6 `prompt()`/`confirm()`/`alert()`
-    → `Dialog` + `useToast`.
+  - **3d — `FlowList` overlays (DONE).** Every `prompt()`/`confirm()`/
+    `alert()` gone. One **New flow** `Dialog` (team + name `Field`s)
+    serves the blank / template / Mermaid paths; **Describe the flow**
+    `Dialog` (`Textarea` + team) drives the AI path; **Custom
+    templates** `Dialog` lists saved templates with an inline
+    click-to-confirm delete. Errors → `Banner`, deletes → `useToast`.
+    `flows/` is now completely free of `prompt`/`confirm`/`alert`.
+    `tsc` + `vite build` + `vitest` green.
+
+  **Chunk 3 complete** — the flow editor is on the Broadsheet system end
+  to end: canvas visuals, toolbar, overlays, and the inspector
+  slide-over. Remaining `prompt`/`confirm`/`alert` in `web/src` are all
+  outside `flows/` (kb, channels, rules, onboarding, App) and fall to
+  their own chunks.
 - **Chunks 4–8** — Runs + Trace, Knowledge, Connections + Channels,
   Billing/Team/Activity, Setup + Login. Existing API wiring preserved
   throughout.
