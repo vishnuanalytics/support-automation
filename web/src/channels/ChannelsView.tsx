@@ -8,6 +8,7 @@ import type {
   PostHogSave,
   PostHogStatus,
 } from "../types";
+import { Banner, ConfirmButton } from "../ui";
 
 type Form = {
   provider: "imap" | "gmail";
@@ -52,11 +53,9 @@ function fromChannel(ch: EmailChannel): Form {
 
 export function ChannelsView({ tenantId }: { tenantId: string }) {
   return (
-    <div style={{ overflow: "auto", height: "100%" }}>
+    <div style={{ display: "grid", gap: 16 }}>
       <EmailPanel tenantId={tenantId} />
-      <div style={{ borderTop: "1px solid var(--border)", margin: "8px 0" }} />
       <FreshchatPanel tenantId={tenantId} />
-      <div style={{ borderTop: "1px solid var(--border)", margin: "8px 0" }} />
       <PostHogPanel tenantId={tenantId} />
     </div>
   );
@@ -123,7 +122,7 @@ function PostHogPanel({ tenantId }: { tenantId: string }) {
     }, "connection ok");
 
   return (
-    <div className="pane" style={{ overflow: "auto", padding: 16, maxWidth: 640 }}>
+    <div className="int-card">
       <h4>Product analytics — PostHog</h4>
       <p className="muted" style={{ fontSize: 12 }}>
         Connect your PostHog project and the platform will pull a per-person
@@ -180,8 +179,8 @@ function PostHogPanel({ tenantId }: { tenantId: string }) {
           placeholder="phx_..." />
       </label>
 
-      {err && <div className="banner err" style={{ marginTop: 8 }}>{err}</div>}
-      {msg && <div className="banner ok" style={{ marginTop: 8 }}>{msg}</div>}
+      {err && <Banner tone="exception" title={err} />}
+      {msg && <Banner tone="accent" title={msg} />}
 
       <div className="row" style={{ gap: 6, marginTop: 12 }}>
         <button className="primary" disabled={busy}
@@ -192,11 +191,14 @@ function PostHogPanel({ tenantId }: { tenantId: string }) {
           Test connection
         </button>
         {st?.configured && (
-          <button disabled={busy}
-            onClick={() => confirm("Disconnect PostHog?") &&
-              run(() => api.posthog.remove(tenantId), "disconnected")}>
-            Disconnect
-          </button>
+          <ConfirmButton
+            label="Disconnect"
+            variant="secondary"
+            disabled={busy}
+            title="Disconnect PostHog?"
+            confirmLabel="Disconnect"
+            onConfirm={() => run(() => api.posthog.remove(tenantId), "disconnected")}
+          />
         )}
       </div>
     </div>
@@ -272,7 +274,7 @@ function EmailPanel({ tenantId }: { tenantId: string }) {
     }, "connection ok");
 
   return (
-    <div className="pane" style={{ overflow: "auto", padding: 16, maxWidth: 640 }}>
+    <div className="int-card">
       <h4>Email channel</h4>
       <p className="muted" style={{ fontSize: 12 }}>
         Point a support mailbox here and the platform will run each incoming
@@ -390,8 +392,8 @@ function EmailPanel({ tenantId }: { tenantId: string }) {
         poll this mailbox (active)
       </label>
 
-      {err && <div className="banner err">{err}</div>}
-      {msg && <div className="banner ok">{msg}</div>}
+      {err && <Banner tone="exception" title={err} />}
+      {msg && <Banner tone="accent" title={msg} />}
 
       <div className="row" style={{ gap: 6, marginTop: 10 }}>
         {f.provider === "imap" && (
@@ -403,11 +405,13 @@ function EmailPanel({ tenantId }: { tenantId: string }) {
           Save
         </button>
         {ch?.configured && (
-          <button className="err" disabled={busy}
-            onClick={() => confirm("Disconnect this mailbox?") &&
-              run(() => api.email.remove(tenantId), "disconnected")}>
-            Disconnect
-          </button>
+          <ConfirmButton
+            label="Disconnect"
+            disabled={busy}
+            title="Disconnect this mailbox?"
+            confirmLabel="Disconnect"
+            onConfirm={() => run(() => api.email.remove(tenantId), "disconnected")}
+          />
         )}
       </div>
     </div>
@@ -515,7 +519,7 @@ function FreshchatPanel({ tenantId }: { tenantId: string }) {
   }
 
   return (
-    <div className="pane" style={{ overflow: "auto", padding: 16, maxWidth: 640 }}>
+    <div className="int-card">
       <h4>Freshchat channel</h4>
       <p className="muted" style={{ fontSize: 12 }}>
         Connect a Freshchat account and the platform will run each incoming
@@ -618,8 +622,8 @@ function FreshchatPanel({ tenantId }: { tenantId: string }) {
         <strong>auto-send replies</strong> — off = every reply waits for a human
       </label>
 
-      {err && <div className="banner err">{err}</div>}
-      {msg && <div className="banner ok">{msg}</div>}
+      {err && <Banner tone="exception" title={err} />}
+      {msg && <Banner tone="accent" title={msg} />}
 
       <div className="row" style={{ gap: 6, marginTop: 10 }}>
         <button onClick={testConn} disabled={busy || !f.domain}>
@@ -630,11 +634,13 @@ function FreshchatPanel({ tenantId }: { tenantId: string }) {
           Save
         </button>
         {ch?.configured && (
-          <button className="err" disabled={busy}
-            onClick={() => confirm("Disconnect Freshchat?") &&
-              run(() => api.freshchat.remove(tenantId), "disconnected")}>
-            Disconnect
-          </button>
+          <ConfirmButton
+            label="Disconnect"
+            disabled={busy}
+            title="Disconnect Freshchat?"
+            confirmLabel="Disconnect"
+            onConfirm={() => run(() => api.freshchat.remove(tenantId), "disconnected")}
+          />
         )}
       </div>
     </div>

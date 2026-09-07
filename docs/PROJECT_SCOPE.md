@@ -842,8 +842,24 @@ Delivered one BUILD-BRIEF chunk at a time, checkpointed with the user:
     use the primitives. Every `alert()` in `kb/` is gone — `kb/` is now
     completely free of `prompt`/`confirm`/`alert`. `tsc` + `vite build`
     + `vitest` green.
-- **Chunks 6–8** — Connections + Channels, Billing/Team/Activity,
-  Setup + Login. Existing API wiring preserved throughout.
+- **Chunk 6 — Connections + Channels (DONE).** New
+  `channels/IntegrationsView.tsx` — one shell with a 44px `Toolbar` and a
+  `Segmented` **Integrations / Channels** switch over a single scroll
+  body. `App.tsx` collapses the two nav items into one "Connections"
+  view. `ConnectionsView` and `ChannelsView` lose their view-level
+  `max-width` / padding / scroll roots; each sub-panel (HTTP
+  connections, Case system, Case taxonomy, Salesforce, Zendesk, AI
+  models; Email, Freshchat, PostHog) is an `.int-card`. New
+  `ui/ConfirmButton` (a button that routes through a `Dialog`) — the
+  drop-in for `confirm(...) && do()`; used for the 3 channel
+  disconnects, and the Zendesk-disconnect / taxonomy-reset are their own
+  `Dialog`s. All `.banner` → `Banner`. `channels/` is now free of
+  `confirm`/`alert`/`prompt`. Full health-bucketed connector cards
+  (live / needs attention / available) from Screen 05 are a later polish
+  pass — this chunk is the shell + overlay-law + card grouping.
+  `tsc` + `vite build` + `vitest` green.
+- **Chunks 7–8** — Billing/Team/Activity, Setup + Login. Existing API
+  wiring preserved throughout.
 
 **Older note, superseded by the above as "most recent," kept for its
 own history:**

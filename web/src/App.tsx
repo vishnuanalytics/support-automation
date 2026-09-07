@@ -11,8 +11,7 @@ import { TraceView } from "./trace/TraceView";
 import { KnowledgeView } from "./kb/KnowledgeView";
 import { RulesView } from "./rules/RulesView";
 import { TeamView } from "./team/TeamView";
-import { ChannelsView } from "./channels/ChannelsView";
-import { ConnectionsView } from "./channels/ConnectionsView";
+import { IntegrationsView } from "./channels/IntegrationsView";
 import { FlowGuideView } from "./guide/FlowGuideView";
 import { BillingView } from "./billing/BillingView";
 import { ActivityView } from "./activity/ActivityView";
@@ -30,7 +29,6 @@ type View =
   | "rules"
   | "guide"
   | "team"
-  | "channels"
   | "connections"
   | "billing"
   | "activity";
@@ -63,7 +61,6 @@ const NAV_GROUPS: { key: string; label: string; items: { view: View; label: stri
     label: "Admin",
     items: [
       { view: "team", label: "Team", ownerOnly: true },
-      { view: "channels", label: "Channels", ownerOnly: true },
       { view: "connections", label: "Connections", ownerOnly: true },
       { view: "billing", label: "Billing", ownerOnly: true },
     ],
@@ -357,11 +354,9 @@ export function App() {
         ) : view === "billing" ? (
           <BillingView key={tenantId} tenantId={tenantId} />
         ) : view === "connections" ? (
-          <ConnectionsView key={tenantId} tenantId={tenantId} />
+          <IntegrationsView key={tenantId} tenantId={tenantId} />
         ) : view === "team" ? (
           <TeamView key={tenantId} tenantId={tenantId} />
-        ) : view === "channels" ? (
-          <ChannelsView key={tenantId} tenantId={tenantId} />
         ) : view === "guide" ? (
           <FlowGuideView />
         ) : view === "rules" ? (

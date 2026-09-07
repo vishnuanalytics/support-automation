@@ -340,6 +340,20 @@ code { font-family: var(--font-mono); }
 .kb-collection__docs { flex: 1; min-height: 0; padding: 0 var(--content-pad) var(--content-pad); }
 .kb-sources { display: grid; gap: 10px; border: 1px solid var(--line); border-radius: var(--radius-md); padding: 12px; background: var(--surface); }
 
+/* integrations / channels — one shell, a segmented switch */
+.int-shell { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.int-shell > .app-toolbar { flex: none; }
+.int-body { flex: 1; min-height: 0; overflow-y: auto; padding: var(--content-pad); }
+.int-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  background: var(--surface);
+}
+.int-card > h3 { margin: 0; font: var(--type-section); }
+
 .trace-shell { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .trace-shell > .app-toolbar { flex: none; }
 .trace-body { flex: 1; min-height: 0; overflow-y: auto; padding: var(--content-pad); }

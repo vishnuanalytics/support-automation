@@ -4,6 +4,7 @@ import type {
   CaseTaxonomy, Connection, ConnectionAction, SalesforceOrg, SalesforceOrgSchema,
   ZendeskConnection, ZendeskConnectionSave,
 } from "../types";
+import { Banner, Button, Dialog } from "../ui";
 
 const AUTH_TYPES = ["none", "bearer", "header", "basic"] as const;
 
@@ -51,14 +52,13 @@ export function ConnectionsView({ tenantId }: { tenantId: string }) {
   };
 
   return (
-    <div className="view-scroll col" style={{ gap: 16, maxWidth: 760, padding: 16 }}>
-      <h2 style={{ margin: 0 }}>Connections</h2>
-      <p style={{ margin: 0, color: "var(--muted, #667)" }}>
+    <div className="col" style={{ gap: 16 }}>
+      <p style={{ margin: 0 }} className="muted">
         A named base URL + credentials an <code>http_request</code> flow node can call.
         The secret is stored server-side and never shown again.
       </p>
 
-      {err && <div className="banner err">{err}</div>}
+      {err && <Banner tone="exception" title={err} actions={<Button variant="ghost" size="sm" onClick={() => setErr(null)}>Dismiss</Button>} />}
 
       <table className="runs-table">
         <thead>
@@ -224,8 +224,8 @@ function CaseConnectorPicker({ tenantId }: { tenantId: string }) {
 
   if (value === null) return null;
   return (
-    <div className="col" style={{ gap: 8, borderTop: "1px solid var(--hair,#ddd)", paddingTop: 16 }}>
-      <h3 style={{ margin: 0 }}>Case system</h3>
+    <div className="int-card">
+      <h3>Case system</h3>
       <p style={{ margin: 0, color: "var(--muted, #667)" }}>
         Which connected system your case-touching flow nodes (routing, notes, assignment,
         replies) write to by default. Connect it below before switching to it.
@@ -288,8 +288,9 @@ function CaseTaxonomyPanel({ tenantId }: { tenantId: string }) {
     }
   }
 
+  const [askReset, setAskReset] = useState(false);
   async function reset() {
-    if (!confirm("Reset to the built-in default taxonomy? Any override is discarded.")) return;
+    setAskReset(false);
     setBusy(true);
     setMsg(null);
     try {
@@ -305,8 +306,19 @@ function CaseTaxonomyPanel({ tenantId }: { tenantId: string }) {
 
   if (!tax) return null;
   return (
-    <div className="col" style={{ gap: 8, borderTop: "1px solid var(--hair,#ddd)", paddingTop: 16 }}>
-      <h3 style={{ margin: 0 }}>Case taxonomy</h3>
+    <div className="int-card">
+      <h3>Case taxonomy</h3>
+      <Dialog
+        open={askReset}
+        onClose={() => setAskReset(false)}
+        title="Reset the case taxonomy?"
+        actions={[
+          { label: "Cancel", variant: "ghost", onClick: () => setAskReset(false) },
+          { label: "Reset", variant: "danger", onClick: reset },
+        ]}
+      >
+        The built-in default taxonomy is restored and your override is discarded.
+      </Dialog>
       <p style={{ margin: 0, color: "var(--muted, #667)" }}>
         Which keywords map a case to Module / Sub-module / Region / Type. Only the keys you
         include here override the built-in default — an empty <code>{"{}"}</code> uses it as-is.
@@ -320,7 +332,7 @@ function CaseTaxonomyPanel({ tenantId }: { tenantId: string }) {
       {!parsed.ok && <div className="err" style={{ fontSize: 11 }}>{parsed.msg}</div>}
       <div className="row" style={{ gap: 8, alignItems: "center" }}>
         <button className="primary" disabled={busy || !parsed.ok} onClick={save}>save</button>
-        <button disabled={busy} onClick={reset}>reset to defaults</button>
+        <button disabled={busy} onClick={() => setAskReset(true)}>reset to defaults</button>
         <button onClick={() => setShowDefaults(!showDefaults)}>
           {showDefaults ? "hide" : "show"} built-in defaults
         </button>
@@ -391,9 +403,29 @@ function ZendeskPanel({ tenantId }: { tenantId: string }) {
       if (!r.ok) throw new ApiError(0, r.error || "connection failed");
     }, "connection ok");
 
+  const [askDisconnect, setAskDisconnect] = useState(false);
+
   return (
-    <div className="col" style={{ gap: 8, borderTop: "1px solid var(--hair,#ddd)", paddingTop: 16 }}>
-      <h3 style={{ margin: 0 }}>Zendesk</h3>
+    <div className="int-card">
+      <h3>Zendesk</h3>
+      <Dialog
+        open={askDisconnect}
+        onClose={() => setAskDisconnect(false)}
+        title="Disconnect Zendesk?"
+        actions={[
+          { label: "Cancel", variant: "ghost", onClick: () => setAskDisconnect(false) },
+          {
+            label: "Disconnect",
+            variant: "danger",
+            onClick: () => {
+              setAskDisconnect(false);
+              void run(() => api.zendesk.remove(tenantId), "disconnected");
+            },
+          },
+        ]}
+      >
+        This tenant stops using Zendesk as its case system.
+      </Dialog>
       <p style={{ margin: 0, color: "var(--muted, #667)" }}>
         Connect a Zendesk account to use it as this tenant's case system (pick it above once
         connected). Ticket comments/status/assignment map onto Zendesk's own model — see the
@@ -421,8 +453,8 @@ function ZendeskPanel({ tenantId }: { tenantId: string }) {
         flagged for a human first)
       </label>
 
-      {err && <div className="banner err">{err}</div>}
-      {msg && <div className="banner ok">{msg}</div>}
+      {err && <Banner tone="exception" title={err} />}
+      {msg && <Banner tone="accent" title={msg} />}
 
       <div className="row" style={{ gap: 6 }}>
         <button onClick={testConn} disabled={busy || !f.subdomain || !f.email}>Test connection</button>
@@ -431,8 +463,7 @@ function ZendeskPanel({ tenantId }: { tenantId: string }) {
           Save
         </button>
         {ch?.configured && (
-          <button className="err" disabled={busy}
-            onClick={() => confirm("Disconnect Zendesk?") && run(() => api.zendesk.remove(tenantId), "disconnected")}>
+          <button className="err" disabled={busy} onClick={() => setAskDisconnect(true)}>
             Disconnect
           </button>
         )}
@@ -600,8 +631,8 @@ function AiModelsPanel({ tenantId }: { tenantId: string }) {
   };
 
   return (
-    <div className="col" style={{ gap: 12, borderTop: "1px solid var(--hair,#ddd)", paddingTop: 16 }}>
-      <h3 style={{ margin: 0 }}>AI models</h3>
+    <div className="int-card">
+      <h3>AI models</h3>
       <p style={{ margin: 0, color: "var(--muted, #667)" }}>
         Every flow node that calls an LLM (drafting a reply, classifying, judging)
         uses this deployment's own key by default — Groq's free tier needs nothing
@@ -760,8 +791,8 @@ function SalesforceOrgsPanel({ tenantId }: { tenantId: string }) {
   };
 
   return (
-    <div className="col" style={{ gap: 12, borderTop: "1px solid var(--hair,#ddd)", paddingTop: 16 }}>
-      <h3 style={{ margin: 0 }}>Salesforce</h3>
+    <div className="int-card">
+      <h3>Salesforce</h3>
       <p style={{ margin: 0, color: "var(--muted, #667)" }}>
         Connect one or more Salesforce orgs (e.g. a production org + a sandbox) using a Connected
         App's JWT bearer credentials. "Fetch from org" pulls your real Case fields, picklist values,
