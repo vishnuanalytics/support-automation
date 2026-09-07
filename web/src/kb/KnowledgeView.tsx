@@ -9,6 +9,21 @@ import type {
   KbEntry,
   KbEntryRow,
 } from "../types";
+import {
+  Button,
+  Tag,
+  Banner,
+  Dialog,
+  SlideOver,
+  Field,
+  Input,
+  Textarea,
+  DataTable,
+  EmptyState,
+  useToast,
+  type Column,
+  type TagTone,
+} from "../ui";
 
 /**
  * Self-serve knowledge base (Phase 14). Every tenant has one **org-level
@@ -38,85 +53,105 @@ export function KnowledgeView({ tenantId }: { tenantId: string }) {
     void refresh();
   }, [refresh]);
 
-  async function newCollection() {
-    const name = prompt(
-      "Name for an extra collection (optional — most orgs just use the org knowledge base):",
-    )?.trim();
+  const [newColOpen, setNewColOpen] = useState(false);
+  const [newColName, setNewColName] = useState("");
+
+  async function createCollection() {
+    const name = newColName.trim();
     if (!name) return;
     try {
       const { source_id } = await api.kb.createCollection({ name, tenant_id: tenantId });
+      setNewColOpen(false);
+      setNewColName("");
       await refresh();
       setSel(source_id);
     } catch (e) {
-      alert(e instanceof ApiError ? String(e.detail) : String(e));
+      setErr(e instanceof ApiError ? String(e.detail) : String(e));
     }
   }
 
   const orgKb = cols.filter((c) => c.org_kb);
   const teamCols = cols.filter((c) => !c.org_kb);
 
-  const railBtn = (c: KbCollection) => (
+  const railItem = (c: KbCollection) => (
     <button
       key={c.source_id}
-      className={c.source_id === sel ? "primary" : ""}
-      style={{ justifyContent: "space-between", display: "flex", gap: 6 }}
+      className={`flow-item${c.source_id === sel ? " active" : ""}`}
+      style={{ textAlign: "left", width: "100%", border: 0, background: "transparent" }}
       onClick={() => setSel(c.source_id)}
     >
-      <span>{c.name}</span>
-      <span className="row" style={{ gap: 4 }}>
-        {!!c.provisional_count && (
-          <span
-            title={`${c.provisional_count} entr${c.provisional_count === 1 ? "y" : "ies"} held pending review`}
-            style={{ fontSize: 11, padding: "0 5px", borderRadius: 8, background: "#8a5a00", color: "#fff" }}
-          >
-            {c.provisional_count} held
-          </span>
-        )}
-        <span className="muted">{c.entry_count}</span>
-      </span>
+      <div className="row" style={{ justifyContent: "space-between", gap: 6 }}>
+        <span style={{ fontWeight: c.source_id === sel ? 600 : 400 }}>{c.name}</span>
+        <span className="row" style={{ gap: 4 }}>
+          {!!c.provisional_count && (
+            <Tag tone="warn">{c.provisional_count} held</Tag>
+          )}
+          <span className="muted" style={{ font: "var(--type-mono)" }}>{c.entry_count}</span>
+        </span>
+      </div>
     </button>
   );
 
   return (
-    <div style={{ display: "flex", height: "100%", minHeight: 0 }}>
-      <div
-        className="col"
-        style={{ width: 220, borderRight: "1px solid var(--border)", padding: 10, gap: 8, overflow: "auto" }}
-      >
-        <strong>Knowledge</strong>
-        {err && <div className="err" style={{ fontSize: 12 }}>{err}</div>}
-        <div className="col" style={{ gap: 2 }}>{orgKb.map(railBtn)}</div>
+    <div className="kb-shell">
+      <aside className="kb-rail">
+        <div className="kb-rail__head">
+          <strong>Knowledge</strong>
+        </div>
+        <div className="kb-rail__scroll">
+          {err && <Banner tone="exception" title={err} actions={<Button variant="ghost" size="sm" onClick={() => setErr(null)}>Dismiss</Button>} />}
+          <div style={{ display: "grid", gap: 2 }}>{orgKb.map(railItem)}</div>
 
-        <div className="row" style={{ justifyContent: "space-between", marginTop: 6 }}>
-          <span className="muted" style={{ fontSize: 11 }}>Additional collections</span>
-          <button
-            style={{ fontSize: 11, padding: "0 6px" }}
-            title="Optional — a separate collection a flow can scope to. Most orgs don't need one."
-            onClick={newCollection}
-          >
-            ＋
-          </button>
-        </div>
-        <div className="col" style={{ gap: 2 }}>
-          {teamCols.map(railBtn)}
-          {teamCols.length === 0 && (
-            <div className="muted" style={{ fontSize: 11 }}>none — everything feeds the org KB</div>
-          )}
-        </div>
-      </div>
-      <div style={{ flex: 1, minWidth: 0, overflow: "auto" }}>
-        {sel && cols.find((c) => c.source_id === sel) ? (
-          <Collection
-            key={sel}
-            col={cols.find((c) => c.source_id === sel)!}
-            onChange={refresh}
-          />
-        ) : (
-          <div className="muted" style={{ display: "grid", placeItems: "center", height: "100%" }}>
-            select a collection
+          <div className="row" style={{ justifyContent: "space-between", margin: "12px 0 4px" }}>
+            <span className="muted" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".12em" }}>
+              Additional collections
+            </span>
+            <Button
+              variant="icon"
+              size="sm"
+              aria-label="New collection"
+              title="Optional — a separate collection a flow can scope to."
+              onClick={() => {
+                setNewColName("");
+                setNewColOpen(true);
+              }}
+            >
+              ＋
+            </Button>
           </div>
+          <div style={{ display: "grid", gap: 2 }}>
+            {teamCols.map(railItem)}
+            {teamCols.length === 0 && (
+              <div className="muted" style={{ fontSize: 11 }}>none — everything feeds the org KB</div>
+            )}
+          </div>
+        </div>
+      </aside>
+
+      <div className="kb-main">
+        {sel && cols.find((c) => c.source_id === sel) ? (
+          <Collection key={sel} col={cols.find((c) => c.source_id === sel)!} onChange={refresh} />
+        ) : (
+          <EmptyState title="Select a collection" body="Pick one from the list on the left." />
         )}
       </div>
+
+      <Dialog
+        open={newColOpen}
+        onClose={() => setNewColOpen(false)}
+        title="New collection"
+        actions={[
+          { label: "Cancel", variant: "ghost", onClick: () => setNewColOpen(false) },
+          { label: "Create", variant: "primary", onClick: createCollection },
+        ]}
+      >
+        <Field
+          label="Name"
+          hint="Optional — most orgs just use the org knowledge base. A separate collection is one a flow can scope its retrieval to."
+        >
+          <Input value={newColName} autoFocus onChange={(e) => setNewColName(e.target.value)} />
+        </Field>
+      </Dialog>
     </div>
   );
 }
@@ -125,6 +160,9 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
   const [entries, setEntries] = useState<KbEntryRow[]>([]);
   const [openId, setOpenId] = useState<string | "new" | null>(null);
   const [showRetired, setShowRetired] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [askArchive, setAskArchive] = useState(false);
+  const toast = useToast();
 
   const [gApi, setGApi] = useState<{ configured: boolean; connected: boolean }>({
     configured: false,
@@ -150,9 +188,13 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
   }, [load, loadGoogle]);
 
   async function removeCollection() {
-    if (!confirm(`archive collection "${col.name}" and all its entries?`)) return;
-    await api.kb.deleteCollection(col.source_id);
-    onChange();
+    setAskArchive(false);
+    try {
+      await api.kb.deleteCollection(col.source_id);
+      onChange();
+    } catch (e) {
+      setErr(e instanceof ApiError ? String(e.detail) : String(e));
+    }
   }
 
   async function connectGoogle() {
@@ -169,10 +211,10 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
   async function resync(entryId: string) {
     try {
       await api.kb.resyncGdoc(entryId);
-      alert("Re-syncing this source in the background — updated entries will appear shortly.");
+      toast("Re-syncing in the background — updated entries appear shortly");
       void load();
     } catch (e) {
-      alert(e instanceof ApiError ? String(e.detail) : String(e));
+      setErr(e instanceof ApiError ? String(e.detail) : String(e));
     }
   }
 
@@ -185,10 +227,11 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
     });
     try {
       await api.kb.upload(col.source_id, { filename: file.name, content_b64: b64 });
+      toast(`Uploaded "${file.name}" — embedding in the background`);
       void load();
       onChange();
     } catch (e) {
-      alert(e instanceof ApiError ? String(e.detail) : String(e));
+      setErr(e instanceof ApiError ? String(e.detail) : String(e));
     }
   }
 
@@ -203,7 +246,7 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
       a.click();
       URL.revokeObjectURL(url);
     } catch (e) {
-      alert(e instanceof ApiError ? String(e.detail) : String(e));
+      setErr(e instanceof ApiError ? String(e.detail) : String(e));
     }
   }
 
@@ -212,22 +255,23 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
     try {
       bundle = JSON.parse(await file.text());
     } catch {
-      alert("not valid JSON");
+      setErr("That file isn't valid JSON.");
       return;
     }
     const entries = bundle.entries;
     if (!Array.isArray(entries) || entries.length === 0) {
-      alert("no entries found in this file — expected an export-shaped JSON ({ entries: [...] })");
+      setErr("No entries found — expected an export-shaped JSON ({ entries: [...] }).");
       return;
     }
     try {
       const res = await api.kb.import(col.source_id, entries);
-      let msg = `importing ${res.accepted} entries in the background — they'll appear here as they're embedded.`;
-      if (res.warnings.length > 0) msg += `\n\nskipped:\n` + res.warnings.join("\n");
-      alert(msg);
+      toast(
+        `Importing ${res.accepted} entries in the background` +
+          (res.warnings.length ? ` · ${res.warnings.length} skipped` : ""),
+      );
       void load();
     } catch (e) {
-      alert(e instanceof ApiError ? String(e.detail) : String(e));
+      setErr(e instanceof ApiError ? String(e.detail) : String(e));
     }
   }
 
@@ -235,167 +279,215 @@ function Collection({ col, onChange }: { col: KbCollection; onChange: () => void
   const visible = entries.filter((e) => showRetired || e.status !== "superseded");
   const heldCount = entries.filter((e) => e.status === "provisional").length;
 
+  const columns: Column<KbEntryRow>[] = [
+    {
+      key: "title",
+      header: "document",
+      cell: (e) => (
+        <span style={{ opacity: e.status === "superseded" ? 0.55 : 1 }}>
+          {e.origin === "gdoc" && <span title={e.gdoc_url ?? "Google Doc"}>🔗 </span>}
+          {e.title}
+          <KbStatusBadge entry={e} />
+          {e.sync_error && <span className="err" style={{ fontSize: 11 }}> · sync error</span>}
+        </span>
+      ),
+    },
+    {
+      key: "chunks",
+      header: "chunks",
+      align: "right",
+      cell: (e) => <span className="muted" style={{ font: "var(--type-mono)" }}>{e.chunk_count}</span>,
+    },
+    {
+      key: "updated",
+      header: "updated",
+      align: "right",
+      cell: (e) => (
+        <span className="muted" style={{ font: "var(--type-mono)" }}>
+          {e.origin === "gdoc" && e.synced_at
+            ? `synced ${new Date(e.synced_at).toLocaleString()}`
+            : new Date(e.updated_at).toLocaleString()}
+        </span>
+      ),
+    },
+    {
+      key: "act",
+      header: "",
+      align: "right",
+      cell: (e) =>
+        e.connection_id ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={(ev) => {
+              ev.stopPropagation();
+              void resync(e.entry_id);
+            }}
+            title="re-sync this source"
+          >
+            re-sync
+          </Button>
+        ) : null,
+    },
+  ];
+
+  const openEntry = openId === "new" ? null : entries.find((e) => e.entry_id === openId) ?? null;
+
   return (
-    <div className="col" style={{ padding: 16, gap: 12, overflow: "auto" }}>
-      <div className="row" style={{ justifyContent: "space-between" }}>
-        <div className="col" style={{ gap: 2 }}>
-          <h3 style={{ margin: 0 }}>
-            {col.name}
-            {col.org_kb && (
-              <span
-                title="The default knowledge base — every connected source feeds it and your chat flows read all of it"
-                style={{
-                  fontSize: 11, marginLeft: 8, padding: "1px 6px", borderRadius: 8,
-                  background: "#2b6a2b", color: "#fff", verticalAlign: "middle",
-                }}
-              >
-                org default
+    <div className="kb-collection">
+      <div className="kb-collection__head">
+        <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+          <div style={{ display: "grid", gap: 4 }}>
+            <div className="row" style={{ gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
+              <span style={{ font: "var(--type-view-title)" }}>{col.name}</span>
+              {col.org_kb && (
+                <span title="The default knowledge base — every connected source feeds it and your chat flows read all of it">
+                  <Tag tone="accent">org default</Tag>
+                </span>
+              )}
+              {heldCount > 0 && <Tag tone="warn">{heldCount} held</Tag>}
+            </div>
+            {col.description && <span className="muted">{col.description}</span>}
+            {heldCount > 0 && (
+              <span className="muted" style={{ fontSize: 12 }}>
+                {heldCount} entr{heldCount === 1 ? "y is" : "ies are"} <strong>held: disputed</strong> —
+                retrievable but flagged until review clears.
               </span>
             )}
-          </h3>
-          {col.description && <span className="muted">{col.description}</span>}
-          {heldCount > 0 && (
-            <span className="muted" style={{ fontSize: 12 }}>
-              {heldCount} entr{heldCount === 1 ? "y is" : "ies are"} <strong>held: disputed</strong> —
-              a review-drafted change, retrievable but flagged until it clears review.
-            </span>
-          )}
+          </div>
+          <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
+            <Button variant="secondary" size="sm" onClick={() => setOpenId("new")}>
+              ＋ Entry
+            </Button>
+            <label className="ui-btn ui-btn--secondary ui-btn--sm" style={{ cursor: "pointer" }}>
+              ⬆ Upload
+              <input
+                type="file"
+                accept=".pdf,.docx,.md,.markdown,.txt,.csv,.json"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  e.currentTarget.value = "";
+                  if (f) void uploadFile(f);
+                }}
+              />
+            </label>
+            <Button variant="ghost" size="sm" onClick={exportCollection} title="download a JSON backup">
+              ⬇ Export
+            </Button>
+            <label className="ui-btn ui-btn--ghost ui-btn--sm" style={{ cursor: "pointer" }} title="restore from a backup">
+              ⬆ Import
+              <input
+                type="file"
+                accept=".json"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  e.currentTarget.value = "";
+                  if (f) void importBackup(f);
+                }}
+              />
+            </label>
+            <Button variant="danger" size="sm" onClick={() => setAskArchive(true)}>
+              Archive
+            </Button>
+          </div>
         </div>
-        <div className="row">
-          <button onClick={() => setOpenId("new")}>＋ entry</button>
-          <label className="button" style={{ cursor: "pointer" }}>
-            ⬆ upload file
-            <input
-              type="file"
-              accept=".pdf,.docx,.md,.markdown,.txt,.csv,.json"
-              style={{ display: "none" }}
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                e.currentTarget.value = "";
-                if (f) void uploadFile(f);
-              }}
-            />
-          </label>
-          <button onClick={exportCollection} title="download a JSON backup of this collection">
-            ⬇ export
-          </button>
-          <label className="button" style={{ cursor: "pointer" }} title="restore entries from a backup">
-            ⬆ import backup
-            <input
-              type="file"
-              accept=".json"
-              style={{ display: "none" }}
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                e.currentTarget.value = "";
-                if (f) void importBackup(f);
-              }}
-            />
-          </label>
-          <button className="err" onClick={removeCollection}>archive collection</button>
-        </div>
-      </div>
 
-      <ConnectedSources
-        col={col}
-        google={gApi}
-        onConnectGoogle={connectGoogle}
-        onChange={() => {
-          void load();
-          onChange();
-        }}
-      />
+        {err && (
+          <Banner
+            tone="exception"
+            title={err}
+            actions={<Button variant="ghost" size="sm" onClick={() => setErr(null)}>Dismiss</Button>}
+          />
+        )}
 
-      {openId === "new" && (
-        <EntryEditor
-          collectionId={col.source_id}
-          onDone={() => {
-            setOpenId(null);
+        <ConnectedSources
+          col={col}
+          google={gApi}
+          onConnectGoogle={connectGoogle}
+          onChange={() => {
             void load();
             onChange();
           }}
-          onCancel={() => setOpenId(null)}
         />
-      )}
 
-      {retiredCount > 0 && (
-        <label className="row muted" style={{ gap: 6, fontSize: 12 }}>
-          <input
-            type="checkbox"
-            checked={showRetired}
-            onChange={(e) => setShowRetired(e.target.checked)}
+        {retiredCount > 0 && (
+          <label className="row muted" style={{ gap: 6, fontSize: 12 }}>
+            <input
+              type="checkbox"
+              style={{ width: "auto" }}
+              checked={showRetired}
+              onChange={(e) => setShowRetired(e.target.checked)}
+            />
+            show {retiredCount} retired (superseded) entr{retiredCount === 1 ? "y" : "ies"}
+          </label>
+        )}
+      </div>
+
+      <div className="kb-collection__docs">
+        <DataTable
+          columns={columns}
+          rows={visible}
+          rowId={(e) => e.entry_id}
+          selectedId={openEntry?.entry_id ?? null}
+          onSelect={(e) => setOpenId(e.entry_id)}
+          empty={
+            <EmptyState
+              title="No entries yet"
+              body="Add a runbook or config note, or connect a source above."
+              action={
+                <Button variant="secondary" size="sm" onClick={() => setOpenId("new")}>
+                  ＋ Entry
+                </Button>
+              }
+            />
+          }
+        />
+      </div>
+
+      <SlideOver
+        open={openId != null}
+        onClose={() => setOpenId(null)}
+        width={720}
+        title={openId === "new" ? "New entry" : openEntry?.title ?? "Entry"}
+      >
+        {openId === "new" ? (
+          <EntryEditor
+            collectionId={col.source_id}
+            onDone={() => {
+              setOpenId(null);
+              void load();
+              onChange();
+            }}
+            onCancel={() => setOpenId(null)}
           />
-          show {retiredCount} retired (superseded) entr{retiredCount === 1 ? "y" : "ies"}
-        </label>
-      )}
+        ) : openEntry ? (
+          <EntryEditor
+            collectionId={col.source_id}
+            entryId={openEntry.entry_id}
+            onDone={() => {
+              setOpenId(null);
+              void load();
+              onChange();
+            }}
+            onCancel={() => setOpenId(null)}
+          />
+        ) : null}
+      </SlideOver>
 
-      <table className="runs-table">
-        <thead>
-          <tr>
-            <th>title</th>
-            <th>chunks</th>
-            <th>updated</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
-          {visible.map((e) => (
-            <Fragment key={e.entry_id}>
-              <tr style={e.status === "superseded" ? { opacity: 0.55 } : undefined}>
-                <td>
-                  {e.origin === "gdoc" && <span title={e.gdoc_url ?? "Google Doc"}>🔗 </span>}
-                  {e.title}
-                  <KbStatusBadge entry={e} />
-                  {e.sync_error && (
-                    <span className="err" style={{ fontSize: 11 }}> · sync error</span>
-                  )}
-                </td>
-                <td className="muted">{e.chunk_count}</td>
-                <td className="muted">
-                  {e.origin === "gdoc" && e.synced_at
-                    ? `synced ${new Date(e.synced_at).toLocaleString()}`
-                    : new Date(e.updated_at).toLocaleString()}
-                </td>
-                <td className="row" style={{ gap: 4 }}>
-                  {e.connection_id && (
-                    <button onClick={() => resync(e.entry_id)} title="re-sync this source">
-                      re-sync
-                    </button>
-                  )}
-                  <button
-                    onClick={() => setOpenId(openId === e.entry_id ? null : e.entry_id)}
-                  >
-                    {openId === e.entry_id ? "close" : e.origin === "gdoc" ? "view" : "edit"}
-                  </button>
-                </td>
-              </tr>
-              {openId === e.entry_id && (
-                <tr>
-                  <td colSpan={4}>
-                    <EntryEditor
-                      collectionId={col.source_id}
-                      entryId={e.entry_id}
-                      onDone={() => {
-                        setOpenId(null);
-                        void load();
-                        onChange();
-                      }}
-                      onCancel={() => setOpenId(null)}
-                    />
-                  </td>
-                </tr>
-              )}
-            </Fragment>
-          ))}
-          {visible.length === 0 && (
-            <tr>
-              <td colSpan={4} className="muted">
-                no entries — add a runbook / workflow / config note, or connect a source above
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
+      <Dialog
+        open={askArchive}
+        onClose={() => setAskArchive(false)}
+        title={`Archive "${col.name}"?`}
+        actions={[
+          { label: "Cancel", variant: "ghost", onClick: () => setAskArchive(false) },
+          { label: "Archive", variant: "danger", onClick: removeCollection },
+        ]}
+      >
+        The collection and all of its entries are archived. Flows that read it stop
+        getting results from it.
+      </Dialog>
     </div>
   );
 }
@@ -1093,20 +1185,9 @@ function ConnectionEditForm({
 }
 
 function KbStatusBadge({ entry }: { entry: KbEntryRow }) {
-  const pill = (bg: string, text: string, title?: string) => (
-    <span
-      title={title}
-      style={{
-        fontSize: 11,
-        marginLeft: 6,
-        padding: "1px 6px",
-        borderRadius: 8,
-        background: bg,
-        color: "#fff",
-        whiteSpace: "nowrap",
-      }}
-    >
-      {text}
+  const badge = (tone: TagTone, text: string, title?: string) => (
+    <span style={{ marginLeft: 6, whiteSpace: "nowrap" }} title={title}>
+      <Tag tone={tone}>{text}</Tag>
     </span>
   );
 
@@ -1114,16 +1195,16 @@ function KbStatusBadge({ entry }: { entry: KbEntryRow }) {
     const until = entry.provisional_until
       ? `auto-promotes ${new Date(entry.provisional_until).toLocaleDateString()} if no new contradiction`
       : "held pending review";
-    return pill("#8a5a00", "held: disputed", until);
+    return badge("warn", "held: disputed", until);
   }
   if (entry.status === "superseded")
-    return pill("#555", "superseded", "replaced by a newer entry — not retrieved");
+    return badge("neutral", "superseded", "replaced by a newer entry — not retrieved");
   if (entry.origin === "review_writeback")
-    return pill("#33608a", "from a review", "created by the knowledge-integrity loop");
+    return badge("accent", "from a review", "created by the knowledge-integrity loop");
   if (entry.quality === "official")
-    return pill("#2b6a2b", "official", "official source — weighted up in retrieval (×1.15)");
+    return badge("accent", "official", "official source — weighted up in retrieval (×1.15)");
   if (entry.quality === "community_resolved")
-    return pill("#5a3a8a", "resolved", "a shipped/answered community item — retrieval weight ×1.0");
+    return badge("neutral", "resolved", "a shipped/answered community item — retrieval weight ×1.0");
   return null;
 }
 
@@ -1143,6 +1224,7 @@ function EntryEditor({
   const [body, setBody] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [confirmArchive, setConfirmArchive] = useState(false);
 
   useEffect(() => {
     if (!entryId) return;
@@ -1168,15 +1250,20 @@ function EntryEditor({
   }
 
   async function archive() {
-    if (!entryId || !confirm("archive this entry?")) return;
-    await api.kb.deleteEntry(entryId);
-    onDone();
+    if (!entryId) return;
+    setConfirmArchive(false);
+    try {
+      await api.kb.deleteEntry(entryId);
+      onDone();
+    } catch (e) {
+      setErr(e instanceof ApiError ? String(e.detail) : String(e));
+    }
   }
 
   const readOnly = entry?.origin === "gdoc" || !!entry?.connection_id;
 
   return (
-    <div className="col" style={{ gap: 8, border: "1px solid var(--border)", padding: 10, borderRadius: 6 }}>
+    <div style={{ display: "grid", gap: 12 }}>
       {readOnly && (
         <div className="muted" style={{ fontSize: 12 }}>
           🔗 synced from a connected source
@@ -1190,41 +1277,56 @@ function EntryEditor({
           )}
         </div>
       )}
-      <div className="field">
-        <label>title</label>
-        <input
+      <Field label="Title">
+        <Input
           value={title}
           disabled={readOnly}
           onChange={(e) => setTitle(e.target.value)}
           placeholder="Refund approval limits"
         />
-      </div>
-      <div className="field">
-        <label>body (markdown — the bot reads this as authoritative)</label>
-        <textarea
-          rows={14}
+      </Field>
+      <Field label="Body" hint="Markdown — the bot reads this as authoritative.">
+        <Textarea
+          rows={16}
           value={body}
           readOnly={readOnly}
           onChange={(e) => setBody(e.target.value)}
           placeholder={"# Refund approval limits\n\n- < $200: auto-approve\n- $200–$2000: team lead\n- > $2000: manager sign-off"}
-          style={{ fontFamily: "ui-monospace, monospace", fontSize: 13, opacity: readOnly ? 0.75 : 1 }}
+          style={{ fontFamily: "var(--font-mono)", fontSize: 13, opacity: readOnly ? 0.75 : 1 }}
         />
-      </div>
+      </Field>
       {entry && (
         <div className="muted" style={{ fontSize: 11 }}>
-          {entry.chunk_count} chunk(s){entry.embedded_at ? ` · embedded ${new Date(entry.embedded_at).toLocaleString()}` : " · not embedded yet"}
+          {entry.chunk_count} chunk(s)
+          {entry.embedded_at ? ` · embedded ${new Date(entry.embedded_at).toLocaleString()}` : " · not embedded yet"}
         </div>
       )}
-      {err && <div className="err" style={{ fontSize: 12 }}>{err}</div>}
-      <div className="row">
+      {err && <Banner tone="exception" title={err} />}
+      <div className="row" style={{ gap: 8 }}>
         {!readOnly && (
-          <button className="primary" onClick={save} disabled={busy || !title.trim()}>
-            {busy ? "saving…" : "save"}
-          </button>
+          <Button variant="primary" onClick={save} loading={busy} disabled={!title.trim()}>
+            Save
+          </Button>
         )}
-        <button onClick={onCancel}>{readOnly ? "close" : "cancel"}</button>
-        <div style={{ flex: 1 }} />
-        {entryId && <button className="err" onClick={archive}>archive</button>}
+        <Button variant="ghost" onClick={onCancel}>
+          {readOnly ? "Close" : "Cancel"}
+        </Button>
+        <span style={{ flex: 1 }} />
+        {entryId &&
+          (confirmArchive ? (
+            <>
+              <Button variant="ghost" size="sm" onClick={() => setConfirmArchive(false)}>
+                Cancel
+              </Button>
+              <Button variant="danger" size="sm" onClick={archive}>
+                Archive entry
+              </Button>
+            </>
+          ) : (
+            <Button variant="danger" size="sm" onClick={() => setConfirmArchive(true)}>
+              Archive
+            </Button>
+          ))}
       </div>
     </div>
   );

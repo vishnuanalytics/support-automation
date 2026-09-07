@@ -818,9 +818,24 @@ Delivered one BUILD-BRIEF chunk at a time, checkpointed with the user:
   `chip()` replaced by `Tag`, every timeline row is a shared `TraceStep`
   (node rows indented), messages are `Banner`s. `tsc` + `vite build` +
   `vitest` green.
-- **Chunks 5–8** — Knowledge, Connections + Channels,
-  Billing/Team/Activity, Setup + Login. Existing API wiring preserved
-  throughout.
+- **Chunk 5 — Knowledge.** Sequenced:
+  - **5a — shell (DONE).** `kb/KnowledgeView.tsx` restructured into three
+    panes / three scrolls: `.kb-rail` (236px, own scroll) with
+    collections as `.flow-item` rows + a `held` `Tag`; `.kb-collection`
+    with a fixed `.kb-collection__head` (name + `org default` / `held`
+    `Tag`s + `Button` actions) and a scrolling `.kb-collection__docs`
+    holding a `DataTable`. A document row opens in a **720px
+    `SlideOver`** (`EntryEditor`), not an inline table row. New
+    collection → `Dialog`; archive collection / archive entry →
+    `Dialog` / inline confirm. `KbStatusBadge` → `Tag`. Errors →
+    `Banner`, background syncs → `useToast`. `prompt()` + both
+    `confirm()` in `KnowledgeView`/`Collection`/`EntryEditor` gone.
+    `tsc` + `vite build` + `vitest` green.
+  - **5b — connector forms.** `ConnectedSources`, `AddSourceForm`
+    (→ `SlideOver`), `DocDefaultsForm`, `ConnectionEditForm` re-skin;
+    their ~6 remaining `alert()`s → `Banner`/`useToast`.
+- **Chunks 6–8** — Connections + Channels, Billing/Team/Activity,
+  Setup + Login. Existing API wiring preserved throughout.
 
 **Older note, superseded by the above as "most recent," kept for its
 own history:**
