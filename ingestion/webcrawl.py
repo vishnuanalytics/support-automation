@@ -38,8 +38,8 @@ _UA = "Mozilla/5.0 (compatible; SupportAutomationKBBot/1.0)"
 _SKIP_EXT = (".pdf", ".zip", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".mp4",
              ".css", ".js", ".ico", ".woff", ".woff2")
 _MAX_REDIRECTS = 5
-_SITEMAP_MAX_URLS = 500     # a pre-filter cap; max_pages still bounds actual fetches
-_SITEMAP_MAX_SUBMAPS = 10   # a sitemap index rarely needs more to find in-scope urls
+_SITEMAP_MAX_URLS = 5000    # a pre-filter cap; max_pages still bounds actual fetches
+_SITEMAP_MAX_SUBMAPS = 50   # big docs sites shard their sitemap index by section
 
 
 def _sitemap_urls(session: requests.Session, base: str, netloc: str, prefix: str,
@@ -158,7 +158,7 @@ def _links(html: str, base: str) -> list[str]:
 
 
 def crawl(start_url: str, *, max_pages: int = 20, max_depth: int = 2,
-          delay: float = 0.3, timeout: float = 15.0) -> list[dict]:
+          delay: float = 0.2, timeout: float = 15.0) -> list[dict]:
     if not _ok_host(start_url):
         raise ValueError(f"refusing to crawl {start_url!r} (must be a public http(s) URL)")
     start = urlparse(start_url)

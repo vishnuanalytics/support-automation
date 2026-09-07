@@ -320,6 +320,23 @@ def test_public_url_sync_not_exhaustive_when_truncated(monkeypatch):
 
 def test_public_url_normalize_rejects_non_http_and_clamps_pages():
     spec = kb_connectors.get_kb_connector("public_url")
-    assert spec.normalize_config({"url": "https://x", "max_pages": 999})["max_pages"] == 50
+    # a "connect a source" crawl goes wide/deep — high ceilings, not a skim
+    n = spec.normalize_config({"url": "https://x"})
+    assert n["max_pages"] == kb_connectors._CRAWL_MAX_PAGES_DEFAULT
+    assert n["max_depth"] == kb_connectors._CRAWL_MAX_DEPTH_DEFAULT
+    assert spec.normalize_config({"url": "https://x", "max_pages": 10_000})["max_pages"] \
+        == kb_connectors._CRAWL_MAX_PAGES_CEILING
+    assert spec.normalize_config({"url": "https://x", "max_depth": 99})["max_depth"] \
+        == kb_connectors._CRAWL_MAX_DEPTH_CEILING
+    assert spec.normalize_config({"url": "https://x", "max_pages": 30})["max_pages"] == 30
     with pytest.raises(ValueError):
         spec.normalize_config({"url": "ftp://x"})
+
+
+def test_public_url_sync_passes_depth_through(monkeypatch):
+    seen = {}
+    monkeypatch.setattr("ingestion.webcrawl.crawl",
+                        lambda url, **k: seen.update(k) or [])
+    kb_connectors._sync_public_url({"url": "https://x", "max_pages": 400, "max_depth": 7},
+                                   None, _ctx())
+    assert seen == {"max_pages": 400, "max_depth": 7}

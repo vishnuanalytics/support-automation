@@ -70,7 +70,10 @@ export function OnboardingWizard({
     setKbMsg(null);
     try {
       await api.kb.crawl(orgKbId, url);
-      setKbMsg("Crawling in the background — pages will appear in Knowledge as they embed.");
+      setKbMsg(
+        "Sample crawl started — the first ~20 pages will appear in Knowledge shortly. " +
+        "Run the full site crawl from Knowledge → add source when you're ready.",
+      );
       setKbUrl("");
       loadKb();
     } catch (e) {
@@ -222,7 +225,12 @@ export function OnboardingWizard({
         </div>
         <p className="muted" style={{ margin: 0, fontSize: 12 }}>
           Everything you connect feeds the org knowledge base and your flows read all of it.
-          Fastest start: crawl a public docs / help-center site (no login needed).
+          Fastest start: a quick <strong>sample crawl</strong> of a public docs / help-center
+          site — the first ~20 pages, just to see it working. Run the full deep crawl of the
+          whole site afterwards from <button
+            style={{ padding: 0, border: "none", background: "none", color: "var(--accent)", cursor: "pointer", font: "inherit" }}
+            onClick={() => onNavigate("knowledge")}
+          >Knowledge → add source</button>.
         </p>
         {!kbDone && (
           <>
@@ -238,7 +246,7 @@ export function OnboardingWizard({
                 disabled={kbBusy || !kbUrl.trim() || !orgKbId}
                 onClick={connectKbUrl}
               >
-                {kbBusy ? "connecting…" : "Crawl & connect"}
+                {kbBusy ? "connecting…" : "Sample crawl (~20 pages)"}
               </button>
             </div>
             <button style={{ alignSelf: "flex-start" }} onClick={() => onNavigate("knowledge")}>

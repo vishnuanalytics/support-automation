@@ -129,18 +129,35 @@ def list_kb_connectors() -> list[KBConnectorSpec]:
 # ==========================================================================
 
 # ---- 1. public_url — sitemap-first crawl (ingestion/webcrawl.py, P7c) -----
+# A "connect a source" crawl is meant to pull a whole docs/help site, going
+# as deep as the site is — not a 20-page skim (that's the onboarding wizard's
+# sample). Wide ceilings; the site's own extent is the real bound, and the
+# worker gives `crawl_site` a long per-job budget (see api/worker.py).
+_CRAWL_MAX_PAGES_DEFAULT = 500
+_CRAWL_MAX_PAGES_CEILING = 5000
+_CRAWL_MAX_DEPTH_DEFAULT = 8
+_CRAWL_MAX_DEPTH_CEILING = 20
+
+
 def _norm_public_url(raw: dict[str, Any]) -> dict[str, Any]:
     url = (raw.get("url") or "").strip()
     if not url.startswith(("http://", "https://")):
         raise ValueError("url must be http(s)")
-    return {"url": url, "max_pages": max(1, min(int(raw.get("max_pages") or 20), 50))}
+    return {
+        "url": url,
+        "max_pages": max(1, min(int(raw.get("max_pages") or _CRAWL_MAX_PAGES_DEFAULT),
+                                _CRAWL_MAX_PAGES_CEILING)),
+        "max_depth": max(1, min(int(raw.get("max_depth") or _CRAWL_MAX_DEPTH_DEFAULT),
+                                _CRAWL_MAX_DEPTH_CEILING)),
+    }
 
 
 def _sync_public_url(config: dict, watermark: "dict | None", ctx: SyncCtx) -> KBSyncResult:
     from ingestion.webcrawl import crawl
 
-    max_pages = int(config.get("max_pages", 20))
-    pages = crawl(config["url"], max_pages=max_pages)
+    max_pages = int(config.get("max_pages", _CRAWL_MAX_PAGES_DEFAULT))
+    max_depth = int(config.get("max_depth", _CRAWL_MAX_DEPTH_DEFAULT))
+    pages = crawl(config["url"], max_pages=max_pages, max_depth=max_depth)
     docs = [
         KBDocument(
             # the URL is a page's stable identity — NOT its <title>. Many doc
@@ -164,7 +181,13 @@ register(KBConnectorSpec(
         {"key": "url", "label": "Start URL (same host + path prefix)", "type": "string",
          "required": True, "placeholder": "https://docs.example.com/guide"},
         {"key": "max_pages", "label": "Max pages", "type": "number", "required": False,
-         "placeholder": "20"},
+         "placeholder": str(_CRAWL_MAX_PAGES_DEFAULT),
+         "help": f"blank = {_CRAWL_MAX_PAGES_DEFAULT}; up to {_CRAWL_MAX_PAGES_CEILING}. "
+                 "The crawler stops early once it has followed everything under the start path."},
+        {"key": "max_depth", "label": "Crawl depth", "type": "number", "required": False,
+         "placeholder": str(_CRAWL_MAX_DEPTH_DEFAULT),
+         "help": f"how many links deep to follow from the start URL (blank = "
+                 f"{_CRAWL_MAX_DEPTH_DEFAULT}). The sitemap is always followed regardless."},
     ],
     normalize=_norm_public_url,
     sync=_sync_public_url,

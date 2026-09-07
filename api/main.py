@@ -2177,8 +2177,12 @@ def kb_upload_file(sid: str, body: KbUploadIn, c: Caller = Depends(caller)) -> d
 
 
 class KbCrawlIn(BaseModel):
+    # the onboarding wizard's "crawl a site" is a fast SAMPLE — a shallow
+    # 20-page skim just to show the pipeline works. The real whole-site crawl
+    # is "＋ add source" in Knowledge (see _norm_public_url's wide ceilings).
     url: str
     max_pages: int = 20
+    max_depth: int = 2
 
 
 # ── KB source connections (docs/KB_SOURCE_CONNECTORS.md) ───────────────────
@@ -2555,12 +2559,14 @@ def kb_list_all_doc_writebacks(tenant_id: str | None = None, status: str = "open
 
 @app.post("/api/kb/collections/{sid}/crawl", status_code=202)
 def kb_crawl_site(sid: str, body: KbCrawlIn, c: Caller = Depends(caller)) -> dict:
-    """Deprecated — thin wrapper over POST /connections {connector:"public_url"}."""
+    """The onboarding wizard's sample crawl — a shallow, capped skim. The
+    full whole-site crawl is POST /connections {connector:"public_url"}."""
     rate_limit(c.user_id, "kb_write", 60)
     col = _kb_collection(c, sid)
     _require_editor(c, col["tenant_id"])
     return _kb_add_connection(c, col, "public_url",
-                              {"url": body.url, "max_pages": body.max_pages}, None)
+                              {"url": body.url, "max_pages": body.max_pages,
+                               "max_depth": body.max_depth}, None)
 
 
 # ── Phase 28 step 6: bulk KB export/import ──────────────────────────────

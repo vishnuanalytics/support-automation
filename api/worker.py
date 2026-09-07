@@ -780,6 +780,14 @@ HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
 
 JOB_TIMEOUT = int(os.environ.get("WORKER_JOB_TIMEOUT", "120"))
 
+# A whole-site crawl (or a re-sync of one) legitimately runs for minutes —
+# it's a bounded loop of politely-spaced HTTP GETs, not a runaway. Give it a
+# long budget instead of the 120s default that fits an LLM flow run.
+JOB_TIMEOUT_BY_KIND = {
+    "crawl_site": int(os.environ.get("WORKER_CRAWL_TIMEOUT", "1800")),
+    "kb_sync": int(os.environ.get("WORKER_CRAWL_TIMEOUT", "1800")),
+}
+
 
 class _JobTimeout(Exception):
     pass
@@ -830,13 +838,15 @@ def process_one(sb, *, job_id: str | None = None) -> bool:
             except Exception as e:  # noqa: BLE001
                 log.warning("stamp job %s tenant: %s", jid, e)
 
+    budget = JOB_TIMEOUT_BY_KIND.get(kind, JOB_TIMEOUT)
+
     def _alarm(_sig, _frm):
-        raise _JobTimeout(f"job exceeded {JOB_TIMEOUT}s")
+        raise _JobTimeout(f"job exceeded {budget}s")
 
     have_alarm = hasattr(signal, "SIGALRM")
     if have_alarm:
         signal.signal(signal.SIGALRM, _alarm)
-        signal.alarm(JOB_TIMEOUT)
+        signal.alarm(budget)
     try:
         handler = HANDLERS.get(kind)
         if not handler:
