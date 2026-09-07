@@ -772,10 +772,23 @@ A pass through the flow-editor web app checking each view actually works.
   After rebuilding the worker image and re-running the crawl: the
   `gunner` "help" collection went **0 → 60 KB entries** (`max_pages` cap),
   all `status=active`, all tenant-scoped to `ee4102db`, 60 distinct URL
-  keys, embeddings filling in via `embed_kb_entry`; the
-  `kb_source_connections` row shows `status=active`,
-  `last_result={documents:60,entries:60}`. A second run at
-  `max_pages=150` tops it up to the whole sitemap.
+  keys, all embedded via `embed_kb_entry`; the `kb_source_connections`
+  row `status=active`, `last_result={documents:60,entries:60}`. A run at
+  `max_pages=80` yields 80 (site has ~115 sitemap URLs; depth-2 BFS + the
+  ≥80-char body filter drop the rest — a `max_depth` tuning call, not a
+  bug).
+- **KB connected-source buttons (edit/re-sync/pause/remove) appeared
+  dead** (`a11d5d3`). `kb_delete_connection` / `kb_delete_collection`
+  archived entries in a per-entry loop (3 PostgREST round-trips each), so
+  removing the 60-page crawl hung ~15s; the connection row is archived
+  *first*, so for that whole window every other button hit
+  `_kb_connection`'s `neq(status,archived)` and 404'd, and the web UI had
+  no in-flight state so the clicks piled up as raw error alerts. Fix:
+  `kb_common.delete_entries(urls=[…])` (batched 100/req); both delete
+  endpoints do one bulk `UPDATE … SET status='archived'` + one batched
+  cleanup; `ConnectedSources` disables every row button while an action
+  runs and refreshes the list on a 404 instead of alerting. Verified: the
+  bulk delete of an 80-entry connection now returns 204 in ~1s.
 
 **Older note, superseded by the above as "most recent," kept for its own
 history:**
