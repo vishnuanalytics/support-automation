@@ -53,7 +53,11 @@ from interpreter import jobs, sf_ingest  # noqa: E402
 from interpreter.registry import known_types  # noqa: E402
 from interpreter.runs import record_run  # noqa: E402
 from interpreter import gdrive, github as githubmod, slack as slackmod  # noqa: E402
-from ingestion.sources.kb_common import delete_entry as _kb_delete, embed_entry as _kb_embed  # noqa: E402
+from ingestion.sources.kb_common import (  # noqa: E402
+    delete_entry as _kb_delete,
+    delete_entries as _kb_delete_many,
+    embed_entry as _kb_embed,
+)
 
 import hashlib  # noqa: E402
 
@@ -2090,9 +2094,10 @@ def kb_delete_collection(sid: str, c: Caller = Depends(caller)) -> None:
     c.sb.table("sources").update({"status": "archived"}).eq("source_id", sid).execute()
     entries = (c.sb.table("kb_entries").select("entry_id")
                .eq("source_id", sid).eq("status", "active").execute().data or [])
-    for e in entries:
-        c.sb.table("kb_entries").update({"status": "archived"}).eq("entry_id", e["entry_id"]).execute()
-        _kb_delete(_service, url=_kb_url(sid, e["entry_id"]))
+    if entries:
+        c.sb.table("kb_entries").update({"status": "archived"}) \
+            .eq("source_id", sid).eq("status", "active").execute()
+        _kb_delete_many(_service, urls=[_kb_url(sid, e["entry_id"]) for e in entries])
 
     from interpreter import audit
     audit.record(_service, tenant_id=col["tenant_id"], action="kb_collection.deleted",
@@ -2490,10 +2495,13 @@ def kb_delete_connection(cid: str, c: Caller = Depends(caller)) -> None:
         .eq("connection_id", cid).execute()
     entries = (c.sb.table("kb_entries").select("entry_id, source_id")
                .eq("connection_id", cid).neq("status", "archived").execute().data or [])
-    for e in entries:
+    if entries:
+        # one bulk update + batched chunk cleanup — a per-entry loop here
+        # made "remove" a multi-second hang on a large crawl, during which
+        # the row was already archived so every other button 404'd
         c.sb.table("kb_entries").update({"status": "archived"}) \
-            .eq("entry_id", e["entry_id"]).execute()
-        _kb_delete(_service, url=_kb_url(e["source_id"], e["entry_id"]))
+            .eq("connection_id", cid).neq("status", "archived").execute()
+        _kb_delete_many(_service, urls=[_kb_url(e["source_id"], e["entry_id"]) for e in entries])
     audit.record(_service, tenant_id=conn["tenant_id"], action="kb_connection.deleted",
                  actor_id=c.user_id, actor_email=c.email,
                  target_type="kb_connection", target_id=cid,

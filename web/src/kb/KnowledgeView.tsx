@@ -471,6 +471,7 @@ function ConnectedSources({
   const [editDefaults, setEditDefaults] = useState(false);
   const [adding, setAdding] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [busyCid, setBusyCid] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -502,38 +503,42 @@ function ConnectedSources({
   const notIndexed = (c: KbConnection) =>
     c.connector === "gdocs" && (c.config as { index?: boolean }).index === false;
 
-  async function sync(cid: string) {
+  // one in-flight action per connection at a time — every row button is
+  // disabled while it runs. A 404 means the connection is already gone
+  // (deleted in another tab, or the delete that's still finishing): just
+  // refresh the list rather than surface a raw "not found".
+  async function runAction(cid: string, fn: () => Promise<unknown>, okMsg?: string) {
+    if (busyCid) return;
+    setBusyCid(cid);
     try {
-      await api.kb.syncConnection(cid);
-      alert("Re-syncing in the background.");
-      await load();
-    } catch (e) {
-      alert(e instanceof ApiError ? String(e.detail) : String(e));
-    }
-  }
-
-  async function toggle(c: KbConnection) {
-    try {
-      await api.kb.setConnectionStatus(
-        c.connection_id,
-        c.status === "paused" ? "active" : "paused",
-      );
-      await load();
-    } catch (e) {
-      alert(e instanceof ApiError ? String(e.detail) : String(e));
-    }
-  }
-
-  async function remove(c: KbConnection) {
-    if (!confirm(`disconnect "${c.label}" and archive the entries it produced?`)) return;
-    try {
-      await api.kb.deleteConnection(c.connection_id);
+      await fn();
       await load();
       onChange();
+      if (okMsg) alert(okMsg);
     } catch (e) {
-      alert(e instanceof ApiError ? String(e.detail) : String(e));
+      if (e instanceof ApiError && e.status === 404) {
+        await load();
+        onChange();
+        alert("That source was already removed — the list has been refreshed.");
+      } else {
+        alert(e instanceof ApiError ? String(e.detail) : String(e));
+      }
+    } finally {
+      setBusyCid(null);
     }
   }
+
+  const sync = (cid: string) =>
+    runAction(cid, () => api.kb.syncConnection(cid), "Re-syncing in the background.");
+
+  const toggle = (c: KbConnection) =>
+    runAction(c.connection_id, () =>
+      api.kb.setConnectionStatus(c.connection_id, c.status === "paused" ? "active" : "paused"));
+
+  const remove = (c: KbConnection) => {
+    if (!confirm(`disconnect "${c.label}" and archive the entries it produced?`)) return;
+    void runAction(c.connection_id, () => api.kb.deleteConnection(c.connection_id));
+  };
 
   const needsGoogle = catalogue.some(
     (c) => c.auth === "oauth2" && !c.available && google.configured && !google.connected,
@@ -675,16 +680,21 @@ function ConnectedSources({
                   {c.last_synced_at ? new Date(c.last_synced_at).toLocaleString() : "—"}
                 </td>
                 <td className="row" style={{ gap: 4 }}>
-                  <button onClick={() => sync(c.connection_id)}>re-sync</button>
+                  <button disabled={!!busyCid} onClick={() => sync(c.connection_id)}>
+                    {busyCid === c.connection_id ? "…" : "re-sync"}
+                  </button>
                   <button
+                    disabled={!!busyCid}
                     onClick={() => setEditId((id) => (id === c.connection_id ? null : c.connection_id))}
                   >
                     {editId === c.connection_id ? "close" : "edit"}
                   </button>
-                  <button onClick={() => toggle(c)}>
+                  <button disabled={!!busyCid} onClick={() => toggle(c)}>
                     {c.status === "paused" ? "resume" : "pause"}
                   </button>
-                  <button className="err" onClick={() => remove(c)}>remove</button>
+                  <button className="err" disabled={!!busyCid} onClick={() => remove(c)}>
+                    remove
+                  </button>
                 </td>
               </tr>
               {editId === c.connection_id && (

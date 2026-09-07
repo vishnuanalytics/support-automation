@@ -47,3 +47,15 @@ def delete_entry(sb, *, url: str) -> None:
     `zapier_docs.status` soft-delete rule — never hard-delete ingested rows)."""
     sb.table("doc_chunks").delete().eq("doc_url", url).execute()
     sb.table("zapier_docs").update({"status": "deleted"}).eq("url", url).execute()
+
+
+def delete_entries(sb, *, urls: list[str]) -> None:
+    """Batched `delete_entry` — two round-trips per 100 urls instead of two
+    per url. Used when archiving a whole connection / collection, where the
+    per-entry loop turned a click into a multi-second wait."""
+    for i in range(0, len(urls), 100):
+        batch = urls[i:i + 100]
+        if not batch:
+            continue
+        sb.table("doc_chunks").delete().in_("doc_url", batch).execute()
+        sb.table("zapier_docs").update({"status": "deleted"}).in_("url", batch).execute()
