@@ -777,12 +777,20 @@ Delivered one BUILD-BRIEF chunk at a time, checkpointed with the user:
     reload explanation. SF-entry is a `Toggle`. `.editor` is now
     flex-column so the 44px bar is fixed and the workarea fills the
     rest. `tsc` + `vite build` + `vitest` green.
-  - **3c — Inspector → slide-over.** Wrap `NodeInspector`/`EdgeInspector`
-    in `SlideOver` with Config / JSON (shared `JsonEditor`) /
-    Recent-runs tabs + sticky Apply bar; canvas is full width when
-    nothing is selected. The per-kind `*Form` components already exist
-    inside `Inspector.tsx` — extract to `flows/panels/*` only if it
-    stays low-risk.
+  - **3c — Inspector → slide-over (DONE).** New `flows/InspectorPanel.tsx`
+    — a 380px `SlideOver` with tabs: **Config** (`NodeInspector` /
+    `EdgeInspector`, now taking an `embedded` prop that drops their own
+    heading / raw-JSON field / delete button), **JSON** (shared
+    `JsonEditor` bound to the node config or edge condition), and
+    **Recent runs** (`RunPanel`, mounted only when that tab is open).
+    Sticky footer: Delete · Revert (resets this node to its last-saved
+    label + config from `flow.nodes`) · unsaved indicator · Done. Edits
+    still apply live — the commit is the toolbar's "Save draft" + global
+    undo/redo — so the footer reflects unsaved state rather than staging
+    a buffer. The canvas now fills the whole workarea; `.inspector` grid
+    column is gone. The per-kind `*Form` components stay inside
+    `Inspector.tsx` (already one component per kind). `tsc` + `vite
+    build` + `vitest` green.
   - **3d — `FlowList` overlays.** Its 6 `prompt()`/`confirm()`/`alert()`
     → `Dialog` + `useToast`.
 - **Chunks 4–8** — Runs + Trace, Knowledge, Connections + Channels,

@@ -521,6 +521,7 @@ export function NodeInspector({
   onConfig,
   onDelete,
   tenantId,
+  embedded = false,
 }: {
   node: RFNode;
   config: Record<string, unknown>;
@@ -528,12 +529,17 @@ export function NodeInspector({
   onConfig: (v: Record<string, unknown>) => void;
   onDelete: () => void;
   tenantId: string;
+  /** rendered inside InspectorPanel's Config tab — the panel owns the
+   *  heading, the JSON tab and the delete action, so skip them here. */
+  embedded?: boolean;
 }) {
   return (
     <div>
-      <h4>
-        <span className="muted">{node.data.nodeType}</span> node
-      </h4>
+      {!embedded && (
+        <h4>
+          <span className="muted">{node.data.nodeType}</span> node
+        </h4>
+      )}
       {NODE_HELP[node.data.nodeType] && (
         <p className="muted" style={{ margin: "0 0 10px", fontSize: 12, lineHeight: 1.4 }}>
           {NODE_HELP[node.data.nodeType]}
@@ -628,11 +634,14 @@ export function NodeInspector({
         <IdentifyForm config={config} onConfig={onConfig} tenantId={tenantId} />
       )}
 
-      <JsonField label="config (jsonb)" value={config} onChange={onConfig} />
-
-      <button className="err" onClick={onDelete}>
-        delete node
-      </button>
+      {!embedded && (
+        <>
+          <JsonField label="config (jsonb)" value={config} onChange={onConfig} />
+          <button className="err" onClick={onDelete}>
+            delete node
+          </button>
+        </>
+      )}
     </div>
   );
 }
@@ -1741,11 +1750,13 @@ export function EdgeInspector({
   onCondition,
   onDelete,
   tenantId,
+  embedded = false,
 }: {
   edge: RFEdge;
   onCondition: (c: Record<string, unknown>) => void;
   onDelete: () => void;
   tenantId: string;
+  embedded?: boolean;
 }) {
   const ifExpr = (edge.data?.condition as { if?: string })?.if ?? "";
   const conditional = ifExpr !== "";
@@ -1785,7 +1796,7 @@ export function EdgeInspector({
 
   return (
     <div>
-      <h4>edge</h4>
+      {!embedded && <h4>edge</h4>}
       <div className="field">
         <label className="row" style={{ gap: 6 }}>
           <input
@@ -1835,9 +1846,11 @@ export function EdgeInspector({
           )}
         </div>
       )}
-      <button className="err" onClick={onDelete}>
-        delete edge
-      </button>
+      {!embedded && (
+        <button className="err" onClick={onDelete}>
+          delete edge
+        </button>
+      )}
     </div>
   );
 }

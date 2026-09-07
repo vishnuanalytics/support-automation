@@ -26,8 +26,7 @@ import { summarize } from "./nodeSummary";
 import { NodeCard } from "./NodeCard";
 import { EdgeLabel } from "./EdgeLabel";
 import { ZoomControl } from "./ZoomControl";
-import { EdgeInspector, NodeInspector } from "./Inspector";
-import { RunPanel } from "./RunPanel";
+import { InspectorPanel } from "./InspectorPanel";
 import { TriggersPanel } from "./TriggersPanel";
 import { Popover, Toolbar, Button, Banner, Dialog, SlideOver, Field, Input, Textarea, Toggle, useToast } from "../ui";
 
@@ -776,41 +775,47 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
             </div>
           )}
         </div>
-
-        <div className="inspector col">
-          {selectedNode ? (
-            <NodeInspector
-              node={selectedNode}
-              config={configById[selectedNode.id] ?? {}}
-              tenantId={flow?.tenant_id || ""}
-              onLabel={(v) => setLabel(selectedNode.id, v)}
-              onConfig={(v) => setConfig(selectedNode.id, v)}
-              onDelete={() => {
-                setNodes((ns) => ns.filter((n) => n.id !== selectedNode.id));
-                setEdges((es) =>
-                  es.filter((e) => e.source !== selectedNode.id && e.target !== selectedNode.id),
-                );
-                onNodesDelete([{ id: selectedNode.id }]);
-              }}
-            />
-          ) : selectedEdge ? (
-            <EdgeInspector
-              edge={selectedEdge}
-              tenantId={flow?.tenant_id || ""}
-              onCondition={(c) => setEdgeCond(selectedEdge.id, c)}
-              onDelete={() => {
-                setEdges((es) => es.filter((e) => e.id !== selectedEdge.id));
-                mark();
-              }}
-            />
-          ) : (
-            <div className="muted">select a node or edge · drag between handles to connect · Del removes</div>
-          )}
-
-          <hr style={{ borderColor: "var(--border)", width: "100%" }} />
-          <RunPanel flowId={flowId} />
-        </div>
       </div>
+
+      <InspectorPanel
+        node={selectedNode}
+        edge={selectedNode ? null : selectedEdge}
+        config={selectedNode ? configById[selectedNode.id] ?? {} : {}}
+        tenantId={flow?.tenant_id || ""}
+        flowId={flowId}
+        dirty={dirty}
+        inCount={selectedNode ? edges.filter((e) => e.target === selectedNode.id).length : 0}
+        outCount={selectedNode ? edges.filter((e) => e.source === selectedNode.id).length : 0}
+        onLabel={(v) => selectedNode && setLabel(selectedNode.id, v)}
+        onConfig={(v) => selectedNode && setConfig(selectedNode.id, v)}
+        onCondition={(c) => selectedEdge && setEdgeCond(selectedEdge.id, c)}
+        onRevert={() => {
+          if (!selectedNode || !flow) return;
+          const saved = flow.nodes.find((n) => n.node_id === selectedNode.id);
+          if (!saved) return;
+          setLabel(selectedNode.id, saved.label || saved.type);
+          setConfig(selectedNode.id, saved.config ?? {});
+        }}
+        onDeleteNode={() => {
+          if (!selectedNode) return;
+          const id = selectedNode.id;
+          setNodes((ns) => ns.filter((n) => n.id !== id));
+          setEdges((es) => es.filter((e) => e.source !== id && e.target !== id));
+          onNodesDelete([{ id }]);
+          setSelNode(null);
+        }}
+        onDeleteEdge={() => {
+          if (!selectedEdge) return;
+          const id = selectedEdge.id;
+          setEdges((es) => es.filter((e) => e.id !== id));
+          mark();
+          setSelEdge(null);
+        }}
+        onClose={() => {
+          setSelNode(null);
+          setSelEdge(null);
+        }}
+      />
 
       <SlideOver
         open={!!assist}
