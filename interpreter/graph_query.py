@@ -235,7 +235,15 @@ def _system_prompt() -> str:
         '"having":{"op":"gt","value":1}}\n'
         "Q: case count per portal under account 001ABC\n"
         'A: {"metric":"count","group_by":["account_name"],'
-        '"filters":[{"field":"parent_account","op":"eq","value":"001ABC"}]}\n')
+        '"filters":[{"field":"parent_account","op":"eq","value":"001ABC"}]}\n'
+        "Q: how many cases on Acme  (a company / customer name, not a module)\n"
+        'A: {"metric":"count","filters":['
+        '{"field":"account_name","op":"contains","value":"Acme"}]}\n'
+        "Q: cases for United Oil & Gas\n"
+        'A: {"metric":"list","filters":['
+        '{"field":"account_name","op":"contains","value":"United Oil"}]}\n'
+        "Q: case count by account\n"
+        'A: {"metric":"count","group_by":["account_name"]}\n')
 
 
 def to_spec(question: str, tenant_id: str | None = None) -> dict:

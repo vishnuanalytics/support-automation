@@ -16,7 +16,7 @@ import type {
 
 const STATUS = ["open", "correct", "wrong", "dismissed", "all"] as const;
 
-export function ReviewView() {
+export function ReviewView({ tenantId }: { tenantId: string }) {
   const [metrics, setMetrics] = useState<KilMetrics | null>(null);
   const [digest, setDigest] = useState<KilDigest | null>(null);
   const [rows, setRows] = useState<ReviewTask[]>([]);
@@ -250,7 +250,7 @@ export function ReviewView() {
         </pre>
       )}
 
-      <GraphAskPanel />
+      <GraphAskPanel tenantId={tenantId} />
 
       {metrics && metrics.by_source.length > 0 && (
         <div className="col" style={{ gap: 4 }}>
@@ -454,7 +454,7 @@ const GRAPH_EXAMPLES = [
   "What usually causes the webhook failures?",
 ];
 
-function GraphTable({ res }: { res: GraphAskResult }) {
+function GraphTable({ res, tenantId }: { res: GraphAskResult; tenantId: string }) {
   const [showCypher, setShowCypher] = useState(false);
   return (
     <div className="col" style={{ gap: 4 }}>
@@ -482,7 +482,7 @@ function GraphTable({ res }: { res: GraphAskResult }) {
                   return (
                     <td key={col} className="muted">
                       {col === "case_number" && v != null ? (
-                        <RelatedToggle caseNumber={String(v)} />
+                        <RelatedToggle caseNumber={String(v)} tenantId={tenantId} />
                       ) : v == null ? (
                         "\u2014"
                       ) : (
@@ -526,7 +526,7 @@ function GraphTable({ res }: { res: GraphAskResult }) {
   );
 }
 
-function RelatedToggle({ caseNumber }: { caseNumber: string }) {
+function RelatedToggle({ caseNumber, tenantId }: { caseNumber: string; tenantId: string }) {
   const [open, setOpen] = useState(false);
   const [rel, setRel] = useState<RelatedCasesResult | null>(null);
   const [busy, setBusy] = useState(false);
@@ -539,7 +539,7 @@ function RelatedToggle({ caseNumber }: { caseNumber: string }) {
       setBusy(true);
       setErr(null);
       try {
-        setRel(await api.graphRelated(caseNumber));
+        setRel(await api.graphRelated(caseNumber, tenantId));
       } catch (e) {
         setErr((e as ApiError).message);
       } finally {
@@ -593,7 +593,7 @@ function RelatedToggle({ caseNumber }: { caseNumber: string }) {
   );
 }
 
-function GraphAskPanel() {
+function GraphAskPanel({ tenantId }: { tenantId: string }) {
   const [q, setQ] = useState("");
   const [res, setRes] = useState<AskResult | null>(null);
   const [busy, setBusy] = useState(false);
@@ -606,7 +606,7 @@ function GraphAskPanel() {
     setErr(null);
     setRes(null);
     try {
-      setRes(await api.ask(text));
+      setRes(await api.ask(text, tenantId));
     } catch (e) {
       setErr((e as ApiError).message);
     } finally {
@@ -671,7 +671,7 @@ function GraphAskPanel() {
             {res.mode === "graph" ? "graph" : "similar cases"}
           </span>
 
-          {res.mode === "graph" && <GraphTable res={res} />}
+          {res.mode === "graph" && <GraphTable res={res} tenantId={tenantId} />}
 
           {res.mode === "rag" && (
             <div className="col" style={{ gap: 6 }}>
@@ -699,7 +699,7 @@ function GraphAskPanel() {
                 >
                   <div className="row" style={{ gap: 6, alignItems: "baseline" }}>
                     {c.case_number ? (
-                      <RelatedToggle caseNumber={c.case_number} />
+                      <RelatedToggle caseNumber={c.case_number} tenantId={tenantId} />
                     ) : (
                       <strong style={{ fontSize: 12 }}>(case)</strong>
                     )}
