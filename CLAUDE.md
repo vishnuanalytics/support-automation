@@ -101,6 +101,43 @@ mentioned. Don't let that happen again:
   `interpreter/flows/validate_flow.py` (referential integrity + cycle
   detection) rather than writing a second validator.
 
+## Frontend — the web UI (`web/`)
+
+- **The design system is "Broadsheet". Its source of truth is a Claude
+  Design canvas artifact (owned by the user):**
+  <https://claude.ai/code/artifact/afee490d-276a-4674-9872-05094facad0a>
+  A decompressed copy of its token/component CSS lives at
+  `web/design/broadsheet.reference.css` (regenerate it from the artifact if
+  the artifact moves or is republished). `web/src/index.css` `:root` mirrors
+  those tokens; the app is the **dark inversion** of the canvas's light
+  palette. Fixed by the canvas, don't drift from them without changing the
+  canvas first:
+  - **Source Serif 4** for `--font-heading` *and* `--font-body` (loaded in
+    `web/index.html`). Not a system sans.
+  - the **5 · 10 · 15 · 20 · 30 · 40** space scale (`--space-1..8`, plus a
+    local `--space-5: 25px` in-between step) — every gap, pad and control
+    height is a multiple of 5.
+  - the **1 · 2 · 4px** radii (`--radius-sm/md/lg`) — corners stay sharp.
+  - the ramps: `--accent*` = process cyan, `--exception*` = magenta,
+    `--warn` = press yellow (a print ink in the canvas; caution accent only
+    here — never body copy or chrome).
+- **One aligned frame, not four separate fixes.** Text size, page/pane
+  scroll, browser-zoom tolerance and full-viewport width are one system and
+  change together:
+  - the shell fills the viewport — `grid: var(--sidebar-w) minmax(0,1fr)`,
+    `width/height: 100%`, no `max-width`, nothing centred;
+  - below a usable minimum (`.app-shell { min-width: 900px; min-height:
+    560px }`) `#root { overflow: auto }` scrolls the **whole app** so
+    nothing clips under browser zoom or a short window; above it the panes
+    own their own scroll (`min-height: 0` + `overflow-y: auto`);
+  - the header is `flex-wrap: wrap` (no `overflow-x`) — controls wrap to a
+    second row, never clip;
+  - the flow canvas keeps its own pan/scroll (`panOnScroll` on `<ReactFlow>`).
+- **UI work is CSS + presentation components only** — backend / API /
+  business logic stay untouched. Verify every change with
+  `cd web && npm run build`, and drive the app in a browser when the change
+  is visual.
+
 ## Keep PROJECT_SCOPE.md current — this is the project's real memory
 
 Chat sessions and even this file can be lost between environments (this

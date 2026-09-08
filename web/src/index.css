@@ -1,7 +1,11 @@
 :root {
-  /* ── Broadsheet on dark — from ui-mockups-for-forms/project/design/tokens.json ──
-     Source Serif 4 everywhere, process cyan + magenta + press yellow on a dark
-     press-proof ground, 2px radius, the 5/10/15/20/30/40 spacing scale. */
+  /* ── Broadsheet, dark inversion ──
+     The app's tokens mirror the Broadsheet design canvas (linked in
+     CLAUDE.md): Source Serif 4 everywhere, process cyan (--accent) +
+     magenta (--exception) on a dark press-proof ground, 1·2·4px radii, the
+     5·10·15·20·30·40 space scale. Press yellow (--warn) is a print ink in
+     the canvas — here it's the caution accent only. Retune in the canvas
+     first, then here. */
   --ground: #1a1918;
   --ground-sunk: #141312;
   --surface: #211f1e;
@@ -26,25 +30,33 @@
   --warn-text: #f0d787;
   --warn-wash: rgba(237, 187, 0, 0.14);
 
-  --font-body: "Source Serif 4", Georgia, serif;
+  /* Broadsheet — Source Serif 4 for heading and body (see the design canvas
+     linked in CLAUDE.md). One family, one weight pair. */
+  --font-heading: "Source Serif 4", Georgia, "Times New Roman", serif;
+  --font-body: "Source Serif 4", Georgia, "Times New Roman", serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
 
-  /* six type steps — a seventh is a content problem */
-  --type-display: 600 40px/1.1 var(--font-body);
-  --type-view-title: 600 26px/1.2 var(--font-body);
-  --type-section: 600 17px/1.3 var(--font-body);
-  --type-body: 400 13.5px/1.6 var(--font-body);
-  --type-label: 600 12px/1.4 var(--font-body);
-  --type-kicker: 600 11px/1.4 var(--font-body);
-  --type-mono: 400 12px/1.7 var(--font-mono);
+  /* Type scale — the Broadsheet family, sized for comfortable on-screen
+     reading: 16px body, one clear step between roles, nothing below 12px. */
+  --type-display: 600 34px/1.15 var(--font-heading);
+  --type-view-title: 600 24px/1.25 var(--font-heading);
+  --type-section: 600 18px/1.35 var(--font-heading);
+  --type-body: 400 16px/1.6 var(--font-body);
+  --type-label: 600 14px/1.4 var(--font-body);
+  --type-kicker: 600 12px/1.4 var(--font-body);
+  --type-mono: 400 13px/1.6 var(--font-mono);
 
+  /* Broadsheet space scale — 5 · 10 · 15 · 20 · 30 · 40 (with a 25 in-between
+     step for control padding). Every gap, pad and control size is a multiple. */
   --space-1: 5px;
   --space-2: 10px;
   --space-3: 15px;
   --space-4: 20px;
+  --space-5: 25px;
   --space-6: 30px;
   --space-8: 40px;
 
+  /* Broadsheet radii — 1 · 2 · 4px. Corners stay sharp. */
   --radius-sm: 1px;
   --radius-md: 2px;
   --radius-lg: 4px;
@@ -53,11 +65,11 @@
   --shadow-md: 0 3px 10px rgba(0, 0, 0, 0.4);
   --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.55);
 
-  --sidebar-w: 240px;
+  --sidebar-w: 260px;
   --flow-list-w: 180px;
-  --toolbar-h: 44px;
+  --toolbar-h: 60px;
   --runs-detail-w: 420px;
-  --content-pad: 24px;
+  --content-pad: 25px;
   --dialog-max: 460px;
   --popover-max: 280px;
   --slideover-sm: 380px;
@@ -83,9 +95,12 @@
 
 * { box-sizing: border-box; }
 
-/* Law 2 — the shell never scrolls. Every scrolling region sets its own
-   min-height:0 + overflow-y:auto; nothing can push the toolbar off screen. */
-html, body, #root { height: 100%; margin: 0; overflow: hidden; }
+/* The shell fits the viewport and its panes scroll independently — until
+   the viewport gets small (heavy browser zoom, a short window), at which
+   point #root scrolls the whole app so nothing is ever clipped out of
+   reach. See `.app-shell` min-width / min-height. */
+html, body { height: 100%; margin: 0; overflow: hidden; }
+#root { height: 100%; overflow: auto; }
 
 body {
   background: var(--ground);
@@ -110,8 +125,9 @@ button {
   background: transparent;
   border: 1px solid var(--border-button);
   border-radius: var(--radius-md);
-  padding: 6px 12px;
+  padding: 8px 16px;
   cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
 }
 button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-hover); }
 button:active:not(:disabled) { color: var(--accent); }
@@ -138,7 +154,7 @@ input, textarea, select {
   background: var(--ground-sunk);
   border: 1px solid var(--border-input);
   border-radius: var(--radius-md);
-  padding: 8px 10px;
+  padding: 10px 12px;
   width: 100%;
 }
 input:focus, textarea:focus, select:focus {
@@ -157,7 +173,7 @@ code { font-family: var(--font-mono); }
 .err { color: var(--exception-text); }
 .ok { color: var(--accent); }
 .pill {
-  font: 600 11.5px/1.4 var(--font-body);
+  font: 600 13px/1.35 var(--font-body);
   letter-spacing: 0.04em;
   padding: 3px 9px;
   border-radius: var(--radius-md);
@@ -166,20 +182,27 @@ code { font-family: var(--font-mono); }
 }
 .pill.published { color: var(--accent-hover); background: rgba(98, 197, 238, 0.16); border-color: rgba(98, 197, 238, 0.4); }
 
-/* ── app frame: AppShell + Sidebar + Toolbar ── */
+/* ── app frame: AppShell + Sidebar + Toolbar ──
+   The frame fills the whole viewport: sidebar column + a fluid main column.
+   No max-width, no auto margins — nothing centres or caps the app. */
 .app-shell {
   display: grid;
   /* minmax(0, 1fr): a bare 1fr track's implicit min is min-content, which lets
      a wide toolbar / canvas blow the grid past the viewport. minmax(0,…) lets
      the pane shrink and clip/scroll its own content instead. */
   grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  width: 100%;
   height: 100%;
-  min-height: 0;
+  /* below this, #root scrolls the whole app instead of panes clipping —
+     keeps everything reachable when the browser is zoomed in */
+  min-width: 900px;
+  min-height: 560px;
   overflow: hidden;
 }
 .app-main {
   min-width: 0;
   min-height: 0;
+  height: 100%;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -190,80 +213,145 @@ code { font-family: var(--font-mono); }
   min-width: 0;
   overflow: hidden;
 }
+
+/* ── top header ── */
 .app-toolbar {
-  height: var(--toolbar-h);
+  min-height: var(--toolbar-h);
   flex: none;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 var(--space-4);
+  gap: var(--space-3);
+  row-gap: var(--space-2);
+  /* it holds a lot of controls — wrap cleanly to a second row rather than
+     clip a button or push the page wide */
+  flex-wrap: wrap;
+  padding: var(--space-2) var(--content-pad);   /* lines up with body content */
   border-bottom: 1px solid var(--line);
   background: var(--surface);
   min-width: 0;
-  /* if the bar genuinely can't fit, it scrolls inside itself — never the page */
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: thin;
 }
-.app-toolbar .app-toolbar-title { font: var(--type-section); white-space: nowrap; min-width: 0; }
+.app-toolbar .app-toolbar-title {
+  font: var(--type-section);
+  color: var(--text);
+  white-space: nowrap;
+  min-width: 0;
+  flex: 0 1 320px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+}
 .app-toolbar .app-toolbar-meta {
   font: var(--type-mono);
   color: var(--text-faint);
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-2);
+  flex: none;
   flex-wrap: wrap;
+  row-gap: var(--space-1);
 }
-.app-toolbar .app-toolbar-actions { margin-left: auto; display: flex; gap: 8px; align-items: center; flex: none; }
+.app-toolbar .app-toolbar-actions {
+  margin-left: auto;
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
 
+/* ── sidebar ── */
 .app-sidebar {
   min-width: 0;
   min-height: 0;
+  height: 100%;
   background: var(--surface);
   border-right: 1px solid var(--line);
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
-.app-sidebar-head { flex: none; padding: 12px 12px 0; }
-.app-sidebar-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 12px; }
-.app-sidebar-foot { flex: none; padding: 12px; border-top: 1px solid var(--line); }
+.app-sidebar-head { flex: none; padding: var(--space-3) var(--space-3) var(--space-2); }
+.app-sidebar-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: var(--space-2); }
+.app-sidebar-foot { flex: none; padding: var(--space-3); border-top: 1px solid var(--line); }
 
 /* legacy shell classes kept so any not-yet-redesigned surface still lays out */
-.shell { display: grid; grid-template-columns: var(--sidebar-w) minmax(0, 1fr); height: 100%; min-height: 0; overflow: hidden; }
-.sidebar { background: var(--surface); border-right: 1px solid var(--line); overflow-y: auto; min-height: 0; padding: 10px; }
-.sidebar h3 { margin: 12px 4px 4px; font: var(--type-kicker); text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-faint); }
-.flow-item { padding: 7px 9px; border-radius: var(--radius-md); cursor: pointer; border-left: 2px solid transparent; }
+.shell { display: grid; grid-template-columns: var(--sidebar-w) minmax(0, 1fr); width: 100%; height: 100%; min-width: 900px; min-height: 560px; overflow: hidden; }
+
+/* ── responsive ──
+   > 900px  : two-column shell; if the viewport is shorter/narrower than the
+              shell minimum (heavy zoom), #root scrolls the whole app.
+   ≤ 900px  : stack — sidebar on top as its own scroll region, main pane fills
+              the rest; the shell fits the width, no page-level side scroll. */
+@media (max-width: 1180px) {          /* laptop — trim the rail */
+  :root { --sidebar-w: 220px; }
+}
+@media (max-width: 900px) {
+  :root { --content-pad: 15px; --toolbar-h: 50px; }
+  .app-shell, .shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+    min-width: 0;
+    min-height: 0;
+  }
+  .app-sidebar, .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    max-height: 42vh;
+  }
+  /* the header has too many controls for one narrow row — wrap, don't clip */
+  .app-toolbar {
+    min-height: var(--toolbar-h);
+    flex-wrap: wrap;
+    padding-block: var(--space-2);
+    row-gap: var(--space-2);
+  }
+  .app-toolbar .app-toolbar-title,
+  .app-toolbar .toolbar__name { width: 100%; max-width: none; }
+  .app-toolbar .app-toolbar-actions { margin-left: 0; }
+}
+.sidebar { background: var(--surface); border-right: 1px solid var(--line); overflow-y: auto; min-height: 0; padding: var(--space-2); }
+.sidebar h3 { margin: var(--space-3) var(--space-1) var(--space-1); font: var(--type-kicker); text-transform: uppercase; letter-spacing: 0.09em; color: var(--text-faint); }
+.flow-item { display: flex; flex-direction: column; gap: var(--space-1); padding: var(--space-2); border-radius: var(--radius-md); cursor: pointer; border-left: 2px solid transparent; }
 .flow-item:hover { background: var(--surface-raised); }
 .flow-item.active { background: var(--accent-wash); border-left-color: var(--accent); outline: none; }
 
-.nav-list { gap: 6px; margin: 4px 0 8px; padding-top: 8px; border-top: 1px solid var(--line); }
-.nav-group { display: flex; flex-direction: column; gap: 1px; }
+.nav-list { gap: var(--space-1); margin: 2px 0 var(--space-2); padding-top: var(--space-2); border-top: 1px solid var(--line); }
+.nav-group { display: flex; flex-direction: column; gap: 2px; margin-top: var(--space-3); }
 .nav-group-header {
   text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   background: transparent;
-  border: none;
+  border: 0;
   border-radius: var(--radius-md);
-  padding: 6px 8px;
+  padding: var(--space-1) var(--space-2);
+  margin-bottom: 2px;
   font: var(--type-kicker);
   text-transform: uppercase;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.09em;
   color: var(--text-faint);
 }
-.nav-group-header:hover:not(:disabled) { background: var(--surface-raised); color: var(--text); }
-.nav-caret { display: inline-block; width: 10px; }
-.nav-group-items { gap: 1px; padding-left: 12px; }
+.nav-group-header:hover:not(:disabled) { background: transparent; color: var(--text-muted); }
+.nav-caret { display: inline-flex; justify-content: center; width: 10px; flex: none; font-size: 9px; color: var(--text-faint); }
+.nav-group-items { gap: 2px; padding-left: var(--space-2); }
 .nav-item {
   text-align: left;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 40px;
+  padding: 0 var(--space-3);
   background: transparent;
-  border: 1px solid transparent;
+  border: 0;
   border-left: 2px solid transparent;
   border-radius: var(--radius-md);
-  padding: 7px 8px;
-  font: 400 13px/1.4 var(--font-body);
+  font: 400 15px/1.3 var(--font-body);
   color: var(--text-secondary);
+  transition: background 0.12s ease, color 0.12s ease;
 }
-.nav-item:hover:not(:disabled) { background: var(--surface-raised); color: var(--text); }
+.nav-item:hover:not(:disabled) { background: var(--surface-raised); color: var(--text); border-color: transparent; }
 .nav-item.active {
   background: var(--accent-wash);
   border-left-color: var(--accent);
@@ -291,9 +379,9 @@ code { font-family: var(--font-mono); }
 /* the canvas owns the whole workarea now — the inspector is a slide-over */
 .workarea { display: flex; min-width: 0; min-height: 0; }
 .canvas-wrap { flex: 1; position: relative; min-width: 0; min-height: 0; overflow: hidden; }
-.inspector h4 { margin: 0 0 8px; }
-.field { margin-bottom: 10px; }
-.field label { display: block; color: var(--text-muted); margin-bottom: 3px; font: var(--type-label); }
+.inspector h4 { margin: 0 0 var(--space-2); }
+.field { margin-bottom: var(--space-3); }
+.field label { display: block; color: var(--text-muted); margin-bottom: var(--space-1); font: var(--type-label); }
 
 /* react-flow node */
 .rf-node {
@@ -301,18 +389,18 @@ code { font-family: var(--font-mono); }
   border: 1px solid var(--line-strong);
   border-left: 3px solid var(--accent);
   border-radius: var(--radius-md);
-  padding: 9px 12px;
-  min-width: 156px;
+  padding: var(--space-3);
+  min-width: 160px;
   color: var(--text);
   box-shadow: var(--shadow-md);
 }
 .rf-node.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), var(--shadow-md); }
-.rf-node .t { font: 600 10.5px/1 var(--font-body); letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent); }
-.rf-node .l { font: 600 14px/1.2 var(--font-body); margin-top: 3px; }
+.rf-node .t { font: 700 11px/1 var(--font-body); letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+.rf-node .l { font: 600 16px/1.25 var(--font-body); margin-top: var(--space-1); }
 .rf-node.terminal { border-left-color: var(--warn); }
 .rf-node.terminal .t { color: var(--warn); }
 
-.banner { padding: 8px 12px; border-radius: var(--radius-md); font-size: 12px; }
+.banner { padding: 10px 14px; border-radius: var(--radius-md); font-size: 14px; }
 .banner.err { background: var(--exception-wash); color: var(--exception-text); border: 1px solid rgba(255, 69, 142, 0.42); }
 .banner.ok { background: var(--accent-wash); color: var(--accent-hover); border: 1px solid rgba(98, 197, 238, 0.4); }
 
@@ -330,7 +418,7 @@ code { font-family: var(--font-mono); }
   box-shadow: var(--shadow-lg);
 }
 .assist-modal h4 { margin: 0; }
-.assist-modal textarea { width: 100%; font-family: var(--font-mono); font-size: 12px; }
+.assist-modal textarea { width: 100%; font-family: var(--font-mono); font-size: 13px; }
 
 .run-panel { padding: 12px; overflow: auto; }
 .trace-step { padding: 8px 12px; border-left: 2px solid var(--accent); margin-bottom: 4px; background: var(--ground); }
@@ -386,7 +474,7 @@ code { font-family: var(--font-mono); }
 .setup-step__mark {
   width: 24px; height: 24px; flex: none; border-radius: 50%;
   border: 1px solid var(--border-button); color: var(--text-muted);
-  display: grid; place-items: center; font: 600 12px/1 var(--font-body);
+  display: grid; place-items: center; font: 600 13px/1 var(--font-body);
 }
 .setup-step--done .setup-step__mark { background: var(--accent); border-color: var(--accent); color: var(--accent-on); }
 .setup-step--open .setup-step__mark { border-color: var(--accent); color: var(--accent); }
@@ -432,18 +520,18 @@ code { font-family: var(--font-mono); }
 .runs-summary { flex: none; padding: var(--space-4) var(--space-4) 12px; }
 .runs-filter { flex: none; padding: 0 var(--space-4) 12px; }
 .run-detail { border-left: 1px solid var(--line-strong); background: var(--surface); padding: var(--space-4); overflow-y: auto; min-height: 0; }
-.run-detail h5 { margin: 0 0 8px; color: var(--text-faint); font: 600 10.5px/1.4 var(--font-body); text-transform: uppercase; letter-spacing: 0.12em; }
+.run-detail h5 { margin: 0 0 8px; color: var(--text-faint); font: 700 12px/1.4 var(--font-body); text-transform: uppercase; letter-spacing: 0.12em; }
 .tile { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 10px 15px; min-width: 92px; }
 .tile.warn { border-color: rgba(237, 187, 0, 0.45); }
 .tile .v { font: 600 24px/1 var(--font-body); }
-.tile .l { font: 600 10.5px/1 var(--font-body); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-muted); margin-top: 5px; }
-.runs-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.tile .l { font: 700 11px/1 var(--font-body); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-muted); margin-top: 5px; }
+.runs-table { width: 100%; border-collapse: collapse; font-size: 14px; }
 .runs-table th {
   position: sticky; top: 0;
   text-align: left;
   background: var(--ground);
   color: var(--text-muted);
-  font: 600 10.5px/1.4 var(--font-body);
+  font: 700 12px/1.4 var(--font-body);
   letter-spacing: 0.1em;
   text-transform: uppercase;
   padding: 8px 10px;
@@ -458,7 +546,7 @@ code { font-family: var(--font-mono); }
 .admin-shell { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .admin-shell > .app-toolbar { flex: none; }
 .admin-body { flex: 1; min-height: 0; overflow-y: auto; padding: var(--content-pad); }
-.admin-body h5 { margin: 18px 0 8px; color: var(--text-faint); font: 600 10.5px/1.4 var(--font-body); text-transform: uppercase; letter-spacing: 0.12em; }
+.admin-body h5 { margin: 18px 0 8px; color: var(--text-faint); font: 700 12px/1.4 var(--font-body); text-transform: uppercase; letter-spacing: 0.12em; }
 .admin-body h5:first-child { margin-top: 0; }
 
 /* billing view */
@@ -476,4 +564,4 @@ code { font-family: var(--font-mono); }
 .pill.ask_human { color: var(--warn); background: var(--warn-wash); border-color: rgba(237, 187, 0, 0.4); }
 .pill.need_info { color: #e0c56a; background: rgba(237, 187, 0, 0.08); border-color: rgba(237, 187, 0, 0.28); }
 .pill.handover { color: var(--exception-text); background: var(--exception-wash); border-color: rgba(255, 69, 142, 0.42); }
-.run-detail h5 { margin: 10px 0 4px; color: var(--text-faint); font: 600 10.5px/1.4 var(--font-body); text-transform: uppercase; letter-spacing: 0.12em; }
+.run-detail h5 { margin: 10px 0 4px; color: var(--text-faint); font: 700 12px/1.4 var(--font-body); text-transform: uppercase; letter-spacing: 0.12em; }

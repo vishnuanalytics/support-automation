@@ -656,10 +656,22 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
             fitView={!savedViewport}
             minZoom={0.25}
             maxZoom={2}
+            /* wheel / two-finger trackpad scrolls the canvas (both axes —
+               React Flow's default panOnScrollMode is "free"); pinch or
+               ⌘/Ctrl+wheel still zooms */
+            panOnScroll
+            colorMode="dark"
             proOptions={{ hideAttribution: true }}
           >
             <Background gap={18} />
-            <MiniMap pannable zoomable />
+            <MiniMap
+              className="flow-minimap"
+              pannable
+              zoomable
+              maskColor="rgba(20, 19, 18, 0.62)"
+              nodeColor="var(--accent)"
+              nodeStrokeColor="transparent"
+            />
           </ReactFlow>
 
           <ZoomControl />
@@ -732,7 +744,7 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
           )}
 
           {banner && (
-            <div style={{ position: "absolute", right: 15, bottom: 15, maxWidth: 460, zIndex: 6 }}>
+            <div style={{ position: "absolute", right: 15, bottom: 15, maxWidth: 460, zIndex: 12 }}>
               <Banner
                 tone={banner.kind === "err" ? "exception" : "warn"}
                 title={banner.text}
