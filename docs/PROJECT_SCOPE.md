@@ -778,6 +778,31 @@ so the running `api` + `worker` containers need
 
 ---
 
+**2026-09-08 (gunner / UrbanPiper demo prep — branch
+`web-redesign-broadsheet`.)**
+
+- **`scripts/seed_urbanpiper_kb.py`** (new) — crawls
+  `help.urbanpiper.com`, `urbanpiper.com`, `api-docs.urbanpiper.com/downstream/api`
+  via `ingestion/webcrawl.py` and embeds each page (`kb_common.embed_entry`)
+  into a `sources` row `urbanpiper-docs` for the gunner tenant. **Ran —
+  107 pages / ~300 chunks embedded** (help-centre articles + the downstream
+  API docs: menu add/update + toggle, store toggle, order-relay,
+  stock-out, swiggy/zomato feature actions, webhooks, customer-complaints).
+  gunner already had `help` (1240 chunks) + `API Document` (676) +
+  `Organization knowledge` sources; the flow's name-less `retrieve` fuses
+  all of them. Retrieval smoke test on the demo queries (menu images not
+  showing / stale prices / missing orders) now surfaces on-point docs.
+- **`scripts/seed_gunner_flow_v2.py`** (new, **NOT RUN — DB-write
+  classifier blocks flow-graph writes**). Builds a v2 of the gunner
+  "salesforce flow" from the live graph with four deltas: + an
+  `attachments` node after `sf_case` (OCR screenshots), `retrieve` top_k
+  6, `clarify` `auto_send:true` + `use_checklists:true`, `case_lookup`
+  `use_graph:true`. Compiles clean (15 nodes / 16 edges). To apply: grant
+  a Bash rule for the script, or rebuild the four deltas by hand in the
+  flow editor and republish.
+
+---
+
 **2026-09-08 (NL→graph over the case graph — richer schema. Branch
 `web-redesign-broadsheet` (same working branch as the UI redesign).
 Extends the existing `interpreter/graph_query.py` "ask the case graph"
