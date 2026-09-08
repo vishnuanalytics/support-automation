@@ -62,6 +62,18 @@ function GraphTable({ res, tenantId }: { res: GraphAskResult; tenantId: string }
           showing the first {res.spec.limit} rows
         </div>
       )}
+      {res.did_you_mean && (
+        <div className="muted" style={{ fontSize: 12 }}>
+          no exact match for <strong>{res.did_you_mean.value}</strong> — did you mean{" "}
+          {res.did_you_mean.candidates.map((c, i) => (
+            <span key={c}>
+              {i > 0 && ", "}
+              <strong>{c}</strong>
+            </span>
+          ))}
+          ?
+        </div>
+      )}
       <button
         style={{ alignSelf: "flex-start", fontSize: 11 }}
         onClick={() => setShowCypher((v) => !v)}

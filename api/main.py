@@ -3827,6 +3827,24 @@ class IntakeChecklistPatch(BaseModel):
     enabled: bool | None = None
 
 
+def _validate_intake_signals(signals: list[dict[str, Any]] | None) -> None:
+    """Reject a checklist whose detect rules won't compile — a bad or
+    pathological regex would otherwise hang the `clarify` node at runtime."""
+    import re as _re
+
+    for s in signals or []:
+        rx = ((s or {}).get("detect") or {}).get("regex")
+        if rx is None:
+            continue
+        if not isinstance(rx, str) or len(rx) > 400:
+            raise HTTPException(422, f"signal {s.get('key')!r}: detect.regex must be a "
+                                     "string under 400 chars")
+        try:
+            _re.compile(rx)
+        except _re.error as e:
+            raise HTTPException(422, f"signal {s.get('key')!r}: invalid regex ({e})")
+
+
 class IntakePreviewIn(BaseModel):
     subject: str = ""
     body: str = ""
@@ -3850,6 +3868,7 @@ def create_intake_checklist(body: IntakeChecklistIn, c: Caller = Depends(caller)
     rate_limit(c.user_id, "intake_write", 60)
     tid = _caller_tenant(c, body.tenant_id)
     _require_editor(c, tid)
+    _validate_intake_signals(body.signals)
     row = {"tenant_id": tid, "label": body.label, "match": body.match,
            "signals": body.signals, "priority": body.priority, "enabled": body.enabled}
     try:
@@ -3874,6 +3893,8 @@ def update_intake_checklist(checklist_id: str, body: IntakeChecklistPatch,
     if not cur:
         raise HTTPException(404, "checklist not found or not visible to you")
     _require_editor(c, cur[0]["tenant_id"])
+    if body.signals is not None:
+        _validate_intake_signals(body.signals)
     patch = {k: v for k, v in body.model_dump(exclude_none=True).items()}
     patch["updated_at"] = _now_iso()
     updated = (c.sb.table("intake_checklists").update(patch)

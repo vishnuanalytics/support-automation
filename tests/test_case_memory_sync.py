@@ -133,7 +133,10 @@ class _FakeSFMulti:
     per-case EmailMessage query -- dispatch on which one is being asked."""
     def query(self, soql):
         if "FROM EmailMessage" in soql:
-            return {"records": [{"TextBody": "Here's the fix."}]}
+            return {"records": [{"TextBody": (
+                "Hi, the invoice showed the wrong tax rate because the account region "
+                "was set to US instead of EU. I've corrected the region and re-generated "
+                "the invoice; the totals are right now.")}]}
         return {"records": [{"Id": _CASE_3, "CaseNumber": "00101", "Subject": "Help",
                              "Description": "desc", "Type": "Bug", "Module__c": "Billing",
                              "Region__c": "US", "AccountId": "001XX7",

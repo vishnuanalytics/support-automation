@@ -76,7 +76,9 @@ def _haystack(state: dict) -> str:
         cls.get("summary"),
         state.get("attachment_text"),
     ]
-    return "\n".join(p for p in parts if p).lower()
+    # cap the haystack — a tenant-authored `detect.regex` runs against this,
+    # and an unbounded body is a backtracking-blowup risk.
+    return "\n".join(p for p in parts if p).lower()[:20000]
 
 
 def _attachment_kinds(state: dict) -> set[str]:

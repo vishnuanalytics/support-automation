@@ -438,7 +438,7 @@ def case_graph_sync(sb, *, dry_run: bool | None = None) -> dict:
     from interpreter import salesforce
 
     dry = _dry() if dry_run is None else dry_run
-    tids = salesforce.active_connector_tenants(sb) or []
+    tids = salesforce.syncable_tenants(sb) or []
     done = 0
     for tid in tids:
         try:

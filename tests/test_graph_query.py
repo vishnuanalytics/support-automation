@@ -233,6 +233,23 @@ def test_ask_keeps_empty_metric_result_as_graph(monkeypatch):
     assert out["mode"] == "graph"              # "how many" is a metric — empty is a real answer
 
 
+def test_ask_suggests_close_names_on_an_empty_eq_filter(monkeypatch):
+    monkeypatch.setenv("NEO4J_URI", "bolt://x")
+    monkeypatch.setattr(g, "to_spec", lambda *a, **k: {
+        "metric": "count",
+        "filters": [{"field": "account_name", "op": "eq", "value": "United Oil"}]})
+
+    def _run(cypher, params):
+        if "CONTAINS" in cypher:               # the did-you-mean probe
+            return (["v"], [{"v": "United Oil & Gas Corp."}, {"v": "United Oil & Gas, Singapore"}])
+        return (["count"], [])                 # the real query: no exact match
+
+    monkeypatch.setattr(g, "_run", _run)
+    out = g.ask("how many cases for United Oil", "T1", sb=object())
+    assert out["mode"] == "graph" and out["rows"] == []
+    assert out["did_you_mean"]["candidates"][0] == "United Oil & Gas Corp."
+
+
 def test_ask_no_graph_goes_straight_to_rag(monkeypatch):
     monkeypatch.delenv("NEO4J_URI", raising=False)
     monkeypatch.setattr("interpreter.case_memory.lookup",

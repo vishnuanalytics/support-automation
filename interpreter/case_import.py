@@ -101,8 +101,8 @@ def _quoted_blocks(text: str) -> list[dict]:
     return out
 
 
-def _ok_answer(c: str) -> bool:
-    if not c or len(c) < 80 or _BOILERPLATE.search(c):
+def _ok_answer(c: str, min_len: int = 80) -> bool:
+    if not c or len(c) < min_len or _BOILERPLATE.search(c):
         return False
     low = c.lower()[:60]
     return not any(p in low for p in (
@@ -110,17 +110,27 @@ def _ok_answer(c: str) -> bool:
         "it's working", "its working", "resolved now"))
 
 
-def _resolution(msgs: list[dict]) -> str | None:
+def _resolution(msgs: list[dict], min_len: int = 80) -> str | None:
     cands: list[str] = []
     for m in msgs:
         if not m["incoming"]:
             c = _clean(m["body"])
-            if _ok_answer(c):
+            if _ok_answer(c, min_len):
                 cands.append(c)
         for q in _quoted_blocks(m["body"]):
-            if q["from_up"] and _ok_answer(q["text"]):
+            if q["from_up"] and _ok_answer(q["text"], min_len):
                 cands.append(q["text"])
     return max(cands, key=len)[:4000] if cands else None
+
+
+def best_resolution(raw_outbound: list[str], *, min_len: int = 50) -> str | None:
+    """Pick the substantive support answer from a Case's outbound email
+    bodies (newest first). Strips quotes + signatures, skips closing
+    boilerplate ("we are marking this resolved") and mines quoted history
+    for the real prior answer. Shared by the live `case_memory_sync
+    --from-salesforce` path and the bulk-export importer."""
+    return _resolution([{"incoming": False, "body": b or ""} for b in raw_outbound],
+                       min_len)
 
 
 def _problem(msgs: list[dict], subject: str | None) -> str:

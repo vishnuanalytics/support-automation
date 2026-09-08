@@ -602,6 +602,45 @@ def related_cases(case_number: str, tenant_id: str, *, limit: int = 50) -> dict:
     }
 
 
+_DYM_PROBE = {
+    "account_name": "MATCH (:Case {tenant_id:$tenant_id})-[:FOR_ACCOUNT]->(a:Account) "
+                    "WHERE toLower(a.name) CONTAINS toLower($v) "
+                    "RETURN DISTINCT a.name AS v LIMIT 5",
+    "module": "MATCH (:Case {tenant_id:$tenant_id})-[:ABOUT]->(m:Module) "
+              "WHERE toLower(m.name) CONTAINS toLower($v) RETURN DISTINCT m.name AS v LIMIT 5",
+    "submodule": "MATCH (:Case {tenant_id:$tenant_id})-[:IN_SUBMODULE]->"
+                 "(sm:SubModule {tenant_id:$tenant_id}) WHERE toLower(sm.name) CONTAINS "
+                 "toLower($v) RETURN DISTINCT sm.name AS v LIMIT 5",
+    "root_cause": "MATCH (:Case {tenant_id:$tenant_id})-[:CAUSED_BY]->"
+                  "(rc:RootCause {tenant_id:$tenant_id}) WHERE toLower(rc.label) CONTAINS "
+                  "toLower($v) RETURN DISTINCT rc.label AS v LIMIT 5",
+}
+
+
+def _did_you_mean(spec: dict, tenant_id: str) -> dict | None:
+    """A graph answer came back empty. If it filtered a name/label with `eq`,
+    probe for close values (`CONTAINS`, then the first word) so the caller can
+    say 'no exact match — did you mean …' instead of a bare 0."""
+    for f in spec.get("filters") or []:
+        if f.get("op") != "eq" or f.get("field") not in _DYM_PROBE:
+            continue
+        val = f.get("value")
+        if not isinstance(val, str) or not val.strip():
+            continue
+        probe = _DYM_PROBE[f["field"]]
+        try:
+            for v in (val, val.split()[0] if " " in val else None):
+                if not v:
+                    continue
+                _, rows = _run(probe, {"tenant_id": tenant_id, "v": v})
+                cand = [r["v"] for r in rows if r.get("v") and r["v"].lower() != val.lower()]
+                if cand:
+                    return {"field": f["field"], "value": val, "candidates": cand[:5]}
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
 def ask(question: str, tenant_id: str, *, sb=None) -> dict:
     """Router (feature-req #7). Try the case graph; fall through to RAG
     (`case_memory.lookup`) when the question isn't expressible as a graph
@@ -637,7 +676,11 @@ def ask(question: str, tenant_id: str, *, sb=None) -> dict:
         "mode": "graph", "question": q, "spec": spec, "cypher": cypher,
         "columns": columns, "rows": rows, "truncated": len(rows) >= spec["limit"],
     }
-    if rows or _looks_like_metric(q):
+    if not rows:
+        dym = _did_you_mean(spec, tenant_id)
+        if dym:
+            res["did_you_mean"] = dym
+    if rows or res.get("did_you_mean") or _looks_like_metric(q):
         return res
     rag = _rag_fallback(q, tenant_id, sb)
     rag["graph"] = res

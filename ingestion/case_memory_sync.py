@@ -237,14 +237,18 @@ def _from_salesforce(since_iso: str, limit: int, *, until_iso: str | None = None
         f"WHERE {' AND '.join(where)} ORDER BY ClosedDate DESC "
         f"LIMIT {int(limit)}"
     ).get("records", [])
+    from interpreter import case_import
     out = []
     for c in cases:
         em = sf.query(
             "SELECT TextBody FROM EmailMessage WHERE ParentId = "
             f"'{salesforce._soql_lit(c['Id'])}' AND Incoming = false "
-            "ORDER BY MessageDate DESC LIMIT 1"
+            "ORDER BY MessageDate DESC LIMIT 5"
         ).get("records", [])
-        reply = (em[0]["TextBody"] if em else "").strip()
+        # the *last* outbound is very often "we're following up on Case ID…"
+        # boilerplate, not the fix — clean + boilerplate-filter + mine the
+        # quoted history for the substantive answer (same as the importer).
+        reply = case_import.best_resolution([m.get("TextBody") or "" for m in em])
         if not reply:
             continue
         out.append({
@@ -357,7 +361,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.from_salesforce and args.all:
         from interpreter import salesforce
         rows = []
-        for tid in salesforce.active_connector_tenants(get_supabase()):
+        for tid in salesforce.syncable_tenants(get_supabase()):
             log.info("--from-salesforce --all: workspace %s", tid)
             rows += [r for r in _from_salesforce(
                 since_iso, args.limit, until_iso=until_iso, tenant_id=tid) if r]

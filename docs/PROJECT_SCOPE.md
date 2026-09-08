@@ -707,6 +707,44 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-08 (Loophole fixes — branch `web-redesign-broadsheet`.)**
+
+Fixed five real gaps found reviewing the session's work:
+
+1. **Silent env-Salesforce fallback → cross-tenant ingest.**
+   `salesforce.has_own_org(tenant_id)` (Vault check) + `syncable_tenants()`
+   = `active_connector_tenants` minus any workspace that would resolve to
+   the platform env client. `case_graph_sync --all` / `case_memory_sync
+   --all` / both sweeps now use it — a mis-configured workspace is
+   **skipped with a warning**, never fed the platform org's cases.
+2. **Hourly `case_memory_sync` ingested follow-up boilerplate as the
+   "resolution."** `_from_salesforce` now pulls the last 5 outbound emails
+   and runs `case_import.best_resolution` (clean + skip "we're following
+   up…" boilerplate + mine quoted history) — the same logic as the bulk
+   importer. `_ok_answer` gained a `min_len` param (80 for the strict
+   importer, 50 for the live path).
+3. **`graph_query` returned a bare `0` on a name typo.** When a graph
+   answer is empty and the spec filtered a name/label with `eq`,
+   `_did_you_mean` probes `CONTAINS` (then the first word) and attaches
+   `did_you_mean: {field, value, candidates}`; the Ask view renders "no
+   exact match for X — did you mean …". Covers `account_name` / `module`
+   / `submodule` / `root_cause`.
+4. **`case_events.record(tenant_id=None)`** now returns early instead of a
+   23502 per breached case per sweep (commit `7a55126`, still needs a
+   worker rebuild).
+5. **`intake_checklists` regex had no guard.** `POST`/`PATCH
+   /api/intake/checklists` `re.compile`-validate every `detect.regex`
+   (422 on failure, 400-char cap); `intake._haystack` caps the match
+   input at 20 KB.
+
+Not a loophole after all: a reply to a **closed** thread — `find_case_by_thread`
+already only reuses **open** cases (`not parent.IsClosed`), so it creates a
+fresh Case. Verified.
+
+Full offline **1064 passed**; web build green.
+
+---
+
 **2026-09-08 (Case-graph sync is now per-workspace — branch
 `web-redesign-broadsheet`.)**
 

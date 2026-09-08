@@ -303,7 +303,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.all:
         from interpreter import salesforce
         rc = 0
-        for tid in salesforce.active_connector_tenants(get_supabase()):
+        for tid in salesforce.syncable_tenants(get_supabase()):
             log.info("=== case_graph_sync — workspace %s ===", tid)
             rc |= sync(tenant_id=tid, since=since, limit=args.limit,
                        one_id=args.one_id, dry=args.dry_run)

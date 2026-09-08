@@ -224,6 +224,21 @@ def list_tenant_orgs(tenant_id: str, sb=None) -> list[str]:
     return [r["org_label"] for r in rows]
 
 
+def has_own_org(tenant_id: str, org_label: str = "default", sb=None) -> bool:
+    """True when this workspace has its *own* Salesforce creds in Vault — i.e.
+    `client_for` will build a tenant-specific client rather than silently
+    falling back to the platform env client. Use this to gate any per-tenant
+    pull so a mis-configured workspace can't ingest the platform org's data."""
+    if not tenant_id:
+        return False
+    try:
+        from . import vault_secrets
+
+        return bool(vault_secrets.get(tenant_id, f"salesforce:{org_label}", sb=sb))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def active_connector_tenants(sb=None) -> list[str]:
     """Workspaces to run the Salesforce case-graph / case-memory sync for:
     every tenant with `tenants.case_connector = 'salesforce'` or an active
@@ -247,6 +262,21 @@ def active_connector_tenants(sb=None) -> list[str]:
     if available():
         out.add(os.environ.get("DEFAULT_TENANT_ID", "00000000-0000-0000-0000-000000000000"))
     return sorted(out)
+
+
+def syncable_tenants(sb=None) -> list[str]:
+    """`active_connector_tenants` minus any workspace that would resolve to
+    the platform env client — a per-tenant pull must use that tenant's own
+    org or not run at all (no silent cross-tenant ingest)."""
+    env_t = os.environ.get("DEFAULT_TENANT_ID", "00000000-0000-0000-0000-000000000000")
+    keep = []
+    for tid in active_connector_tenants(sb):
+        if tid == env_t or has_own_org(tid, sb=sb):
+            keep.append(tid)
+        else:
+            log.warning("salesforce sync: skipping workspace %s — no Salesforce "
+                        "org of its own (refusing the platform env fallback)", tid)
+    return keep
 
 
 def save_tenant_org(tenant_id: str, org_label: str, creds: dict[str, str], sb=None) -> None:

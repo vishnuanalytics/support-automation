@@ -550,6 +550,7 @@ export interface GraphAskResult {
   columns: string[];
   rows: Record<string, unknown>[];
   truncated: boolean;
+  did_you_mean?: { field: string; value: string; candidates: string[] };
 }
 
 // POST /api/ask — the router: graph first, RAG (similar resolved cases) when
