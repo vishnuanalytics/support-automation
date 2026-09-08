@@ -860,7 +860,7 @@ def h_product_signal(state: CaseState, config: dict) -> dict:
     try:
         rec, _s, _k = driver.execute_query(
             _PRODUCT_SIGNAL_CYPHER, email=email, tenant_id=str(tenant_id),
-            database_=os.environ.get("NEO4J_DATABASE", "neo4j"))
+            database_=case_memory.graph_database(str(tenant_id)))
     except Exception as e:  # noqa: BLE001 -- an enrichment step never fails a run
         log.warning("product_signal query: %s", e)
         return _out({"available": False, "reason": "graph error"}, f"graph error: {e}")

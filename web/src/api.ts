@@ -14,6 +14,8 @@ import type {
   PostHogStatus,
   PostHogSave,
   GraphAskResult,
+  AskResult,
+  RelatedCasesResult,
   FlowVersion,
   FlowTrigger,
   Connection,
@@ -70,11 +72,27 @@ async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
       ...(init.headers || {}),
     },
   });
-  const body = res.headers.get("content-type")?.includes("application/json")
-    ? await res.json()
-    : await res.text();
+  // Read once as text so an empty body (204, or a 200 with no content — a
+  // successful DELETE) never blows up. Only JSON.parse a non-empty JSON
+  // body, and never let a parse failure escape as a raw SyntaxError.
+  const text = await res.text();
+  const isJson = (res.headers.get("content-type") ?? "").includes("application/json");
+  let body: unknown;
+  if (!text) {
+    body = undefined;
+  } else if (isJson) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = text;
+    }
+  } else {
+    body = text;
+  }
   if (!res.ok) {
-    const detail = (body && (body.detail ?? body)) as unknown;
+    const d = body as { detail?: unknown } | string | undefined;
+    const detail =
+      (d && typeof d === "object" && "detail" in d ? d.detail : d) ?? res.statusText;
     throw new ApiError(res.status, detail);
   }
   return body as T;
@@ -478,6 +496,16 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ question, tenant_id: tenantId }),
     }),
+  ask: (question: string, tenantId?: string) =>
+    req<AskResult>("/ask", {
+      method: "POST",
+      body: JSON.stringify({ question, tenant_id: tenantId }),
+    }),
+  graphRelated: (caseNumber: string, tenantId?: string) =>
+    req<RelatedCasesResult>(
+      `/graph/related?case=${encodeURIComponent(caseNumber)}` +
+        (tenantId ? `&tenant_id=${encodeURIComponent(tenantId)}` : ""),
+    ),
 
   approvals: {
     list: () =>

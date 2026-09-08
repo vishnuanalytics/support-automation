@@ -1689,6 +1689,39 @@ def graph_ask(body: GraphAskIn, c: Caller = Depends(caller)) -> dict:
         raise HTTPException(422, str(e))
 
 
+@app.get("/api/graph/related")
+def graph_related_ep(case: str, tenant_id: str | None = None,
+                     c: Caller = Depends(caller)) -> dict:
+    """Owner-only. Cases linked to `?case=<number>` by a shared Issue (same
+    extracted root cause) or a DUPLICATE_OF edge — "the same underlying bug
+    as this one". Populate Issues with `python -m interpreter.case_cluster`."""
+    from interpreter import graph_query
+
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    try:
+        return graph_query.related_cases(case, tid)
+    except graph_query.GraphQueryError as e:
+        raise HTTPException(422, str(e))
+
+
+@app.post("/api/ask")
+def ask_ep(body: GraphAskIn, c: Caller = Depends(caller)) -> dict:
+    """Owner-only 'ask in English' with a router: the question goes to the
+    case graph first (see `/api/graph/ask`); when it isn't expressible as a
+    graph query — or the graph is empty and the question reads like prose —
+    it falls through to RAG over similar resolved cases. The response
+    carries `mode: "graph" | "rag"`."""
+    from interpreter import graph_query
+
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    try:
+        return graph_query.ask(body.question, tid, sb=c.sb)
+    except graph_query.GraphQueryError as e:
+        raise HTTPException(422, str(e))
+
+
 @app.get("/api/kil/digest")
 def kil_digest_ep(weeks: int = 4, tenant_id: str | None = None,
                   format: str = "json", c: Caller = Depends(caller)) -> Any:

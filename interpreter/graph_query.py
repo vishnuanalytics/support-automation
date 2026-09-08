@@ -42,7 +42,17 @@ _MAX_GROUP_BY = 2
 
 
 class GraphQueryError(Exception):
-    """Anything we won't or can't run — carries a user-facing message."""
+    """Anything we won't or can't run — carries a user-facing message.
+
+    `unsupported=True` marks the specific case "this question isn't
+    expressible as a graph query" (vs. the graph being down / an LLM
+    hiccup) — the router in `ask()` uses it to decide whether to fall
+    through to RAG.
+    """
+
+    def __init__(self, message: str, *, unsupported: bool = False):
+        super().__init__(message)
+        self.unsupported = unsupported
 
 
 # ── the allow-lists: the entire surface the LLM can address ────────────
@@ -51,9 +61,19 @@ class GraphQueryError(Exception):
 # filtered (so a Case with no module still lands in an "(unassigned)" bucket).
 _JOINS: dict[str, str] = {
     "module": "MATCH (c)-[:ABOUT]->(m:Module)",
+    # SubModule / RootCause / Issue are tenant-scoped — the predicate rides
+    # in the pattern, like account. Integration is global-shared (a
+    # content-free vocab string), like Module.
+    "submodule": "MATCH (c)-[:IN_SUBMODULE]->(sm:SubModule {tenant_id: $tenant_id})",
+    "root_cause": "MATCH (c)-[:CAUSED_BY]->(rc:RootCause {tenant_id: $tenant_id})",
+    "integration": "MATCH (c)-[:INVOLVES]->(ig:Integration)",
+    "issue": "MATCH (c)-[:INSTANCE_OF]->(iss:Issue {tenant_id: $tenant_id})",
     "case_type": "MATCH (c)-[:OF_TYPE]->(ct:CaseType)",
     "agent": "MATCH (c)-[:HANDLED_BY]->(ag:Agent)",
     "account": "MATCH (c)-[:FOR_ACCOUNT]->(a:Account {tenant_id: $tenant_id})",
+    # the parent / contract account a portal (child account) sits under
+    "parent_account": ("MATCH (c)-[:FOR_ACCOUNT]->(:Account)"
+                       "-[:CHILD_OF]->(pa:Account {tenant_id: $tenant_id})"),
 }
 _JOINS_OPTIONAL: dict[str, str] = {
     k: v.replace("MATCH", "OPTIONAL MATCH", 1) for k, v in _JOINS.items()
@@ -62,7 +82,9 @@ _JOINS_OPTIONAL: dict[str, str] = {
 # the `WHERE`, so the tenant predicate is a standalone filter and can never
 # be absorbed into an OPTIONAL MATCH pattern.
 _JOIN_ALIAS: dict[str, str] = {
-    "module": "m", "case_type": "ct", "agent": "ag", "account": "a",
+    "module": "m", "submodule": "sm", "root_cause": "rc", "integration": "ig",
+    "issue": "iss", "case_type": "ct", "agent": "ag", "account": "a",
+    "parent_account": "pa",
 }
 
 # Group-by dimensions. `join` = which relationship it needs (if any);
@@ -70,12 +92,24 @@ _JOIN_ALIAS: dict[str, str] = {
 _DIMS: dict[str, dict[str, Any]] = {
     "module": {"join": "module", "expr": "m.name", "coalesce": "(unassigned)",
                "help": "the product module/area the case is about"},
+    "submodule": {"join": "submodule", "expr": "sm.name", "coalesce": "(none)",
+                  "help": "the sub-module / sub-area within a module"},
+    "root_cause": {"join": "root_cause", "expr": "rc.label", "coalesce": "(unknown)",
+                   "help": "the extracted underlying fault (e.g. 'Salesforce sync failure')"},
+    "integration": {"join": "integration", "expr": "ig.name", "coalesce": "(none)",
+                    "help": "an external system the case implicated (Salesforce, Zomato, Stripe…)"},
+    "issue": {"join": "issue", "expr": "coalesce(iss.title, iss.issue_key)",
+              "coalesce": "(none)", "help": "the curated recurring issue / bug this case is an instance of"},
     "case_type": {"join": "case_type", "expr": "ct.name", "coalesce": "(none)",
                   "help": "the case Type picklist value"},
     "agent": {"join": "agent", "expr": "ag.sf_user_id", "coalesce": "(unassigned)",
               "help": "the Salesforce user who handled the case"},
     "account": {"join": "account", "expr": "a.sf_id", "coalesce": "(none)",
-                "help": "the customer account"},
+                "help": "the customer account (or portal) the case is filed on"},
+    "account_name": {"join": "account", "expr": "a.name", "coalesce": "(none)",
+                     "help": "the name of that account / portal"},
+    "parent_account": {"join": "parent_account", "expr": "pa.sf_id", "coalesce": "(none)",
+                       "help": "the parent / contract account a portal sits under"},
     "tier": {"expr": "c.tier", "coalesce": "(none)", "help": "support tier"},
     "status": {"expr": "c.status", "coalesce": "(none)", "help": "case status"},
     "routed_team": {"expr": "c.routed_team", "coalesce": "(none)",
@@ -101,8 +135,19 @@ _FILTERS: dict[str, dict[str, Any]] = {
     "resolution_kind": {"expr": "c.resolution_kind", "type": "str", "ops": ["eq", "in"]},
     "is_closed": {"expr": "c.is_closed", "type": "bool", "ops": ["eq"]},
     "module": {"join": "module", "expr": "m.name", "type": "str", "ops": ["eq", "in"]},
+    "submodule": {"join": "submodule", "expr": "sm.name", "type": "str", "ops": ["eq", "in"]},
+    "root_cause": {"join": "root_cause", "expr": "rc.label", "type": "str",
+                   "ops": ["eq", "in", "contains"]},
+    "integration": {"join": "integration", "expr": "ig.name", "type": "str",
+                    "ops": ["eq", "in"]},
+    "issue": {"join": "issue", "expr": "iss.issue_key", "type": "str", "ops": ["eq", "in"]},
     "case_type": {"join": "case_type", "expr": "ct.name", "type": "str", "ops": ["eq", "in"]},
     "agent": {"join": "agent", "expr": "ag.sf_user_id", "type": "str", "ops": ["eq"]},
+    "account": {"join": "account", "expr": "a.sf_id", "type": "str", "ops": ["eq", "in"]},
+    "account_name": {"join": "account", "expr": "a.name", "type": "str",
+                     "ops": ["eq", "in", "contains"]},
+    "parent_account": {"join": "parent_account", "expr": "pa.sf_id", "type": "str",
+                       "ops": ["eq", "in"]},
     "opened_at": {"expr": "c.opened_at", "type": "date", "ops": ["gte", "lte", "gt", "lt"]},
     "closed_at": {"expr": "c.closed_at", "type": "date", "ops": ["gte", "lte", "gt", "lt"]},
     "subject": {"expr": "c.subject", "type": "str", "ops": ["contains"]},
@@ -125,6 +170,14 @@ _METRICS: dict[str, dict[str, Any]] = {
     "distinct_accounts": {"agg": "count(DISTINCT a)", "col": "distinct_accounts",
                           "force_join": "account",
                           "help": "how many distinct customer accounts match"},
+    "distinct_submodules": {"agg": "count(DISTINCT sm.name)", "col": "distinct_submodules",
+                            "force_join": "submodule",
+                            "help": ("how many distinct sub-modules the matched cases span "
+                                     "— group_by module/case_type + having > 1 to find "
+                                     "issues that cut across the sub-module tree")},
+    "distinct_integrations": {"agg": "count(DISTINCT ig.name)", "col": "distinct_integrations",
+                              "force_join": "integration",
+                              "help": "how many distinct external systems the matched cases implicate"},
     "duplicate_count": {"agg": "count(DISTINCT dup)", "col": "duplicate_count",
                         "help": "how many earlier cases the matches are duplicates of"},
 }
@@ -173,7 +226,16 @@ def _system_prompt() -> str:
         '"having":{"op":"gte","value":2},"order_by":{"field":"value","dir":"desc"}}\n'
         "Q: average resolution time by tier for the API module\n"
         'A: {"metric":"avg_resolution_hours","group_by":["tier"],'
-        '"filters":[{"field":"module","op":"eq","value":"API"}]}\n')
+        '"filters":[{"field":"module","op":"eq","value":"API"}]}\n'
+        "Q: billing cases where the root cause was a Salesforce sync failure\n"
+        'A: {"metric":"list","filters":[{"field":"module","op":"eq","value":"Billing"},'
+        '{"field":"root_cause","op":"contains","value":"salesforce sync"}]}\n'
+        "Q: which modules have cases spanning more than one sub-module\n"
+        'A: {"metric":"distinct_submodules","group_by":["module"],'
+        '"having":{"op":"gt","value":1}}\n'
+        "Q: case count per portal under account 001ABC\n"
+        'A: {"metric":"count","group_by":["account_name"],'
+        '"filters":[{"field":"parent_account","op":"eq","value":"001ABC"}]}\n')
 
 
 def to_spec(question: str, tenant_id: str | None = None) -> dict:
@@ -186,13 +248,16 @@ def to_spec(question: str, tenant_id: str | None = None) -> dict:
     try:
         spec = json.loads(raw)
     except (ValueError, TypeError):
-        raise GraphQueryError("Couldn't turn that into a graph query — try rephrasing.")
+        raise GraphQueryError("Couldn't turn that into a graph query — try rephrasing.",
+                              unsupported=True)
     if not isinstance(spec, dict):
-        raise GraphQueryError("Couldn't turn that into a graph query — try rephrasing.")
+        raise GraphQueryError("Couldn't turn that into a graph query — try rephrasing.",
+                              unsupported=True)
     if spec.get("error"):
         raise GraphQueryError(
             "That question can't be answered from the case graph yet — "
-            "try asking about case counts, accounts, modules, tiers, agents or timing.")
+            "try asking about case counts, accounts, modules, tiers, agents or timing.",
+            unsupported=True)
     return spec
 
 
@@ -419,7 +484,8 @@ def _run(cypher: str, params: dict) -> tuple[list[str], list[dict]]:
     driver = _driver_or_none()
     if driver is None:
         raise GraphQueryError("The knowledge graph isn't connected for this workspace.")
-    db = os.environ.get("NEO4J_DATABASE", "neo4j")
+    from interpreter.case_memory import graph_database
+    db = graph_database(params.get("tenant_id"))
     try:
         result = driver.execute_query(
             Query(cypher, timeout=_TIMEOUT_S), params,
@@ -454,3 +520,117 @@ def answer(question: str, tenant_id: str) -> dict:
         "rows": rows,
         "truncated": len(rows) >= spec["limit"],
     }
+
+
+# ── router: graph, else RAG ──────────────────────────────────────────
+_METRIC_PHRASE = re.compile(
+    r"(?i)\b(how many|how much|count|number of|total|sum|average|avg|mean|"
+    r"per |by (module|tier|team|agent|account|month|type|status|integration)|"
+    r"most|least|top \d|fewest|trend|over time|breakdown|distribution)\b")
+
+
+def _looks_like_metric(q: str) -> bool:
+    return bool(_METRIC_PHRASE.search(q or ""))
+
+
+def _rag_fallback(question: str, tenant_id: str, sb) -> dict:
+    """Similar resolved cases from `case_memory` — the RAG answer for a
+    question the graph can't express."""
+    from interpreter import case_memory
+    if sb is None:
+        from ingestion.scraper import get_supabase
+        sb = get_supabase()
+    hit = case_memory.lookup(sb, (question or "").strip(),
+                             tenant_id=str(tenant_id), k=5, pool=15)
+    return {
+        "mode": "rag",
+        "question": (question or "").strip(),
+        "citable": hit.get("citable", []),
+        "hints": hit.get("hints", []),
+        "scanned": hit.get("scanned", 0),
+    }
+
+
+_RELATED_CYPHER = """
+MATCH (seed:Case {case_number: $cn, tenant_id: $tenant_id})
+OPTIONAL MATCH (seed)-[:INSTANCE_OF]->(iss:Issue)<-[:INSTANCE_OF]-(oi:Case {tenant_id: $tenant_id})
+OPTIONAL MATCH (seed)-[:DUPLICATE_OF]-(od:Case {tenant_id: $tenant_id})
+WITH seed,
+     [x IN collect(DISTINCT oi) WHERE x.case_number <> seed.case_number] AS by_issue,
+     [x IN collect(DISTINCT od) WHERE x.case_number <> seed.case_number] AS by_dup,
+     head(collect(iss.title)) AS issue_title
+UNWIND (by_issue + by_dup) AS rel
+RETURN DISTINCT rel.case_number AS case_number, rel.subject AS subject,
+       rel.status AS status, rel.opened_at AS opened_at,
+       (rel IN by_issue) AS same_issue, (rel IN by_dup) AS duplicate,
+       issue_title AS issue_title
+ORDER BY coalesce(rel.opened_at, '') DESC
+LIMIT $limit
+"""
+
+
+def related_cases(case_number: str, tenant_id: str, *, limit: int = 50) -> dict:
+    """Cases linked to `case_number` by a shared `(:Issue)` (same root cause)
+    or a `DUPLICATE_OF` edge — "what's the same underlying bug as #1423".
+    Both ends are tenant-scoped. Read-only.
+
+    Returns `{seed, issue_title, related: [{case_number, subject, status,
+    opened_at, same_issue, duplicate}]}`.
+    """
+    cn = (case_number or "").strip()
+    if not cn:
+        raise GraphQueryError("Give a case number.")
+    if not os.environ.get("NEO4J_URI"):
+        raise GraphQueryError("The knowledge graph isn't connected for this workspace.")
+    params = {"cn": cn, "tenant_id": str(tenant_id), "limit": max(1, min(int(limit), _LIMIT_MAX))}
+    _cols, rows = _run(_RELATED_CYPHER, params)
+    title = rows[0].get("issue_title") if rows else None
+    return {
+        "seed": cn,
+        "issue_title": title,
+        "related": [{k: r.get(k) for k in
+                     ("case_number", "subject", "status", "opened_at",
+                      "same_issue", "duplicate")} for r in rows],
+    }
+
+
+def ask(question: str, tenant_id: str, *, sb=None) -> dict:
+    """Router (feature-req #7). Try the case graph; fall through to RAG
+    (`case_memory.lookup`) when the question isn't expressible as a graph
+    query, when the graph isn't connected, or when the graph returns
+    nothing and the question doesn't read like a metric.
+
+    Return carries `mode: "graph" | "rag"`. A graph miss that fell through
+    keeps its (empty) attempt under `graph` for transparency. Real
+    safety / execution failures still raise `GraphQueryError`.
+    """
+    q = (question or "").strip()
+    if not q:
+        raise GraphQueryError("Ask a question about your support cases.")
+
+    spec = cypher = params = None
+    if os.environ.get("NEO4J_URI"):
+        try:
+            spec = validate_spec(to_spec(q, tenant_id))
+            cypher, params = compile_spec(spec, tenant_id)
+            _assert_safe(cypher)
+        except GraphQueryError as e:
+            # not expressible (bad/`error` spec) -> RAG; a safety or compile
+            # failure on an otherwise-valid spec is a real bug -> surface.
+            if not (getattr(e, "unsupported", False) or spec is None):
+                raise
+            spec = None
+
+    if spec is None:
+        return _rag_fallback(q, tenant_id, sb)
+
+    columns, rows = _run(cypher, params)
+    res = {
+        "mode": "graph", "question": q, "spec": spec, "cypher": cypher,
+        "columns": columns, "rows": rows, "truncated": len(rows) >= spec["limit"],
+    }
+    if rows or _looks_like_metric(q):
+        return res
+    rag = _rag_fallback(q, tenant_id, sb)
+    rag["graph"] = res
+    return rag

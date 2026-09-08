@@ -552,6 +552,40 @@ export interface GraphAskResult {
   truncated: boolean;
 }
 
+// POST /api/ask — the router: graph first, RAG (similar resolved cases) when
+// the question isn't expressible as a graph query.
+export type AskResult =
+  | (GraphAskResult & { mode: "graph" })
+  | {
+      mode: "rag";
+      question: string;
+      citable: {
+        case_number: string | null;
+        subject: string | null;
+        resolution_text: string;
+        kind: string;
+        duplicate: boolean;
+        relevance: number;
+      }[];
+      hints: string[];
+      scanned: number;
+      graph?: GraphAskResult; // the (empty) graph attempt that fell through
+    };
+
+// GET /api/graph/related?case=<n>
+export interface RelatedCasesResult {
+  seed: string;
+  issue_title: string | null;
+  related: {
+    case_number: string;
+    subject: string | null;
+    status: string | null;
+    opened_at: string | null;
+    same_issue: boolean;
+    duplicate: boolean;
+  }[];
+}
+
 export interface KilDigest {
   week_of: string;
   this_week: KilMetrics;

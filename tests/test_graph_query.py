@@ -72,6 +72,22 @@ _ALL_SHAPES = [
                                                  "value": ["gold", "platinum"]}]},
     {"metric": "duplicate_count", "group_by": ["module"]},
     {"metric": "count", "group_by": ["opened_month", "module"]},
+    {"metric": "count", "group_by": ["submodule"],
+     "filters": [{"field": "module", "op": "eq", "value": "Billing"}]},
+    # "which issues appear across more than one sub-module"
+    {"metric": "distinct_submodules", "group_by": ["module"],
+     "having": {"op": "gt", "value": 1}},
+    # chunk-2 "what" layer
+    {"metric": "list", "filters": [
+        {"field": "module", "op": "eq", "value": "Billing"},
+        {"field": "root_cause", "op": "contains", "value": "salesforce sync"}]},
+    {"metric": "count", "group_by": ["integration"]},
+    {"metric": "count", "filters": [{"field": "issue", "op": "eq", "value": "ISS-1423"}]},
+    {"metric": "distinct_integrations", "group_by": ["module"]},
+    # chunk-3 "one SF account, many portals"
+    {"metric": "count", "group_by": ["account_name"],
+     "filters": [{"field": "parent_account", "op": "eq", "value": "001ABC"}]},
+    {"metric": "count", "filters": [{"field": "account_name", "op": "contains", "value": "downtown"}]},
 ]
 
 
@@ -103,6 +119,53 @@ def test_account_join_carries_tenant_id_on_the_node_too():
     assert "(a:Account {tenant_id: $tenant_id})" in cypher
 
 
+def test_submodule_join_is_tenant_scoped_on_the_node():
+    # SubModule is tenant-scoped (unlike Module/CaseType) — the predicate
+    # must ride in the pattern, the same as Account.
+    spec = g.validate_spec({"metric": "count",
+                            "filters": [{"field": "submodule", "op": "eq", "value": "Refunds"}]})
+    cypher, _ = g.compile_spec(spec, "T1")
+    assert "(c)-[:IN_SUBMODULE]->(sm:SubModule {tenant_id: $tenant_id})" in cypher
+
+
+def test_cross_submodule_question_compiles():
+    # "issues that cut across more than one sub-module"
+    spec = g.validate_spec({"metric": "distinct_submodules", "group_by": ["module"],
+                            "having": {"op": "gt", "value": 1}})
+    cypher, params = g.compile_spec(spec, "T1")
+    assert "count(DISTINCT sm.name) AS value" in cypher
+    assert "WHERE value > $having" in cypher and params["having"] == 1
+    assert "(sm:SubModule {tenant_id: $tenant_id})" in cypher
+
+
+def test_what_layer_joins_scope_correctly():
+    # RootCause + Issue are tenant-scoped ON THE NODE; Integration is global
+    # (safe: reached only via a Case that IS tenant-scoped).
+    spec = g.validate_spec({"metric": "count", "filters": [
+        {"field": "root_cause", "op": "contains", "value": "salesforce sync"},
+        {"field": "integration", "op": "eq", "value": "Salesforce"},
+        {"field": "issue", "op": "eq", "value": "ISS-1423"}]})
+    cy, params = g.compile_spec(spec, "T1")
+    assert "(rc:RootCause {tenant_id: $tenant_id})" in cy
+    assert "(iss:Issue {tenant_id: $tenant_id})" in cy
+    assert "(ig:Integration)" in cy and "Integration {tenant_id" not in cy
+    assert "c.tenant_id = $tenant_id" in cy
+    assert "toLower(rc.label) CONTAINS toLower($f0)" in cy
+    assert params["f0"] == "salesforce sync"
+
+
+def test_portal_hierarchy_join_is_tenant_scoped():
+    # "cases per portal under account 001ABC" — the parent_account hop must
+    # land on a tenant-scoped node; the Case is already tenant-scoped.
+    spec = g.validate_spec({"metric": "count", "group_by": ["account_name"],
+                            "filters": [{"field": "parent_account", "op": "eq",
+                                         "value": "001ABC"}]})
+    cy, _ = g.compile_spec(spec, "T1")
+    assert "-[:CHILD_OF]->(pa:Account {tenant_id: $tenant_id})" in cy
+    assert "a.name AS g0" in cy or "coalesce(a.name" in cy
+    assert "c.tenant_id = $tenant_id" in cy
+
+
 def test_duplicate_subquery_is_tenant_scoped():
     spec = g.validate_spec({"metric": "count",
                             "filters": [{"field": "has_duplicate", "op": "eq", "value": True}]})
@@ -125,6 +188,93 @@ def test_list_metric_returns_case_columns_no_message_text():
     cypher, _ = g.compile_spec(spec, "T1")
     assert "c.subject AS subject" in cypher
     assert "Message" not in cypher and "Reply" not in cypher and "mm.text" not in cypher
+
+
+# ── ask() — the graph-or-RAG router ──────────────────────────────────
+def _throw(exc):
+    def _f(*a, **k):
+        raise exc
+    return _f
+
+
+def test_ask_routes_unsupported_question_to_rag(monkeypatch):
+    monkeypatch.setenv("NEO4J_URI", "bolt://x")
+    monkeypatch.setattr(g, "to_spec", _throw(g.GraphQueryError("nope", unsupported=True)))
+    monkeypatch.setattr("interpreter.case_memory.lookup",
+                        lambda sb, q, **k: {"citable": [{"case_number": "1"}], "hints": [], "scanned": 3})
+    out = g.ask("explain how the billing refund cases were resolved", "T1", sb=object())
+    assert out["mode"] == "rag" and out["citable"] == [{"case_number": "1"}]
+
+
+def test_ask_returns_graph_when_it_answers(monkeypatch):
+    monkeypatch.setenv("NEO4J_URI", "bolt://x")
+    monkeypatch.setattr(g, "to_spec", lambda *a, **k: {"metric": "count"})
+    monkeypatch.setattr(g, "_run", lambda cy, p: (["count"], [{"count": 7}]))
+    out = g.ask("how many cases are open", "T1", sb=object())
+    assert out["mode"] == "graph" and out["rows"] == [{"count": 7}]
+
+
+def test_ask_falls_through_on_empty_prose_result(monkeypatch):
+    monkeypatch.setenv("NEO4J_URI", "bolt://x")
+    monkeypatch.setattr(g, "to_spec", lambda *a, **k: {"metric": "list"})
+    monkeypatch.setattr(g, "_run", lambda cy, p: (["case_number"], []))
+    monkeypatch.setattr("interpreter.case_memory.lookup",
+                        lambda sb, q, **k: {"citable": [], "hints": ["h"], "scanned": 1})
+    out = g.ask("what usually causes the webhook failures", "T1", sb=object())
+    assert out["mode"] == "rag" and out["hints"] == ["h"]
+    assert out["graph"]["rows"] == []          # the empty graph attempt is kept
+
+
+def test_ask_keeps_empty_metric_result_as_graph(monkeypatch):
+    monkeypatch.setenv("NEO4J_URI", "bolt://x")
+    monkeypatch.setattr(g, "to_spec", lambda *a, **k: {"metric": "count"})
+    monkeypatch.setattr(g, "_run", lambda cy, p: (["count"], []))
+    out = g.ask("how many cases in the Foo module", "T1", sb=object())
+    assert out["mode"] == "graph"              # "how many" is a metric — empty is a real answer
+
+
+def test_ask_no_graph_goes_straight_to_rag(monkeypatch):
+    monkeypatch.delenv("NEO4J_URI", raising=False)
+    monkeypatch.setattr("interpreter.case_memory.lookup",
+                        lambda sb, q, **k: {"citable": [], "hints": [], "scanned": 0})
+    assert g.ask("anything", "T1", sb=object())["mode"] == "rag"
+
+
+def test_ask_surfaces_a_real_safety_failure(monkeypatch):
+    monkeypatch.setenv("NEO4J_URI", "bolt://x")
+    monkeypatch.setattr(g, "to_spec", lambda *a, **k: {"metric": "count"})
+    monkeypatch.setattr(g, "_assert_safe", _throw(g.GraphQueryError("unsafe")))
+    with pytest.raises(g.GraphQueryError):
+        g.ask("how many cases", "T1", sb=object())
+
+
+# ── related_cases() — "same underlying bug as #1423" ─────────────────
+def test_related_cases_is_tenant_scoped(monkeypatch):
+    monkeypatch.setenv("NEO4J_URI", "bolt://x")
+    seen = {}
+
+    def _fake_run(cy, p):
+        seen.update(cy=cy, p=p)
+        return (["case_number"], [{"case_number": "1500", "subject": "x", "status": "Closed",
+                                   "opened_at": "2026-01-01", "same_issue": True,
+                                   "duplicate": False, "issue_title": "Salesforce sync failure"}])
+
+    monkeypatch.setattr(g, "_run", _fake_run)
+    out = g.related_cases("1423", "T1")
+    assert out["seed"] == "1423" and out["issue_title"] == "Salesforce sync failure"
+    assert out["related"][0]["case_number"] == "1500" and out["related"][0]["same_issue"] is True
+    assert "issue_title" not in out["related"][0]        # stays at the top level only
+    assert seen["p"]["tenant_id"] == "T1" and seen["p"]["cn"] == "1423"
+    # both link legs land on a tenant-scoped Case node
+    assert "oi:Case {tenant_id: $tenant_id}" in seen["cy"]
+    assert "od:Case {tenant_id: $tenant_id}" in seen["cy"]
+    assert "MERGE" not in seen["cy"] and "DELETE" not in seen["cy"]
+
+
+def test_related_cases_needs_a_connected_graph(monkeypatch):
+    monkeypatch.delenv("NEO4J_URI", raising=False)
+    with pytest.raises(g.GraphQueryError):
+        g.related_cases("1423", "T1")
 
 
 # ── _assert_safe ─────────────────────────────────────────────────────

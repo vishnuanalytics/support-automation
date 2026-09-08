@@ -185,7 +185,8 @@ def _sync_one(sb, driver, tenant_id: str, *, dry: bool) -> dict:
     if driver is None:
         return {"tenant_id": tenant_id, "contacts": 0, "note": "no neo4j"}
 
-    db = os.environ.get("NEO4J_DATABASE", "neo4j")
+    from interpreter.case_memory import graph_database
+    db = graph_database(str(tenant_id))
     synced_at = datetime.now(timezone.utc).isoformat()
     driver.execute_query(_ROLLUP_CYPHER, rollups=payload, tenant_id=tenant_id,
                          synced_at=synced_at, database_=db)

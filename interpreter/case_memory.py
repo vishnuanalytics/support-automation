@@ -128,6 +128,38 @@ def _driver_or_none():
         return None
 
 
+def graph_database(tenant_id: str | None = None) -> str:
+    """The Neo4j database a tenant's graph reads/writes run against.
+
+    Today: one shared database — tenant isolation is the `tenant_id`
+    predicate baked into every MERGE key here and into
+    `graph_query.compile_spec`. Moving to database-per-tenant (Neo4j
+    Enterprise / Aura) is a one-line change here — `return f"t_{tenant_id}"`
+    — with nothing above this call site to touch. Kept as the single seam
+    so that switch stays cheap.
+    """
+    return os.environ.get("NEO4J_DATABASE", "neo4j")
+
+
+# Chunk-2 enrichment: what the problem *was*, not just where it lived.
+# RootCause + Issue are tenant-scoped (a label/title can carry specifics);
+# Integration is global-shared like Module (a content-free vocab string,
+# reachable only via a tenant-scoped Case). Shared verbatim by both MERGE
+# cyphers — string-concatenated so there's one definition.
+_WHAT_BLOCK = """
+FOREACH (_ IN CASE WHEN $root_cause IS NULL THEN [] ELSE [1] END |
+  MERGE (rc:RootCause {label: $root_cause, tenant_id: $tenant_id})
+  MERGE (c)-[:CAUSED_BY]->(rc))
+FOREACH (ig_n IN coalesce($integrations, []) |
+  MERGE (ig:Integration {name: ig_n}) MERGE (c)-[:INVOLVES]->(ig))
+FOREACH (_ IN CASE WHEN $issue_key IS NULL THEN [] ELSE [1] END |
+  MERGE (iss:Issue {issue_key: $issue_key, tenant_id: $tenant_id})
+  MERGE (c)-[:INSTANCE_OF]->(iss)
+  FOREACH (__ IN CASE WHEN $root_cause IS NULL THEN [] ELSE [1] END |
+    MERGE (rc2:RootCause {label: $root_cause, tenant_id: $tenant_id})
+    MERGE (iss)-[:ROOT_CAUSE]->(rc2)))"""
+
+
 _MERGE_CYPHER = """
 MERGE (c:Case {sf_id: $sf_id, tenant_id: $tenant_id})
   SET c.case_number = $case_number, c.subject = $subject,
@@ -138,10 +170,18 @@ MERGE (r:Reply {case_sf_id: $sf_id, tenant_id: $tenant_id})
 MERGE (c)-[:RESOLVED_BY]->(r)
 FOREACH (_ IN CASE WHEN $module   IS NULL THEN [] ELSE [1] END |
   MERGE (m:Module {name: $module})     MERGE (c)-[:ABOUT]->(m))
+// SubModule is tenant-scoped (its name can be tenant-specific); Module
+// stays global-shared. Keyed on (name, module_name, tenant_id) so
+// "Refunds / Billing" and "Refunds / <other module>" are distinct nodes.
+FOREACH (_ IN CASE WHEN $submodule IS NULL OR $module IS NULL THEN [] ELSE [1] END |
+  MERGE (sm:SubModule {name: $submodule, module_name: $module, tenant_id: $tenant_id})
+  MERGE (c)-[:IN_SUBMODULE]->(sm)
+  MERGE (pm:Module {name: $module}) MERGE (sm)-[:PART_OF]->(pm))
 FOREACH (_ IN CASE WHEN $case_type IS NULL THEN [] ELSE [1] END |
   MERGE (t:CaseType {name: $case_type}) MERGE (c)-[:OF_TYPE]->(t))
 FOREACH (_ IN CASE WHEN $agent    IS NULL THEN [] ELSE [1] END |
   MERGE (a:Agent {sf_user_id: $agent}) MERGE (c)-[:HANDLED_BY]->(a))
+""" + _WHAT_BLOCK + """
 WITH c
 UNWIND $similar AS sim
   MATCH (o:Case {sf_id: sim.sf_id, tenant_id: $tenant_id})
@@ -164,7 +204,7 @@ def sync_graph(row: dict[str, Any], similar: list[dict] | None = None) -> bool:
     driver = _driver_or_none()
     if driver is None:
         return False
-    db = os.environ.get("NEO4J_DATABASE", "neo4j")
+    db = graph_database(str(row.get("tenant_id") or "") or None)
     try:
         driver.execute_query(
             _MERGE_CYPHER,
@@ -176,8 +216,12 @@ def sync_graph(row: dict[str, Any], similar: list[dict] | None = None) -> bool:
             resolution_text=row.get("resolution_text"),
             accepted=row.get("resolution_kind") in _CITABLE_KINDS,
             source=row.get("source") or "sync",
-            module=row.get("module"), case_type=row.get("case_type"),
+            module=row.get("module"), submodule=row.get("submodule"),
+            case_type=row.get("case_type"),
             agent=row.get("agent_user_id"),
+            root_cause=(row.get("root_cause") or None),
+            integrations=list(row.get("integrations") or []),
+            issue_key=(row.get("issue_key") or None),
             dup_threshold=float(os.environ.get("CASE_MEMORY_DUP_THRESHOLD", "0.92")),
             similar=[{"sf_id": s["case_sf_id"],
                       "score": float(s.get("similarity", 0)),
@@ -199,13 +243,25 @@ MERGE (c:Case {sf_id: $sf_id, tenant_id: $tenant_id})
       c.opened_at = $opened_at, c.closed_at = $closed_at, c.synced_at = $synced_at
 FOREACH (_ IN CASE WHEN $module    IS NULL THEN [] ELSE [1] END |
   MERGE (m:Module {name: $module})       MERGE (c)-[:ABOUT]->(m))
+FOREACH (_ IN CASE WHEN $submodule IS NULL OR $module IS NULL THEN [] ELSE [1] END |
+  MERGE (sm:SubModule {name: $submodule, module_name: $module, tenant_id: $tenant_id})
+  MERGE (c)-[:IN_SUBMODULE]->(sm)
+  MERGE (pm:Module {name: $module}) MERGE (sm)-[:PART_OF]->(pm))
 FOREACH (_ IN CASE WHEN $case_type  IS NULL THEN [] ELSE [1] END |
   MERGE (t:CaseType {name: $case_type})  MERGE (c)-[:OF_TYPE]->(t))
 FOREACH (_ IN CASE WHEN $account_id IS NULL THEN [] ELSE [1] END |
   MERGE (a:Account {sf_id: $account_id, tenant_id: $tenant_id})
   MERGE (c)-[:FOR_ACCOUNT]->(a)
   FOREACH (__ IN CASE WHEN $account_domain IS NULL THEN [] ELSE [1] END |
-    SET a.domain = $account_domain))
+    SET a.domain = $account_domain)
+  FOREACH (__ IN CASE WHEN $account_name IS NULL THEN [] ELSE [1] END |
+    SET a.name = $account_name)
+  // "one SF account, many portals": a child Account (has a ParentId) is a
+  // portal / operating entity under its parent — [:CHILD_OF] carries the
+  // hierarchy, so "cases for portals under account X" is one hop.
+  FOREACH (__ IN CASE WHEN $account_parent_id IS NULL THEN [] ELSE [1] END |
+    MERGE (pa:Account {sf_id: $account_parent_id, tenant_id: $tenant_id})
+    MERGE (a)-[:CHILD_OF]->(pa)))
 // Phase 30: the Case's Contact is the join target the product-analytics
 // sync resolves against. A Case that names both a contact and an account
 // is Salesforce's own ground truth for [:AT_ACCOUNT] — stronger than the
@@ -215,7 +271,7 @@ FOREACH (_ IN CASE WHEN $contact_email IS NULL THEN [] ELSE [1] END |
   MERGE (c)-[:FILED_BY]->(ct)
   FOREACH (__ IN CASE WHEN $account_id IS NULL THEN [] ELSE [1] END |
     MERGE (a:Account {sf_id: $account_id, tenant_id: $tenant_id})
-    MERGE (ct)-[:AT_ACCOUNT]->(a)))
+    MERGE (ct)-[:AT_ACCOUNT]->(a)))""" + _WHAT_BLOCK + """
 WITH c
 UNWIND $messages AS msg
   MERGE (mm:Message {id: msg.id, tenant_id: $tenant_id})
@@ -237,7 +293,7 @@ def sync_case_lifecycle(case: dict[str, Any], messages: list[dict] | None = None
     driver = _driver_or_none()
     if driver is None:
         return False
-    db = os.environ.get("NEO4J_DATABASE", "neo4j")
+    db = graph_database(str(case.get("tenant_id") or "") or None)
     try:
         driver.execute_query(
             _LIFECYCLE_CYPHER,
@@ -254,8 +310,14 @@ def sync_case_lifecycle(case: dict[str, Any], messages: list[dict] | None = None
             closed_at=case.get("closed_at"),
             synced_at=datetime.now(timezone.utc).isoformat(),
             module=case.get("module"),
+            submodule=case.get("submodule"),
             case_type=case.get("case_type"),
+            root_cause=(case.get("root_cause") or None),
+            integrations=list(case.get("integrations") or []),
+            issue_key=(case.get("issue_key") or None),
             account_id=case.get("account_id"),
+            account_name=(case.get("account_name") or None),
+            account_parent_id=(case.get("account_parent_id") or None),
             account_domain=(case.get("account_domain") or None),
             contact_email=(case.get("contact_email") or None),
             messages=[{"id": m["id"], "role": m.get("role"),
@@ -284,8 +346,8 @@ def _graph_duplicates(sf_ids: list[str], *, tenant_id: str | None = None) -> set
     driver = _driver_or_none()
     if driver is None:
         return set()
-    db = os.environ.get("NEO4J_DATABASE", "neo4j")
     tid = str(tenant_id) if tenant_id else None
+    db = graph_database(tid)
     try:
         recs = driver.execute_query(
             "MATCH (src:Case)-[:DUPLICATE_OF]->(o:Case) WHERE o.sf_id IN $ids "

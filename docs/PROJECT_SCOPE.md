@@ -707,8 +707,188 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-08 (NL→graph over the case graph — richer schema. Branch
+`web-redesign-broadsheet` (same working branch as the UI redesign).
+Extends the existing `interpreter/graph_query.py` "ask the case graph"
+spec-compiler; does NOT switch to free-form text-to-Cypher — that stays
+rejected for the documented reason (one shared Neo4j Aura, no per-tenant
+DB / no read-only role; the deterministic spec→Cypher compiler with a
+per-node `tenant_id` predicate is the tenant boundary).**
+
+Design agreed with the user over a long thread (see the "Feature
+request: Natural language → Cypher" discussion). The user's example
+questions ("root cause = a Salesforce sync failure", "issues across >1
+sub-module", "same underlying bug as case #1423") aren't blocked by the
+query interface — they're blocked by the graph *schema* being too
+coarse (`Module {name}` flat string; no `SubModule` / `Issue` /
+`RootCause` / `Integration` node; no `Account → Business → Location`
+operating hierarchy for "one SF account, many portals"). Multi-tenancy
+stays property-based now; database-per-tenant (Neo4j Enterprise) is a
+later config flip via the new `graph_database()` seam.
+
+Sequenced, one verifiable chunk at a time, checkpointed with the user:
+
+- **Chunk 1 — `SubModule` node + `graph_database()` seam (DONE, this
+  commit).**
+  - `interpreter/case_memory.py`: new `graph_database(tenant_id)` — the
+    single call site that today returns the shared DB name and later
+    becomes `f"t_{tenant_id}"` for database-per-tenant, nothing above it
+    to change. Routed the 3 `NEO4J_DATABASE` reads in this module through
+    it (retrieval / registry / kb_writeback / product_analytics still
+    read the env directly — mechanical follow-up).
+  - Both MERGE cyphers (`_MERGE_CYPHER`, `_LIFECYCLE_CYPHER`) now create
+    `(:SubModule {name, module_name, tenant_id})` —
+    **tenant-scoped** (its name can be tenant-specific; `Module` stays
+    global-shared) — with `(c)-[:IN_SUBMODULE]->(sm)` and
+    `(sm)-[:PART_OF]->(m:Module)`. `submodule` param passed from the row
+    (`case_memory_sync._row_from_run` already read `SubModule__c`;
+    `case_graph_sync._case_row` + `_CASE_SOQL` now do too).
+  - `interpreter/graph_query.py`: `submodule` added as a join (predicate
+    in the pattern, like `account`), a group-by dim, a filter, and a
+    `distinct_submodules` metric — so `{metric: distinct_submodules,
+    group_by: [module], having: {op: gt, value: 1}}` answers "which
+    modules have cases cutting across >1 sub-module". `_run` routes the
+    DB through `graph_database()`.
+  - Tests: `test_case_graph_sync.py` (SubModule MERGE + tenant_id + the
+    two new edges), `test_graph_query.py` (submodule join is
+    node-tenant-scoped; the cross-submodule spec compiles). 91 green in
+    the graph/case suites; the one integration failure
+    (`test_multiflow::test_same_case_diverges_across_tenants`,
+    `FlowBuildError: 2 unconditional edges` in test tenant `22222222`) is
+    pre-existing DB data, unrelated.
+- **Chunk 2 — `Issue` / `RootCause` / `Integration` nodes + extractor
+  (DONE, this commit).**
+  - New `interpreter/case_extract.py` — `extract_case_signals(subject,
+    body, resolution)` → `{root_cause: str|None, integrations: [str]}`.
+    One bounded LLM call (`openai/gpt-oss-20b`, `json_object`,
+    `cache=True`); integration names snapped to a module-level allow-list
+    (`_DEFAULT_INTEGRATIONS`, ~30 names) so the graph doesn't sprout a
+    node per spelling; root cause capped at 80 chars. Any failure →
+    `{"root_cause": None, "integrations": []}` (never raises).
+  - `case_memory.py`: shared `_WHAT_BLOCK` string, concatenated into both
+    MERGE cyphers — `(:RootCause {label, tenant_id})` +
+    `(c)-[:CAUSED_BY]->`, global `(:Integration {name})` +
+    `(c)-[:INVOLVES]->`, `(:Issue {issue_key, tenant_id})` +
+    `(c)-[:INSTANCE_OF]->` and `(iss)-[:ROOT_CAUSE]->(rc)`. RootCause /
+    Issue tenant-scoped; Integration global-shared (content-free vocab,
+    reached only via a tenant-scoped Case — same rationale as Module).
+    Three new params (`root_cause`, `integrations`, `issue_key`) threaded
+    from the row; NULL/empty-safe.
+  - `ingestion/case_graph_sync.py`: when `CASE_EXTRACT=1` (opt-in — a
+    backfill otherwise stays free of LLM calls), each closed / replied
+    case gets `case_extract.extract_case_signals(...)` and the result
+    lands on the row before `sync_case_lifecycle`. `Issue__c` is NOT
+    pulled from SOQL yet (speculative field — would break orgs without
+    it); `issue_key` stays `None` until a linker/clusterer populates it,
+    the schema + query surface are ready.
+  - `graph_query.py`: `root_cause` / `integration` / `issue` as joins
+    (RootCause + Issue carry the tenant predicate in the pattern;
+    Integration doesn't — global), dims, filters (root_cause supports
+    `contains`), plus a `distinct_integrations` metric and two new
+    few-shots ("root cause was a Salesforce sync failure", the
+    cross-submodule one).
+  - Tests: `test_case_extract.py` (vocab snapping, null, no-text-no-call,
+    failure swallowed), `test_case_graph_sync.py` (the `_WHAT_BLOCK`
+    MERGEs + `CASE_EXTRACT` wiring), `test_graph_query.py` (the three
+    joins scope correctly — RootCause/Issue node-scoped, Integration
+    global-but-Case-scoped). 380 offline green.
+  - **Still open:** `Issue` auto-clustering (group resolved cases by
+    root-cause similarity → propose Issue nodes for manager approval, in
+    the KIL loop) — that's what makes "same bug as #1423" work in
+    practice. Deferred to chunk 2b / its own phase.
+- **Chunk 3 — "one SF account, many portals" (DONE, this commit).**
+  Kept minimal: a child Account (has a `ParentId`) *is* a portal /
+  operating entity — no new node label needed.
+  - `case_graph_sync`: SOQL pulls `Account.Name` + `Account.ParentId`;
+    `_case_row` derives `account_name` + `account_parent_id`.
+  - `case_memory._LIFECYCLE_CYPHER`: the account FOREACH now
+    `SET a.name = $account_name` and, when there's a parent,
+    `MERGE (pa:Account {sf_id: $account_parent_id, tenant_id})
+    MERGE (a)-[:CHILD_OF]->(pa)`. (`_MERGE_CYPHER` still doesn't sync
+    Account at all — pre-existing gap, out of scope.)
+  - `graph_query`: `account_name` dim/filter (with `contains`), a
+    self-contained tenant-scoped `parent_account` join
+    (`(c)-[:FOR_ACCOUNT]->(:Account)-[:CHILD_OF]->(pa:Account
+    {tenant_id})`), dim + filter, and a few-shot ("case count per portal
+    under account 001ABC"). `account` also gained a filter (it only had a
+    dim before).
+  - **Deferred:** distinct `Business` / `Location` / `Channel` labels for
+    tenants whose portals/outlets aren't SF Accounts (a `Brand__c` /
+    `Store__c` custom object) — needs per-tenant adapter config for which
+    SF object/field carries the hierarchy. `CHILD_OF` + `Account.name`
+    covers the common case now.
+- **Chunk 4 — graph-or-RAG router (DONE, this commit).**
+  `graph_query.ask(question, tenant_id, sb=)` — runs the pipeline stages
+  itself so it can tell "not expressible" (`GraphQueryError.unsupported`,
+  set on the `{"error"}` / bad-JSON / (still to tag: bad-spec) paths —
+  currently keyed off `spec is None`, i.e. the failure happened in
+  `to_spec`/`validate_spec` before a spec existed) from a real
+  safety/execution failure (re-raised). Falls through to
+  `case_memory.lookup` (similar resolved cases) when: the question isn't
+  expressible, `NEO4J_URI` is unset, **or** the graph returned 0 rows and
+  the question doesn't match `_METRIC_PHRASE` (how many / count / average
+  / by <dim> / trend …). Return carries `mode: "graph" | "rag"`; a
+  fell-through graph miss keeps its empty attempt under `graph`. New
+  `POST /api/ask` (owner-only) wraps it; `POST /api/graph/ask` stays
+  pure-graph. 7 router tests; **1034 offline green**.
+- **Chunk 2b — `Issue` clustering + "related to case #1423" (DONE, this
+  commit).**
+  - New `interpreter/case_cluster.py` — `cluster_issues(tenant_id,
+    min_cases=3)`: **deterministic, no LLM.** `case_extract` already
+    normalised root causes into `(:RootCause {label})` nodes, so cases
+    sharing a label *are* one issue. Two Cypher round-trips: list the
+    tenant's distinct RootCause labels → mint a stable
+    `issue_key = auto:<sha1(tenant:label)[:16]>` per label in Python (no
+    md5 in Community Cypher) → one MERGE that creates
+    `(:Issue {issue_key, tenant_id, title, status:'auto', case_count})`,
+    `(:Issue)-[:ROOT_CAUSE]->(:RootCause)` and
+    `(:Case)-[:INSTANCE_OF]->(:Issue)` for every case, when the label has
+    ≥ `min_cases`. Re-running only updates counts. CLI:
+    `python -m interpreter.case_cluster --tenant <id>` / `--all`.
+    `status='auto'` — Issues drive nothing automated, they're a query
+    grouping; human promote / rename / merge is a later chunk.
+  - `graph_query.related_cases(case_number, tenant_id)` +
+    `GET /api/graph/related?case=<n>` (owner-only) — cases linked to a
+    seed by a shared `(:Issue)` or a `DUPLICATE_OF` edge. Both link legs
+    tenant-scoped, read-only, `LIMIT _LIMIT_MAX`. Returns
+    `{seed, issue_title, related:[{case_number, subject, status,
+    opened_at, same_issue, duplicate}]}`. **This is what makes "what's
+    linked to the same underlying bug as case #1423" work** — run
+    `case_cluster` first to populate the Issues.
+  - Tests: `test_case_cluster.py` (stable per-tenant key, pair building,
+    None-label dropped, no-graph / no-labels / driver-error all → zero),
+    `test_graph_query.py` (`related_cases` tenant-scoped + read-only).
+- **Seam cleanup (DONE, this commit).** The 4 stray `NEO4J_DATABASE`
+  reads now route through `case_memory.graph_database(tenant_id)`:
+  `retrieval._graph_expand` (no-arg — the doc-link graph is shared),
+  `registry` product-signal, `kb_writeback._graph_supersede`,
+  `product_analytics_sync`. Only `case_memory.graph_database()` itself
+  and `ingestion/neo4j_sync.py` (the shared `docs.zapier.com` Doc graph —
+  genuinely not tenant-scoped, and a module-level constant) still read
+  the env directly, by design.
+- **Web ask-box (DONE, this commit).** `GraphAskPanel` in
+  `web/src/review/ReviewView.tsx` (the Approvals view) now calls
+  `api.ask()` → `POST /api/ask` (the router) instead of `/graph/ask`
+  directly. It renders a `graph` / `similar cases` mode chip; for
+  `mode:"graph"` the compiled-Cypher table as before (now with a
+  per-`case_number` **related-cases** expander → `api.graphRelated()` →
+  `GET /api/graph/related`, showing `same issue` / `duplicate` badges +
+  the issue title); for `mode:"rag"` the citable resolved cases (subject +
+  clipped resolution, same related-cases expander) and the `hints` list.
+  `GRAPH_EXAMPLES` refreshed with a root-cause / prose question.
+  `AskResult` + `RelatedCasesResult` added to `web/src/types.ts` and
+  `api.ask` / `api.graphRelated` to `web/src/api.ts`. `npm run build`
+  green (tsc + vite).
+- **Not doing** — free-form Cypher; a read-only Neo4j user (needs
+  Enterprise / per-tenant DB — a cost decision left to the user).
+- **Still queued** — human promote/rename/merge of `status='auto'`
+  Issues; distinct `Business`/`Location`/`Channel` labels for non-Account
+  portal hierarchies (chunk 3's deferred half).
+
+---
+
 **2026-09-07 (Web UI redesign — "Broadsheet on dark" — branch
-`web-redesign-broadsheet`, off `main`. Most recent work in this file.
+`web-redesign-broadsheet`, off `main`.
 A visual + structural rebuild of `web/` from a Claude Design handoff
 bundle in `ui-mockups-for-forms/`; not a backend phase.)**
 

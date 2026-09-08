@@ -159,9 +159,10 @@ def graph_expand(
         return []
     try:
         from ingestion.neo4j_sync import get_neo4j_driver
+        from interpreter.case_memory import graph_database
 
         driver = get_neo4j_driver()   # cached singleton — do NOT close here
-        db = os.environ.get("NEO4J_DATABASE", "neo4j")
+        db = graph_database()         # the doc-link graph is shared, not tenant-scoped
         recs = driver.execute_query(
             """
             MATCH (d:Doc)-[:LINKS_TO]->(n:Doc)

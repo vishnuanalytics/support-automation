@@ -52,7 +52,8 @@ _BOT_DRAFT_MARKERS = ("[bot draft", "[draft", "suggested draft", "review before 
 _CASE_SOQL = (
     "SELECT Id, CaseNumber, Subject, Description, Status, Type, Reason, Priority, "
     "Origin, IsClosed, CreatedDate, ClosedDate, LastModifiedDate, OwnerId, AccountId, "
-    "ContactId, Contact.Email, Module__c, Routed_Team__c, Account.Tier__c, Account.Website, "
+    "ContactId, Contact.Email, Module__c, SubModule__c, Routed_Team__c, "
+    "Account.Name, Account.ParentId, Account.Tier__c, Account.Website, "
     "(SELECT Id, CommentBody, CreatedById, CreatedDate, IsPublished FROM CaseComments), "
     "(SELECT Id, Incoming, FromAddress, ToAddress, TextBody, MessageDate, CreatedById "
     " FROM EmailMessages) "
@@ -129,8 +130,13 @@ def _case_row(case: dict) -> dict:
         "opened_at": case.get("CreatedDate"),
         "closed_at": case.get("ClosedDate"),
         "module": case.get("Module__c"),
+        "submodule": case.get("SubModule__c"),
         "case_type": case.get("Type"),
         "account_id": case.get("AccountId"),
+        # "one SF account, many portals": a child Account (has a ParentId) is
+        # an operating entity / portal under the contract Account.
+        "account_name": (case.get("Account") or {}).get("Name"),
+        "account_parent_id": (case.get("Account") or {}).get("ParentId"),
         "account_domain": _domain_from_website((case.get("Account") or {}).get("Website")),
         "contact_email": ((case.get("Contact") or {}).get("Email") or "").strip().lower() or None,
     }
@@ -221,6 +227,13 @@ def sync(*, since: str | None, limit: int, one_id: str | None, dry: bool) -> int
     cases = _fetch(sf, since=since, limit=limit, one_id=one_id)
     log.info("%d Case(s) to sync", len(cases))
 
+    # Chunk-2: pull root-cause + integrations out of resolved cases' text so
+    # the graph can answer "what was the problem". One LLM call per closed
+    # case — opt-in, so a big backfill doesn't silently cost N calls.
+    extract_on = bool(os.environ.get("CASE_EXTRACT")) and not dry
+    if extract_on:
+        log.info("CASE_EXTRACT=1 — extracting root cause / integrations per closed case")
+
     _CKPT_EVERY = 50
     n_cases = n_msgs = ck_c = ck_m = 0
     high_water = since
@@ -234,6 +247,17 @@ def sync(*, since: str | None, limit: int, one_id: str | None, dry: bool) -> int
     for case in cases:
         row = _case_row(case)
         msgs = _messages(case)
+        if extract_on and (row.get("is_closed") or any(
+                m.get("role") in ("agent_reply", "agent_note") for m in msgs)):
+            from interpreter import case_extract
+            resolution = "\n".join(
+                m["text"] for m in msgs
+                if m.get("role") in ("agent_reply", "agent_note") and m.get("text"))
+            sig = case_extract.extract_case_signals(
+                row.get("subject"), case.get("Description"), resolution,
+                tenant_id=row.get("tenant_id"))
+            row["root_cause"] = sig["root_cause"]
+            row["integrations"] = sig["integrations"]
         high_water = max(high_water or "", case.get("LastModifiedDate") or "") or None
         if dry:
             log.info("[dry-run] %s %s  status=%s  messages=%d",

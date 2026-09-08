@@ -303,11 +303,11 @@ def _maybe_enqueue_doc_writeback(sb, *, old_id: str, tenant_id: Any, new_body_md
 
 def _graph_supersede(new_id: str, old_id: str | None, tenant_id: str, title: str) -> None:
     try:
-        from .case_memory import _driver_or_none
+        from .case_memory import _driver_or_none, graph_database
         driver = _driver_or_none()
         if driver is None:
             return
-        db = os.environ.get("NEO4J_DATABASE", "neo4j")
+        db = graph_database(str(tenant_id))
         cy = ("MERGE (k:KBArticle {entry_id: $new}) "
               "SET k.tenant_id = $tid, k.title = $title, k.status = 'provisional' ")
         params = {"new": new_id, "tid": str(tenant_id), "title": title}

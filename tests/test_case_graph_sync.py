@@ -30,8 +30,10 @@ _CASE = {
     "ContactId": "003XX000004TmiAAA",
     "Contact": {"Email": "rose@edge.com"},
     "Module__c": "API & Webhooks",
+    "SubModule__c": "Webhooks",
     "Routed_Team__c": "tier2",
-    "Account": {"Tier__c": "premium"},
+    "Account": {"Tier__c": "premium", "Name": "Edge Retail — Downtown",
+                "ParentId": "001XX00000EPARENT"},
     "CaseComments": {"records": [
         {"Id": "00aXX01", "CommentBody": "Confirmed reproducible on staging.",
          "CreatedById": "005AGENT", "CreatedDate": "2026-08-31T10:00:00.000+0000",
@@ -55,6 +57,9 @@ def test_case_row_normalises_fields():
     assert r["status"] == "Escalated" and r["is_closed"] is False
     assert r["tier"] == "premium" and r["routed_team"] == "tier2"
     assert r["module"] == "API & Webhooks" and r["case_type"] == "Problem"
+    assert r["submodule"] == "Webhooks"
+    assert r["account_name"] == "Edge Retail — Downtown"
+    assert r["account_parent_id"] == "001XX00000EPARENT"
     assert r["account_id"] == "001XX000003DfgAAA"
     assert r["contact_email"] == "rose@edge.com"       # Phase 30: the join target
     assert r["account_domain"] is None                 # _CASE has no Account.Website
@@ -133,6 +138,7 @@ def test_sync_case_lifecycle_builds_the_expected_cypher_params(monkeypatch):
     assert p["sf_id"] == "500XX0000000abcAAA"
     assert p["is_closed"] is False and p["tenant_id"]  # str, non-empty
     assert p["module"] == "API & Webhooks" and p["account_id"] == "001XX000003DfgAAA"
+    assert p["submodule"] == "Webhooks"
     assert len(p["messages"]) == 4
     assert {m["role"] for m in p["messages"]} == {"inbound", "agent_note", "agent_reply"}
     # security fix (2026-09-03) -- Case/Account/Message MERGE keys include
@@ -141,12 +147,60 @@ def test_sync_case_lifecycle_builds_the_expected_cypher_params(monkeypatch):
     assert "MERGE (c:Case {sf_id: $sf_id, tenant_id: $tenant_id})" in captured["cypher"]
     assert "MERGE (a:Account {sf_id: $account_id, tenant_id: $tenant_id})" in captured["cypher"]
     assert "MERGE (mm:Message {id: msg.id, tenant_id: $tenant_id})" in captured["cypher"]
+    # SubModule is a tenant-scoped node (name can be tenant-specific); it hangs
+    # off the global Module via [:PART_OF] and off the Case via [:IN_SUBMODULE].
+    assert ("MERGE (sm:SubModule {name: $submodule, module_name: $module, "
+            "tenant_id: $tenant_id})") in captured["cypher"]
+    assert "MERGE (c)-[:IN_SUBMODULE]->(sm)" in captured["cypher"]
+    assert "MERGE (sm)-[:PART_OF]->(pm)" in captured["cypher"]
+    # Chunk-2 "what" layer: RootCause + Issue tenant-scoped, Integration global.
+    assert "MERGE (rc:RootCause {label: $root_cause, tenant_id: $tenant_id})" in captured["cypher"]
+    assert "MERGE (c)-[:CAUSED_BY]->(rc)" in captured["cypher"]
+    assert "MERGE (ig:Integration {name: ig_n}) MERGE (c)-[:INVOLVES]->(ig)" in captured["cypher"]
+    assert "MERGE (iss:Issue {issue_key: $issue_key, tenant_id: $tenant_id})" in captured["cypher"]
+    assert "MERGE (c)-[:INSTANCE_OF]->(iss)" in captured["cypher"]
+    # nothing was extracted for this offline row -> params are null / empty
+    assert p["root_cause"] is None and p["integrations"] == [] and p["issue_key"] is None
     assert "MERGE (c)-[:HAS_MESSAGE]->(mm)" in captured["cypher"]
+    # Chunk-3 "one SF account, many portals": child-account name + hierarchy edge.
+    assert p["account_name"] == "Edge Retail — Downtown"
+    assert p["account_parent_id"] == "001XX00000EPARENT"
+    assert "SET a.name = $account_name" in captured["cypher"]
+    assert "MERGE (pa:Account {sf_id: $account_parent_id, tenant_id: $tenant_id})" in captured["cypher"]
+    assert "MERGE (a)-[:CHILD_OF]->(pa)" in captured["cypher"]
     # Phase 30 — the Contact join target + the SF-ground-truth [:AT_ACCOUNT]
     assert p["contact_email"] == "rose@edge.com"
     assert "MERGE (ct:Contact {email: $contact_email, tenant_id: $tenant_id})" in captured["cypher"]
     assert "MERGE (c)-[:FILED_BY]->(ct)" in captured["cypher"]
     assert "MERGE (ct)-[:AT_ACCOUNT]->(a)" in captured["cypher"]
+
+
+def test_case_extract_wires_root_cause_and_integrations_when_enabled(monkeypatch):
+    monkeypatch.setenv("CASE_EXTRACT", "1")
+    monkeypatch.setattr("interpreter.case_extract.extract_case_signals",
+                        lambda *a, **k: {"root_cause": "Salesforce sync failure",
+                                         "integrations": ["Salesforce"]})
+    captured = {}
+    monkeypatch.setattr(case_memory, "sync_case_lifecycle",
+                        lambda row, msgs: captured.update(row=row) or True)
+    monkeypatch.setattr(cgs, "_fetch", lambda *a, **k: [_CASE])
+
+    class _SB:  # _save_state / _load_state no-ops
+        def table(self, *a): return self
+        def select(self, *a): return self
+        def eq(self, *a): return self
+        def limit(self, *a): return self
+        def upsert(self, *a, **k): return self
+        def execute(self):
+            return type("R", (), {"data": []})()
+
+    monkeypatch.setattr(cgs, "get_supabase", lambda: _SB())
+    monkeypatch.setattr("interpreter.salesforce.available", lambda: True)
+    monkeypatch.setattr("interpreter.salesforce.client_for", lambda *_: object())
+
+    cgs.sync(since="2026-01-01", limit=10, one_id=None, dry=False)
+    assert captured["row"]["root_cause"] == "Salesforce sync failure"
+    assert captured["row"]["integrations"] == ["Salesforce"]
 
 
 def test_sync_case_lifecycle_omits_contact_when_no_email(monkeypatch):
