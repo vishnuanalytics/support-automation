@@ -793,3 +793,48 @@ export interface KbExportBundle {
   collection: { name: string | null; description: string | null };
   entries: { title: string; body_md: string; status: string }[];
 }
+
+// intake_checklists (migration 101 / interpreter/intake.py) — the per-issue
+// investigation spec the `clarify` node uses to ask targeted questions.
+export interface IntakeSignal {
+  key: string;
+  label?: string;
+  question?: string;
+  required?: boolean;
+  detect?: {
+    any_of?: string[];
+    regex?: string;
+    attachment_type?: "image" | "video";
+  };
+  lands_in?: { sf_field?: string; ctx?: string };
+  vision?: boolean;
+}
+
+export interface IntakeChecklistMatch {
+  module?: string;
+  submodule?: string;
+  case_type?: string;
+  topic?: string;
+  keywords?: string[];
+}
+
+export interface IntakeChecklist {
+  checklist_id: string;
+  tenant_id: string;
+  label: string;
+  match: IntakeChecklistMatch;
+  signals: IntakeSignal[];
+  priority: number;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface IntakePreview {
+  matched: string | null;
+  known: Record<string, string>;
+  sources: Record<string, string>;
+  gaps: string[];
+  questions: string[];
+  field_writes: Record<string, string>;
+}

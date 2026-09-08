@@ -3806,6 +3806,135 @@ def delete_rule(rule_id: str, c: Caller = Depends(caller)) -> None:
                      summary=f"deleted rule {cur[0].get('name', rule_id)!r}")
 
 
+# --------------------------------------------------------------------------- #
+# Intake checklists (migration 101 / interpreter/intake.py) — the per-issue
+# investigation spec that drives the `clarify` node's questions.
+# --------------------------------------------------------------------------- #
+class IntakeChecklistIn(BaseModel):
+    label: str
+    match: dict[str, Any] = {}
+    signals: list[dict[str, Any]] = []
+    priority: int = 0
+    enabled: bool = True
+    tenant_id: str | None = None
+
+
+class IntakeChecklistPatch(BaseModel):
+    label: str | None = None
+    match: dict[str, Any] | None = None
+    signals: list[dict[str, Any]] | None = None
+    priority: int | None = None
+    enabled: bool | None = None
+
+
+class IntakePreviewIn(BaseModel):
+    subject: str = ""
+    body: str = ""
+    topic: str = ""
+    case_type: str = ""
+    module: str = ""
+    submodule: str = ""
+    tenant_id: str | None = None
+
+
+@app.get("/api/intake/checklists")
+def list_intake_checklists(tenant_id: str | None = None,
+                           c: Caller = Depends(caller)) -> list[dict]:
+    tid = _caller_tenant(c, tenant_id)
+    return (c.sb.table("intake_checklists").select("*")
+            .eq("tenant_id", tid).order("priority", desc=True).execute().data or [])
+
+
+@app.post("/api/intake/checklists", status_code=201)
+def create_intake_checklist(body: IntakeChecklistIn, c: Caller = Depends(caller)) -> dict:
+    rate_limit(c.user_id, "intake_write", 60)
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_editor(c, tid)
+    row = {"tenant_id": tid, "label": body.label, "match": body.match,
+           "signals": body.signals, "priority": body.priority, "enabled": body.enabled}
+    try:
+        created = c.sb.table("intake_checklists").insert(row).execute().data[0]
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(409, f"could not create checklist: {e}")
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="intake_checklist.created",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="intake_checklist", target_id=created["checklist_id"],
+                 summary=f"created intake checklist {body.label!r}")
+    return created
+
+
+@app.patch("/api/intake/checklists/{checklist_id}")
+def update_intake_checklist(checklist_id: str, body: IntakeChecklistPatch,
+                            c: Caller = Depends(caller)) -> dict:
+    rate_limit(c.user_id, "intake_write", 60)
+    cur = (c.sb.table("intake_checklists").select("checklist_id, tenant_id, label")
+           .eq("checklist_id", checklist_id).execute().data)
+    if not cur:
+        raise HTTPException(404, "checklist not found or not visible to you")
+    _require_editor(c, cur[0]["tenant_id"])
+    patch = {k: v for k, v in body.model_dump(exclude_none=True).items()}
+    patch["updated_at"] = _now_iso()
+    updated = (c.sb.table("intake_checklists").update(patch)
+               .eq("checklist_id", checklist_id).execute().data[0])
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=cur[0]["tenant_id"], action="intake_checklist.updated",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="intake_checklist", target_id=checklist_id,
+                 summary=f"updated intake checklist {updated.get('label', checklist_id)!r}",
+                 metadata={"changed_fields": sorted(patch.keys() - {"updated_at"})})
+    return updated
+
+
+@app.delete("/api/intake/checklists/{checklist_id}", status_code=204)
+def delete_intake_checklist(checklist_id: str, c: Caller = Depends(caller)) -> None:
+    rate_limit(c.user_id, "intake_write", 60)
+    cur = (c.sb.table("intake_checklists").select("tenant_id, label")
+           .eq("checklist_id", checklist_id).execute().data)
+    if cur:
+        _require_editor(c, cur[0]["tenant_id"])
+    c.sb.table("intake_checklists").delete().eq("checklist_id", checklist_id).execute()
+
+    if cur:
+        from interpreter import audit
+        audit.record(_service, tenant_id=cur[0]["tenant_id"], action="intake_checklist.deleted",
+                     actor_id=c.user_id, actor_email=c.email,
+                     target_type="intake_checklist", target_id=checklist_id,
+                     summary=f"deleted intake checklist {cur[0].get('label', checklist_id)!r}")
+
+
+@app.post("/api/intake/preview")
+def preview_intake(body: IntakePreviewIn, c: Caller = Depends(caller)) -> dict:
+    """Dry-run the matcher + extractor against a sample case so an author can
+    see which checklist fires and the exact questions the bot would ask."""
+    tid = _caller_tenant(c, body.tenant_id)
+    from interpreter import intake
+
+    state = {
+        "tenant_id": tid,
+        "case": {"subject": body.subject, "body": body.body},
+        "classification": {"topic": body.topic, "case_type": body.case_type,
+                           "module": body.module, "submodule": body.submodule},
+        "attachments": [],
+    }
+    cl = intake.checklist_for(state, sb=c.sb)
+    if not cl:
+        return {"matched": None, "known": {}, "sources": {}, "gaps": [],
+                "questions": [], "field_writes": {}}
+    ex = intake.extract(cl, state, use_llm=bool((body.subject or body.body).strip()))
+    gap = intake.gaps(cl, ex["known"])
+    return {
+        "matched": cl["label"],
+        "known": ex["known"],
+        "sources": ex["sources"],
+        "gaps": [s["key"] for s in gap],
+        "questions": intake.questions_for(gap, 3),
+        "field_writes": intake.field_writes(cl, ex["known"]),
+    }
+
+
 @app.get("/api/action-requests")
 def list_action_requests(limit: int = 50, c: Caller = Depends(caller)) -> list[dict]:
     return (c.sb.table("action_requests").select("*")

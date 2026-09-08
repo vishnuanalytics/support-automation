@@ -753,11 +753,28 @@ questions are generated but still only posted as an internal Chatter
 draft. Scratchpad has `enable_autoconv.py` if the user prefers to grant a
 Bash permission and run it.
 
-**Still queued for the checklist feature** — a web editor for
-`intake_checklists` (today it's seed-script only); reading the customer's
+**Web editor (DONE — `web/src/intake/IntakeView.tsx`, nav: Knowledge →
+Intake).** List + full editor for `intake_checklists`: name / priority /
+enabled, the `match` block (module / submodule / case_type + keywords),
+and an ordered signal editor — per signal the *exact* question text, the
+`detect` rule (contains-any / regex / attachment-type), where the answer
+lands (a Salesforce field or the run ctx), required + "read from image"
+toggles, reorder. A **Preview** panel POSTs a sample subject/body/case_type
+to `POST /api/intake/preview` and shows which checklist fires and the
+exact questions it would ask. API (`api/main.py`, owner/editor-gated,
+audited): `GET/POST /api/intake/checklists`, `PATCH`/`DELETE
+/api/intake/checklists/{id}`, `POST /api/intake/preview`. `web` types +
+`api.intake.*` client. `npm run build` green; 47 offline API tests green.
+
+**Still queued for the checklist feature** — reading the customer's
 *reply* back through `intake.extract` to close gaps round-over-round
 (the reply currently just re-enters `clarify` as a fresh case, which
 works but re-extracts from scratch); `Business`/`Location` portal labels.
+
+**Not deployed** — the docker images bake the code in (no source mount),
+so the running `api` + `worker` containers need
+`docker compose up -d --build` before the new endpoints / the
+`use_checklists` clarify path are live.
 
 ---
 

@@ -34,6 +34,8 @@ import type {
   KbExportBundle,
   Member,
   PolicyRule,
+  IntakeChecklist,
+  IntakePreview,
   NodeTypesResp,
   ReviewTask,
   JobFailures,
@@ -472,6 +474,36 @@ export const api = {
     update: (id: string, b: Partial<PolicyRule>) =>
       req<PolicyRule>(`/rules/${id}`, { method: "PATCH", body: JSON.stringify(b) }),
     remove: (id: string) => req<void>(`/rules/${id}`, { method: "DELETE" }),
+  },
+
+  intake: {
+    list: (tenantId?: string) =>
+      req<IntakeChecklist[]>(
+        "/intake/checklists" + (tenantId ? `?tenant_id=${encodeURIComponent(tenantId)}` : ""),
+      ),
+    create: (b: {
+      label: string;
+      match?: IntakeChecklist["match"];
+      signals?: IntakeChecklist["signals"];
+      priority?: number;
+      enabled?: boolean;
+      tenant_id?: string;
+    }) => req<IntakeChecklist>("/intake/checklists", { method: "POST", body: JSON.stringify(b) }),
+    update: (id: string, b: Partial<Omit<IntakeChecklist, "checklist_id" | "tenant_id">>) =>
+      req<IntakeChecklist>(`/intake/checklists/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(b),
+      }),
+    remove: (id: string) => req<void>(`/intake/checklists/${id}`, { method: "DELETE" }),
+    preview: (b: {
+      subject?: string;
+      body?: string;
+      topic?: string;
+      case_type?: string;
+      module?: string;
+      submodule?: string;
+      tenant_id?: string;
+    }) => req<IntakePreview>("/intake/preview", { method: "POST", body: JSON.stringify(b) }),
   },
 
   actionRequests: (limit = 50) => req<ActionRequest[]>(`/action-requests?limit=${limit}`),

@@ -10,6 +10,7 @@ import { ReviewView } from "./review/ReviewView";
 import { TraceView } from "./trace/TraceView";
 import { KnowledgeView } from "./kb/KnowledgeView";
 import { RulesView } from "./rules/RulesView";
+import { IntakeView } from "./intake/IntakeView";
 import { IntegrationsView } from "./channels/IntegrationsView";
 import { AdminView } from "./admin/AdminView";
 import { FlowGuideView } from "./guide/FlowGuideView";
@@ -26,6 +27,7 @@ type View =
   | "trace"
   | "knowledge"
   | "rules"
+  | "intake"
   | "guide"
   | "team"
   | "connections"
@@ -52,6 +54,7 @@ const NAV_GROUPS: { key: string; label: string; items: { view: View; label: stri
     items: [
       { view: "knowledge", label: "Knowledge" },
       { view: "rules", label: "Rules" },
+      { view: "intake", label: "Intake" },
       { view: "guide", label: "Guide" },
     ],
   },
@@ -349,6 +352,12 @@ export function App() {
             evaluates; <code>task</code> outcomes route through Slack approval
           </div>
         )}
+        {view === "intake" && (
+          <div className="muted">
+            per-issue checklists — the exact questions the <code>clarify</code> node
+            asks when a customer's report is missing detail
+          </div>
+        )}
         {view === "guide" && (
           <div className="muted">
             how an inbound email becomes a handled Salesforce Case — the live
@@ -388,6 +397,8 @@ export function App() {
           <FlowGuideView />
         ) : view === "rules" ? (
           <RulesView key={tenantId} tenantId={tenantId} />
+        ) : view === "intake" ? (
+          <IntakeView key={tenantId} tenantId={tenantId} />
         ) : view === "knowledge" ? (
           <KnowledgeView key={tenantId} tenantId={tenantId} />
         ) : view === "runs" ? (
