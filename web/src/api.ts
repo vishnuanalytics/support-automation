@@ -36,6 +36,8 @@ import type {
   PolicyRule,
   IntakeChecklist,
   IntakePreview,
+  CaseImportAck,
+  CaseMemoryStats,
   NodeTypesResp,
   ReviewTask,
   JobFailures,
@@ -297,6 +299,15 @@ export const api = {
       req<KbEntry>(`/kb/collections/${id}/entries`, { method: "POST", body: JSON.stringify(b) }),
     upload: (id: string, b: { filename: string; content_b64: string }) =>
       req<KbEntry>(`/kb/collections/${id}/upload`, { method: "POST", body: JSON.stringify(b) }),
+    caseImport: (files: { filename: string; content_b64: string }[], tenantId?: string) =>
+      req<CaseImportAck>("/kb/case-import", {
+        method: "POST",
+        body: JSON.stringify({ files, tenant_id: tenantId }),
+      }),
+    caseMemoryStats: (tenantId?: string) =>
+      req<CaseMemoryStats>(
+        "/kb/case-memory/stats" + (tenantId ? `?tenant_id=${encodeURIComponent(tenantId)}` : ""),
+      ),
     crawl: (id: string, url: string, max_pages = 20) =>
       req<KbConnection>(`/kb/collections/${id}/crawl`, {
         method: "POST",

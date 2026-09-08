@@ -792,6 +792,23 @@ so the running `api` + `worker` containers need
   `Organization knowledge` sources; the flow's name-less `retrieve` fuses
   all of them. Retrieval smoke test on the demo queries (menu images not
   showing / stale prices / missing orders) now surfaces on-point docs.
+- **Case-history import (DONE — `interpreter/case_import.py`, `POST
+  /api/kb/case-import`, `GET /api/kb/case-memory/stats`,
+  `web/src/kb/CaseHistoryPanel.tsx` in Knowledge).** For a tenant whose
+  Salesforce isn't reachable (sandbox / permissions): upload a Bulk-API
+  export (an `EmailMessage` query result + optionally a `Case` result) or
+  a flat CSV (`subject,problem,resolution,resolved_at`). `case_import`
+  reconstructs problem/resolution pairs per Case (first inbound = problem;
+  substantive UrbanPiper outbound, direct or mined from quoted history =
+  resolution; closing-boilerplate-only + customer-only threads dropped);
+  the `case_import` worker job embeds + upserts them via
+  `case_memory_sync._sync_rows`. 12 MB/file cap (slice a big export by
+  month). Ran for gunner off a 1-day EmailMessage slice + the Case
+  export: 107 threads → 81 `case_memory` rows; `case_lookup` smoke test
+  0.75–0.93 on the demo topics. `scripts/import_gunner_cases.py` is now a
+  thin CLI over the module. Tests: `test_case_import.py` (5). Still queued:
+  the Salesforce **date-range pull** in the same panel (`--until` on
+  `case_memory_sync` + a `case-backfill` endpoint) for connected orgs.
 - **`scripts/seed_gunner_flow_v2.py`** (new, **NOT RUN — DB-write
   classifier blocks flow-graph writes**). Builds a v2 of the gunner
   "salesforce flow" from the live graph with four deltas: + an

@@ -838,3 +838,17 @@ export interface IntakePreview {
   questions: string[];
   field_writes: Record<string, string>;
 }
+
+// POST /api/kb/case-import — bootstrap case_memory from a historical export.
+export interface CaseImportAck {
+  job_id: string | null;
+  files: Record<string, string>; // filename -> detected kind
+}
+
+export interface CaseMemoryStats {
+  total: number;
+  active: number;
+  by_kind: Record<string, number>;
+  latest_resolved_at: string | null;
+  earliest_resolved_at: string | null;
+}

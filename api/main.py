@@ -2632,6 +2632,83 @@ def kb_import_bundle(sid: str, body: KbImportIn, c: Caller = Depends(caller)) ->
     return {"job_id": job_id, "accepted": len(clean), "warnings": warnings}
 
 
+# ── Case history import — bootstrap `case_memory` from historical cases ────
+# A tenant whose Salesforce isn't reachable (sandbox, permissions) can upload
+# a Bulk-API export (EmailMessage + optional Case) or a flat CSV; the worker
+# parses problem/resolution pairs and embeds them so `case_lookup` has
+# something to cite from day one.
+class CaseImportIn(BaseModel):
+    files: list[dict[str, str]]          # [{filename, content_b64}], 1-2 items
+    tenant_id: str | None = None
+
+
+_CASE_IMPORT_MAX = 12 * 1024 * 1024     # 12 MB per file, decoded
+
+
+@app.post("/api/kb/case-import", status_code=202)
+def kb_case_import(body: CaseImportIn, c: Caller = Depends(caller)) -> dict:
+    import base64 as _b64
+
+    from interpreter import audit, case_import
+
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_editor(c, tid)
+    rate_limit(c.user_id, "case_import", 20)
+    if not body.files or len(body.files) > 2:
+        raise HTTPException(422, "attach one or two files")
+
+    decoded: list[tuple[str, bytes]] = []
+    for f in body.files:
+        raw = (f.get("content_b64") or "").split(",", 1)[-1]
+        try:
+            data = _b64.b64decode(raw, validate=False)
+        except Exception:  # noqa: BLE001
+            raise HTTPException(422, f"{f.get('filename')!r}: not valid base64")
+        if len(data) > _CASE_IMPORT_MAX:
+            raise HTTPException(
+                413, f"{f.get('filename')!r} is over 12 MB — slice the export by "
+                     "month, or use a Salesforce date-range pull")
+        decoded.append((f.get("filename") or "upload", data))
+
+    kinds = {name: case_import.sniff(data) for name, data in decoded}
+    if not any(k in ("sf_email", "csv") for k in kinds.values()):
+        raise HTTPException(
+            422, "need a Salesforce EmailMessage export or a CSV "
+                 f"(got: {', '.join(sorted(set(kinds.values())))})")
+
+    job_id = jobs.enqueue("case_import", {
+        "tenant_id": tid, "created_by": c.user_id,
+        "files": [{"filename": n, "b64": _b64.b64encode(d).decode()} for n, d in decoded],
+    }, dedupe_key=f"case_import:{tid}:{uuid.uuid4()}", sb=_service)
+
+    audit.record(_service, tenant_id=tid, action="case_memory.import_started",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="tenant", target_id=tid,
+                 summary=f"importing case history from {len(decoded)} file(s)")
+    return {"job_id": job_id, "files": kinds}
+
+
+@app.get("/api/kb/case-memory/stats")
+def kb_case_memory_stats(tenant_id: str | None = None,
+                         c: Caller = Depends(caller)) -> dict:
+    tid = _caller_tenant(c, tenant_id)
+    rows = (c.sb.table("case_memory")
+            .select("resolution_kind, resolved_at, status")
+            .eq("tenant_id", tid).execute().data or [])
+    by_kind: dict[str, int] = {}
+    for r in rows:
+        by_kind[r.get("resolution_kind") or "unknown"] = (
+            by_kind.get(r.get("resolution_kind") or "unknown", 0) + 1)
+    dates = [r["resolved_at"] for r in rows if r.get("resolved_at")]
+    return {
+        "total": len(rows),
+        "active": sum(1 for r in rows if (r.get("status") or "active") == "active"),
+        "by_kind": by_kind,
+        "latest_resolved_at": max(dates) if dates else None,
+        "earliest_resolved_at": min(dates) if dates else None,
+    }
+
+
 @app.get("/api/kb/entries/{eid}")
 def kb_get_entry(eid: str, c: Caller = Depends(caller)) -> dict:
     return _kb_entry(c, eid)

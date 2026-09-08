@@ -667,6 +667,34 @@ def _import_kb_bundle(payload: dict, sb) -> dict:
     return {"source_id": sid, "requested": len(payload.get("entries", [])), "entries": made}
 
 
+def _case_import(payload: dict, sb) -> dict:
+    """Bootstrap `case_memory` from an uploaded Salesforce export / CSV
+    (POST /api/kb/case-import). Parse problem/resolution pairs, then embed +
+    upsert them through the same path case_memory_sync uses."""
+    import base64 as _b64
+
+    from ingestion import case_memory_sync as cms
+    from interpreter import case_import
+
+    tid = payload["tenant_id"]
+    files = [(f["filename"], _b64.b64decode(f["b64"])) for f in payload.get("files", [])]
+    kinds = {n: case_import.sniff(d) for n, d in files}
+    email_xml = next((d for n, d in files if kinds[n] == "sf_email"), None)
+    case_xml = next((d for n, d in files if kinds[n] == "sf_case"), None)
+    csv_data = next((d for n, d in files if kinds[n] == "csv"), None)
+
+    if email_xml:
+        rows, stats = case_import.parse_salesforce_bulk(email_xml, case_xml, tenant_id=tid)
+    elif csv_data:
+        rows, stats = case_import.parse_flat_csv(csv_data, tenant_id=tid)
+    else:
+        return {"error": "no EmailMessage export or CSV in the upload", "kinds": kinds}
+
+    synced = cms._sync_rows(rows, dry=False) if rows else 0
+    log.info("case_import tenant %s: %s -> synced %d", tid, stats, synced)
+    return {"tenant_id": tid, "synced": synced, **stats}
+
+
 def _create_github_issue(payload: dict, sb) -> dict:
     """Phase 16 — a human approved a task_dispatch action in Slack."""
     ar_id = payload["action_request_id"]
@@ -765,6 +793,7 @@ HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
             "gdoc_writeback": _gdoc_writeback,
             "crawl_site": _crawl_site, "sync_gsheet": _sync_gsheet,
             "import_kb_bundle": _import_kb_bundle,
+            "case_import": _case_import,
             "queue_sweep": _sweep_handler("queue_sweep"),
             "cdc_reconcile": _sweep_handler("cdc_reconcile"),
             "reasoning_ttl": _sweep_handler("reasoning_ttl"),
