@@ -49,6 +49,12 @@ def record(
         return None
     if not case_sf_id:
         return None
+    # `case_events.tenant_id` is NOT NULL (RLS). A system sweep that operates
+    # straight off Salesforce data with no tenant context (queue_sweep,
+    # reasoning_ttl) can't produce a valid row — skip rather than error on
+    # every call.
+    if not tenant_id:
+        return None
     row: dict[str, Any] = {
         "tenant_id": str(tenant_id) if tenant_id else None,
         "case_sf_id": str(case_sf_id),
