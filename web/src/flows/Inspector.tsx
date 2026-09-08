@@ -753,6 +753,7 @@ function ClarifyForm({
   const maxQ = typeof config.max_questions === "number" ? config.max_questions : 3;
   const maxRounds = typeof config.max_rounds === "number" ? config.max_rounds : 2;
   const autoSend = config.auto_send === true;
+  const useChecklists = config.use_checklists === true;
   const handoverQueue =
     typeof config.handover_queue === "string" ? config.handover_queue : "";
 
@@ -818,8 +819,22 @@ function ClarifyForm({
       </label>
       <div className="muted" style={{ fontSize: 11 }}>
         {autoSend
-          ? "emails the questions to the customer (falls back to a public case comment); run is marked awaiting_customer."
+          ? "emails the questions to the customer (falls back to a public case comment); run is marked awaiting_customer. Also needs the channel's auto-send on (Connections → the channel)."
           : "off: posts the questions to Chatter for an agent to send."}
+      </div>
+      <label className="row" style={{ gap: 6, marginTop: 4 }}>
+        <input
+          type="checkbox"
+          style={{ width: "auto" }}
+          checked={useChecklists}
+          onChange={(e) => set({ use_checklists: e.target.checked })}
+        />
+        use intake checklists
+      </label>
+      <div className="muted" style={{ fontSize: 11 }}>
+        {useChecklists
+          ? "asks the specific questions from the matching checklist (Knowledge → Intake), skips anything the case already answers, and writes answers to their mapped Salesforce fields. Falls back to the generic path when no checklist matches."
+          : "off: the questions are free-written by the LLM from the case + KB."}
       </div>
     </div>
   );
