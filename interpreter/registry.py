@@ -1904,40 +1904,77 @@ def h_clarify(state: CaseState, config: dict) -> dict:
     context = _context_block(state.get("retrieval") or []) or "(nothing relevant retrieved)"
     unsupported = (state.get("groundedness") or {}).get("unsupported") or []
 
-    raw = llm.complete(
-        system=(
-            "A support bot could not confidently answer a customer's message from its "
-            "knowledge base. Write the SHORTEST list of specific questions whose answers "
-            "would let it resolve the issue — concrete details only (exact error text, "
-            "product / plan, IDs, what they have already tried). Never ask for something "
-            "the message already states. "
-            f'Return JSON {{"questions": [string], "missing": [string]}} '
-            f"with at most {max_q} questions." + identity_line
-        ),
-        user=(
-            f"# Customer message\n{body or '(empty)'}\n\n"
-            f"# What the knowledge base had\n{context}"
-            + (
-                "\n\n# Draft claims we could not ground\n- " + "\n- ".join(unsupported[:5])
-                if unsupported else ""
-            )
-        ),
-        model=config.get("model", llm.FAST_MODEL),
-        json_object=True,
-        max_tokens=int(config.get("max_tokens", 350)),
-        tenant_id=state.get("tenant_id"),
-    )
-    parsed = _safe_json(raw)
-    questions = [
-        q.strip() for q in (parsed.get("questions") or [])
-        if isinstance(q, str) and q.strip()
-    ][:max_q]
+    # Phase 30 — checklist-driven intake. When the node opts in
+    # (`use_checklists`) and a per-issue-type checklist (migration 101 /
+    # interpreter/intake.py) matches this case, ask *its* specific gap
+    # questions and persist whatever we could already extract to the mapped
+    # Salesforce fields — instead of free-writing questions from an LLM.
+    checklist = None
+    intake_known: dict | None = None
+    intake_field_writes: dict | None = None
+    questions: list[str] = []
+    missing: list[str] = []
+    if config.get("use_checklists"):
+        try:
+            from interpreter import intake
+
+            checklist = intake.checklist_for(state, sb=config.get("_sb"))
+            if checklist:
+                ex = intake.extract(checklist, state)
+                intake_known = ex["known"]
+                gap_signals = intake.gaps(checklist, ex["known"])
+                questions = intake.questions_for(gap_signals, max_q)
+                missing = [s["key"] for s in gap_signals]
+                intake_field_writes = intake.field_writes(checklist, ex["known"])
+                if intake_field_writes and sf_id and not config.get("dry_run"):
+                    try:
+                        connectors.invoke(
+                            state.get("tenant_id"), _case_conn(state, config),
+                            "update_fields",
+                            {"case_id": sf_id, "fields": intake_field_writes},
+                            org_label=config.get("org"),
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("clarify: intake field writeback failed: %s", e)
+        except Exception as e:  # noqa: BLE001
+            log.warning("clarify: checklist path failed: %s", e)
+            checklist = None
+
     if not questions:
+        raw = llm.complete(
+            system=(
+                "A support bot could not confidently answer a customer's message from its "
+                "knowledge base. Write the SHORTEST list of specific questions whose answers "
+                "would let it resolve the issue — concrete details only (exact error text, "
+                "product / plan, IDs, what they have already tried). Never ask for something "
+                "the message already states. "
+                f'Return JSON {{"questions": [string], "missing": [string]}} '
+                f"with at most {max_q} questions." + identity_line
+            ),
+            user=(
+                f"# Customer message\n{body or '(empty)'}\n\n"
+                f"# What the knowledge base had\n{context}"
+                + (
+                    "\n\n# Draft claims we could not ground\n- " + "\n- ".join(unsupported[:5])
+                    if unsupported else ""
+                )
+            ),
+            model=config.get("model", llm.FAST_MODEL),
+            json_object=True,
+            max_tokens=int(config.get("max_tokens", 350)),
+            tenant_id=state.get("tenant_id"),
+        )
+        parsed = _safe_json(raw)
         questions = [
-            "Could you share more detail about what you're trying to do, including "
-            "any exact error message and the steps you've already tried?"
-        ]
-    missing = [m for m in (parsed.get("missing") or []) if isinstance(m, str)]
+            q.strip() for q in (parsed.get("questions") or [])
+            if isinstance(q, str) and q.strip()
+        ][:max_q]
+        if not questions:
+            questions = [
+                "Could you share more detail about what you're trying to do, including "
+                "any exact error message and the steps you've already tried?"
+            ]
+        missing = [m for m in (parsed.get("missing") or []) if isinstance(m, str)]
     numbered = "\n".join(f"{i + 1}. {q}" for i, q in enumerate(questions))
 
     # exhausted -> stop asking the customer; hand to a human with the gaps.
@@ -2017,6 +2054,9 @@ def h_clarify(state: CaseState, config: dict) -> dict:
         "exhausted": exhausted,
         "handover_queue": handover_queue if exhausted else None,
         "handover_assignment": handover_assignment,
+        "checklist": (checklist or {}).get("label"),
+        "intake_known": intake_known,
+        "intake_fields_written": intake_field_writes or None,
     }
     outcome = {
         "action": "ask_human" if exhausted else "need_info",
@@ -2076,11 +2116,15 @@ def h_clarify(state: CaseState, config: dict) -> dict:
         **_trace(
             nid, "clarify",
             f"{len(questions)} question(s) for the customer — {where}"
+            + (f" [checklist: {checklist['label']}]" if checklist else "")
             + (" (+ identity)" if ask_identity else ""),
             {"questions": questions, "missing": missing, "channel": channel,
              "auto_sent": auto_sent, "posted": posted_internal, "round": clarify_round,
              "exhausted": exhausted, "ask_identity": ask_identity,
-             "account_hint": account_hint},
+             "account_hint": account_hint,
+             "checklist": (checklist or {}).get("label"),
+             "intake_known": intake_known,
+             "intake_fields_written": intake_field_writes or None},
         ),
     }
 

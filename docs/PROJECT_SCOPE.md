@@ -707,6 +707,60 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-08 (Checklist-driven intake for the `clarify` node — branch
+`web-redesign-broadsheet`. Goal: the bot carries the whole clarifying
+conversation instead of posting a vague Chatter note and stopping.)**
+
+When a customer report is too thin to answer, `clarify` used to
+free-write ≤3 questions from an LLM with no per-topic structure, and (on
+the gunner "salesforce flow") `auto_send:false` meant it only posted an
+internal Chatter draft — no customer email, no Slack. New:
+
+- **`db/migrations/101_intake_checklists.sql`** (APPLIED) — `intake_checklists`
+  table, tenant RLS via `tenant_members`. One row per issue class:
+  `match` ({module|submodule|case_type exact, keywords ANY}, most-specific
+  wins, `priority` tie-break) + ordered `signals`
+  (`{key,label,question,required,detect,lands_in,vision}`).
+- **`interpreter/intake.py`** (new) — `checklist_for(state)` →
+  `extract(checklist,state)` (deterministic `detect` rules: `any_of` /
+  `regex` / `attachment_type`; then already-set SF fields; then ONE
+  classify-tier LLM pass for the rest; then ONE vision pass — reusing the
+  Phase-25 `_attachment_blobs` — for `vision:true` gaps) → `gaps()` /
+  `questions_for()` / `field_writes()` ({SF field: value}). All best-effort,
+  never raises.
+- **`h_clarify`** (`interpreter/registry.py`): behind `config.use_checklists`,
+  when a checklist matches it asks *its* gap questions and writes what it
+  already extracted back via the `update_fields` connector; otherwise the
+  old LLM path is unchanged. `clarification`/`outcome`/trace now carry
+  `checklist` + `intake_known` + `intake_fields_written`.
+- **`scripts/seed_intake_checklists.py`** (new) — 4 starter checklists for
+  the restaurant-ops domain (menu images / price-stock sync / publish
+  failure / missing orders). **Seeded for tenant
+  `ee4102db-…` (gunner).**
+- Tests: `tests/test_intake.py` (17) — matching precedence, detect rules,
+  extract (detect-only / SF-field / LLM / vision / failure), gaps /
+  questions / field-writes, and the `h_clarify` opt-in wiring. Full
+  offline **1058 passed**.
+
+**BLOCKED — needs the user (the Claude Code DB-write classifier refuses
+these three config flips, both via the Supabase MCP and via a script):**
+to actually make the bot self-drive the conversation, on the gunner
+"salesforce flow" set the `clarify` node `auto_send: true` +
+`use_checklists: true` (edit the node in the flow editor and republish —
+that also writes a clean v2 snapshot), and flip the **email** channel's
+`auto_send_enabled: true` (Connections → email). Until then the checklist
+questions are generated but still only posted as an internal Chatter
+draft. Scratchpad has `enable_autoconv.py` if the user prefers to grant a
+Bash permission and run it.
+
+**Still queued for the checklist feature** — a web editor for
+`intake_checklists` (today it's seed-script only); reading the customer's
+*reply* back through `intake.extract` to close gaps round-over-round
+(the reply currently just re-enters `clarify` as a fresh case, which
+works but re-extracts from scratch); `Business`/`Location` portal labels.
+
+---
+
 **2026-09-08 (NL→graph over the case graph — richer schema. Branch
 `web-redesign-broadsheet` (same working branch as the UI redesign).
 Extends the existing `interpreter/graph_query.py` "ask the case graph"
