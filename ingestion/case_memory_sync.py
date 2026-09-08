@@ -328,6 +328,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tenant", default=None,
                     help="tenant_id to tag rows with + resolve the SF org for "
                          "(--from-salesforce)")
+    ap.add_argument("--all", action="store_true",
+                    help="--from-salesforce: every workspace with a Salesforce "
+                         "connection, each against its own org")
     ap.add_argument("--limit", type=int, default=2000)
     ap.add_argument("--from-salesforce", action="store_true")
     ap.add_argument("--from-zendesk", action="store_true")
@@ -351,6 +354,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.from_zendesk:
         rows = _from_zendesk(since_iso, args.limit)
+    elif args.from_salesforce and args.all:
+        from interpreter import salesforce
+        rows = []
+        for tid in salesforce.active_connector_tenants(get_supabase()):
+            log.info("--from-salesforce --all: workspace %s", tid)
+            rows += [r for r in _from_salesforce(
+                since_iso, args.limit, until_iso=until_iso, tenant_id=tid) if r]
     elif args.from_salesforce:
         rows = [r for r in _from_salesforce(
             since_iso, args.limit, until_iso=until_iso, tenant_id=args.tenant) if r]

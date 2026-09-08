@@ -707,6 +707,38 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-08 (Case-graph sync is now per-workspace — branch
+`web-redesign-broadsheet`.)**
+
+`ingestion/case_graph_sync.py` was single-tenant: env Salesforce org,
+every node tagged `DEFAULT_TENANT_ID` (`00000000`). So the NL→graph
+search (`graph_query.ask`, tenant-scoped by construction) returned nothing
+for any real workspace. Now:
+
+- `sync(tenant_id=…)`, `_case_row(case, tenant_id)`, `_save_state(…,
+  tenant_id=…)`, checkpoint scope `case_graph:<tenant>`, SF client via
+  `salesforce._try_client(tenant_id)` (that workspace's own connected org,
+  env fallback).
+- CLI: `--tenant <id>`, `--all` (every workspace with a Salesforce
+  connection). `salesforce.active_connector_tenants(sb)` is new — tenants
+  with `case_connector='salesforce'` or an active `salesforce`
+  integration, ∪ the env tenant.
+- `ingestion/case_memory_sync.py` got the matching `--all` (and already
+  had `--tenant`/`--until`).
+- Both periodic sweeps in `interpreter/sweeps.py` iterate workspaces now,
+  not the single env org.
+- Ran `--tenant ee4102db… --backfill` for gunner: 92 Cases / 174
+  Messages / 10 RootCauses under `tenant_id = ee4102db…`;
+  `graph_query.ask("how many cases per module", <gunner>)` → real
+  UrbanPiper taxonomy (Catalogue 23, Order Relay, Store Availability, …).
+- Still: `graph_query`'s spec-compiler design (LLM → JSON spec → Cypher,
+  never free-form Cypher) is unchanged and staying — one shared Neo4j
+  Aura, no per-tenant DB / read-only role. The ask-box UI still lives in
+  the Approvals view; promoting it to its own nav item is open.
+- Full offline **1063 passed**.
+
+---
+
 **2026-09-08 (Checklist-driven intake for the `clarify` node — branch
 `web-redesign-broadsheet`. Goal: the bot carries the whole clarifying
 conversation instead of posting a vague Chatter note and stopping.)**

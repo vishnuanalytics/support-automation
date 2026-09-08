@@ -116,12 +116,12 @@ def _domain_from_website(website: str | None) -> str | None:
     return host if ("." in host and " " not in host) else None
 
 
-def _case_row(case: dict) -> dict:
+def _case_row(case: dict, tenant_id: str = _TENANT) -> dict:
     return {
         "sf_id": case["Id"],
         "case_number": case.get("CaseNumber"),
         "subject": case.get("Subject"),
-        "tenant_id": _TENANT,
+        "tenant_id": tenant_id,
         "status": case.get("Status"),
         "is_closed": bool(case.get("IsClosed")),
         "tier": (case.get("Account") or {}).get("Tier__c"),
@@ -187,12 +187,13 @@ def _load_state(sb, scope: str) -> dict:
         return {}
 
 
-def _save_state(sb, scope: str, *, last_modified: str | None, cases: int, messages: int) -> None:
+def _save_state(sb, scope: str, *, tenant_id: str = _TENANT, last_modified: str | None,
+                cases: int, messages: int) -> None:
     try:
         prev = _load_state(sb, scope)
         sb.table("graph_sync_state").upsert({
             "scope": scope,
-            "tenant_id": _TENANT,
+            "tenant_id": tenant_id,
             "last_modified": last_modified or prev.get("last_modified"),
             "cases_synced": (prev.get("cases_synced") or 0) + cases,
             "messages_synced": (prev.get("messages_synced") or 0) + messages,
@@ -204,13 +205,15 @@ def _save_state(sb, scope: str, *, last_modified: str | None, cases: int, messag
 
 
 # ── run ──────────────────────────────────────────────────────────────────
-def sync(*, since: str | None, limit: int, one_id: str | None, dry: bool) -> int:
+def sync(*, tenant_id: str = _TENANT, since: str | None, limit: int,
+         one_id: str | None, dry: bool) -> int:
     from interpreter import salesforce
-    if not salesforce.available():
-        log.warning("no Salesforce creds — nothing to sync")
+    sf = salesforce._try_client(tenant_id)
+    if sf is None:
+        log.warning("no Salesforce client for workspace %s — nothing to sync", tenant_id)
         return 0
     sb = None
-    scope = f"case_graph:{_TENANT}"
+    scope = f"case_graph:{tenant_id}"
     if not dry:
         try:
             from ingestion.neo4j_sync import ensure_constraints, get_neo4j_driver
@@ -223,7 +226,6 @@ def sync(*, since: str | None, limit: int, one_id: str | None, dry: bool) -> int
             if since:
                 log.info("resuming from LastModifiedDate >= %s", since)
 
-    sf = salesforce.client_for(None)
     cases = _fetch(sf, since=since, limit=limit, one_id=one_id)
     log.info("%d Case(s) to sync", len(cases))
 
@@ -241,11 +243,12 @@ def sync(*, since: str | None, limit: int, one_id: str | None, dry: bool) -> int
     def _checkpoint():
         nonlocal ck_c, ck_m
         if not dry and ck_c:
-            _save_state(sb, scope, last_modified=high_water, cases=ck_c, messages=ck_m)
+            _save_state(sb, scope, tenant_id=tenant_id, last_modified=high_water,
+                        cases=ck_c, messages=ck_m)
             ck_c = ck_m = 0
 
     for case in cases:
-        row = _case_row(case)
+        row = _case_row(case, tenant_id)
         msgs = _messages(case)
         if extract_on and (row.get("is_closed") or any(
                 m.get("role") in ("agent_reply", "agent_note") for m in msgs)):
@@ -288,11 +291,25 @@ def main(argv: list[str] | None = None) -> int:
                     help="ignore the saved checkpoint; walk from the start")
     ap.add_argument("--since", default=None, help="ISO date/datetime; LastModifiedDate >=")
     ap.add_argument("--case", dest="one_id", default=None, help="sync a single Case Id")
+    ap.add_argument("--tenant", default=None, help="workspace / tenant_id to sync")
+    ap.add_argument("--all", action="store_true",
+                    help="every workspace with a Salesforce connection (its own org, "
+                         "its own graph_sync_state checkpoint)")
     ap.add_argument("--limit", type=int, default=5000)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
     since = "1970-01-01" if args.backfill else args.since
-    return sync(since=since, limit=args.limit, one_id=args.one_id, dry=args.dry_run)
+
+    if args.all:
+        from interpreter import salesforce
+        rc = 0
+        for tid in salesforce.active_connector_tenants(get_supabase()):
+            log.info("=== case_graph_sync — workspace %s ===", tid)
+            rc |= sync(tenant_id=tid, since=since, limit=args.limit,
+                       one_id=args.one_id, dry=args.dry_run)
+        return rc
+    return sync(tenant_id=args.tenant or _TENANT, since=since, limit=args.limit,
+                one_id=args.one_id, dry=args.dry_run)
 
 
 if __name__ == "__main__":

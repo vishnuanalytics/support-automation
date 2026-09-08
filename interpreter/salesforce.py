@@ -224,6 +224,31 @@ def list_tenant_orgs(tenant_id: str, sb=None) -> list[str]:
     return [r["org_label"] for r in rows]
 
 
+def active_connector_tenants(sb=None) -> list[str]:
+    """Workspaces to run the Salesforce case-graph / case-memory sync for:
+    every tenant with `tenants.case_connector = 'salesforce'` or an active
+    `salesforce` `tenant_integrations` row, plus the env-default tenant when
+    env creds are present (the shared demo org). Best-effort -> []."""
+    from ingestion.scraper import get_supabase
+
+    sb = sb or get_supabase()
+    out: set[str] = set()
+    try:
+        for r in (sb.table("tenants").select("tenant_id")
+                  .eq("case_connector", "salesforce").execute().data or []):
+            if r.get("tenant_id"):
+                out.add(r["tenant_id"])
+        for r in (sb.table("tenant_integrations").select("tenant_id")
+                  .eq("kind", "salesforce").eq("status", "active").execute().data or []):
+            if r.get("tenant_id"):
+                out.add(r["tenant_id"])
+    except Exception as e:  # noqa: BLE001
+        log.warning("salesforce.active_connector_tenants: %s", e)
+    if available():
+        out.add(os.environ.get("DEFAULT_TENANT_ID", "00000000-0000-0000-0000-000000000000"))
+    return sorted(out)
+
+
 def save_tenant_org(tenant_id: str, org_label: str, creds: dict[str, str], sb=None) -> None:
     """Store (or replace) one named Salesforce org connection for a tenant.
     `creds` keys mirror the env var names (SF_USERNAME, SF_CONSUMER_KEY,
