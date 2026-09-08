@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError } from "../api";
-import { CaseHistoryPanel } from "./CaseHistoryPanel";
 import type {
   KbCollection,
   KbConnection,
@@ -164,8 +163,7 @@ export function KnowledgeView({ tenantId }: { tenantId: string }) {
         </div>
       </aside>
 
-      <div className="kb-main" style={{ display: "flex", flexDirection: "column", gap: "var(--space-3)" }}>
-        <CaseHistoryPanel tenantId={tenantId} />
+      <div className="kb-main">
         {sel && cols.find((c) => c.source_id === sel) ? (
           <Collection key={sel} col={cols.find((c) => c.source_id === sel)!} onChange={refresh} />
         ) : (

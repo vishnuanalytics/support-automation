@@ -839,18 +839,3 @@ export interface IntakePreview {
   field_writes: Record<string, string>;
 }
 
-// POST /api/kb/case-backfill — pull resolved cases from the connected
-// Salesforce org over a date range into case_memory.
-export interface CaseBackfillAck {
-  job_id: string | null;
-  since: string;
-  until: string;
-}
-
-export interface CaseMemoryStats {
-  total: number;
-  active: number;
-  by_kind: Record<string, number>;
-  latest_resolved_at: string | null;
-  earliest_resolved_at: string | null;
-}

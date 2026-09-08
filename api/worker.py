@@ -667,24 +667,6 @@ def _import_kb_bundle(payload: dict, sb) -> dict:
     return {"source_id": sid, "requested": len(payload.get("entries", [])), "entries": made}
 
 
-def _case_backfill(payload: dict, sb) -> dict:
-    """Pull resolved Salesforce cases over a chosen window into the tenant's
-    `case_memory` (POST /api/kb/case-backfill). Runs the `--from-salesforce`
-    sync bounded to [since, until) for this tenant's own connected org."""
-    from ingestion import case_memory_sync as cms
-
-    tid = payload["tenant_id"]
-    since, until = payload["since"], payload["until"]
-    argv = ["--from-salesforce", "--once", "--since", since, "--until", until,
-            "--tenant", str(tid)]
-    try:
-        cms.main(argv)
-    except SystemExit:
-        pass
-    total = (sb.table("case_memory").select("case_sf_id", count="exact")
-             .eq("tenant_id", str(tid)).execute().count or 0)
-    log.info("case_backfill tenant %s [%s, %s): case_memory now %d rows", tid, since, until, total)
-    return {"tenant_id": tid, "since": since, "until": until, "case_memory_total": total}
 
 
 def _create_github_issue(payload: dict, sb) -> dict:
@@ -785,7 +767,6 @@ HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
             "gdoc_writeback": _gdoc_writeback,
             "crawl_site": _crawl_site, "sync_gsheet": _sync_gsheet,
             "import_kb_bundle": _import_kb_bundle,
-            "case_backfill": _case_backfill,
             "queue_sweep": _sweep_handler("queue_sweep"),
             "cdc_reconcile": _sweep_handler("cdc_reconcile"),
             "reasoning_ttl": _sweep_handler("reasoning_ttl"),
