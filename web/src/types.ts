@@ -839,10 +839,12 @@ export interface IntakePreview {
   field_writes: Record<string, string>;
 }
 
-// POST /api/kb/case-import — bootstrap case_memory from a historical export.
-export interface CaseImportAck {
+// POST /api/kb/case-backfill — pull resolved cases from the connected
+// Salesforce org over a date range into case_memory.
+export interface CaseBackfillAck {
   job_id: string | null;
-  files: Record<string, string>; // filename -> detected kind
+  since: string;
+  until: string;
 }
 
 export interface CaseMemoryStats {

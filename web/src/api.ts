@@ -36,7 +36,7 @@ import type {
   PolicyRule,
   IntakeChecklist,
   IntakePreview,
-  CaseImportAck,
+  CaseBackfillAck,
   CaseMemoryStats,
   NodeTypesResp,
   ReviewTask,
@@ -299,10 +299,10 @@ export const api = {
       req<KbEntry>(`/kb/collections/${id}/entries`, { method: "POST", body: JSON.stringify(b) }),
     upload: (id: string, b: { filename: string; content_b64: string }) =>
       req<KbEntry>(`/kb/collections/${id}/upload`, { method: "POST", body: JSON.stringify(b) }),
-    caseImport: (files: { filename: string; content_b64: string }[], tenantId?: string) =>
-      req<CaseImportAck>("/kb/case-import", {
+    caseBackfill: (b: { date_from: string; date_to: string }, tenantId?: string) =>
+      req<CaseBackfillAck>("/kb/case-backfill", {
         method: "POST",
-        body: JSON.stringify({ files, tenant_id: tenantId }),
+        body: JSON.stringify({ ...b, tenant_id: tenantId }),
       }),
     caseMemoryStats: (tenantId?: string) =>
       req<CaseMemoryStats>(

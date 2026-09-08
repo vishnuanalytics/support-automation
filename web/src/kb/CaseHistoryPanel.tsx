@@ -1,31 +1,29 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, ApiError } from "../api";
 import type { CaseMemoryStats } from "../types";
-import { Banner, Button } from "../ui";
+import { Banner, Button, Field, Input } from "../ui";
 
 /**
- * Bootstrap `case_memory` from a tenant's historical cases so `case_lookup`
- * has real prior resolutions to cite from day one — for tenants whose
- * Salesforce isn't reachable (sandbox / permissions), upload a Bulk-API
- * export (EmailMessage + optional Case) or a flat CSV.
+ * Pull a tenant's past resolved Salesforce cases over a chosen window into
+ * `case_memory`, so `case_lookup` can cite real prior resolutions from day
+ * one. Runs the `--from-salesforce` sync bounded to [from, to) against the
+ * tenant's own connected org — no export, no upload.
  */
 
-function readAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onload = () => resolve(String(r.result));
-    r.onerror = () => reject(r.error);
-    r.readAsDataURL(file);
-  });
+function isoDay(d: Date): string {
+  return d.toISOString().slice(0, 10);
 }
 
 export function CaseHistoryPanel({ tenantId }: { tenantId: string }) {
+  const today = new Date();
+  const ninetyAgo = new Date(today.getTime() - 90 * 864e5);
+
   const [stats, setStats] = useState<CaseMemoryStats | null>(null);
-  const [files, setFiles] = useState<File[]>([]);
+  const [from, setFrom] = useState(isoDay(ninetyAgo));
+  const [to, setTo] = useState(isoDay(today));
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(() => {
     api.kb
@@ -38,22 +36,20 @@ export function CaseHistoryPanel({ tenantId }: { tenantId: string }) {
     refresh();
   }, [refresh]);
 
-  async function submit() {
-    if (files.length === 0) return;
+  async function pull() {
+    if (!from || !to || from >= to) {
+      setErr("pick a start date before the end date");
+      return;
+    }
     setBusy(true);
     setErr(null);
     setNote(null);
     try {
-      const payload = await Promise.all(
-        files.map(async (f) => ({ filename: f.name, content_b64: await readAsDataUrl(f) })),
-      );
-      const ack = await api.kb.caseImport(payload, tenantId);
-      const kinds = Object.values(ack.files).join(", ");
+      const ack = await api.kb.caseBackfill({ date_from: from, date_to: to }, tenantId);
       setNote(
-        `Import queued (${kinds}). Resolved cases will appear in case memory in a minute or two — refresh the count.`,
+        `Pull queued for ${ack.since.slice(0, 10)} → ${ack.until.slice(0, 10)}. ` +
+          "Resolved cases will land in case memory over the next few minutes — refresh the count.",
       );
-      setFiles([]);
-      if (inputRef.current) inputRef.current.value = "";
     } catch (e) {
       setErr(e instanceof ApiError ? String(e.detail) : String(e));
     } finally {
@@ -89,37 +85,29 @@ export function CaseHistoryPanel({ tenantId }: { tenantId: string }) {
       </div>
 
       <div className="muted" style={{ fontSize: 12, maxWidth: 720 }}>
-        Load past solved cases so the bot can cite real prior resolutions from day one.
-        Upload a Salesforce Bulk-API export — an <code>EmailMessage</code> query result,
-        and optionally a <code>Case</code> query result for status/type — or a CSV with{" "}
-        <code>subject</code>, <code>problem</code>, <code>resolution</code>,{" "}
-        <code>resolved_at</code> columns. Each file up to 12&nbsp;MB; slice a large export
-        by month. This is retrieval memory, not model training.
+        Pull your resolved Salesforce cases from a date range so the bot can cite real
+        prior resolutions immediately. It reads closed cases and their last support reply
+        from your connected org and embeds them into case memory. This is retrieval
+        memory, not model training. Up to a year per pull; run it again for older windows.
       </div>
 
       {err && <Banner tone="exception" title={err} />}
       {note && <Banner tone="accent" title={note} />}
 
-      <div className="row" style={{ gap: "var(--space-2)", flexWrap: "wrap", alignItems: "center" }}>
-        <input
-          ref={inputRef}
-          type="file"
-          accept=".xml,.csv"
-          multiple
-          onChange={(e) => setFiles(Array.from(e.target.files ?? []).slice(0, 2))}
-        />
-        <Button variant="primary" size="sm" loading={busy} disabled={files.length === 0} onClick={submit}>
-          Import case history
+      <div className="row" style={{ gap: "var(--space-2)", flexWrap: "wrap", alignItems: "flex-end" }}>
+        <Field label="From (case closed on/after)">
+          <Input type="date" value={from} max={to} onChange={(e) => setFrom(e.target.value)} />
+        </Field>
+        <Field label="To (before)">
+          <Input type="date" value={to} min={from} onChange={(e) => setTo(e.target.value)} />
+        </Field>
+        <Button variant="primary" size="sm" loading={busy} onClick={pull}>
+          Pull from Salesforce
         </Button>
         <Button size="sm" variant="ghost" onClick={refresh}>
           Refresh count
         </Button>
       </div>
-      {files.length > 0 && (
-        <div className="muted" style={{ fontSize: 11 }}>
-          {files.map((f) => `${f.name} (${(f.size / 1024 / 1024).toFixed(1)} MB)`).join("  ·  ")}
-        </div>
-      )}
 
       {stats && Object.keys(stats.by_kind).length > 0 && (
         <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
@@ -132,8 +120,7 @@ export function CaseHistoryPanel({ tenantId }: { tenantId: string }) {
       )}
 
       <div className="muted" style={{ fontSize: 11 }}>
-        Connected to Salesforce instead? A date-range pull from the live org is coming to
-        this panel — it avoids the export step.
+        Needs Salesforce connected for this workspace (Connections → Salesforce).
       </div>
     </section>
   );

@@ -792,23 +792,27 @@ so the running `api` + `worker` containers need
   `Organization knowledge` sources; the flow's name-less `retrieve` fuses
   all of them. Retrieval smoke test on the demo queries (menu images not
   showing / stale prices / missing orders) now surfaces on-point docs.
-- **Case-history import (DONE — `interpreter/case_import.py`, `POST
-  /api/kb/case-import`, `GET /api/kb/case-memory/stats`,
-  `web/src/kb/CaseHistoryPanel.tsx` in Knowledge).** For a tenant whose
-  Salesforce isn't reachable (sandbox / permissions): upload a Bulk-API
-  export (an `EmailMessage` query result + optionally a `Case` result) or
-  a flat CSV (`subject,problem,resolution,resolved_at`). `case_import`
-  reconstructs problem/resolution pairs per Case (first inbound = problem;
-  substantive UrbanPiper outbound, direct or mined from quoted history =
-  resolution; closing-boilerplate-only + customer-only threads dropped);
-  the `case_import` worker job embeds + upserts them via
-  `case_memory_sync._sync_rows`. 12 MB/file cap (slice a big export by
-  month). Ran for gunner off a 1-day EmailMessage slice + the Case
-  export: 107 threads → 81 `case_memory` rows; `case_lookup` smoke test
-  0.75–0.93 on the demo topics. `scripts/import_gunner_cases.py` is now a
-  thin CLI over the module. Tests: `test_case_import.py` (5). Still queued:
-  the Salesforce **date-range pull** in the same panel (`--until` on
-  `case_memory_sync` + a `case-backfill` endpoint) for connected orgs.
+- **Case-history date-range pull (DONE — `POST /api/kb/case-backfill`,
+  `GET /api/kb/case-memory/stats`, `web/src/kb/CaseHistoryPanel.tsx` in
+  Knowledge).** A user picks a from/to date; the `case_backfill` worker
+  job runs `case_memory_sync --from-salesforce --once --since X --until Y
+  --tenant T` against **that tenant's own connected org**
+  (`salesforce._try_client(tenant_id)`, env fallback) and tags the rows
+  with `T` — was hardcoded to `00000000`. `case_memory_sync` gained
+  `--until` + `--tenant`; `_from_salesforce(since, limit, *, until_iso,
+  tenant_id)`. ≤ 1 year per pull. The panel shows the current count +
+  kind breakdown + covered span.
+  - The manual-upload route (`POST /api/kb/case-import`, the `case_import`
+    worker job, the file-picker UI) was **removed** — users have SF
+    access, the product path is the API pull. `interpreter/case_import.py`
+    + `scripts/import_gunner_cases.py` + `test_case_import.py` stay as an
+    **ops CLI** (not wired to any endpoint) — it's how the gunner demo's
+    81 `case_memory` rows were loaded from a one-off export while the real
+    org was inaccessible.
+  - Still queued: hour-granularity (`datetime-local`) inputs; a progress
+    indicator (poll the job); `case_graph_sync --until`/`--tenant` so the
+    graph half of a backfill is bounded too; the same panel as a Setup
+    wizard step.
 - **`scripts/seed_gunner_flow_v2.py`** (new, **NOT RUN — DB-write
   classifier blocks flow-graph writes**). Builds a v2 of the gunner
   "salesforce flow" from the live graph with four deltas: + an

@@ -2632,60 +2632,48 @@ def kb_import_bundle(sid: str, body: KbImportIn, c: Caller = Depends(caller)) ->
     return {"job_id": job_id, "accepted": len(clean), "warnings": warnings}
 
 
-# ── Case history import — bootstrap `case_memory` from historical cases ────
-# A tenant whose Salesforce isn't reachable (sandbox, permissions) can upload
-# a Bulk-API export (EmailMessage + optional Case) or a flat CSV; the worker
-# parses problem/resolution pairs and embeds them so `case_lookup` has
-# something to cite from day one.
-class CaseImportIn(BaseModel):
-    files: list[dict[str, str]]          # [{filename, content_b64}], 1-2 items
+# ── Case history — pull resolved cases from the connected Salesforce org ──
+# over a chosen window, so `case_lookup` has real prior resolutions to cite
+# from day one. Runs the `--from-salesforce` sync bounded to [from, to] for
+# the caller's tenant (its own connected org via `client_for`).
+class CaseBackfillIn(BaseModel):
+    date_from: str                       # ISO date/datetime (ClosedDate >=)
+    date_to: str                         # ISO date/datetime (ClosedDate <)
     tenant_id: str | None = None
 
 
-_CASE_IMPORT_MAX = 12 * 1024 * 1024     # 12 MB per file, decoded
+@app.post("/api/kb/case-backfill", status_code=202)
+def kb_case_backfill(body: CaseBackfillIn, c: Caller = Depends(caller)) -> dict:
+    from datetime import datetime as _d
 
-
-@app.post("/api/kb/case-import", status_code=202)
-def kb_case_import(body: CaseImportIn, c: Caller = Depends(caller)) -> dict:
-    import base64 as _b64
-
-    from interpreter import audit, case_import
+    from interpreter import audit
 
     tid = _caller_tenant(c, body.tenant_id)
     _require_editor(c, tid)
-    rate_limit(c.user_id, "case_import", 20)
-    if not body.files or len(body.files) > 2:
-        raise HTTPException(422, "attach one or two files")
+    rate_limit(c.user_id, "case_backfill", 12)
 
-    decoded: list[tuple[str, bytes]] = []
-    for f in body.files:
-        raw = (f.get("content_b64") or "").split(",", 1)[-1]
+    def _parse(s: str) -> _d:
         try:
-            data = _b64.b64decode(raw, validate=False)
-        except Exception:  # noqa: BLE001
-            raise HTTPException(422, f"{f.get('filename')!r}: not valid base64")
-        if len(data) > _CASE_IMPORT_MAX:
-            raise HTTPException(
-                413, f"{f.get('filename')!r} is over 12 MB — slice the export by "
-                     "month, or use a Salesforce date-range pull")
-        decoded.append((f.get("filename") or "upload", data))
+            return _d.fromisoformat(s.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(422, f"bad date {s!r} — use ISO (YYYY-MM-DD or full datetime)")
 
-    kinds = {name: case_import.sniff(data) for name, data in decoded}
-    if not any(k in ("sf_email", "csv") for k in kinds.values()):
-        raise HTTPException(
-            422, "need a Salesforce EmailMessage export or a CSV "
-                 f"(got: {', '.join(sorted(set(kinds.values())))})")
+    a, b = _parse(body.date_from), _parse(body.date_to)
+    if a >= b:
+        raise HTTPException(422, "'from' must be before 'to'")
+    if (b - a).days > 366:
+        raise HTTPException(422, "window too wide — pull at most a year at a time")
 
-    job_id = jobs.enqueue("case_import", {
+    job_id = jobs.enqueue("case_backfill", {
         "tenant_id": tid, "created_by": c.user_id,
-        "files": [{"filename": n, "b64": _b64.b64encode(d).decode()} for n, d in decoded],
-    }, dedupe_key=f"case_import:{tid}:{uuid.uuid4()}", sb=_service)
+        "since": a.isoformat(), "until": b.isoformat(),
+    }, dedupe_key=f"case_backfill:{tid}:{uuid.uuid4()}", sb=_service)
 
-    audit.record(_service, tenant_id=tid, action="case_memory.import_started",
+    audit.record(_service, tenant_id=tid, action="case_memory.backfill_started",
                  actor_id=c.user_id, actor_email=c.email,
                  target_type="tenant", target_id=tid,
-                 summary=f"importing case history from {len(decoded)} file(s)")
-    return {"job_id": job_id, "files": kinds}
+                 summary=f"pulling Salesforce cases closed {a.date()} → {b.date()}")
+    return {"job_id": job_id, "since": a.isoformat(), "until": b.isoformat()}
 
 
 @app.get("/api/kb/case-memory/stats")

@@ -218,17 +218,23 @@ def _sync_rows(rows: list[dict], *, dry: bool) -> int:
     return done
 
 
-def _from_salesforce(since_iso: str, limit: int) -> list[dict]:
+def _from_salesforce(since_iso: str, limit: int, *, until_iso: str | None = None,
+                     tenant_id: str | None = None) -> list[dict]:
     from interpreter import salesforce
-    if not salesforce.available():
-        log.warning("--from-salesforce: no Salesforce creds")
+    # `client_for` resolves the tenant's own connected org (Vault), falling
+    # back to the env client; only bail when even that has nothing.
+    sf = salesforce._try_client(tenant_id)
+    if sf is None:
+        log.warning("--from-salesforce: no Salesforce client for tenant %s", tenant_id)
         return []
-    sf = salesforce.client_for(None)
-    lit = salesforce._soql_lit(since_iso)
+    tid = tenant_id or "00000000-0000-0000-0000-000000000000"
+    where = [f"IsClosed = true AND ClosedDate >= {salesforce._soql_lit(since_iso)}"]
+    if until_iso:
+        where.append(f"ClosedDate < {salesforce._soql_lit(until_iso)}")
     cases = sf.query(
         "SELECT Id, CaseNumber, Subject, Description, Type, Module__c, Region__c, "
         "AccountId, ClosedDate, Account.Tier__c FROM Case "
-        f"WHERE IsClosed = true AND ClosedDate >= {lit} ORDER BY ClosedDate DESC "
+        f"WHERE {' AND '.join(where)} ORDER BY ClosedDate DESC "
         f"LIMIT {int(limit)}"
     ).get("records", [])
     out = []
@@ -242,7 +248,7 @@ def _from_salesforce(since_iso: str, limit: int) -> list[dict]:
         if not reply:
             continue
         out.append({
-            "case_sf_id": c["Id"], "tenant_id": "00000000-0000-0000-0000-000000000000",
+            "case_sf_id": c["Id"], "tenant_id": tid,
             "case_number": c.get("CaseNumber"), "subject": c.get("Subject"),
             "body_summary": c.get("Description") or c.get("Subject") or "",
             "case_type": c.get("Type"), "module": c.get("Module__c"),
@@ -318,6 +324,10 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="ingestion.case_memory_sync")
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--since", default=None, help="ISO date; default = 90 days ago")
+    ap.add_argument("--until", default=None, help="ISO date; ClosedDate < (bounded pull)")
+    ap.add_argument("--tenant", default=None,
+                    help="tenant_id to tag rows with + resolve the SF org for "
+                         "(--from-salesforce)")
     ap.add_argument("--limit", type=int, default=2000)
     ap.add_argument("--from-salesforce", action="store_true")
     ap.add_argument("--from-zendesk", action="store_true")
@@ -335,16 +345,20 @@ def main(argv: list[str] | None = None) -> int:
 
     since = args.since or (datetime.now(timezone.utc) - timedelta(days=90)).date().isoformat()
     since_iso = since if "T" in since else f"{since}T00:00:00Z"
+    until_iso = None
+    if args.until:
+        until_iso = args.until if "T" in args.until else f"{args.until}T00:00:00Z"
 
     if args.from_zendesk:
         rows = _from_zendesk(since_iso, args.limit)
     elif args.from_salesforce:
-        rows = [r for r in (
-            {**c, **{}} for c in _from_salesforce(since_iso, args.limit)) if r]
+        rows = [r for r in _from_salesforce(
+            since_iso, args.limit, until_iso=until_iso, tenant_id=args.tenant) if r]
     else:
         rows = [r for r in (_row_from_run(x) for x in _iter_runs(get_supabase(), since_iso, args.limit)) if r]
 
-    log.info("%d candidate resolution(s) since %s", len(rows), since_iso)
+    log.info("%d candidate resolution(s) %s", len(rows),
+             f"in [{since_iso}, {until_iso})" if until_iso else f"since {since_iso}")
     n = _sync_rows(rows, dry=args.dry_run)
     log.info("%s %d case_memory row(s)", "would sync" if args.dry_run else "synced", n)
     return 0
