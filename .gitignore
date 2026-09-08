@@ -20,3 +20,6 @@ web/*.tsbuildinfo
 web/playwright-report/
 web/test-results/
 web/.playwright/
+
+# local case exports — never commit (large, contains customer PII)
+gunner urbanpiper old cases/
