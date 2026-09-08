@@ -10,6 +10,7 @@ import { ReviewView } from "./review/ReviewView";
 import { TraceView } from "./trace/TraceView";
 import { KnowledgeView } from "./kb/KnowledgeView";
 import { RulesView } from "./rules/RulesView";
+import { AskView } from "./ask/AskView";
 import { IntakeView } from "./intake/IntakeView";
 import { IntegrationsView } from "./channels/IntegrationsView";
 import { AdminView } from "./admin/AdminView";
@@ -26,6 +27,7 @@ type View =
   | "review"
   | "trace"
   | "knowledge"
+  | "ask"
   | "rules"
   | "intake"
   | "guide"
@@ -53,6 +55,7 @@ const NAV_GROUPS: { key: string; label: string; items: { view: View; label: stri
     label: "Knowledge",
     items: [
       { view: "knowledge", label: "Knowledge" },
+      { view: "ask", label: "Ask" },
       { view: "rules", label: "Rules" },
       { view: "intake", label: "Intake" },
       { view: "guide", label: "Guide" },
@@ -346,6 +349,12 @@ export function App() {
             in a flow consults a collection at a checkpoint
           </div>
         )}
+        {view === "ask" && (
+          <div className="muted">
+            plain-English questions over this workspace's cases — answered from the
+            case graph (read-only, workspace-scoped) or the closest resolved cases
+          </div>
+        )}
         {view === "rules" && (
           <div className="muted">
             structured <code>when → then</code> rules a <code>policy_gate</code> node
@@ -395,6 +404,8 @@ export function App() {
           <IntegrationsView key={tenantId} tenantId={tenantId} />
         ) : view === "guide" ? (
           <FlowGuideView />
+        ) : view === "ask" ? (
+          <AskView key={tenantId} tenantId={tenantId} />
         ) : view === "rules" ? (
           <RulesView key={tenantId} tenantId={tenantId} />
         ) : view === "intake" ? (
@@ -404,7 +415,7 @@ export function App() {
         ) : view === "runs" ? (
           <RunsView />
         ) : view === "review" ? (
-          <ReviewView tenantId={tenantId} />
+          <ReviewView />
         ) : view === "trace" ? (
           <TraceView />
         ) : flowId ? (

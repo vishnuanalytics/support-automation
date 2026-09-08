@@ -733,8 +733,10 @@ for any real workspace. Now:
   UrbanPiper taxonomy (Catalogue 23, Order Relay, Store Availability, …).
 - Still: `graph_query`'s spec-compiler design (LLM → JSON spec → Cypher,
   never free-form Cypher) is unchanged and staying — one shared Neo4j
-  Aura, no per-tenant DB / read-only role. The ask-box UI still lives in
-  the Approvals view; promoting it to its own nav item is open.
+  Aura, no per-tenant DB / read-only role. The ask-box is now its own
+  **Ask** view (`web/src/ask/AskView.tsx`, nav: Knowledge → Ask), pulled
+  out of the Approvals view; it passes the active workspace to
+  `/api/ask` (was `400 tenant_id required` for multi-workspace users).
 - Full offline **1063 passed**.
 
 ---
