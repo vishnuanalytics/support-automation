@@ -21,18 +21,21 @@ class EntryFlowError(RuntimeError):
     """No single published flow is marked `sf_entry`."""
 
 
-def resolve_entry_flow_id(sb) -> str:
+def resolve_entry_flow_id(sb, tenant_id: str | None = None) -> str:
     """The flow the Salesforce Case pipeline runs — the one the editor's
-    "Salesforce entry" toggle points at (`flows.sf_entry`, migration 042)."""
-    rows = (
-        sb.table("flows").select("flow_id")
-        .eq("sf_entry", True).eq("status", "published").execute().data
-        or []
-    )
+    "Salesforce entry" toggle points at (`flows.sf_entry`, migration 042).
+    With `tenant_id` it resolves that workspace's entry flow (there is one
+    per workspace); without it, the deployment-wide single one."""
+    q = sb.table("flows").select("flow_id").eq("sf_entry", True).eq("status", "published")
+    if tenant_id:
+        q = q.eq("tenant_id", tenant_id)
+    rows = q.execute().data or []
     if len(rows) != 1:
+        scope = f" for workspace {tenant_id}" if tenant_id else ""
         raise EntryFlowError(
-            f"expected exactly one published flow marked 'Salesforce entry', found {len(rows)} "
-            "— set one with the toggle in the flow editor (PUT /api/flows/{id}/sf-entry)"
+            f"expected exactly one published flow marked 'Salesforce entry'{scope}, found "
+            f"{len(rows)} — set one with the toggle in the flow editor "
+            "(PUT /api/flows/{id}/sf-entry)"
         )
     return rows[0]["flow_id"]
 
@@ -45,11 +48,13 @@ def enqueue_case_run(
     idempotency_key: str,
     trigger: str = "",
     flow_id: str | None = None,
+    tenant_id: str | None = None,
 ) -> str | None:
     """Queue a `run_flow` job for a Salesforce Case. Returns the job id, or
     `None` when an identical job is already queued (dedupe). The worker
-    hydrates the bare Case id via `salesforce.get_case`."""
-    fid = flow_id or resolve_entry_flow_id(sb)
+    hydrates the bare Case id via `salesforce.get_case`. `tenant_id` scopes
+    the entry-flow lookup to that workspace."""
+    fid = flow_id or resolve_entry_flow_id(sb, tenant_id)
     return jobs.enqueue(
         "run_flow",
         {

@@ -95,181 +95,199 @@ def _event(sb, **kw) -> None:
         log.warning("sweep case_events failed: %s", e)
 
 
+# ── per-workspace Salesforce targets ──────────────────────────────────
+def _sf_targets(sb) -> list:
+    """`(tenant_id, sf_client)` for every workspace a Salesforce sweep runs
+    against — its *own* connected org. The shared env client is used only as
+    tenant `None` when nothing is configured (single-tenant / dev), never as
+    a silent fallback for a mis-configured workspace."""
+    from interpreter import salesforce
+
+    out: list = []
+    for tid in salesforce.syncable_tenants(sb):
+        cl = salesforce._try_client(tid)
+        if cl is not None:
+            out.append((tid, cl))
+    if not out and salesforce.available():
+        out.append((None, salesforce.client_for(None)))
+    return out
+
+
 # ── queue_sweep ─────────────────────────────────────────────────────────
 def queue_sweep(sb, *, dry_run: bool | None = None) -> dict:
     from interpreter import salesforce
 
     dry = _dry() if dry_run is None else dry_run
-    if not salesforce.available():
+    targets = _sf_targets(sb)
+    if not targets:
         return {"skipped": "no Salesforce creds"}
-    sf = salesforce.client_for(None)
     now = _now()
-    try:
-        rows = sf.query(
-            "SELECT Id, CaseNumber, Status, OwnerId, Routed_Team__c, Next_Action_Due__c, "
-            "Last_AI_Run_At__c, SLA_Breach__c, CreatedDate, LastModifiedDate FROM Case "
-            "WHERE IsClosed = false AND Status NOT IN ('Resolved', 'Closed') "
-            "ORDER BY CreatedDate ASC LIMIT 500"
-        ).get("records", [])
-    except Exception as e:  # noqa: BLE001
-        log.warning("queue_sweep query failed: %s", e)
-        return {"error": str(e)[:200]}
-
     nudged: list[str] = []
     breached: list[str] = []
     resolved: list[str] = []
-    for r in rows:
-        if r.get("SLA_Breach__c"):
-            continue
-        status = r.get("Status") or ""
-        owner = r.get("OwnerId") or ""
-        is_queue = owner.startswith("00G")
-        due = _parse(r.get("Next_Action_Due__c"))
-        team = r.get("Routed_Team__c") or "support"
-        cn = r.get("CaseNumber")
+    scanned = 0
 
-        # A Case with none of the control-plane fields set has never been
-        # through the Phase 27c pipeline — predates the cutover, or CDC
-        # hasn't run its first pass yet. Ours to judge only once it shows a
-        # fingerprint of the pipeline touching it; `cdc_reconcile` is the
-        # backstop for "CDC never picked this up at all".
-        touched = bool(due or r.get("Routed_Team__c") or r.get("Last_AI_Run_At__c"))
-        if not touched:
-            continue
+    def _judge_org(tid, sf):
+        nonlocal scanned
+        try:
+            rows = sf.query(
+                "SELECT Id, CaseNumber, Status, OwnerId, Routed_Team__c, Next_Action_Due__c, "
+                "Last_AI_Run_At__c, SLA_Breach__c, CreatedDate, LastModifiedDate FROM Case "
+                "WHERE IsClosed = false AND Status NOT IN ('Resolved', 'Closed') "
+                "ORDER BY CreatedDate ASC LIMIT 500"
+            ).get("records", [])
+        except Exception as e:  # noqa: BLE001
+            log.warning("queue_sweep query failed (workspace %s): %s", tid, e)
+            return
+        scanned += len(rows)
+        for r in rows:
+            if r.get("SLA_Breach__c"):
+                continue
+            status = r.get("Status") or ""
+            owner = r.get("OwnerId") or ""
+            is_queue = owner.startswith("00G")
+            due = _parse(r.get("Next_Action_Due__c"))
+            team = r.get("Routed_Team__c") or "support"
+            cn = r.get("CaseNumber")
 
-        # Phase 27 — the customer went quiet: auto-resolve a stale
-        # `Waiting on Customer` Case (design state machine: WOC -> Resolved
-        # on the timer). Not a breach — a graceful close.
-        if status == "Waiting on Customer" and due and due < now:
-            resolved.append(cn)
-            if not dry:
-                try:
-                    salesforce.update_case_fields(r["Id"], {
-                        "Status": "Resolved",
-                        "Next_Action__c": "auto-resolved — no customer reply",
-                    })
-                    salesforce.post_chatter(
-                        r["Id"], "Closing this out as we didn't hear back. Reply any "
-                        "time and it'll reopen.")
-                except Exception as e:  # noqa: BLE001
-                    log.warning("queue_sweep auto-resolve %s: %s", cn, e)
-                _event(sb, tenant_id=None, case_sf_id=r["Id"], case_number=cn,
-                       actor="system:sweep", action="send", from_status=status,
-                       to_status="Resolved", reason="no customer reply — auto-resolved")
-            continue
+            touched = bool(due or r.get("Routed_Team__c") or r.get("Last_AI_Run_At__c"))
+            if not touched:
+                continue
 
-        # Phase 27 — escalated but Omni never took it (Routed_Team__c missing,
-        # or still queue-owned by AI_Intake): dead-letter to Unrouted_Review.
-        if (status == "Escalated" and is_queue
-                and (not r.get("Routed_Team__c") or "AI_Intake" in owner)
-                and _age_min(r.get("LastModifiedDate"), now) > ACK_MIN):
-            breached.append(cn)
-            if not dry:
-                try:
-                    salesforce.assign_case(r["Id"], queue="Unrouted_Review")
-                    salesforce.update_case_fields(r["Id"], {"SLA_Breach__c": True})
-                except Exception as e:  # noqa: BLE001
-                    log.warning("queue_sweep unrouted %s: %s", cn, e)
-                _page(f":warning: Case *{cn}* escalated but never routed "
-                      f"(team=`{r.get('Routed_Team__c') or '∅'}`) — parked in `Unrouted_Review`.",
-                      sb=sb)
-                _event(sb, tenant_id=None, case_sf_id=r["Id"], case_number=cn,
-                       actor="system:sweep", action="breach", from_status=status,
-                       to_status=status, reason="escalated but unrouted")
-            continue
+            if status == "Waiting on Customer" and due and due < now:
+                resolved.append(cn)
+                if not dry:
+                    try:
+                        salesforce.update_case_fields(r["Id"], {
+                            "Status": "Resolved",
+                            "Next_Action__c": "auto-resolved — no customer reply",
+                        }, tenant_id=tid)
+                        salesforce.post_chatter(
+                            r["Id"], "Closing this out as we didn't hear back. Reply any "
+                            "time and it'll reopen.", tenant_id=tid)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("queue_sweep auto-resolve %s: %s", cn, e)
+                    _event(sb, tenant_id=tid, case_sf_id=r["Id"], case_number=cn,
+                           actor="system:sweep", action="send", from_status=status,
+                           to_status="Resolved", reason="no customer reply — auto-resolved")
+                continue
 
-        reason = hard = None
-        if due and due < now:
-            over = (now - due).total_seconds() / 60
-            reason, hard = "overdue", over > ACK_MIN
-        elif status in ("New", "Triaged"):
-            # age since the pipeline last touched it, not since the Case was
-            # first created — a re-triaged Case (customer reply) has an old
-            # CreatedDate but should read as fresh, not stuck.
-            last_touch = r.get("Last_AI_Run_At__c") or r.get("CreatedDate")
-            age = _age_min(last_touch, now)
-            if age > STUCK_MIN:
-                reason, hard = "stuck", age > 2 * STUCK_MIN
-        elif status == "Escalated" and is_queue:
-            age = _age_min(r.get("LastModifiedDate"), now)
-            if age > ACK_MIN:
-                reason, hard = "unaccepted", age > 2 * ACK_MIN
-        if not reason:
-            continue
+            if (status == "Escalated" and is_queue
+                    and (not r.get("Routed_Team__c") or "AI_Intake" in owner)
+                    and _age_min(r.get("LastModifiedDate"), now) > ACK_MIN):
+                breached.append(cn)
+                if not dry:
+                    try:
+                        salesforce.assign_case(r["Id"], queue="Unrouted_Review", tenant_id=tid)
+                        salesforce.update_case_fields(r["Id"], {"SLA_Breach__c": True}, tenant_id=tid)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("queue_sweep unrouted %s: %s", cn, e)
+                    _page(f":warning: Case *{cn}* escalated but never routed "
+                          f"(team=`{r.get('Routed_Team__c') or '∅'}`) — parked in `Unrouted_Review`.",
+                          tenant_id=tid, sb=sb)
+                    _event(sb, tenant_id=tid, case_sf_id=r["Id"], case_number=cn,
+                           actor="system:sweep", action="breach", from_status=status,
+                           to_status=status, reason="escalated but unrouted")
+                continue
 
-        if hard:
-            breached.append(cn)
-            if not dry:
-                try:
-                    salesforce.update_case_fields(r["Id"], {"SLA_Breach__c": True})
-                    salesforce.assign_case(r["Id"], queue="SLA_Breach")
-                except Exception as e:  # noqa: BLE001
-                    log.warning("queue_sweep breach %s: %s", cn, e)
-                _page(f":rotating_light: *SLA breach* — Case *{cn}* ({reason}, team `{team}`) "
-                      f"has been unattended past 2× its window. Parked in `SLA_Breach`.", sb=sb)
-                _event(sb, tenant_id=None, case_sf_id=r["Id"], case_number=cn,
-                       actor="system:sweep", action="breach", from_status=status,
-                       to_status=status, reason=reason, routed_team=team)
-        else:
-            nudged.append(cn)
-            if not dry:
-                try:
-                    # re-route: touch the team queue so the Omni Flow re-fires,
-                    # and give it one more ack window.
-                    salesforce.assign_case(r["Id"], queue=TEAM_QUEUE.get(team, "Team_Support"))
-                    salesforce.update_case_fields(r["Id"], {
-                        "Next_Action_Due__c": (now + timedelta(minutes=ACK_MIN)).isoformat(),
-                    })
-                except Exception as e:  # noqa: BLE001
-                    log.warning("queue_sweep nudge %s: %s", cn, e)
-                _page(f":hourglass_flowing_sand: Case *{cn}* ({reason}) re-routed to `{team}` — "
-                      f"still no owner. Next check in {ACK_MIN} min.", sb=sb)
-                _event(sb, tenant_id=None, case_sf_id=r["Id"], case_number=cn,
-                       actor="system:sweep", action="reconcile", from_status=status,
-                       to_status=status, reason=reason, routed_team=team)
+            reason = hard = None
+            if due and due < now:
+                over = (now - due).total_seconds() / 60
+                reason, hard = "overdue", over > ACK_MIN
+            elif status in ("New", "Triaged"):
+                last_touch = r.get("Last_AI_Run_At__c") or r.get("CreatedDate")
+                age = _age_min(last_touch, now)
+                if age > STUCK_MIN:
+                    reason, hard = "stuck", age > 2 * STUCK_MIN
+            elif status == "Escalated" and is_queue:
+                age = _age_min(r.get("LastModifiedDate"), now)
+                if age > ACK_MIN:
+                    reason, hard = "unaccepted", age > 2 * ACK_MIN
+            if not reason:
+                continue
 
-    return {"scanned": len(rows), "nudged": nudged, "breached": breached,
+            if hard:
+                breached.append(cn)
+                if not dry:
+                    try:
+                        salesforce.update_case_fields(r["Id"], {"SLA_Breach__c": True}, tenant_id=tid)
+                        salesforce.assign_case(r["Id"], queue="SLA_Breach", tenant_id=tid)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("queue_sweep breach %s: %s", cn, e)
+                    _page(f":rotating_light: *SLA breach* — Case *{cn}* ({reason}, team `{team}`) "
+                          f"has been unattended past 2× its window. Parked in `SLA_Breach`.",
+                          tenant_id=tid, sb=sb)
+                    _event(sb, tenant_id=tid, case_sf_id=r["Id"], case_number=cn,
+                           actor="system:sweep", action="breach", from_status=status,
+                           to_status=status, reason=reason, routed_team=team)
+            else:
+                nudged.append(cn)
+                if not dry:
+                    try:
+                        salesforce.assign_case(r["Id"], queue=TEAM_QUEUE.get(team, "Team_Support"),
+                                               tenant_id=tid)
+                        salesforce.update_case_fields(r["Id"], {
+                            "Next_Action_Due__c": (now + timedelta(minutes=ACK_MIN)).isoformat(),
+                        }, tenant_id=tid)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("queue_sweep nudge %s: %s", cn, e)
+                    _page(f":hourglass_flowing_sand: Case *{cn}* ({reason}) re-routed to `{team}` — "
+                          f"still no owner. Next check in {ACK_MIN} min.", tenant_id=tid, sb=sb)
+                    _event(sb, tenant_id=tid, case_sf_id=r["Id"], case_number=cn,
+                           actor="system:sweep", action="reconcile", from_status=status,
+                           to_status=status, reason=reason, routed_team=team)
+
+    for tid, sf in targets:
+        _judge_org(tid, sf)
+
+    return {"scanned": scanned, "nudged": nudged, "breached": breached,
             "resolved": resolved, "dry_run": dry}
 
 
 # ── cdc_reconcile ───────────────────────────────────────────────────────
 def cdc_reconcile(sb, *, dry_run: bool | None = None) -> dict:
-    from interpreter import salesforce
     from interpreter.sf_ingest import enqueue_case_run
 
     dry = _dry() if dry_run is None else dry_run
-    if not salesforce.available():
+    targets = _sf_targets(sb)
+    if not targets:
         return {"skipped": "no Salesforce creds"}
-    sf = salesforce.client_for(None)
     since = (_now() - timedelta(hours=RECONCILE_HOURS)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    try:
-        recs = sf.query(
-            "SELECT Id, CaseNumber FROM Case WHERE IsClosed = false "
-            f"AND (CreatedDate >= {since} OR LastModifiedDate >= {since}) LIMIT 500"
-        ).get("records", [])
-    except Exception as e:  # noqa: BLE001
-        log.warning("cdc_reconcile query failed: %s", e)
-        return {"error": str(e)[:200]}
-
     missing: list[str] = []
-    for r in recs:
-        sid, cn = r["Id"], r.get("CaseNumber")
+    scanned = 0
+
+    for tid, sf in targets:
         try:
-            have = (sb.table("runs").select("run_id")
-                    .or_(f"case_payload->>sf_id.eq.{sid},case_id.eq.{cn}")
-                    .limit(1).execute().data)
-        except Exception:  # noqa: BLE001
-            have = (sb.table("runs").select("run_id")
-                    .eq("case_payload->>sf_id", sid).limit(1).execute().data)
-        if have:
+            recs = sf.query(
+                "SELECT Id, CaseNumber FROM Case WHERE IsClosed = false "
+                f"AND (CreatedDate >= {since} OR LastModifiedDate >= {since}) LIMIT 500"
+            ).get("records", [])
+        except Exception as e:  # noqa: BLE001
+            log.warning("cdc_reconcile query failed (workspace %s): %s", tid, e)
             continue
-        missing.append(cn)
-        if not dry:
-            ik = f"reconcile:{sid}"
-            enqueue_case_run(sb, sid, dedupe_key=ik, idempotency_key=ik, trigger="reconcile")
-            _event(sb, tenant_id=None, case_sf_id=sid, case_number=cn,
-                   actor="system:cdc", action="reconcile", reason="no run — CDC gap backfill")
-    return {"scanned": len(recs), "enqueued": missing, "dry_run": dry}
+        scanned += len(recs)
+        for r in recs:
+            sid, cn = r["Id"], r.get("CaseNumber")
+            try:
+                have = (sb.table("runs").select("run_id")
+                        .or_(f"case_payload->>sf_id.eq.{sid},case_id.eq.{cn}")
+                        .limit(1).execute().data)
+            except Exception:  # noqa: BLE001
+                have = (sb.table("runs").select("run_id")
+                        .eq("case_payload->>sf_id", sid).limit(1).execute().data)
+            if have:
+                continue
+            missing.append(cn)
+            if not dry:
+                ik = f"reconcile:{sid}"
+                try:
+                    enqueue_case_run(sb, sid, dedupe_key=ik, idempotency_key=ik,
+                                     trigger="reconcile", tenant_id=tid)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("cdc_reconcile enqueue %s (workspace %s): %s", cn, tid, e)
+                _event(sb, tenant_id=tid, case_sf_id=sid, case_number=cn,
+                       actor="system:cdc", action="reconcile", reason="no run — CDC gap backfill")
+    return {"scanned": scanned, "enqueued": missing, "dry_run": dry}
 
 
 # ── reasoning_ttl ───────────────────────────────────────────────────────
@@ -384,33 +402,33 @@ def handoff_watch(sb, *, dry_run: bool | None = None) -> dict:
     on new messages + check for still-open critical questions, flagging the
     manager thread. `interpreter/handoff_watch.watch_case` does one Case."""
     from interpreter import handoff_watch as hw
-    from interpreter import salesforce
 
     dry = _dry() if dry_run is None else dry_run
-    if not salesforce.available():
+    targets = _sf_targets(sb)
+    if not targets:
         return {"skipped": "no Salesforce creds"}
-    sf = salesforce.client_for(None)
-    try:
-        rows = sf.query(
-            "SELECT Id, CaseNumber, Status, Type, Routed_Team__c, CreatedDate "
-            "FROM Case WHERE IsClosed = false AND Status IN ('Escalated', 'In Progress') "
-            "AND Routed_Team__c != null ORDER BY LastModifiedDate DESC LIMIT 200"
-        ).get("records", [])
-    except Exception as e:  # noqa: BLE001
-        log.warning("handoff_watch query failed: %s", e)
-        return {"error": str(e)[:200]}
 
     watched = 0
     flagged: list[str] = []
-    for r in rows:
+    for tid, sf in targets:
         try:
-            res = hw.watch_case(sb, r, sf=sf, dry=dry)
+            rows = sf.query(
+                "SELECT Id, CaseNumber, Status, Type, Routed_Team__c, CreatedDate "
+                "FROM Case WHERE IsClosed = false AND Status IN ('Escalated', 'In Progress') "
+                "AND Routed_Team__c != null ORDER BY LastModifiedDate DESC LIMIT 200"
+            ).get("records", [])
         except Exception as e:  # noqa: BLE001
-            log.warning("handoff_watch %s: %s", r.get("CaseNumber"), e)
+            log.warning("handoff_watch query failed (workspace %s): %s", tid, e)
             continue
-        watched += 1
-        if res.get("flags"):
-            flagged.append(r.get("CaseNumber"))
+        for r in rows:
+            try:
+                res = hw.watch_case(sb, r, sf=sf, tenant_id=tid, dry=dry)
+            except Exception as e:  # noqa: BLE001
+                log.warning("handoff_watch %s: %s", r.get("CaseNumber"), e)
+                continue
+            watched += 1
+            if res.get("flags"):
+                flagged.append(r.get("CaseNumber"))
     return {"watched": watched, "flagged": flagged, "dry_run": dry}
 
 

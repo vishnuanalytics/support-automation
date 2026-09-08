@@ -171,6 +171,7 @@ def test_cdc_reconcile_enqueues_only_cases_with_no_run(monkeypatch):
     sf = _SF([{"Id": "500E", "CaseNumber": "0005"}, {"Id": "500F", "CaseNumber": "0006"}])
     monkeypatch.setattr(salesforce, "available", lambda *a, **k: True)
     monkeypatch.setattr(salesforce, "client_for", lambda *a, **k: sf)
+    monkeypatch.setattr(sweeps, "_sf_targets", lambda _sb: [(None, sf)])
 
     calls: list = []
     monkeypatch.setattr("interpreter.sf_ingest.enqueue_case_run",
