@@ -1,20 +1,18 @@
 """
-P9 — usage & billing dashboard.
+P9 — usage & billing dashboard. Billing-foundation chunk (2026-09-10)
+moved plan quotas off a hardcoded dict onto the `plans` table.
 
-`usage_summary(rows, plan, period_start, period_end)` turns a tenant's
-`runs` rows for one calendar-month window into the numbers the Billing tab
-shows: run count, tokens (total + by model), an *illustrative* estimated
-cost, a daily series for the usage chart, and plan-quota percentages.
+`usage_summary(rows, plan_name, limits, period_start, period_end)` turns a
+tenant's `runs` rows for one calendar-month window into the numbers the
+Billing tab shows: run count, tokens (total + by model), an *illustrative*
+estimated cost, a daily series for the usage chart, and plan-quota
+percentages. Stays pure/no-DB — `get_plan_for_tenant()` below does the one
+Supabase round-trip (tenants.plan_id -> plans row) callers need first.
 
-Scope is usage metering only — there is no payment processing behind this
-(`tenants.plan` is a static admin-set label, not billing-system-driven).
 `estimated_cost_usd` is a notional number for illustration, not a real
 invoice: Groq (this project's default LLM provider) runs on its free tier,
 so Groq/OpenRouter model ids price at $0; only opt-in Anthropic models
 carry a rate, taken from published list pricing at time of writing.
-
-Read-only / pure — no Supabase calls here (the route in api/main.py does
-the fetch, same split as kil_metrics.py's compute() vs. its caller).
 """
 
 from __future__ import annotations
@@ -35,12 +33,56 @@ RATE_PER_1M_USD: dict[str, float] = {
 }
 DEFAULT_RATE_USD = 0.0
 
-# Static per-tenant plan quotas. None = unlimited. Not payment-processor
-# driven — an admin sets `tenants.plan`, this table just holds the numbers.
-PLAN_LIMITS: dict[str, dict[str, int | None]] = {
-    "free": {"runs": 200, "tokens": 500_000},
-    "pro": {"runs": None, "tokens": None},
+# Fallback only for a tenant somehow missing a plan_id (shouldn't happen —
+# `default_tenant_plan()` trigger backstops every insert) or an empty
+# `plans` table. Never the primary source of quotas. Same field names as a
+# real plan row so `plan_limits()` reads it identically either way.
+_FREE_PLAN_FALLBACK: dict[str, Any] = {
+    "slug": "free", "name": "Free", "included_runs": 200, "included_tokens": 500_000,
 }
+
+
+class BillingLockedError(RuntimeError):
+    """Raised by `assert_not_locked` when a tenant's trial (or grace
+    period) has lapsed with no payment on file. Callers turn this into a
+    clear, actionable failure — a 402 for the interactive "run" endpoint,
+    a job that fails (and retries a few times, harmlessly, before settling
+    as an error) for the worker's queued path — never a generic crash."""
+
+
+def assert_not_locked(tenant_id: "str | None", sb) -> None:
+    """The billing-enforcement gate (chunk D): called before a flow
+    actually runs, so a locked tenant never spends an LLM call. A missing/
+    unresolvable tenant_id is let through — this is a billing gate, not a
+    tenant-existence check; other code already handles that."""
+    if not tenant_id:
+        return
+    rows = (sb.table("tenants").select("billing_status").eq("tenant_id", tenant_id)
+            .execute().data or [])
+    if rows and rows[0].get("billing_status") == "locked":
+        raise BillingLockedError(
+            "This workspace's trial has ended and no payment method is on file — "
+            "flows are paused until billing is reactivated.")
+
+
+def get_plan_for_tenant(tenant_id: str, sb) -> dict[str, Any]:
+    """The tenant's plan row from `plans` — the numbers `usage_summary` and
+    `check_and_warn` need, sourced from data instead of a hardcoded dict."""
+    trows = (sb.table("tenants").select("plan_id").eq("tenant_id", tenant_id)
+             .execute().data or [])
+    plan_id = trows[0].get("plan_id") if trows else None
+    if plan_id:
+        prows = (sb.table("plans").select("*").eq("plan_id", plan_id).execute().data or [])
+        if prows:
+            return prows[0]
+    prows = sb.table("plans").select("*").eq("slug", "free").execute().data or []
+    if prows:
+        return prows[0]
+    return dict(_FREE_PLAN_FALLBACK)
+
+
+def plan_limits(plan: dict[str, Any]) -> dict[str, int | None]:
+    return {"runs": plan.get("included_runs"), "tokens": plan.get("included_tokens")}
 
 
 def estimate_cost_usd(tokens_by_model: dict[str, int]) -> float:
@@ -59,10 +101,9 @@ def _pct(used: int, limit: int | None) -> float | None:
     return round(used / limit * 100, 1)
 
 
-def usage_summary(rows: list[dict[str, Any]], plan: str,
+def usage_summary(rows: list[dict[str, Any]], plan_name: str, limits: dict[str, int | None],
                    period_start: str, period_end: str,
                    flow_names: dict[str, str] | None = None) -> dict:
-    limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])
     flow_names = flow_names or {}
 
     runs_count = len(rows)
@@ -118,7 +159,7 @@ def usage_summary(rows: list[dict[str, Any]], plan: str,
 
     return {
         "period": {"start": period_start, "end": period_end},
-        "plan": plan,
+        "plan": plan_name,
         "limits": limits,
         "runs_count": runs_count,
         "tokens_total": tokens_total,
@@ -171,10 +212,8 @@ def check_and_warn(sb, tenant_id: str) -> str | None:
 
         period_label, period_start, period_end = month_bounds(None)
 
-        trows = (sb.table("tenants").select("plan").eq("tenant_id", tenant_id)
-                 .execute().data or [])
-        plan = (trows[0].get("plan") if trows else None) or "free"
-        limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])
+        plan_row = get_plan_for_tenant(tenant_id, sb)
+        plan, limits = plan_row["slug"], plan_limits(plan_row)
         if limits["runs"] is None and limits["tokens"] is None:
             return None  # unlimited plan — nothing to warn about
 
@@ -182,7 +221,7 @@ def check_and_warn(sb, tenant_id: str) -> str | None:
                 .eq("tenant_id", tenant_id)
                 .gte("created_at", period_start).lt("created_at", period_end)
                 .limit(5000).execute().data or [])
-        s = usage_summary(rows, plan, period_start, period_end)
+        s = usage_summary(rows, plan, limits, period_start, period_end)
         pcts = [p for p in (s["pct_runs_used"], s["pct_tokens_used"]) if p is not None]
         if not pcts:
             return None

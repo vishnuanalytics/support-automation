@@ -28,6 +28,15 @@ They are the backstop for everything the pipeline + Omni-Channel can't catch.
                                once per job, windowed by `updated_at` so a
                                job that failed once doesn't get re-paged
                                every sweep tick.
+  billing_trial_sweep
+                 hourly     — Billing chunk D (2026-09-10): enforces the
+                               trial/grace/lock clock that chunk A's schema
+                               populated but nothing previously read —
+                               trialing -> (reminder, then) grace ->
+                               (daily nudge, then) locked. A payment
+                               webhook can move a tenant to `active` from
+                               any of these at any time, independent of
+                               this sweep.
 
 SWEEP_DRY_RUN=1 -> log intended actions, change nothing.
 """
@@ -642,3 +651,167 @@ def failed_jobs_sweep(sb, *, dry_run: bool | None = None) -> dict:
         else:
             _page(text, sb=sb)
     return {"failed": len(rows), "dry_run": dry}
+
+
+# ── billing_trial_sweep (Billing & Payments chunk D, 2026-09-10) ────────
+TRIAL_REMINDER_DAYS = int(os.environ.get("SWEEP_TRIAL_REMINDER_DAYS", "2"))
+GRACE_DAYS = int(os.environ.get("SWEEP_GRACE_DAYS", "3"))
+
+
+def _already_notified(sb, tenant_id: str, action: str, *, period: "str | None" = None) -> bool:
+    """Same dedupe shape as `billing.check_and_warn`: has this exact
+    notification already fired for this tenant (this period, if given)?
+    Unlike the trialing->grace->locked transitions themselves (which need
+    no ledger — a transitioned row just drops out of the next query), the
+    reminder and the daily grace nudge don't change `billing_status`, so
+    without this they'd re-fire on every sweep tick."""
+    try:
+        rows = (sb.table("audit_log").select("metadata").eq("tenant_id", tenant_id)
+                .eq("action", action).limit(50).execute().data or [])
+    except Exception as e:  # noqa: BLE001
+        log.warning("billing_trial_sweep dedupe check failed: %s", e)
+        return False
+    if period is None:
+        return bool(rows)
+    return any((r.get("metadata") or {}).get("period") == period for r in rows)
+
+
+def _billing_notify(sb, tenant_id: str, text: str) -> None:
+    """In-app state (`tenants.billing_status`) is the source of truth the
+    web UI reads directly; this is a best-effort nudge on top, via the
+    tenant's own Slack digest channel if they have one connected — there
+    is no platform -> tenant-owner email path today (see check_and_warn,
+    the only other place this same limitation already applies)."""
+    try:
+        rows = (sb.table("tenant_integrations").select("config")
+                .eq("tenant_id", tenant_id).eq("kind", "slack").execute().data or [])
+        channel = (((rows[0].get("config") or {}).get("digest") or {}).get("channel")
+                   if rows else None)
+        if channel:
+            _page(text, tenant_id=tenant_id, channel=channel, sb=sb)
+    except Exception as e:  # noqa: BLE001
+        log.warning("billing_trial_sweep notify %s failed: %s", tenant_id, e)
+
+
+def billing_trial_sweep(sb, *, dry_run: bool | None = None) -> dict:
+    """The trial/grace/lock lifecycle: a tenant created after the billing
+    schema landed starts `trialing` with a real `trial_ends_at` (7 days,
+    set at signup). This sweep is what actually *enforces* that clock —
+    before it, those columns were populated but nothing read them.
+
+      trialing, ends within TRIAL_REMINDER_DAYS -> one-time reminder
+      trialing, trial_ends_at passed            -> grace (GRACE_DAYS window)
+      grace, still open                         -> one nudge per day
+      grace, grace_ends_at passed                -> locked (interpreter/
+                                                     billing.py's
+                                                     assert_not_locked then
+                                                     blocks every run)
+
+    A payment webhook can move a tenant straight to `active` from any of
+    these states at any time (api/main.py::_apply_billing_webhook) —
+    independent of this sweep, which only ever pushes a tenant *toward*
+    locked, never the reverse."""
+    from interpreter import audit
+
+    dry = _dry() if dry_run is None else dry_run
+    now = _now()
+    reminded: list[str] = []
+    started_grace: list[str] = []
+    warned_grace: list[str] = []
+    locked: list[str] = []
+
+    # 1. reminder — trialing, ending soon, not yet reminded
+    try:
+        soon_rows = (sb.table("tenants").select("tenant_id, name, trial_ends_at")
+                    .eq("billing_status", "trialing")
+                    .lt("trial_ends_at", (now + timedelta(days=TRIAL_REMINDER_DAYS)).isoformat())
+                    .gt("trial_ends_at", now.isoformat())
+                    .limit(500).execute().data or [])
+    except Exception as e:  # noqa: BLE001
+        log.warning("billing_trial_sweep reminder query failed: %s", e)
+        soon_rows = []
+    for t in soon_rows:
+        tid = t["tenant_id"]
+        if _already_notified(sb, tid, "billing.trial_ending_soon"):
+            continue
+        reminded.append(tid)
+        if dry:
+            continue
+        audit.record(sb, tenant_id=tid, action="billing.trial_ending_soon",
+                     target_type="tenant", target_id=tid,
+                     summary=f"trial ends {t.get('trial_ends_at')}")
+        _billing_notify(sb, tid, f":hourglass: Your trial ends on {t.get('trial_ends_at')} — "
+                                 "add a payment method to keep flows running without interruption.")
+
+    # 2. trialing -> grace
+    try:
+        lapsed_rows = (sb.table("tenants").select("tenant_id, name, trial_ends_at")
+                       .eq("billing_status", "trialing")
+                       .lt("trial_ends_at", now.isoformat())
+                       .limit(500).execute().data or [])
+    except Exception as e:  # noqa: BLE001
+        log.warning("billing_trial_sweep grace query failed: %s", e)
+        lapsed_rows = []
+    for t in lapsed_rows:
+        tid = t["tenant_id"]
+        started_grace.append(tid)
+        if dry:
+            continue
+        ends_at = _parse(t.get("trial_ends_at")) or now
+        grace_ends_at = (ends_at + timedelta(days=GRACE_DAYS)).isoformat()
+        sb.table("tenants").update(
+            {"billing_status": "grace", "grace_ends_at": grace_ends_at}
+        ).eq("tenant_id", tid).execute()
+        audit.record(sb, tenant_id=tid, action="billing.trial_ended_grace_started",
+                     target_type="tenant", target_id=tid,
+                     summary=f"trial ended — {GRACE_DAYS}-day grace period started")
+        _billing_notify(sb, tid, f":warning: Your trial has ended. You have {GRACE_DAYS} days to "
+                                 "add a payment method before flows pause.")
+
+    # 3. grace — one nudge per calendar day
+    today = now.date().isoformat()
+    try:
+        grace_rows = (sb.table("tenants").select("tenant_id, name, grace_ends_at")
+                     .eq("billing_status", "grace")
+                     .gt("grace_ends_at", now.isoformat())
+                     .limit(500).execute().data or [])
+    except Exception as e:  # noqa: BLE001
+        log.warning("billing_trial_sweep grace-warn query failed: %s", e)
+        grace_rows = []
+    for t in grace_rows:
+        tid = t["tenant_id"]
+        if _already_notified(sb, tid, "billing.grace_warning", period=today):
+            continue
+        warned_grace.append(tid)
+        if dry:
+            continue
+        audit.record(sb, tenant_id=tid, action="billing.grace_warning",
+                     target_type="tenant", target_id=tid,
+                     summary=f"grace period active, ends {t.get('grace_ends_at')}",
+                     metadata={"period": today})
+        _billing_notify(sb, tid, f":rotating_light: Payment still needed — flows pause on "
+                                 f"{t.get('grace_ends_at')} without one.")
+
+    # 4. grace -> locked
+    try:
+        expired_rows = (sb.table("tenants").select("tenant_id, name")
+                        .eq("billing_status", "grace")
+                        .lt("grace_ends_at", now.isoformat())
+                        .limit(500).execute().data or [])
+    except Exception as e:  # noqa: BLE001
+        log.warning("billing_trial_sweep lock query failed: %s", e)
+        expired_rows = []
+    for t in expired_rows:
+        tid = t["tenant_id"]
+        locked.append(tid)
+        if dry:
+            continue
+        sb.table("tenants").update({"billing_status": "locked"}).eq("tenant_id", tid).execute()
+        audit.record(sb, tenant_id=tid, action="billing.locked",
+                     target_type="tenant", target_id=tid,
+                     summary="grace period ended with no payment — flows paused")
+        _billing_notify(sb, tid, ":no_entry: Flows are now paused — no payment method was added. "
+                                 "Add one to resume immediately.")
+
+    return {"reminded": reminded, "started_grace": started_grace,
+            "warned_grace": warned_grace, "locked": locked, "dry_run": dry}

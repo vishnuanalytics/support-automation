@@ -7,6 +7,8 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+import pytest
+
 from interpreter import triggers
 from interpreter.builder import build_graph, initial_state
 from interpreter.registry import h_trigger
@@ -121,7 +123,41 @@ def test_worker_run_flow_threads_context(monkeypatch):
                         lambda **k: {"flow_id": "f", "tenant_id": "t", "team": "support"})
     monkeypatch.setattr(worker, "build_graph", lambda flow: _G())
     monkeypatch.setattr(worker, "record_run", lambda *a, **k: "run-1")
+    monkeypatch.setattr("interpreter.billing.assert_not_locked", lambda *a, **k: None)
     out = worker._run_flow({"flow_id": "f", "context": {"plan": "free"}}, sb=None)
     assert seen["state"]["context"]["plan"] == "free"
     assert seen["state"]["case"] == {}
     assert out["run_id"] == "run-1"
+
+
+def test_worker_run_flow_refuses_a_locked_tenant_before_any_llm_call(monkeypatch):
+    """Billing chunk D's enforcement gate: a locked tenant's run_flow job
+    must fail here, before build_graph ever runs a node."""
+    from api import worker
+    from interpreter import billing
+
+    called = {"build_graph": False}
+
+    class _SB:
+        def table(self, name):
+            assert name == "tenants"
+
+            class _Q:
+                def select(self_q, *a):
+                    return self_q
+
+                def eq(self_q, *a):
+                    return self_q
+
+                def execute(self_q):
+                    return type("R", (), {"data": [{"billing_status": "locked"}]})()
+            return _Q()
+
+    monkeypatch.setattr(worker, "load_flow",
+                        lambda **k: {"flow_id": "f", "tenant_id": "t", "team": "support"})
+    monkeypatch.setattr(worker, "build_graph",
+                        lambda flow: called.update(build_graph=True) or (_ for _ in ()).throw(
+                            AssertionError("build_graph must not run for a locked tenant")))
+    with pytest.raises(billing.BillingLockedError):
+        worker._run_flow({"flow_id": "f", "context": {}}, sb=_SB())
+    assert called["build_graph"] is False

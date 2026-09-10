@@ -73,6 +73,9 @@ def _run_flow(payload: dict, sb) -> dict:
             return {"run_id": dup[0]["run_id"], "idempotent_skip": True}
 
     flow = load_flow(flow_id=flow_id, sb=sb, status="published", validate=True)
+    from interpreter import billing
+
+    billing.assert_not_locked(flow.get("tenant_id"), sb)
     final = build_graph(flow).invoke(initial_state(flow, case=case, context=context))
     # nodes like `sf_case` mutate the case in-flight (add sf_id, refresh the
     # account tier) — persist / act on that, not the pre-run input.
@@ -735,7 +738,8 @@ _SWEEP_EVERY_MIN = {"queue_sweep": 5, "cdc_reconcile": 60, "reasoning_ttl": 5,
                     "handoff_watch": 5, "kb_promote": 360,
                     "case_graph_sync": 60, "case_memory_sync": 60,
                     "fire_schedules": 1, "kil_digest": 30, "failed_jobs_sweep": 10,
-                    "product_analytics_sync": 720, "zendesk_case_graph_sync": 60}
+                    "product_analytics_sync": 720, "zendesk_case_graph_sync": 60,
+                    "billing_trial_sweep": 60}
 
 
 def _reschedule(kind: str, sb) -> None:
@@ -778,7 +782,8 @@ HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
             "product_analytics_sync": _sweep_handler("product_analytics_sync"),
             "fire_schedules": _sweep_handler("fire_schedules"),
             "kil_digest": _sweep_handler("kil_digest"),
-            "failed_jobs_sweep": _sweep_handler("failed_jobs_sweep")}
+            "failed_jobs_sweep": _sweep_handler("failed_jobs_sweep"),
+            "billing_trial_sweep": _sweep_handler("billing_trial_sweep")}
 
 JOB_TIMEOUT = int(os.environ.get("WORKER_JOB_TIMEOUT", "120"))
 

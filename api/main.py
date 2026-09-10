@@ -536,12 +536,17 @@ class TenantIn(BaseModel):
 @app.post("/api/tenants", status_code=201)
 def create_tenant(body: TenantIn, c: Caller = Depends(caller)) -> dict:
     """P7d — self-serve: create a named workspace with the caller as owner."""
+    from datetime import datetime, timedelta, timezone
+
     name = body.name.strip()
     if not name:
         raise HTTPException(422, "name is required")
     tid = str(uuid.uuid4())
-    _service.table("tenants").insert(
-        {"tenant_id": tid, "name": name, "created_by": c.user_id}).execute()
+    trial_ends_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    _service.table("tenants").insert({
+        "tenant_id": tid, "name": name, "created_by": c.user_id,
+        "billing_status": "trialing", "trial_ends_at": trial_ends_at,
+    }).execute()
     _service.table("tenant_members").insert(
         {"tenant_id": tid, "user_id": c.user_id, "role": "owner"}).execute()
 
@@ -951,6 +956,13 @@ def run_flow(
         flow = load_flow(flow_id=flow_id, sb=_service, validate=True)
     except FlowInvalid as e:
         raise HTTPException(422, {"errors": e.errors})
+
+    from interpreter import billing
+
+    try:
+        billing.assert_not_locked(flow.get("tenant_id"), _service)
+    except billing.BillingLockedError as e:
+        raise HTTPException(402, str(e))
     try:
         final = build_graph(flow).invoke(initial_state(flow, case=body.case, context=body.context))
     except Exception as e:  # noqa: BLE001
@@ -1450,8 +1462,8 @@ def billing_usage(tenant_id: str | None = None, period: str | None = None,
     except (ValueError, TypeError):
         raise HTTPException(422, "period must be YYYY-MM")
 
-    trows = c.sb.table("tenants").select("plan").eq("tenant_id", tid).execute().data or []
-    plan = (trows[0].get("plan") if trows else None) or "free"
+    plan_row = billing.get_plan_for_tenant(tid, c.sb)
+    plan, limits = plan_row["slug"], billing.plan_limits(plan_row)
 
     rows = (
         c.sb.table("runs")
@@ -1467,7 +1479,7 @@ def billing_usage(tenant_id: str | None = None, period: str | None = None,
                   .eq("tenant_id", tid).execute().data or [])
     }
     return {"period_label": period_label,
-            **billing.usage_summary(rows, plan, period_start, period_end, flow_names)}
+            **billing.usage_summary(rows, plan, limits, period_start, period_end, flow_names)}
 
 
 @app.get("/api/billing/flow-deltas")
@@ -1521,6 +1533,161 @@ def billing_flow_deltas(tenant_id: str | None = None, c: Caller = Depends(caller
         })
     out.sort(key=lambda x: -(x["ratio"] or 0))
     return out
+
+
+# ── Billing chunks B/C: subscribe + provider webhooks ───────────────────
+class SubscribeIn(BaseModel):
+    plan_slug: str
+    billing_country: str | None = None   # required the tenant's first time; ignored after
+    tenant_id: str | None = None
+
+
+@app.post("/api/billing/subscribe")
+def billing_subscribe(body: SubscribeIn, c: Caller = Depends(caller)) -> dict:
+    """Owner picks a plan -> create (or reuse) a provider customer and a
+    hosted-checkout subscription, hand back its URL to redirect to. We
+    never see a card ourselves — Stripe/Razorpay's own hosted page does."""
+    from interpreter import payments
+
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+
+    trows = c.sb.table("tenants").select("*").eq("tenant_id", tid).execute().data or []
+    if not trows:
+        raise HTTPException(404, "tenant not found")
+    tenant = trows[0]
+
+    country = tenant.get("billing_country") or body.billing_country
+    if not country:
+        raise HTTPException(422, "billing_country is required to pick a payment provider")
+    provider_slug = tenant.get("payment_provider") or payments.provider_for_country(country)
+
+    prows = c.sb.table("plans").select("*").eq("slug", body.plan_slug).execute().data or []
+    if not prows:
+        raise HTTPException(404, f"no such plan {body.plan_slug!r}")
+    plan = prows[0]
+
+    provider = payments.get_provider(provider_slug)
+    try:
+        customer_id = tenant.get("provider_customer_id") or provider.create_customer(
+            tenant["name"], c.email, tid)
+        result = provider.create_subscription(customer_id, plan, tid)
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+
+    _service.table("tenants").update({
+        "billing_country": country, "payment_provider": provider_slug,
+        "provider_customer_id": result.provider_customer_id or customer_id,
+    }).eq("tenant_id", tid).execute()
+
+    _service.table("subscriptions").insert({
+        "tenant_id": tid, "plan_id": plan["plan_id"], "provider": provider_slug,
+        "provider_customer_id": result.provider_customer_id or customer_id,
+        "provider_subscription_id": result.provider_subscription_id,
+        "status": result.status, "short_url": result.short_url,
+    }).execute()
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="billing.subscription_started",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="plan", target_id=plan["plan_id"],
+                 summary=f"started checkout for plan {plan['slug']!r} via {provider_slug}")
+    return {"checkout_url": result.short_url, "provider": provider_slug, "status": result.status}
+
+
+def _apply_billing_webhook(provider_slug: str, event: "Any", payload: dict) -> None:
+    """Shared by every provider's webhook route: idempotent record + state
+    sync. Razorpay hands back a real `provider_subscription_id` immediately
+    so the direct lookup always hits; Stripe's Checkout flow doesn't (the
+    `subscriptions` row still holds the Checkout Session id at this point),
+    so this falls back to `event.tenant_id` and backfills the real id once
+    it's known — from then on the direct lookup hits for that row too."""
+    sub_row = None
+    if event.provider_subscription_id:
+        rows = (_service.table("subscriptions").select("subscription_id, tenant_id, plan_id")
+                .eq("provider", provider_slug)
+                .eq("provider_subscription_id", event.provider_subscription_id)
+                .execute().data or [])
+        sub_row = rows[0] if rows else None
+    if not sub_row and event.tenant_id:
+        rows = (_service.table("subscriptions").select("subscription_id, tenant_id, plan_id")
+                .eq("provider", provider_slug).eq("tenant_id", event.tenant_id)
+                .order("created_at", desc=True).limit(1).execute().data or [])
+        sub_row = rows[0] if rows else None
+        if sub_row and event.provider_subscription_id:
+            _service.table("subscriptions").update(
+                {"provider_subscription_id": event.provider_subscription_id}
+            ).eq("subscription_id", sub_row["subscription_id"]).execute()
+
+    try:
+        _service.table("billing_events").insert({
+            "tenant_id": sub_row["tenant_id"] if sub_row else event.tenant_id,
+            "provider": provider_slug, "provider_event_id": event.provider_event_id,
+            "event_type": event.event_type, "payload": payload,
+        }).execute()
+    except Exception as e:  # noqa: BLE001 -- unique(provider, provider_event_id) => already processed
+        if "billing_events_provider_provider_event_id_key" in str(e):
+            return
+        raise
+
+    if not (sub_row and event.status):
+        return
+    update: dict[str, Any] = {"status": event.status}
+    if event.current_period_start:
+        update["current_period_start"] = event.current_period_start
+    if event.current_period_end:
+        update["current_period_end"] = event.current_period_end
+    _service.table("subscriptions").update(update).eq(
+        "subscription_id", sub_row["subscription_id"]).execute()
+
+    # normalized status -> tenant.billing_status. "created"/checkout-not-
+    # finished intentionally does nothing here — a tenant stays
+    # trialing/whatever it already was until the subscription actually
+    # activates or a charge actually fails.
+    tenant_update: dict[str, Any] = {}
+    if event.status == "active":
+        tenant_update = {"billing_status": "active", "plan_id": sub_row["plan_id"],
+                         "grace_ends_at": None}
+    elif event.status == "past_due":
+        tenant_update = {"billing_status": "grace"}
+    elif event.status in ("canceled", "expired"):
+        tenant_update = {"billing_status": "canceled"}
+    if tenant_update:
+        _service.table("tenants").update(tenant_update).eq(
+            "tenant_id", sub_row["tenant_id"]).execute()
+
+
+@app.post("/api/hooks/razorpay", status_code=200)
+async def razorpay_webhook(request: Request) -> PlainTextResponse:
+    """Razorpay -> us. Signature-verified against the raw body (never the
+    parsed/re-serialized JSON — that can byte-shift and break the HMAC)."""
+    from interpreter import payments
+
+    raw = await request.body()
+    if not payments.razorpay_verify_webhook(raw, dict(request.headers)):
+        raise HTTPException(401, "bad razorpay signature")
+
+    import json as _json
+    payload = _json.loads(raw)
+    _apply_billing_webhook("razorpay", payments.razorpay_normalize_event(payload), payload)
+    return PlainTextResponse("ok")
+
+
+@app.post("/api/hooks/stripe", status_code=200)
+async def stripe_webhook(request: Request) -> PlainTextResponse:
+    """Stripe -> us. Same shape as the Razorpay route — see
+    _apply_billing_webhook for how Stripe's two-step Checkout-Session-then-
+    real-Subscription flow still lands on the same generic handling."""
+    from interpreter import payments
+
+    raw = await request.body()
+    if not payments.stripe_verify_webhook(raw, dict(request.headers)):
+        raise HTTPException(401, "bad stripe signature")
+
+    import json as _json
+    payload = _json.loads(raw)
+    _apply_billing_webhook("stripe", payments.stripe_normalize_event(payload), payload)
+    return PlainTextResponse("ok")
 
 
 # ── KIL-f: the Knowledge Integrity Loop review queue + metrics ─────────

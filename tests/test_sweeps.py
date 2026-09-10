@@ -387,3 +387,190 @@ def test_failed_jobs_sweep_query_failure_is_a_clean_skip(monkeypatch):
 
     out = sweeps.failed_jobs_sweep(_Broken([]), dry_run=False)
     assert "error" in out
+
+
+# ── billing_trial_sweep (Billing & Payments chunk D, 2026-09-10) ────────
+# billing_trial_sweep runs several distinct queries against the *same*
+# tenants/audit_log tables in one call (reminder / grace-start /
+# grace-nudge / lock), so — unlike the fakes above, which just replay one
+# fixed row list regardless of the query — this one actually applies
+# .eq/.lt/.gt filters, closely enough to tell those four queries apart.
+class _BillingTable:
+    def __init__(self, sb, name):
+        self.sb, self.name = sb, name
+        self.filters = []
+        self._update = None
+
+    def select(self, *_a):
+        return self
+
+    def eq(self, field, value):
+        self.filters.append(("eq", field, value))
+        return self
+
+    def lt(self, field, value):
+        self.filters.append(("lt", field, value))
+        return self
+
+    def gt(self, field, value):
+        self.filters.append(("gt", field, value))
+        return self
+
+    def gte(self, field, value):
+        self.filters.append(("gte", field, value))
+        return self
+
+    def limit(self, *_a):
+        return self
+
+    def order(self, *_a):
+        return self
+
+    def update(self, fields):
+        self._update = fields
+        return self
+
+    def insert(self, row):
+        self.sb.rows.setdefault(self.name, []).append(dict(row))
+        return self
+
+    def _matches(self, row):
+        for op, field, value in self.filters:
+            v = row.get(field)
+            if op == "eq" and v != value:
+                return False
+            if op == "lt" and not (v is not None and v < value):
+                return False
+            if (op == "gt" and not (v is not None and v > value)) or \
+               (op == "gte" and not (v is not None and v >= value)):
+                return False
+        return True
+
+    def execute(self):
+        if self._update is not None:
+            for row in self.sb.rows.get(self.name, []):
+                if self._matches(row):
+                    row.update(self._update)
+            return type("R", (), {"data": None})()
+        return type("R", (), {"data": [r for r in self.sb.rows.get(self.name, []) if self._matches(r)]})()
+
+
+class _BillingSB:
+    def __init__(self, tenants=None, audit_log=None):
+        self.rows = {"tenants": tenants or [], "audit_log": audit_log or [],
+                     "tenant_integrations": []}
+
+    def table(self, name):
+        return _BillingTable(self, name)
+
+
+def test_billing_sweep_reminds_a_trial_ending_soon_once():
+    now = datetime.now(timezone.utc)
+    sb = _BillingSB(tenants=[
+        {"tenant_id": "t1", "name": "Acme", "billing_status": "trialing",
+         "trial_ends_at": (now + timedelta(days=1)).isoformat()},
+    ])
+    out = sweeps.billing_trial_sweep(sb, dry_run=False)
+    assert out["reminded"] == ["t1"]
+    assert sb.rows["audit_log"][0]["action"] == "billing.trial_ending_soon"
+
+    # a second sweep pass must not remind the same tenant again
+    out2 = sweeps.billing_trial_sweep(sb, dry_run=False)
+    assert out2["reminded"] == []
+
+
+def test_billing_sweep_does_not_remind_a_trial_ending_far_out():
+    now = datetime.now(timezone.utc)
+    sb = _BillingSB(tenants=[
+        {"tenant_id": "t1", "name": "Acme", "billing_status": "trialing",
+         "trial_ends_at": (now + timedelta(days=6)).isoformat()},
+    ])
+    out = sweeps.billing_trial_sweep(sb, dry_run=False)
+    assert out["reminded"] == []
+
+
+def test_billing_sweep_moves_a_lapsed_trial_to_grace():
+    now = datetime.now(timezone.utc)
+    tenant = {"tenant_id": "t1", "name": "Acme", "billing_status": "trialing",
+             "trial_ends_at": (now - timedelta(hours=1)).isoformat()}
+    sb = _BillingSB(tenants=[tenant])
+    out = sweeps.billing_trial_sweep(sb, dry_run=False)
+    assert out["started_grace"] == ["t1"]
+    assert tenant["billing_status"] == "grace"
+    assert tenant["grace_ends_at"] > now.isoformat()   # trial_ends_at + GRACE_DAYS, still in the future
+    assert sb.rows["audit_log"][0]["action"] == "billing.trial_ended_grace_started"
+
+
+def test_billing_sweep_dry_run_changes_nothing():
+    now = datetime.now(timezone.utc)
+    tenant = {"tenant_id": "t1", "name": "Acme", "billing_status": "trialing",
+             "trial_ends_at": (now - timedelta(hours=1)).isoformat()}
+    sb = _BillingSB(tenants=[tenant])
+    out = sweeps.billing_trial_sweep(sb, dry_run=True)
+    assert out["started_grace"] == ["t1"] and out["dry_run"] is True
+    assert tenant["billing_status"] == "trialing"   # unchanged
+    assert sb.rows["audit_log"] == []
+
+
+def test_billing_sweep_nudges_an_open_grace_once_per_day():
+    now = datetime.now(timezone.utc)
+    sb = _BillingSB(tenants=[
+        {"tenant_id": "t1", "name": "Acme", "billing_status": "grace",
+         "grace_ends_at": (now + timedelta(days=1)).isoformat()},
+    ])
+    out = sweeps.billing_trial_sweep(sb, dry_run=False)
+    assert out["warned_grace"] == ["t1"]
+    out2 = sweeps.billing_trial_sweep(sb, dry_run=False)
+    assert out2["warned_grace"] == []   # already nudged today
+
+
+def test_billing_sweep_locks_an_expired_grace():
+    now = datetime.now(timezone.utc)
+    tenant = {"tenant_id": "t1", "name": "Acme", "billing_status": "grace",
+             "grace_ends_at": (now - timedelta(hours=1)).isoformat()}
+    sb = _BillingSB(tenants=[tenant])
+    out = sweeps.billing_trial_sweep(sb, dry_run=False)
+    assert out["locked"] == ["t1"]
+    assert tenant["billing_status"] == "locked"
+    assert sb.rows["audit_log"][0]["action"] == "billing.locked"
+
+
+def test_billing_sweep_active_tenant_is_untouched():
+    sb = _BillingSB(tenants=[{"tenant_id": "t1", "name": "Acme", "billing_status": "active"}])
+    out = sweeps.billing_trial_sweep(sb, dry_run=False)
+    assert out == {"reminded": [], "started_grace": [], "warned_grace": [], "locked": [], "dry_run": False}
+
+
+def test_billing_sweep_query_failure_is_a_clean_skip():
+    class _Broken(_BillingSB):
+        def table(self, name):
+            class _T(_BillingTable):
+                def execute(self_):
+                    raise RuntimeError("db down")
+            return _T(self, name)
+
+    out = sweeps.billing_trial_sweep(_Broken(), dry_run=False)
+    assert out == {"reminded": [], "started_grace": [], "warned_grace": [], "locked": [], "dry_run": False}
+
+
+# ── interpreter/billing.py::assert_not_locked (the enforcement gate) ───
+def test_assert_not_locked_raises_for_a_locked_tenant():
+    from interpreter import billing
+
+    sb = _BillingSB(tenants=[{"tenant_id": "t1", "billing_status": "locked"}])
+    with pytest.raises(billing.BillingLockedError):
+        billing.assert_not_locked("t1", sb)
+
+
+def test_assert_not_locked_allows_every_other_status():
+    from interpreter import billing
+
+    for status in ("trialing", "active", "grace", "canceled"):
+        sb = _BillingSB(tenants=[{"tenant_id": "t1", "billing_status": status}])
+        billing.assert_not_locked("t1", sb)   # must not raise
+
+
+def test_assert_not_locked_lets_a_missing_tenant_id_through():
+    from interpreter import billing
+
+    billing.assert_not_locked(None, _BillingSB())   # must not raise

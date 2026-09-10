@@ -707,6 +707,246 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-10 (Billing & Payments chunk D — trial enforcement, done and
+live-verified end-to-end. Chunks E/F (BYOK metering, real prices) remain
+the only gap before this track is a complete, usable billing system.)**
+
+Chunks A-C gave `tenants` a real `trial_ends_at`/`billing_status`/
+`grace_ends_at` and two working payment providers, but nothing *read*
+those columns — a trial populated a real 7-day clock that nothing ever
+checked, so it never actually expired. This chunk is the enforcement:
+
+- New `interpreter/sweeps.py::billing_trial_sweep` (registered hourly in
+  `api/worker.py`'s existing `_SWEEP_EVERY_MIN`/`HANDLERS` — no new
+  scheduling mechanism): `trialing` (ending within 2 days) → one-time
+  reminder; `trialing` past `trial_ends_at` → `grace` (a 3-day window,
+  `grace_ends_at = trial_ends_at + 3d`); `grace` still open → one nudge
+  per calendar day; `grace` past `grace_ends_at` → `locked`. The three
+  state *transitions* need no dedupe ledger (`reasoning_ttl`'s shape — a
+  transitioned row just drops out of the next query); the two
+  notifications that don't change state (the reminder, the daily nudge)
+  dedupe via `audit_log`, exactly `billing.check_and_warn`'s existing
+  pattern. Notifications are in-app state (`billing_status`, read
+  directly) plus a Slack nudge if the tenant has Slack connected — there
+  is no platform→owner email primitive anywhere in this codebase (checked
+  before building anything; scoped to what actually exists rather than
+  inventing an email sender unprompted).
+- New `interpreter/billing.py::assert_not_locked(tenant_id, sb)` — the
+  actual enforcement — raises `BillingLockedError` for a `locked` tenant.
+  Called at both real places a flow executes: `api/worker.py::_run_flow`
+  (covers every async trigger — webhook, Salesforce push, email poller,
+  scheduled — since they all funnel through one `run_flow` job handler)
+  and `api/main.py`'s `POST /api/flows/{id}/run` (the synchronous "test
+  run" from the web editor, which bypasses the job queue entirely and so
+  needed its own call site). Both call it right after `load_flow`, before
+  `build_graph(...).invoke(...)` — a locked tenant never spends an LLM
+  call. `eval/`, `interpreter/run.py`'s CLI entry point, and other
+  internal tooling that also call `build_graph` directly are deliberately
+  untouched — this gate is for customer-triggered execution paths only.
+
+**Live-verified against the real Supabase project**, not just the fake-DB
+unit tests: created a real tenant (real 7-day trial from `POST
+/api/tenants`), back-dated its `trial_ends_at` into the past, ran the real
+sweep inside the rebuilt `worker` container against production — confirmed
+`trialing→grace` with `grace_ends_at` exactly `trial_ends_at + 3d`, a
+second sweep pass correctly sent no duplicate nudge, back-dating
+`grace_ends_at` and sweeping again correctly locked it, and
+`billing.assert_not_locked` correctly raised against that real locked
+row. Audit trail confirmed clean (`tenant.created` →
+`billing.trial_ended_grace_started` → `billing.grace_warning` →
+`billing.locked`). Cleaned up afterward — real tenants confirmed
+unaffected (all still `active`, as before). 12 new tests
+(`tests/test_sweeps.py`'s billing section + `assert_not_locked` +
+`tests/test_triggers.py`'s worker-wiring test); offline suite 1120 passed.
+
+**Not done yet**: BYOK-aware metering (chunk E — a run using the tenant's
+own LLM key should not count toward overage, per the billing plan's
+"bundled by default, BYOK as a discount" decision, but nothing tags
+`key_source` yet); real, signed-off prices for either provider (chunk F —
+today's `plans` rows are still the free/pro placeholders from chunk A,
+neither has a `razorpay_plan_id`/`stripe_price_id`, so
+`/api/billing/subscribe` 409s with a clear error until a real plan is
+priced); no web UI surfaces any of this yet (no trial countdown banner, no
+"add payment method" button, no locked-state screen — `BillingView.tsx`
+still only shows the old usage/quota dashboard from chunk P9).
+
+---
+
+**2026-09-10 (Billing & Payments chunk B — Stripe, done and live-verified.
+Both payment providers now built; chunks D-F (trial enforcement, BYOK
+metering, real prices) remain.)**
+
+`interpreter/payments.py` gained a full Stripe implementation behind the
+same `PaymentProviderSpec` used by Razorpay. The one real design wrinkle:
+Razorpay's `create_subscription` returns an already-live Subscription
+with a hosted `short_url` immediately, but Stripe's hosted flow (Checkout)
+doesn't create the real Subscription until the tenant actually pays — at
+creation time all we have is a Checkout Session (`cs_...`). Handled by
+giving `WebhookEvent` a `tenant_id` field and making the shared webhook
+handler (`api/main.py::_apply_billing_webhook`, factored out of the
+Razorpay-only handler this chunk built on) fall back to matching a
+`subscriptions` row by `tenant_id` when the direct `provider_subscription_id`
+lookup misses, backfilling the real id the first time it's seen
+(`checkout.session.completed`) — from then on the direct lookup hits like
+any other provider. This keeps the webhook route itself fully
+provider-agnostic; no Stripe-specific branch in api/main.py.
+
+`_stripe_flatten()` turns nested dicts/lists into Stripe's classic
+form-encoded bracket notation (`metadata[tenant_id]=t1`,
+`line_items[0][price]=price_1`) since Stripe's v1 API doesn't take JSON —
+confirmed by real calls against api.stripe.com before writing the
+Python, same discipline as the Razorpay chunk. Webhook verification
+follows the documented `t=...,v1=...` HMAC-over-`{timestamp}.{body}`
+scheme with a 5-minute replay window (mirrors `interpreter/slack.py`'s
+`verify_signature`). New route `POST /api/hooks/stripe`, symmetric with
+Razorpay's.
+
+**Live-verified end-to-end**, including the tricky two-step flow: a real
+`POST /api/billing/subscribe` call with `billing_country=US` correctly
+routed to Stripe, created a real customer + Checkout Session, returned a
+real `checkout.stripe.com` URL; the `subscriptions` row correctly held
+the Checkout Session id as a placeholder. Two self-signed synthetic
+webhooks (real HMAC, realistic payloads matching Stripe's documented
+schema — `checkout.session.completed` then `customer.subscription.
+updated`, since completing a real Checkout needs a browser + test card
+this sandbox can't drive) confirmed: the placeholder correctly got
+swapped for the real `sub_...` id, the subscription flipped to `active`
+with real period dates, and the tenant moved to `billing_status=active`
+on the right plan — resending an event produced no duplicate
+`billing_events` row. All test artifacts cleaned up: the throwaway Price/
+Product deactivated on Stripe's side (can't be deleted, only archived),
+every DB row the test touched deleted, tenant `22222222…` restored to
+its exact pre-test state. 17 new tests
+(`tests/test_payments.py`, Stripe section); offline suite 1108 passed.
+
+**Not done yet**: the trial-lifecycle sweep (chunk D) — `billing_status`/
+`trial_ends_at`/`grace_ends_at` are populated but nothing reads them, so
+a trial still never actually expires; BYOK-aware metering (chunk E); real
+signed-off prices for both providers (today's `plans` rows are still the
+original free/pro placeholders — neither has a `razorpay_plan_id` or
+`stripe_price_id` set in production, so `/api/billing/subscribe` 409s
+with a clear error until a real plan is priced).
+
+---
+
+**2026-09-10 (Billing & Payments chunk C — Razorpay, done and live-verified
+against the real test-mode API. Chunk B, Stripe, still needs the user's
+Stripe credentials before it can start; skipped ahead to C since the user
+supplied real Razorpay test keys directly.)**
+
+Migrations `103_billing_subscriptions.sql` + `104_plans_provider_ids.sql`
+(both applied): `subscriptions` (one row per tenant while it has a *live*
+subscription — partial unique index on `tenant_id where status not in
+('canceled','expired')`, canceled/expired rows kept as history) and
+`billing_events` (append-only webhook ledger, `unique(provider,
+provider_event_id)` for idempotency, RLS-locked to service role only, same
+as `jobs`). `plans` gains `razorpay_plan_id`/`stripe_price_id` — nullable,
+since neither of today's seeded plans has a real signed-off price yet.
+
+New `interpreter/payments.py`: a `PaymentProviderSpec` registry (mirrors
+`interpreter/kb_connectors.py`'s `KBConnectorSpec` pattern exactly —
+"a provider is data behind one narrow contract") with a full Razorpay
+implementation — `create_customer`, `create_subscription` (needs the
+plan's `razorpay_plan_id`; raises a clear error if it's not set yet rather
+than guessing a price), `verify_webhook` (HMAC-SHA256 over the *raw* body,
+never the parsed/re-serialized JSON), `normalize_event` (maps Razorpay's
+status vocabulary — created/authenticated/active/pending/halted/
+cancelled/completed/expired — onto ours: created/active/past_due/
+canceled/expired; the idempotency key is a sha256 of the exact raw body,
+not an assumed-present header, since Razorpay's webhook payload carries no
+built-in stable event id the way Stripe's `evt_...` does).
+`provider_for_country()`: India -> razorpay, else -> stripe.
+
+New routes: `POST /api/billing/subscribe` (owner picks a plan -> creates/
+reuses a provider customer + a hosted-checkout subscription, returns the
+URL to redirect to — we never touch a card) and `POST /api/hooks/razorpay`
+(signature-verified, idempotent, updates `subscriptions` +
+`tenants.billing_status`/`plan_id` on activation/past-due/cancellation).
+
+**Live-verified, not just unit-tested** — real calls against
+api.razorpay.com in test mode confirmed the exact request/response shapes
+*before* writing the Python (customer create, plan create, subscription
+create both with and without a pre-attached `customer_id` — the latter is
+what actually links a pre-created customer, confirmed by trial and error
+against the real API since this specific behavior wasn't something to
+assume). Then end-to-end through the real rebuilt `api` container: a real
+`POST /api/billing/subscribe` call created a real Razorpay customer +
+subscription and correctly wrote `tenants`/`subscriptions`/`audit_log`; a
+self-signed synthetic `subscription.activated` webhook (real HMAC, this
+project's own webhook secret) correctly flipped the subscription to
+`active` with real period dates and moved the tenant to
+`billing_status=active` on the right plan; resending the identical
+webhook produced no duplicate `billing_events` row (idempotency
+confirmed). All test artifacts cleaned up afterward: the three test
+Razorpay subscriptions canceled via the API, the smoketest `plans` row
+and every DB row it touched deleted, tenant `22222222…`'s billing columns
+restored to exactly their pre-test null/`active` state. 17 new tests
+(`tests/test_payments.py`); offline suite 1091 passed.
+
+**Not done yet**: Stripe (chunk B — blocked on the user's Stripe
+credentials); the trial-lifecycle sweep (chunk D — `billing_status`/
+`trial_ends_at`/`grace_ends_at` are populated but nothing reads them yet,
+so a trial still never actually expires); BYOK-aware metering (chunk E);
+real, signed-off prices (today's `plans` rows are still the original
+free/pro placeholders from chunk A — nothing has a `razorpay_plan_id` set
+in production, so `POST /api/billing/subscribe` will 409 with a clear
+error until a real plan is priced and its Razorpay Plan created).
+
+---
+
+**2026-09-10 (New track: Billing & Payments — chunk A of 6, "schema", done.
+Plan drafted and shared with the user first — Stripe + Razorpay picked by
+billing country, hybrid flat-tier+overage pricing, bundled-by-default LLM
+cost with a bring-your-own-key discount, 7-day trial + 3-day grace before
+lock. Full plan + reasoning: an artifact shared with the user, not
+duplicated here — see the decisions below for what actually shipped.)**
+
+Migration `102_billing_foundation.sql` (applied): a `plans` table (data,
+not `tenants.plan`'s old two-value CHECK-constrained enum — same "generic
+strings, not an enum" rule this file already applies to `flow_nodes.type`
+and connector slugs), seeded with the two plans that already existed
+(free: 200 runs/500k tokens, pro: unlimited) so this chunk is a pure
+refactor of *where the numbers live*, not a pricing change. `tenants`
+gains `plan_id` (FK, defaulted to the free plan via a
+`before insert` trigger — Postgres doesn't allow a subquery in a column
+DEFAULT), `billing_status` (`trialing`/`active`/`grace`/`locked`/
+`canceled`), `billing_country`, `payment_provider`
+(`stripe`/`razorpay`/null), `provider_customer_id`, `trial_ends_at`,
+`grace_ends_at`. Backfilled every *existing* tenant to `billing_status =
+'active'` with no trial clock (they predate the concept — nothing should
+suddenly look "trialing"); `POST /api/tenants` now starts a real 7-day
+trial (`billing_status='trialing'`, `trial_ends_at = now()+7d`) for a
+*new* tenant only.
+
+`interpreter/billing.py`: retired the hardcoded `PLAN_LIMITS` dict. New
+`get_plan_for_tenant(tenant_id, sb)` (tenants.plan_id -> plans row, falls
+back to the free plan / a hardcoded shape if something's missing) and
+`plan_limits(plan_row)`; `usage_summary()` now takes `limits` as a
+parameter instead of looking it up internally, staying pure/no-DB.
+`/api/billing/usage`'s response shape is byte-for-byte unchanged (still
+`{plan: "free", limits: {runs, tokens}, ...}`) — `web/src/billing/
+BillingView.tsx` needed zero changes. 6 new tests
+(`get_plan_for_tenant`/`plan_limits`), all existing billing tests updated
+for the new signature. **Live-verified against the real Supabase project**
+after rebuilding `api`+`worker`: `/api/billing/usage` returns the correct
+free-plan numbers sourced through the new `plan_id` join; a real
+`POST /api/tenants` call produced `billing_status=trialing`,
+`trial_ends_at` = created_at + 7 days exactly, `plan_id` correctly
+defaulted by the trigger with no explicit value passed — then cleaned up.
+
+**Not done yet (chunks B-F of the plan, in order): a `PaymentProviderSpec`
+registry (mirrors `interpreter/kb_connectors.py`'s pattern) with Stripe
+first, then Razorpay behind the same interface, routed by
+`billing_country`; the trial-lifecycle sweep that actually reads
+`billing_status`/`trial_ends_at`/`grace_ends_at` to warn/grace/lock (today
+those columns are populated but nothing enforces them — a trial never
+actually expires yet); tagging each run's `key_source`
+(platform-paid vs. bring-your-own-key) so overage billing excludes BYOK
+usage; real price points (the plan's numbers are explicitly flagged
+illustrative, not signed off).**
+
+---
+
 **2026-09-10 (Four bugs reported live: KB cross-tenant leak, crawl-source
 sync 500, the Knowledge view's right pane not scrolling, and the Slack
 Socket Mode bot hardcoded to one tenant.)**

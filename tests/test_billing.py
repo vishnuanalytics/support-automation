@@ -27,6 +27,10 @@ def test_estimate_cost_unlisted_model_defaults_to_zero():
     assert billing.estimate_cost_usd({"some-new-model": 999_999}) == 0.0
 
 
+_FREE_LIMITS = {"runs": 200, "tokens": 500_000}
+_PRO_LIMITS = {"runs": None, "tokens": None}
+
+
 def test_usage_summary_aggregates_runs_tokens_and_daily_buckets():
     rows = [
         {"tokens_total": 100, "tokens_by_model": {"openai/gpt-oss-120b": 100},
@@ -37,7 +41,7 @@ def test_usage_summary_aggregates_runs_tokens_and_daily_buckets():
         {"tokens_total": 50, "tokens_by_model": {"claude-haiku-4-5": 50},
          "created_at": "2026-09-02T09:00:00+00:00"},
     ]
-    s = billing.usage_summary(rows, "free", "2026-09-01T00:00:00+00:00",
+    s = billing.usage_summary(rows, "free", _FREE_LIMITS, "2026-09-01T00:00:00+00:00",
                               "2026-10-01T00:00:00+00:00")
 
     assert s["runs_count"] == 3
@@ -66,7 +70,7 @@ def test_usage_summary_by_flow_groups_sorts_and_names_flows():
          "created_at": "2026-09-02T09:00:00+00:00"},
         {"flow_id": None, "tokens_total": 10, "tokens_by_model": {}, "created_at": None},
     ]
-    s = billing.usage_summary(rows, "free", "2026-09-01T00:00:00+00:00",
+    s = billing.usage_summary(rows, "free", _FREE_LIMITS, "2026-09-01T00:00:00+00:00",
                               "2026-10-01T00:00:00+00:00", flow_names={"f1": "Support Autoreply"})
 
     assert s["runs_count"] == 4          # the flow_id=None row still counts toward the total
@@ -82,7 +86,8 @@ def test_usage_summary_by_flow_groups_sorts_and_names_flows():
 
 
 def test_usage_summary_pro_plan_has_no_pct_limits():
-    s = billing.usage_summary([], "pro", "2026-09-01T00:00:00+00:00", "2026-10-01T00:00:00+00:00")
+    s = billing.usage_summary([], "pro", _PRO_LIMITS, "2026-09-01T00:00:00+00:00",
+                              "2026-10-01T00:00:00+00:00")
     assert s["limits"] == {"runs": None, "tokens": None}
     assert s["pct_runs_used"] is None
     assert s["pct_tokens_used"] is None
@@ -90,10 +95,9 @@ def test_usage_summary_pro_plan_has_no_pct_limits():
     assert s["daily"] == []
 
 
-def test_usage_summary_unknown_plan_falls_back_to_free_limits():
-    s = billing.usage_summary([], "not-a-real-plan", "2026-09-01T00:00:00+00:00",
-                              "2026-10-01T00:00:00+00:00")
-    assert s["limits"] == billing.PLAN_LIMITS["free"]
+def test_plan_limits_reads_included_runs_and_tokens_off_a_plan_row():
+    assert billing.plan_limits({"included_runs": 200, "included_tokens": 500_000}) == _FREE_LIMITS
+    assert billing.plan_limits({"included_runs": None, "included_tokens": None}) == _PRO_LIMITS
 
 
 def test_month_bounds_explicit_period():
@@ -140,7 +144,7 @@ def test_usage_summary_by_node_splits_cost_proportionally():
          "tokens_by_node": {"draft": 100},
          "created_at": "2026-09-02T10:00:00+00:00"},
     ]
-    s = billing.usage_summary(rows, "pro", "2026-09-01T00:00:00+00:00",
+    s = billing.usage_summary(rows, "pro", _PRO_LIMITS, "2026-09-01T00:00:00+00:00",
                               "2026-10-01T00:00:00+00:00")
     by_node = {n["node"]: n for n in s["by_node"]}
     assert by_node["draft"]["tokens"] == 300
@@ -154,7 +158,7 @@ def test_usage_summary_by_node_splits_cost_proportionally():
 def test_usage_summary_by_node_empty_when_no_rows_carry_it():
     s = billing.usage_summary(
         [{"tokens_total": 50, "tokens_by_model": {}, "created_at": None}],
-        "pro", "2026-09-01T00:00:00+00:00", "2026-10-01T00:00:00+00:00")
+        "pro", _PRO_LIMITS, "2026-09-01T00:00:00+00:00", "2026-10-01T00:00:00+00:00")
     assert s["by_node"] == []
 
 
@@ -207,15 +211,22 @@ def _period_start():
     return start
 
 
+# `get_plan_for_tenant` now does tenants.plan_id -> plans row; `_Q.eq()` is a
+# no-op passthrough, so each fixture's `plans` bucket just needs the one row
+# the test actually wants (the fake doesn't really filter by plan_id).
+_FREE_PLAN = {"plan_id": "p-free", "slug": "free", "included_runs": 200, "included_tokens": 500_000}
+_PRO_PLAN = {"plan_id": "p-pro", "slug": "pro", "included_runs": None, "included_tokens": None}
+
+
 def test_check_and_warn_unlimited_plan_is_a_noop():
-    sb = _SB({"tenants": [{"plan": "pro"}]})
+    sb = _SB({"tenants": [{"plan_id": "p-pro"}], "plans": [_PRO_PLAN]})
     level = billing.check_and_warn(sb, "t1")
     assert level is None
     assert sb.inserted == {}
 
 
 def test_check_and_warn_under_threshold_is_a_noop():
-    sb = _SB({"tenants": [{"plan": "free"}], "runs": []})
+    sb = _SB({"tenants": [{"plan_id": "p-free"}], "plans": [_FREE_PLAN], "runs": []})
     level = billing.check_and_warn(sb, "t1")
     assert level is None
     assert sb.inserted == {}
@@ -224,8 +235,8 @@ def test_check_and_warn_under_threshold_is_a_noop():
 def test_check_and_warn_crosses_warning_threshold():
     runs = [{"tokens_total": 0, "tokens_by_model": {}, "created_at": _period_start()}
             for _ in range(160)]  # 160/200 = 80%
-    sb = _SB({"tenants": [{"plan": "free"}], "runs": runs, "audit_log": [],
-              "tenant_integrations": []})
+    sb = _SB({"tenants": [{"plan_id": "p-free"}], "plans": [_FREE_PLAN], "runs": runs,
+              "audit_log": [], "tenant_integrations": []})
     level = billing.check_and_warn(sb, "t1")
     assert level == "warning"
     assert len(sb.inserted["audit_log"]) == 1
@@ -238,8 +249,8 @@ def test_check_and_warn_crosses_warning_threshold():
 def test_check_and_warn_crosses_exceeded_threshold():
     runs = [{"tokens_total": 0, "tokens_by_model": {}, "created_at": _period_start()}
             for _ in range(200)]  # 200/200 = 100%
-    sb = _SB({"tenants": [{"plan": "free"}], "runs": runs, "audit_log": [],
-              "tenant_integrations": []})
+    sb = _SB({"tenants": [{"plan_id": "p-free"}], "plans": [_FREE_PLAN], "runs": runs,
+              "audit_log": [], "tenant_integrations": []})
     level = billing.check_and_warn(sb, "t1")
     assert level == "exceeded"
     assert sb.inserted["audit_log"][0]["action"] == "billing.quota_exceeded"
@@ -250,8 +261,8 @@ def test_check_and_warn_dedups_within_the_same_period():
     runs = [{"tokens_total": 0, "tokens_by_model": {}, "created_at": _period_start()}
             for _ in range(160)]
     existing = [{"event_id": 1, "metadata": {"period": period_label}}]
-    sb = _SB({"tenants": [{"plan": "free"}], "runs": runs, "audit_log": existing,
-              "tenant_integrations": []})
+    sb = _SB({"tenants": [{"plan_id": "p-free"}], "plans": [_FREE_PLAN], "runs": runs,
+              "audit_log": existing, "tenant_integrations": []})
     level = billing.check_and_warn(sb, "t1")
     assert level == "warning"
     assert sb.inserted == {}   # already warned this period -- no duplicate
@@ -265,7 +276,8 @@ def test_check_and_warn_posts_to_slack_when_a_digest_channel_is_configured(monke
     )
     runs = [{"tokens_total": 0, "tokens_by_model": {}, "created_at": _period_start()}
             for _ in range(200)]
-    sb = _SB({"tenants": [{"plan": "free"}], "runs": runs, "audit_log": [],
+    sb = _SB({"tenants": [{"plan_id": "p-free"}], "plans": [_FREE_PLAN], "runs": runs,
+              "audit_log": [],
               "tenant_integrations": [{"config": {"digest": {"channel": "#billing"}}}]})
     billing.check_and_warn(sb, "t1")
     assert len(calls) == 1
@@ -276,3 +288,21 @@ def test_check_and_warn_posts_to_slack_when_a_digest_channel_is_configured(monke
 
 def test_check_and_warn_never_raises_on_a_broken_client():
     assert billing.check_and_warn(_BrokenSB(), "t1") is None
+
+
+# ── Billing-foundation chunk (2026-09-10): plans as data, not a hardcoded dict ──
+def test_get_plan_for_tenant_resolves_via_plan_id():
+    sb = _SB({"tenants": [{"plan_id": "p-pro"}], "plans": [_PRO_PLAN]})
+    assert billing.get_plan_for_tenant("t1", sb) == _PRO_PLAN
+
+
+def test_get_plan_for_tenant_falls_back_to_free_plan_row_when_tenant_missing():
+    sb = _SB({"tenants": [], "plans": [_FREE_PLAN]})
+    assert billing.get_plan_for_tenant("ghost-tenant", sb)["slug"] == "free"
+
+
+def test_get_plan_for_tenant_falls_back_to_hardcoded_limits_if_plans_table_is_empty():
+    sb = _SB({"tenants": [{"plan_id": "p-free"}], "plans": []})
+    plan = billing.get_plan_for_tenant("t1", sb)
+    assert plan["slug"] == "free"
+    assert billing.plan_limits(plan) == _FREE_LIMITS
