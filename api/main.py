@@ -112,6 +112,10 @@ NODE_DEFAULTS: dict[str, dict[str, Any]] = {
                          "out_key": "connector_result", "on_error": "passthrough"},
     "transform": {"map": {}, "set": {}, "drop": [], "into": "context"},
     "case_lookup": {"k": 3, "pool": 10, "min_similarity": 0.35},
+    # Response Quality Feedback Loop chunk D — real judged corrections
+    # (chunk B) as few-shot guidance for `draft`. Opt-in: has no effect
+    # unless placed upstream of `draft` in the flow.
+    "correction_exemplars": {"k": 2, "pool": 50, "min_severity": 0.4, "max_age_days": 90},
     # Phase 25 — image attachments, Salesforce context, generic AI prompt
     "attachments": {"source": "salesforce", "max_images": 5, "ocr": True,
                     "skip_signatures": True, "min_image_px": 350,

@@ -205,3 +205,118 @@ def test_correction_review_sweep_query_failure_is_a_clean_skip():
             return _T(self)
     out = sweeps.correction_review_sweep(_Broken([]), dry_run=False)
     assert "error" in out
+
+
+# ── select_exemplars / format_exemplars_block (chunk D) ──────────────────
+class _ExemplarQuery:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def select(self, *_a):
+        return self
+
+    def eq(self, *_a):
+        return self
+
+    def gte(self, *_a):
+        return self
+
+    def order(self, *_a, **_kw):
+        return self
+
+    def limit(self, n):
+        self.rows = self.rows[:n]
+        return self
+
+    @property
+    def not_(self):
+        return self
+
+    def is_(self, *_a):
+        return self
+
+    def execute(self):
+        return type("R", (), {"data": self.rows})()
+
+
+class _ExemplarSB:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def table(self, name):
+        assert name == "runs"
+        return _ExemplarQuery(list(self.rows))
+
+
+def _row(category="policy", severity=0.6, draft="d", human_reply="h", run_id="r1"):
+    return {"run_id": run_id, "subject": "s", "draft": draft, "human_reply": human_reply,
+            "correction_analysis": {"category": category, "severity": severity, "summary": "x"},
+            "created_at": "2026-09-10T00:00:00Z"}
+
+
+def test_select_exemplars_empty_tenant_short_circuits():
+    class _Boom:
+        def table(self, name):
+            raise AssertionError("must not query without a tenant_id")
+    assert correction_review.select_exemplars(_Boom(), None) == []
+    assert correction_review.select_exemplars(_Boom(), "") == []
+
+
+def test_select_exemplars_excludes_none_and_unknown_categories():
+    rows = [_row(category="none", severity=0.9), _row(category="unknown", severity=0.9)]
+    out = correction_review.select_exemplars(_ExemplarSB(rows), "t1")
+    assert out == []
+
+
+def test_select_exemplars_excludes_low_or_missing_severity():
+    rows = [_row(severity=0.1), _row(severity=None)]
+    out = correction_review.select_exemplars(_ExemplarSB(rows), "t1", min_severity=0.4)
+    assert out == []
+
+
+def test_select_exemplars_excludes_blank_draft_or_reply():
+    rows = [_row(draft="  ", severity=0.9), _row(human_reply="", severity=0.9)]
+    out = correction_review.select_exemplars(_ExemplarSB(rows), "t1")
+    assert out == []
+
+
+def test_select_exemplars_sorts_by_severity_and_respects_k():
+    rows = [_row(run_id="low", severity=0.4), _row(run_id="high", severity=0.9),
+            _row(run_id="mid", severity=0.6)]
+    out = correction_review.select_exemplars(_ExemplarSB(rows), "t1", k=2)
+    assert [r["run_id"] for r in out] == ["high", "mid"]
+
+
+def test_select_exemplars_query_failure_returns_empty_not_a_raise():
+    class _Broken:
+        def table(self, name):
+            class _Q:
+                def select(self, *_a): return self
+                def eq(self, *_a): return self
+                def gte(self, *_a): return self
+                def order(self, *_a, **_kw): return self
+                def limit(self, *_a): return self
+                @property
+                def not_(self): return self
+                def is_(self, *_a): return self
+                def execute(self): raise RuntimeError("db down")
+            return _Q()
+    assert correction_review.select_exemplars(_Broken(), "t1") == []
+
+
+def test_select_exemplars_respects_categories_override():
+    rows = [_row(category="tone", severity=0.9), _row(category="policy", severity=0.9)]
+    out = correction_review.select_exemplars(_ExemplarSB(rows), "t1", categories=("policy",))
+    assert len(out) == 1 and out[0]["correction_analysis"]["category"] == "policy"
+
+
+def test_format_exemplars_block_empty_list_is_empty_string():
+    assert correction_review.format_exemplars_block([]) == ""
+
+
+def test_format_exemplars_block_renders_and_truncates():
+    long_draft = "z" * 500
+    out = correction_review.format_exemplars_block([_row(draft=long_draft, severity=0.7)])
+    assert "[policy, severity 0.7]" in out
+    assert "A human corrected it to: \"h\"" in out
+    assert "z" * 300 in out and "z" * 301 not in out   # truncated to 300 chars

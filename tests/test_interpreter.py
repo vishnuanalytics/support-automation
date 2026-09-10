@@ -21,8 +21,8 @@ from interpreter.flows.validate_flow import Flow, check_flow
 from interpreter import registry as _registry
 from interpreter.registry import (
     _norm_tier, h_agent, h_ask_human, h_clarify, h_classify, h_confidence_gate,
-    h_draft, h_extract, h_identify, h_kb_lookup, h_policy_gate, h_retrieve,
-    h_sf_writeback, h_task_dispatch, register,
+    h_correction_exemplars, h_draft, h_extract, h_identify, h_kb_lookup,
+    h_policy_gate, h_retrieve, h_sf_writeback, h_task_dispatch, register,
 )
 from interpreter.runs import build_row
 
@@ -626,6 +626,95 @@ def test_draft_with_only_confirmed_context_has_no_unverified_block(monkeypatch):
              "retrieval": [{"doc_url": "d", "chunk_text": "confirmed fact", "entry_status": "active"}]},
             {"_node_id": "d"})
     assert "UNVERIFIED" not in globals()["_u"]
+
+
+# --------------------------------------------------------------------------
+# Response Quality Feedback Loop chunk D — correction_exemplars node +
+# h_draft's few-shot injection
+# --------------------------------------------------------------------------
+def test_correction_exemplars_skips_without_tenant():
+    out = h_correction_exemplars({}, {"_node_id": "ce"})
+    assert out["exemplars"] == []
+    assert "skipped (no tenant)" in out["trace"][0]["summary"]
+
+
+def test_correction_exemplars_skips_without_db(monkeypatch):
+    import ingestion.scraper as scraper
+
+    def _boom():
+        raise RuntimeError("no creds")
+    monkeypatch.setattr(scraper, "get_supabase", _boom)
+    out = h_correction_exemplars({"tenant_id": "t"}, {"_node_id": "ce"})
+    assert out["exemplars"] == []
+    assert "skipped (no db" in out["trace"][0]["summary"]
+
+
+def test_correction_exemplars_calls_select_exemplars_with_config(monkeypatch):
+    from interpreter import correction_review
+
+    captured = {}
+
+    def fake_select(sb, tenant_id, **kw):
+        captured["tenant_id"] = tenant_id
+        captured.update(kw)
+        return [{"draft": "d", "human_reply": "h",
+                 "correction_analysis": {"category": "policy", "severity": 0.9, "summary": "x"}}]
+
+    monkeypatch.setattr(correction_review, "select_exemplars", fake_select)
+    out = h_correction_exemplars(
+        {"tenant_id": "t1"},
+        {"_node_id": "ce", "_sb": object(), "k": 1, "min_severity": 0.5},
+    )
+    assert captured["tenant_id"] == "t1" and captured["k"] == 1 and captured["min_severity"] == 0.5
+    assert len(out["exemplars"]) == 1
+    assert "1 exemplar" in out["trace"][0]["summary"]
+
+
+def test_draft_injects_exemplars_block_when_present(monkeypatch):
+    captured = {}
+
+    def fake_complete(system, user, **kw):
+        captured["user"] = user
+        return '{"reply": "ok", "confidence": 0.8}'
+
+    monkeypatch.setattr(_registry.llm, "complete", fake_complete)
+    monkeypatch.setattr(_registry.llm, "last_usage", None, raising=False)
+    state = {
+        "case": {"subject": "s", "body": "b"},
+        "retrieval": [],
+        "exemplars": [{"draft": "We don't do refunds.", "human_reply": "You get a 30-day refund.",
+                       "correction_analysis": {"category": "policy", "severity": 0.9,
+                                                "summary": "denied a real refund policy"}}],
+    }
+    out = h_draft(state, {"_node_id": "d"})
+    assert "Corrections a human made to past AI drafts" in captured["user"]
+    assert "We don't do refunds." in captured["user"]
+    assert out["trace"][0]["data"]["exemplars_used"] == 1
+
+
+def test_draft_has_no_exemplars_block_when_none_selected(monkeypatch):
+    monkeypatch.setattr(_registry.llm, "complete",
+                        lambda system, user, **kw: (globals().__setitem__("_u2", user)
+                                                    or '{"reply": "ok", "confidence": 0.8}'))
+    monkeypatch.setattr(_registry.llm, "last_usage", None, raising=False)
+    out = h_draft({"case": {"subject": "s", "body": "b"}, "retrieval": []}, {"_node_id": "d"})
+    assert "Corrections a human made" not in globals()["_u2"]
+    assert out["trace"][0]["data"]["exemplars_used"] == 0
+
+
+def test_draft_respects_exemplars_key_override(monkeypatch):
+    monkeypatch.setattr(_registry.llm, "complete",
+                        lambda system, user, **kw: (globals().__setitem__("_u3", user)
+                                                    or '{"reply": "ok", "confidence": 0.8}'))
+    monkeypatch.setattr(_registry.llm, "last_usage", None, raising=False)
+    state = {
+        "case": {"subject": "s", "body": "b"}, "retrieval": [],
+        "custom_exemplars": [{"draft": "x", "human_reply": "y",
+                              "correction_analysis": {"category": "tone", "severity": 0.5,
+                                                       "summary": "z"}}],
+    }
+    h_draft(state, {"_node_id": "d", "exemplars_key": "custom_exemplars"})
+    assert "Corrections a human made" in globals()["_u3"]
 
 
 # --------------------------------------------------------------------------

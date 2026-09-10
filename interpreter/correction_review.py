@@ -14,12 +14,25 @@ JSON, robust parsing) — deliberately *not* the `deepeval` package itself,
 since deepeval is a dev-only tool (`requirements-dev.txt`, not in the
 runtime image) and this needs to run in the production worker via a sweep
 (`interpreter/sweeps.py::correction_review_sweep`), not a hand-run script.
+
+Chunk D (2026-09-10) adds `select_exemplars()`/`format_exemplars_block()`:
+the first piece of this loop that actually changes what the bot says. It
+turns judged corrections back into few-shot guidance for the `draft` node
+via a new `correction_exemplars` node (`interpreter/registry.py`) —
+opt-in, placed upstream of `draft` in a flow, so an existing flow's
+behavior is unchanged until someone adds it. Deliberately excludes
+`category in (none, unknown)` (no real lesson) and anything below
+`min_severity` or older than `max_age_days` — an old correction can
+reflect a policy that has since changed again, and re-surfacing it as
+guidance would actively reintroduce the staleness this whole loop exists
+to fix.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 
 log = logging.getLogger("interpreter.correction_review")
 
@@ -77,3 +90,69 @@ def judge_correction(draft: str, human_reply: str, *, subject: str = "",
     except Exception as e:  # noqa: BLE001 — a judge failure must not break the sweep
         log.warning("judge_correction failed: %s", e)
         return {"category": "unknown", "severity": None, "summary": ""}
+
+
+# ── exemplar selection for chunk D (few-shot guidance for `draft`) ──────
+_LESSON_CATEGORIES = tuple(c for c in CATEGORIES if c not in ("none", "unknown"))
+
+
+def select_exemplars(sb, tenant_id: "str | None", *, k: int = 2, pool: int = 50,
+                     min_severity: float = 0.4, max_age_days: int = 90,
+                     categories: "tuple[str, ...] | None" = None) -> list[dict]:
+    """The `k` most severe, real judged corrections for this tenant, to show
+    `draft` as few-shot "don't repeat this" guidance. Scoped to `tenant_id`
+    (never cross-tenant), capped to the last `max_age_days` (an old
+    correction may reflect a policy that has since changed again — reusing
+    it as guidance could reintroduce the very staleness this loop exists to
+    fix), and restricted to categories that carry a real lesson (excludes
+    `none`/`unknown` by default). Best-effort — a query failure returns `[]`,
+    never raises."""
+    if not tenant_id:
+        return []
+    allowed = set(categories) if categories else set(_LESSON_CATEGORIES)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+    try:
+        rows = (sb.table("runs")
+                .select("run_id, subject, draft, human_reply, correction_analysis, created_at")
+                .eq("tenant_id", tenant_id)
+                .not_.is_("correction_analysis", "null")
+                .gte("created_at", cutoff)
+                .order("created_at", desc=True).limit(pool).execute().data or [])
+    except Exception as e:  # noqa: BLE001
+        log.warning("select_exemplars query failed: %s", e)
+        return []
+
+    candidates = []
+    for r in rows:
+        ca = r.get("correction_analysis") or {}
+        if ca.get("category") not in allowed:
+            continue
+        severity = ca.get("severity")
+        if severity is None or severity < min_severity:
+            continue
+        if not (r.get("draft") or "").strip() or not (r.get("human_reply") or "").strip():
+            continue
+        candidates.append((severity, r))
+    candidates.sort(key=lambda t: t[0], reverse=True)
+    return [r for _, r in candidates[:max(k, 0)]]
+
+
+def format_exemplars_block(exemplars: list[dict]) -> str:
+    """Render `select_exemplars()`'s rows as a prompt block. Empty string
+    when there's nothing to show, so a caller can unconditionally append
+    the result without an extra `if`."""
+    if not exemplars:
+        return ""
+    blocks = []
+    for i, r in enumerate(exemplars, 1):
+        ca = r.get("correction_analysis") or {}
+        draft = (r.get("draft") or "").strip()[:300]
+        reply = (r.get("human_reply") or "").strip()[:300]
+        summary = ca.get("summary") or "(no summary)"
+        blocks.append(
+            f"{i}. [{ca.get('category')}, severity {ca.get('severity')}] "
+            f"A past AI draft said: \"{draft}\"\n"
+            f"A human corrected it to: \"{reply}\"\n"
+            f"Why: {summary}"
+        )
+    return "\n\n".join(blocks)

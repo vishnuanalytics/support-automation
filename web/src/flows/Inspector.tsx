@@ -32,6 +32,7 @@ const NODE_HELP: Record<string, string> = {
   retrieve: "Searches the knowledge base for docs relevant to the case. Feeds draft's context and the confidence gate's retrieval score.",
   kb_lookup: "Consults one or more internal KB collections at this exact point in the flow — the result is treated as authoritative context for draft, ahead of the public docs.",
   case_lookup: "Looks for past resolved Cases similar to this one, so draft can reuse a real resolution instead of only KB docs.",
+  correction_exemplars: "Pulls this tenant's most severe recent corrections (a human's actual reply vs. the AI's draft) as few-shot guidance for draft, so the same kind of mistake is less likely to repeat. Put it right before draft; has no effect unless it's in the flow.",
   draft: "Writes the AI's reply from everything gathered so far (KB docs, internal runbook, prior resolved cases). The core drafting step.",
   agent: "A bounded retrieve+draft loop: if the first draft isn't well grounded, reformulates the search query and retries. Drop-in replacement for a plain retrieve+draft pair.",
   ai_prompt: "A free-form AI call for anything the built-in nodes don't cover — write your own prompt (with attachments as vision input, optionally); the structured output feeds an edge condition.",

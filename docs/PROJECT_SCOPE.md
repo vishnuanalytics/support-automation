@@ -707,6 +707,58 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-10 (Response Quality Feedback Loop — chunk D of 6, "few-shot
+exemplars from graded examples", done and live-verified. The first chunk
+in this loop that actually changes what the bot says — A-C only ever
+captured and judged signal.)**
+
+New node type `correction_exemplars` (`interpreter/registry.py`,
+`interpreter/correction_review.py::select_exemplars()`/
+`format_exemplars_block()`): pulls this tenant's most severe recent
+`runs.correction_analysis` (chunk B) rows — excluding `category in (none,
+unknown)` (no real lesson), below `min_severity` (default 0.4), or older
+than `max_age_days` (default 90 — an old correction can reflect a policy
+that's since changed again; reusing it as guidance would reintroduce the
+exact staleness this loop exists to fix) — and hands them to `draft` as
+few-shot "a human corrected this exact kind of mistake before" guidance.
+**Opt-in, following the same pattern as `case_lookup`/`kb_lookup`/
+`product_signal`**: a generic node type, placed upstream of `draft` in a
+flow, that writes a state key `draft` reads if present — an existing flow
+that doesn't add this node is completely unaffected. Deliberately *not*
+an automatic fetch inside `h_draft` itself, to stay consistent with how
+every other draft-context source in this codebase works and to keep
+today's production flows' behavior frozen until someone opts in.
+`h_draft`'s trace now records `exemplars_used`. New NODE_DEFAULTS entry +
+`web/src/types.ts`/`Inspector.tsx` wiring so the flow editor's palette
+picks it up automatically (it's driven by the registry, not a hardcoded
+list — `known_types()`). 15 new tests (9 in `tests/test_correction_review.py`,
+6 in `tests/test_interpreter.py`). Full offline suite: 1189 passed (was
+1174). `cd web && npm run build` clean.
+
+**Live-verified against the real Supabase project — and this is the one
+that actually demonstrates behavior change**: inserted one synthetic
+judged correction for the real Globex tenant (a past draft that wrongly
+denied a refund; the real correction says customers get a 30-day refund
+window), ran the real `correction_exemplars` node against real Supabase
+data (found it), then ran the real `draft` node (real Groq call, **empty
+KB retrieval** — no other grounding available) with that exemplar wired
+into state. The resulting draft correctly said the customer "is still
+within our 30-day refund window" and is "eligible for a full refund" —
+the bot generalized the injected correction to a *different*,
+never-before-seen refund question, with no other grounding source telling
+it that policy. Confirmed via `GET /api/node-types` that the new node
+type and its defaults are live and discoverable in the real running API.
+Cleaned up the synthetic row afterward.
+
+**Not done yet (chunks E-F)**: no confidence-gate/model-routing tuning
+proposals yet (chunk E). No dashboard ties `correction_analysis`/
+`session_analysis`/exemplar usage together for a human to browse (chunk
+F). Exemplar selection is severity-ranked only, not matched to the
+current case's topic/category — a future refinement, not required for
+chunk D's scope.
+
+---
+
 **2026-09-10 (Response Quality Feedback Loop — chunk C of 6, "judge whole
 reasoning-session transcripts", done and live-verified. This is the
 specific multi-turn "to and fro" gap the user originally flagged when

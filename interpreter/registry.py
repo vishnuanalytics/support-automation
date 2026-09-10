@@ -1029,6 +1029,43 @@ def h_task_dispatch(state: CaseState, config: dict) -> dict:
     }
 
 
+@register("correction_exemplars")
+def h_correction_exemplars(state: CaseState, config: dict) -> dict:
+    """Response Quality Feedback Loop chunk D — pull this tenant's most
+    severe, real (draft, human_reply) corrections that chunk B already
+    judged, and hand them to `draft` as few-shot "don't repeat this"
+    guidance. Opt-in: place this node upstream of `draft` in a flow — an
+    existing flow that doesn't include it behaves exactly as before.
+    Best-effort: no DB / no tenant / no qualifying corrections -> an empty
+    list, `draft` behaves exactly as if this node weren't there.
+
+    config: {k=2, pool=50, min_severity=0.4, max_age_days=90,
+             out_key="exemplars"}
+    """
+    nid = config["_node_id"]
+    from interpreter import correction_review
+
+    tenant_id = state.get("tenant_id")
+    out_key = config.get("out_key", "exemplars")
+    if not tenant_id:
+        return {out_key: [], **_trace(nid, "correction_exemplars", "skipped (no tenant)", {})}
+    try:
+        from ingestion.scraper import get_supabase
+
+        sb = config.get("_sb") or get_supabase()
+    except Exception as e:  # noqa: BLE001
+        return {out_key: [], **_trace(nid, "correction_exemplars", f"skipped (no db: {e})", {})}
+
+    exemplars = correction_review.select_exemplars(
+        sb, tenant_id, k=int(config.get("k", 2)), pool=int(config.get("pool", 50)),
+        min_severity=float(config.get("min_severity", 0.4)),
+        max_age_days=int(config.get("max_age_days", 90)),
+    )
+    note = f"{len(exemplars)} exemplar(s)" if exemplars else "no qualifying corrections"
+    return {out_key: exemplars,
+           **_trace(nid, "correction_exemplars", note, {"count": len(exemplars)})}
+
+
 @register("draft")
 def h_draft(state: CaseState, config: dict) -> dict:
     case = state.get("case", {})
@@ -1091,6 +1128,19 @@ def h_draft(state: CaseState, config: dict) -> dict:
                          f"usage trend {acct.get('usage_trend')}.")
         user += "\n\n# Product activity for this user (background — do not quote as policy)\n" \
                 + "\n".join(lines)
+
+    # Response Quality Feedback Loop chunk D: real past corrections a
+    # `correction_exemplars` node upstream selected for this tenant — the
+    # bot's own past mistakes, not generic advice. A no-op when that node
+    # isn't in the flow, or found nothing severe/recent enough to show.
+    from interpreter import correction_review
+
+    exemplars = state.get(config.get("exemplars_key", "exemplars")) or []
+    exemplars_block = correction_review.format_exemplars_block(exemplars)
+    if exemplars_block:
+        user += ("\n\n# Corrections a human made to past AI drafts for this "
+                 "account — avoid repeating the same kind of mistake\n"
+                 + exemplars_block)
 
     grounding_rule = (
         "Ground the reply in the KNOWLEDGE BASE and, when they closely match, the "
@@ -1171,7 +1221,7 @@ def h_draft(state: CaseState, config: dict) -> dict:
              "model": _model, "key_source": key_source,
              "used_internal_kb": bool(internal_matches),
              "prior_cases": [p.get("case_number") for p in prior[:3]],
-             "answer_mode": mode},
+             "answer_mode": mode, "exemplars_used": len(exemplars)},
         ),
     }
 
