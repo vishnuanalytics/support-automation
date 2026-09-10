@@ -46,6 +46,14 @@ They are the backstop for everything the pipeline + Omni-Channel can't catch.
                                past the raw label — via a Groq-routed judge,
                                batched to stay under Groq's free-tier rate
                                ceiling.
+  session_review_sweep
+                 every 5 min — Response Quality Feedback Loop chunk C
+                               (2026-09-10): judges whole `reasoning_sessions`
+                               transcripts once they reach a terminal state
+                               (sent/abandoned) — the actual multi-turn
+                               bot<->agent dialogue, which had zero quality
+                               signal at all before this. Same batching/
+                               rate-limit shape as correction_review_sweep.
 
 SWEEP_DRY_RUN=1 -> log intended actions, change nothing.
 """
@@ -866,6 +874,52 @@ def correction_review_sweep(sb, *, dry_run: bool | None = None) -> dict:
             log.warning("correction_review_sweep store %s: %s", r["run_id"], e)
             continue
         judged.append(r["run_id"])
+        by_category[verdict["category"]] = by_category.get(verdict["category"], 0) + 1
+
+    return {"judged": len(judged), "by_category": by_category, "dry_run": dry}
+
+
+# ── session_review_sweep (Response Quality Feedback Loop chunk C) ───────
+SESSION_REVIEW_BATCH = int(os.environ.get("SWEEP_SESSION_REVIEW_BATCH", "20"))
+
+
+def session_review_sweep(sb, *, dry_run: bool | None = None) -> dict:
+    """Chunk C: score whole `reasoning_sessions` transcripts — the actual
+    multi-turn bot<->agent dialogue, unlabelled until now. Only judges
+    terminal sessions (`state in (sent, abandoned)`) so a transcript is
+    never scored mid-dialogue, and never re-judges one that already has a
+    `session_analysis` verdict. Same batching/rate-limit shape as
+    `correction_review_sweep`."""
+    from interpreter import session_review
+
+    dry = _dry() if dry_run is None else dry_run
+    try:
+        rows = (sb.table("reasoning_sessions")
+                .select("session_id, tenant_id, case_number, transcript, pointers, draft, state")
+                .in_("state", ["sent", "abandoned"])
+                .is_("session_analysis", "null")
+                .order("updated_at").limit(SESSION_REVIEW_BATCH).execute().data or [])
+    except Exception as e:  # noqa: BLE001
+        log.warning("session_review_sweep query failed: %s", e)
+        return {"error": str(e)[:200]}
+
+    judged: list[str] = []
+    by_category: dict[str, int] = {}
+    for r in rows:
+        if dry:
+            judged.append(r["session_id"])
+            continue
+        verdict = session_review.judge_session(
+            r.get("transcript") or [], pointers=r.get("pointers"),
+            draft=r.get("draft"), state=r.get("state"),
+            subject=r.get("case_number") or "", tenant_id=r.get("tenant_id"))
+        try:
+            sb.table("reasoning_sessions").update({"session_analysis": verdict}) \
+              .eq("session_id", r["session_id"]).execute()
+        except Exception as e:  # noqa: BLE001
+            log.warning("session_review_sweep store %s: %s", r["session_id"], e)
+            continue
+        judged.append(r["session_id"])
         by_category[verdict["category"]] = by_category.get(verdict["category"], 0) + 1
 
     return {"judged": len(judged), "by_category": by_category, "dry_run": dry}

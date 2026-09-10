@@ -739,7 +739,8 @@ _SWEEP_EVERY_MIN = {"queue_sweep": 5, "cdc_reconcile": 60, "reasoning_ttl": 5,
                     "case_graph_sync": 60, "case_memory_sync": 60,
                     "fire_schedules": 1, "kil_digest": 30, "failed_jobs_sweep": 10,
                     "product_analytics_sync": 720, "zendesk_case_graph_sync": 60,
-                    "billing_trial_sweep": 60, "correction_review_sweep": 5}
+                    "billing_trial_sweep": 60, "correction_review_sweep": 5,
+                    "session_review_sweep": 5}
 
 
 def _reschedule(kind: str, sb) -> None:
@@ -784,7 +785,8 @@ HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
             "kil_digest": _sweep_handler("kil_digest"),
             "failed_jobs_sweep": _sweep_handler("failed_jobs_sweep"),
             "billing_trial_sweep": _sweep_handler("billing_trial_sweep"),
-            "correction_review_sweep": _sweep_handler("correction_review_sweep")}
+            "correction_review_sweep": _sweep_handler("correction_review_sweep"),
+            "session_review_sweep": _sweep_handler("session_review_sweep")}
 
 JOB_TIMEOUT = int(os.environ.get("WORKER_JOB_TIMEOUT", "120"))
 

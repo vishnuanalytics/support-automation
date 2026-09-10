@@ -707,6 +707,67 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-10 (Response Quality Feedback Loop — chunk C of 6, "judge whole
+reasoning-session transcripts", done and live-verified. This is the
+specific multi-turn "to and fro" gap the user originally flagged when
+asking for RLHF — chunks A/B only ever judged one (draft, human_reply)
+pair at a time.)**
+
+`reasoning_sessions` (migration `056`) already stores the full bot<->agent
+dialogue (`transcript`, `pointers`) behind every escalated case, and it had
+zero quality signal at all. Migration `109` adds
+`reasoning_sessions.session_analysis jsonb` (null = not yet judged, only
+ever judged once a session reaches a terminal state — `sent` or
+`abandoned` — so a transcript is never scored mid-dialogue). New
+`interpreter/session_review.py::judge_session(transcript, *, pointers,
+draft, state, subject, tenant_id)` classifies the dialogue itself —
+`sound` (sharp questions, converged efficiently), `redundant` (re-asked
+what the agent already answered, or took more rounds than warranted),
+`misguided` (questions/draft off-track from the real issue), `abandoned`
+(the dialogue itself is why the agent held it back), or `other` — plus a
+0-1 severity and a one-sentence summary. Own module rather than folded
+into `correction_review.py` since the input shape (a transcript + pointer
+Q&A, not one draft/reply pair) and category set are a different signal.
+Same Groq-routed-`llm.complete()` judge pattern as chunk B, for the same
+reason (deepeval is dev-only, this runs continuously in production).
+
+New `interpreter/sweeps.py::session_review_sweep()` (registered in
+`api/worker.py`, every 5 min): finds terminal `reasoning_sessions` rows
+with `session_analysis is null`, batched
+(`SWEEP_SESSION_REVIEW_BATCH`, default 20), judges and stores each
+verdict. New `GET /api/feedback/sessions` (owner-only, same bar as
+billing/corrections) surfaces every terminal session with its transcript,
+pointers, draft, and `session_analysis` — reasoning sessions had no
+visibility endpoint at all before this (chunk A only ever built one for
+`runs`' draft/reply pairs), so this chunk adds both the judge and the
+surface together. 14 new tests (`tests/test_session_review.py`). Full
+offline suite: 1174 passed (was 1160).
+
+**Live-verified against the real Supabase project**: rebuilt `worker` +
+`api`, inserted a synthetic `reasoning_sessions` row for the real Globex
+tenant with a transcript where the bot re-asks a question the agent had
+already answered, ran `session_review_sweep` for real inside the worker
+container. It picked up the tenant's entire real backlog across all
+demo tenants (batched at 20, then the remaining 5 on a second run) —
+confirmed the synthetic row got `category="redundant"`, `severity=0.3`,
+with an accurate summary, and confirmed several real `abandoned` sessions
+with empty transcripts correctly came back `category="unknown"` (the
+judge's genuine "nothing to judge" case, not a bug). Re-ran the sweep and
+confirmed 0 rows left in the backlog. Separately verified
+`GET /api/feedback/sessions` end-to-end through real auth (signed in as
+`globex-owner@example.test`) and real RLS — inserted one more synthetic
+session, confirmed it round-trips through the endpoint with its
+`session_analysis`, then deleted it. The 20 real sessions' new verdicts
+across other demo tenants were left in place, same reasoning as chunk B.
+
+**Not done yet (chunks D-F)**: nothing changes bot behavior yet — that's
+chunk D (few-shot exemplars drawn from graded examples, injected into the
+`draft` node's prompt). No confidence-gate/routing tuning proposals yet
+(chunk E). No dashboard ties `correction_analysis` and `session_analysis`
+together for a human to actually browse — that's chunk F.
+
+---
+
 **2026-09-10 (Response Quality Feedback Loop — chunk B of 6, "score existing
 pairs with an LLM judge", done and live-verified. Resumes the 6-chunk plan
 from chunk A above.)**

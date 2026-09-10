@@ -1792,6 +1792,27 @@ def list_corrections(tenant_id: str | None = None, limit: int = 50,
     return rows
 
 
+@app.get("/api/feedback/sessions")
+def list_reasoning_sessions(tenant_id: str | None = None, limit: int = 50,
+                            c: Caller = Depends(caller)) -> list[dict]:
+    """Response Quality Feedback Loop chunk C — every terminal (sent or
+    abandoned) `reasoning_sessions` row for a tenant: the actual multi-turn
+    bot<->agent dialogue behind an escalated case's reply, previously
+    visible nowhere. `session_analysis` is the judge's classification of
+    the dialogue's quality (sound/redundant/misguided/abandoned/other),
+    once `sweeps.session_review_sweep` has gotten to this row — null until
+    then. Owner-only, same bar as billing/corrections."""
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    rows = (c.sb.table("reasoning_sessions")
+            .select("session_id, case_id, case_number, state, transcript, pointers, "
+                    "draft, session_analysis, created_at, updated_at")
+            .eq("tenant_id", tid).in_("state", ["sent", "abandoned"])
+            .order("updated_at", desc=True).limit(min(max(limit, 1), 200))
+            .execute().data or [])
+    return rows
+
+
 @app.get("/api/kil/metrics")
 def kil_metrics_ep(days: int = 30, tenant_id: str | None = None,
                    c: Caller = Depends(caller)) -> dict:
