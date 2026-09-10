@@ -40,6 +40,8 @@ import type {
   NodeTypesResp,
   ReviewTask,
   Correction,
+  ReasoningSessionRow,
+  FeedbackSummary,
   JobFailures,
   KilMetrics,
   KilDigest,
@@ -359,8 +361,10 @@ export const api = {
       req<void>(`/kb/connections/${cid}`, { method: "DELETE" }),
     listDocWritebacks: (id: string) =>
       req<KbDocWriteback[]>(`/kb/collections/${id}/doc-writebacks`),
-    listAllDocWritebacks: (status: "open" | "all" = "open") =>
-      req<KbDocWriteback[]>(`/kb/doc-writebacks?status=${status}`),
+    listAllDocWritebacks: (status: "open" | "all" = "open", tenantId?: string) =>
+      req<KbDocWriteback[]>(
+        `/kb/doc-writebacks?status=${status}${tenantId ? `&tenant_id=${tenantId}` : ""}`,
+      ),
     getDocDefaults: (tenantId: string) =>
       req<KbDocDefaultsResp>(`/kb/doc-defaults?tenant_id=${tenantId}`),
     setDocDefaults: (b: {
@@ -523,10 +527,20 @@ export const api = {
       req<Correction[]>(
         `/feedback/corrections?limit=${limit}${tenantId ? `&tenant_id=${tenantId}` : ""}`,
       ),
-    metrics: (days = 30) => req<KilMetrics>(`/kil/metrics?days=${days}`),
+    sessions: (tenantId?: string, limit = 50) =>
+      req<ReasoningSessionRow[]>(
+        `/feedback/sessions?limit=${limit}${tenantId ? `&tenant_id=${tenantId}` : ""}`,
+      ),
+    feedbackSummary: (days = 30, tenantId?: string) =>
+      req<FeedbackSummary>(
+        `/feedback/summary?days=${days}${tenantId ? `&tenant_id=${tenantId}` : ""}`,
+      ),
+    metrics: (days = 30, tenantId?: string) =>
+      req<KilMetrics>(`/kil/metrics?days=${days}${tenantId ? `&tenant_id=${tenantId}` : ""}`),
     digest: (weeks = 4) =>
       req<KilDigest>(`/kil/digest?weeks=${weeks}`),
-    tenantHealth: () => req<TenantHealth>("/health/tenant"),
+    tenantHealth: (tenantId?: string) =>
+      req<TenantHealth>(`/health/tenant${tenantId ? `?tenant_id=${tenantId}` : ""}`),
     jobFailures: (hours = 24) => req<JobFailures>(`/jobs/failures?hours=${hours}`),
   },
 

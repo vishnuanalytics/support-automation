@@ -1817,6 +1817,21 @@ def list_reasoning_sessions(tenant_id: str | None = None, limit: int = 50,
     return rows
 
 
+@app.get("/api/feedback/summary")
+def feedback_summary(days: int = 30, tenant_id: str | None = None,
+                     c: Caller = Depends(caller)) -> dict:
+    """Response Quality Feedback Loop chunk F — the numbers chunks B-E
+    produced (`runs.correction_analysis`, `reasoning_sessions.
+    session_analysis`, `draft`'s exemplar usage, gate-tuning proposals),
+    summarized in one place instead of four separate raw feeds. Owner-only,
+    same bar as billing/corrections/sessions (it aggregates exactly that
+    data)."""
+    from interpreter import feedback_metrics
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    return feedback_metrics.compute(c.sb, tid, days=min(max(days, 1), 180))
+
+
 @app.get("/api/kil/metrics")
 def kil_metrics_ep(days: int = 30, tenant_id: str | None = None,
                    c: Caller = Depends(caller)) -> dict:

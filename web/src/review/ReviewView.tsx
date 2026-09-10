@@ -3,17 +3,20 @@ import { api, ApiError } from "../api";
 import { Banner, Input } from "../ui";
 import type {
   ActionRequest,
+  Correction,
+  FeedbackSummary,
   JobFailures,
   KbDocWriteback,
   KilDigest,
   KilMetrics,
+  ReasoningSessionRow,
   ReviewTask,
   TenantHealth,
 } from "../types";
 
 const STATUS = ["open", "correct", "wrong", "dismissed", "all"] as const;
 
-export function ReviewView() {
+export function ReviewView({ tenantId }: { tenantId?: string | null }) {
   const [metrics, setMetrics] = useState<KilMetrics | null>(null);
   const [digest, setDigest] = useState<KilDigest | null>(null);
   const [rows, setRows] = useState<ReviewTask[]>([]);
@@ -26,19 +29,29 @@ export function ReviewView() {
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  // Response Quality Feedback Loop chunk F — ties chunks B-E's numbers
+  // together instead of leaving them as four separate raw feeds.
+  const [feedback, setFeedback] = useState<FeedbackSummary | null>(null);
+  const [corrections, setCorrections] = useState<Correction[]>([]);
+  const [sessions, setSessions] = useState<ReasoningSessionRow[]>([]);
+  const [showCorrections, setShowCorrections] = useState(false);
+  const [showSessions, setShowSessions] = useState(false);
 
   const load = () => {
     api.review.list(status).then(setRows).catch((e: ApiError) => setErr(e.message));
-    api.review.metrics(30).then(setMetrics).catch(() => {});
+    api.review.metrics(30, tenantId || undefined).then(setMetrics).catch(() => {});
     api.approvals
       .list()
       .then((r) => setArs(r.action_requests))
       .catch(() => {});
-    api.kb.listAllDocWritebacks("open").then(setDocWb).catch(() => {});
-    api.review.tenantHealth().then(setHealth).catch(() => {});
+    api.kb.listAllDocWritebacks("open", tenantId || undefined).then(setDocWb).catch(() => {});
+    api.review.tenantHealth(tenantId || undefined).then(setHealth).catch(() => {});
+    api.review.feedbackSummary(30, tenantId || undefined).then(setFeedback).catch(() => {});
+    api.review.corrections(tenantId || undefined, 20).then(setCorrections).catch(() => {});
+    api.review.sessions(tenantId || undefined, 20).then(setSessions).catch(() => {});
     setJobFails(null);
   };
-  useEffect(load, [status]);
+  useEffect(load, [status, tenantId]);
 
   const decide = async (ar: ActionRequest, decision: "approve" | "reject") => {
     setBusy(ar.id);
@@ -292,6 +305,73 @@ export function ReviewView() {
         </div>
       )}
 
+      {feedback && (
+        <div className="col" style={{ gap: 8 }}>
+          <h4 style={{ margin: "4px 0" }}>Response quality ({feedback.window_days}d)</h4>
+          <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
+            <Tile label="corrections judged" value={feedback.corrections.total_judged} />
+            <Tile
+              label="avg correction severity"
+              value={
+                feedback.corrections.avg_severity != null
+                  ? feedback.corrections.avg_severity.toFixed(2)
+                  : "—"
+              }
+              warn={(feedback.corrections.avg_severity ?? 0) >= 0.6}
+            />
+            <Tile label="sessions judged" value={feedback.sessions.total_judged} />
+            <Tile
+              label="avg session severity"
+              value={
+                feedback.sessions.avg_severity != null
+                  ? feedback.sessions.avg_severity.toFixed(2)
+                  : "—"
+              }
+              warn={(feedback.sessions.avg_severity ?? 0) >= 0.6}
+            />
+            <Tile label="draft exemplar usage" value={pct(feedback.exemplars.usage_rate)} />
+            <Tile
+              label="gate-tuning pending"
+              value={feedback.gate_tuning.pending}
+              warn={feedback.gate_tuning.pending > 0}
+            />
+            <Tile label="gate-tuning approved" value={feedback.gate_tuning.approved} />
+            <Tile label="gate-tuning rejected" value={feedback.gate_tuning.rejected} />
+          </div>
+
+          {(Object.keys(feedback.corrections.by_category).length > 0 ||
+            Object.keys(feedback.sessions.by_category).length > 0) && (
+            <div className="row" style={{ flexWrap: "wrap", gap: 24 }}>
+              {Object.keys(feedback.corrections.by_category).length > 0 && (
+                <CategoryTable
+                  title="Corrections by category"
+                  counts={feedback.corrections.by_category}
+                />
+              )}
+              {Object.keys(feedback.sessions.by_category).length > 0 && (
+                <CategoryTable
+                  title="Sessions by category"
+                  counts={feedback.sessions.by_category}
+                />
+              )}
+            </div>
+          )}
+
+          <div className="row" style={{ gap: 8 }}>
+            <button onClick={() => setShowCorrections((v) => !v)}>
+              {showCorrections ? "hide" : "show"} {corrections.length} correction
+              {corrections.length === 1 ? "" : "s"}
+            </button>
+            <button onClick={() => setShowSessions((v) => !v)}>
+              {showSessions ? "hide" : "show"} {sessions.length} session
+              {sessions.length === 1 ? "" : "s"}
+            </button>
+          </div>
+          {showCorrections && <CorrectionsTable rows={corrections} />}
+          {showSessions && <SessionsTable rows={sessions} />}
+        </div>
+      )}
+
       {docWb.length > 0 && (
         <div className="col" style={{ gap: 6 }}>
           <button
@@ -533,6 +613,101 @@ function DocWritebacksTable({ rows }: { rows: KbDocWriteback[] }) {
                   <span style={{ color: "var(--muted, #667)" }}>—</span>
                 )}
               </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function CategoryTable({ title, counts }: { title: string; counts: Record<string, number> }) {
+  const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  return (
+    <div className="col" style={{ gap: 4 }}>
+      <strong style={{ fontSize: 12, color: "var(--muted, #667)" }}>{title}</strong>
+      <table className="runs-table" style={{ minWidth: 220 }}>
+        <tbody>
+          {entries.map(([cat, n]) => (
+            <tr key={cat}>
+              <td>{cat}</td>
+              <td className="muted" style={{ textAlign: "right" }}>
+                {n}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function CorrectionsTable({ rows }: { rows: Correction[] }) {
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table className="runs-table" style={{ minWidth: 720 }}>
+        <thead>
+          <tr>
+            <th>subject</th>
+            <th>category</th>
+            <th>severity</th>
+            <th>why</th>
+            <th>when</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.run_id}>
+              <td style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis" }}>
+                {r.subject || "—"}
+              </td>
+              <td>{r.correction_analysis?.category ?? "—"}</td>
+              <td className="muted">
+                {r.correction_analysis?.severity != null
+                  ? r.correction_analysis.severity.toFixed(2)
+                  : "—"}
+              </td>
+              <td className="muted" style={{ maxWidth: 320 }}>
+                {r.correction_analysis?.summary || "—"}
+              </td>
+              <td className="muted">{r.created_at.slice(0, 16).replace("T", " ")}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function SessionsTable({ rows }: { rows: ReasoningSessionRow[] }) {
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table className="runs-table" style={{ minWidth: 720 }}>
+        <thead>
+          <tr>
+            <th>case</th>
+            <th>state</th>
+            <th>category</th>
+            <th>severity</th>
+            <th>why</th>
+            <th>when</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.session_id}>
+              <td>{r.case_number || r.case_id}</td>
+              <td className="muted">{r.state}</td>
+              <td>{r.session_analysis?.category ?? "—"}</td>
+              <td className="muted">
+                {r.session_analysis?.severity != null
+                  ? r.session_analysis.severity.toFixed(2)
+                  : "—"}
+              </td>
+              <td className="muted" style={{ maxWidth: 320 }}>
+                {r.session_analysis?.summary || "—"}
+              </td>
+              <td className="muted">{r.updated_at.slice(0, 16).replace("T", " ")}</td>
             </tr>
           ))}
         </tbody>

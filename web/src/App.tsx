@@ -415,7 +415,7 @@ export function App() {
         ) : view === "runs" ? (
           <RunsView />
         ) : view === "review" ? (
-          <ReviewView />
+          <ReviewView key={tenantId} tenantId={tenantId} />
         ) : view === "trace" ? (
           <TraceView />
         ) : flowId ? (

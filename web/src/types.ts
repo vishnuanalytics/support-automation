@@ -505,6 +505,12 @@ export interface ReviewTask {
   created_at: string;
 }
 
+export interface CorrectionVerdict {
+  category: "tone" | "factual" | "policy" | "brevity" | "none" | "other" | "unknown";
+  severity: number | null;
+  summary: string;
+}
+
 export interface Correction {
   run_id: string;
   flow_id: string | null;
@@ -514,8 +520,59 @@ export interface Correction {
   human_reply: string | null;
   human_action: "sent_as_is" | "edited" | "rewrote" | "no_reply" | null;
   outcome: string | null;
+  correction_analysis: CorrectionVerdict | null;
   feedback_checked_at: string | null;
   created_at: string;
+}
+
+export interface SessionVerdict {
+  category: "sound" | "redundant" | "misguided" | "abandoned" | "other" | "unknown";
+  severity: number | null;
+  summary: string;
+}
+
+export interface ReasoningSessionRow {
+  session_id: string;
+  case_id: string;
+  case_number: string | null;
+  state: string;
+  transcript: { role: string; text: string; at: string }[];
+  pointers: unknown[];
+  draft: string | null;
+  session_analysis: SessionVerdict | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FeedbackSummary {
+  window_days: number;
+  corrections: {
+    total_judged: number;
+    by_category: Record<string, number>;
+    avg_severity: number | null;
+    recent: { run_id: string; subject: string | null; category: string | null;
+             severity: number | null; summary: string | null; created_at: string }[];
+  };
+  sessions: {
+    total_judged: number;
+    by_category: Record<string, number>;
+    avg_severity: number | null;
+    recent: { session_id: string; case_number: string | null; category: string | null;
+             severity: number | null; summary: string | null; updated_at: string }[];
+  };
+  exemplars: {
+    draft_runs_sampled: number;
+    draft_runs_with_exemplars: number;
+    usage_rate: number | null;
+  };
+  gate_tuning: {
+    pending: number;
+    approved: number;
+    rejected: number;
+    recent: { id: string; status: string; title: string | null; tier: string | null;
+             current_threshold: number | null; suggested_threshold: number | null;
+             created_at: string }[];
+  };
 }
 
 export interface KilMetrics {

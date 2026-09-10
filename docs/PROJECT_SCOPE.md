@@ -707,6 +707,81 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-10 (Response Quality Feedback Loop — chunk F of 6, "a feedback
+dashboard tying it together", done and live-verified. This closes the
+6-chunk plan: A stop discarding signal, B score corrections, C score
+sessions, D few-shot exemplars, E gate-tuning proposals, F this dashboard
+— all built, live-verified, and committed.)**
+
+New `interpreter/feedback_metrics.py::compute(sb, tenant_id, days=30)` —
+same read-only, degrade-to-zero shape as `kil_metrics.py::compute()` —
+reads all four prior chunks' data and returns one summary: corrections
+judged (chunk B) with category breakdown + avg severity, sessions judged
+(chunk C) likewise, draft exemplar usage rate sampled from recent runs'
+trace (chunk D), and gate-tuning proposal counts by status (chunk E). New
+`GET /api/feedback/summary` (owner-only, same bar as its constituent
+data).
+
+**Web**: `ReviewView.tsx` (the existing Approvals/KIL-metrics tab — this
+data belongs there, not a new sidebar tab) gained a "Response quality"
+section: Tiles for the summary numbers, two category-breakdown mini-
+tables, and two toggleable browsable tables (recent judged corrections,
+recent judged sessions) reusing chunk A/C's existing list endpoints —
+which had literally zero UI before this, only ever returning raw JSON.
+Added `api.review.sessions()`/`.feedbackSummary()`, and fixed the
+`Correction` TS type, which was missing `correction_analysis` since
+chunk B shipped it.
+
+**Found and fixed a real pre-existing bug while wiring this up**:
+`<ReviewView />` was the only major view in `App.tsx` never passed a
+`tenantId` prop (every sibling view — Knowledge/Admin/Integrations/Ask/
+Rules/Intake — gets `key={tenantId} tenantId={tenantId}`). It silently
+broke for any user belonging to more than one tenant: `kil/metrics`,
+`health/tenant`, and `kb/doc-writebacks` all 400 with "tenant_id required
+(you belong to several tenants)" the moment such a user opens Approvals —
+not something I introduced, but something that was blocking verification
+of this exact chunk in the browser, using the same multi-tenant
+`globex-owner@example.test` fixture prior chunks' UI verification also
+used. Fixed by threading `tenantId` through `ReviewView` and the three
+API calls that needed it (`metrics`/`tenantHealth`/`listAllDocWritebacks`
+gained an optional `tenantId` param, matching the shape chunks A/C/F's
+endpoints already had) — the same one-line pattern every other view in
+`App.tsx` already uses. `GET /api/approvals` and `/api/review-tasks`
+correctly need no tenant_id (RLS intentionally spans all the caller's
+tenants there), so those were left alone.
+
+8 new tests (`tests/test_feedback_metrics.py`). Full offline suite: 1220
+passed (was 1212). `cd web && npm run build` clean.
+
+**Live-verified in a real browser** (headless Chromium, same apt-get-
+download-the-.debs setup as earlier UI passes this session): inserted 2
+synthetic judged corrections + 1 synthetic judged session for the real
+Globex tenant, started the Vite dev server, signed in as
+`globex-owner@example.test` (a real multi-tenant account — this is what
+surfaced the `tenantId` bug above), selected the Globex workspace,
+opened Approvals, and confirmed the "Response quality" section renders
+the exact real numbers (2 corrections judged, avg severity 0.45, 1
+session judged, category breakdowns, gate-tuning counts) — then expanded
+both browsable tables and confirmed the individual rows (subject/
+category/severity/summary/timestamp) match the real inserted data
+exactly. Screenshotted both states. Cleaned up the synthetic rows
+afterward, along with a stray duplicate gate-tuning proposal left over
+from chunk E's own verification (its evidence runs no longer existed —
+real test-cycle residue, unlike the genuine Acme-tenant proposal chunk E
+deliberately left in place).
+
+**Known limitation, not fixed here — flagged for whoever picks this up
+next**: `gate_tuning_sweep` (chunk E) can raise a second, duplicate
+proposal for the same evidence if it runs again after the first one is
+approved/rejected but before the underlying `runs` rows' `human_action`/
+`correction_analysis` state changes — nothing marks a run's evidence as
+"already proposed against." Low practical impact (a human just rejects
+the duplicate; applying either one is idempotent-safe at the config
+level), observed firsthand during this chunk's cleanup, not chunk F's
+scope to fix.
+
+---
+
 **2026-09-10 (Response Quality Feedback Loop — chunk E of 6, "confidence-
 gate threshold tuning proposals, human-approved not automatic", done and
 live-verified.)**
