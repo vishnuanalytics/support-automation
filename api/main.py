@@ -1698,6 +1698,7 @@ async def stripe_webhook(request: Request) -> PlainTextResponse:
 # ── KIL-f: the Knowledge Integrity Loop review queue + metrics ─────────
 class ReviewResolveIn(BaseModel):
     status: str  # 'correct' | 'wrong' | 'dismissed'
+    note: str | None = None  # optional reviewer reason (Response Quality Feedback Loop chunk A)
 
 
 @app.get("/api/review-tasks")
@@ -1705,8 +1706,8 @@ def list_review_tasks(status: str | None = "open", limit: int = 100,
                       c: Caller = Depends(caller)) -> list[dict]:
     q = (c.sb.table("review_tasks")
          .select("id, case_sf_id, case_number, run_id, kind, trigger, statement, "
-                 "verdict, contexts, status, reviewer_id, reviewed_at, kb_change_id, "
-                 "slack_channel, slack_ts, created_at")
+                 "verdict, contexts, status, reviewer_id, reviewed_at, reviewer_note, "
+                 "kb_change_id, slack_channel, slack_ts, created_at")
          .order("created_at", desc=True).limit(min(max(limit, 1), 500)))
     if status and status != "all":
         q = q.eq("status", status)
@@ -1726,10 +1727,31 @@ def resolve_review_task(task_id: str, body: ReviewResolveIn,
         raise HTTPException(404, "review task not found")
     rate_limit(c.user_id, "review", 60)
     res = approvals.resolve_review_task(
-        _service, task_id, status=body.status, reviewed_by=c.user_id)
+        _service, task_id, status=body.status, reviewed_by=c.user_id,
+        note=(body.note or "").strip() or None)
     if res.get("skipped"):
         raise HTTPException(409, "task already resolved")
     return res
+
+
+@app.get("/api/feedback/corrections")
+def list_corrections(tenant_id: str | None = None, limit: int = 50,
+                     c: Caller = Depends(caller)) -> list[dict]:
+    """Response Quality Feedback Loop chunk A — every (bot draft, human's
+    actual final reply) pair already sitting in `runs`, surfaced instead of
+    left unused after `_check_resolution` records it. `human_action` in
+    ('edited','rewrote') means a human changed the bot's draft before it
+    went out to the customer — the raw material a later chunk's judge
+    scores. Read-only, no judging yet. Owner-only, same bar as billing."""
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    rows = (c.sb.table("runs")
+            .select("run_id, flow_id, case_id, subject, draft, human_reply, human_action, "
+                    "outcome, feedback_checked_at, created_at")
+            .eq("tenant_id", tid).in_("human_action", ["edited", "rewrote"])
+            .order("feedback_checked_at", desc=True).limit(min(max(limit, 1), 200))
+            .execute().data or [])
+    return rows
 
 
 @app.get("/api/kil/metrics")

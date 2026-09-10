@@ -38,6 +38,7 @@ import type {
   IntakePreview,
   NodeTypesResp,
   ReviewTask,
+  Correction,
   JobFailures,
   KilMetrics,
   KilDigest,
@@ -512,11 +513,15 @@ export const api = {
   review: {
     list: (status = "open") =>
       req<ReviewTask[]>(`/review-tasks?status=${encodeURIComponent(status)}`),
-    resolve: (id: string, status: "correct" | "wrong" | "dismissed") =>
+    resolve: (id: string, status: "correct" | "wrong" | "dismissed", note?: string) =>
       req<{ task: ReviewTask; kb_change: unknown }>(`/review-tasks/${id}/resolve`, {
         method: "POST",
-        body: JSON.stringify({ status }),
+        body: JSON.stringify({ status, note: note || undefined }),
       }),
+    corrections: (tenantId?: string, limit = 50) =>
+      req<Correction[]>(
+        `/feedback/corrections?limit=${limit}${tenantId ? `&tenant_id=${tenantId}` : ""}`,
+      ),
     metrics: (days = 30) => req<KilMetrics>(`/kil/metrics?days=${days}`),
     digest: (weeks = 4) =>
       req<KilDigest>(`/kil/digest?weeks=${weeks}`),

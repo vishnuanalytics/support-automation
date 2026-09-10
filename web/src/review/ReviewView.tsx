@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
-import { Banner } from "../ui";
+import { Banner, Input } from "../ui";
 import type {
   ActionRequest,
   JobFailures,
@@ -55,12 +55,17 @@ export function ReviewView() {
     }
   };
 
+  // per-task draft of the optional reason typed before resolving — separate
+  // from `note` above, which is the toast confirming what just happened.
+  const [reasonDraft, setReasonDraft] = useState<Record<string, string>>({});
+
   const resolve = async (t: ReviewTask, s: "correct" | "wrong" | "dismissed") => {
     setBusy(t.id);
     setErr(null);
     setNote(null);
     try {
-      const res = await api.review.resolve(t.id, s);
+      const reason = reasonDraft[t.id]?.trim();
+      const res = await api.review.resolve(t.id, s, reason);
       setNote(
         s === "correct"
           ? "Marked correct — a KB update was drafted and sent for approval."
@@ -68,6 +73,11 @@ export function ReviewView() {
             ? "Marked wrong — logged for agent coaching."
             : "Dismissed.",
       );
+      setReasonDraft((d) => {
+        const next = { ...d };
+        delete next[t.id];
+        return next;
+      });
       void res;
       load();
     } catch (e) {
@@ -395,6 +405,12 @@ export function ReviewView() {
 
             <div style={{ whiteSpace: "pre-wrap", fontSize: 14 }}>{t.statement}</div>
 
+            {t.status !== "open" && t.reviewer_note && (
+              <div style={{ fontSize: 13, color: "var(--muted, #667)" }}>
+                <b>Reviewer's reason:</b> {t.reviewer_note}
+              </div>
+            )}
+
             {t.verdict?.salient?.length > 0 && (
               <div style={{ fontSize: 13 }}>
                 <b>Claim at issue:</b> {t.verdict.salient[0]}
@@ -416,20 +432,29 @@ export function ReviewView() {
             )}
 
             {t.status === "open" && (
-              <div className="row" style={{ gap: 6 }}>
-                <button
-                  className="primary"
-                  disabled={busy === t.id}
-                  onClick={() => resolve(t, "correct")}
-                >
-                  Correct → update KB
-                </button>
-                <button disabled={busy === t.id} onClick={() => resolve(t, "wrong")}>
-                  Wrong → coach
-                </button>
-                <button disabled={busy === t.id} onClick={() => resolve(t, "dismissed")}>
-                  Not a conflict
-                </button>
+              <div className="col" style={{ gap: 6 }}>
+                <Input
+                  placeholder="optional reason (e.g. tone was off, factual correction, policy) — feeds the feedback loop"
+                  value={reasonDraft[t.id] || ""}
+                  onChange={(e) =>
+                    setReasonDraft((d) => ({ ...d, [t.id]: e.target.value }))
+                  }
+                />
+                <div className="row" style={{ gap: 6 }}>
+                  <button
+                    className="primary"
+                    disabled={busy === t.id}
+                    onClick={() => resolve(t, "correct")}
+                  >
+                    Correct → update KB
+                  </button>
+                  <button disabled={busy === t.id} onClick={() => resolve(t, "wrong")}>
+                    Wrong → coach
+                  </button>
+                  <button disabled={busy === t.id} onClick={() => resolve(t, "dismissed")}>
+                    Not a conflict
+                  </button>
+                </div>
               </div>
             )}
           </div>

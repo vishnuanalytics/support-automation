@@ -71,13 +71,17 @@ def decide_action_request(sb, ar_id: str, *, approve: bool, decided_by: str) -> 
                       "text": slack_text}}
 
 
-def resolve_review_task(sb, task_id: str, *, status: str, reviewed_by: str | None) -> dict:
+def resolve_review_task(sb, task_id: str, *, status: str, reviewed_by: str | None,
+                        note: str | None = None) -> dict:
     """Mark a `review_tasks` row correct / wrong / dismissed. On `correct`,
-    draft a KB change and raise it for approval (KIL-d). Returns
-    `{"task", "kb_change"}` or `{"skipped": ...}`."""
+    draft a KB change and raise it for approval (KIL-d). `note` — Response
+    Quality Feedback Loop chunk A — is an optional reviewer-written reason,
+    persisted instead of only living in a Slack message (today's default
+    for a "wrong" verdict). Returns `{"task", "kb_change"}` or
+    `{"skipped": ...}`."""
     from interpreter import kb_writeback, review
 
-    row = review.resolve(sb, task_id, status=status, reviewer_id=reviewed_by)
+    row = review.resolve(sb, task_id, status=status, reviewer_id=reviewed_by, note=note)
     if not row:
         return {"skipped": "not open", "task_id": task_id}
 

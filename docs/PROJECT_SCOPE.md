@@ -707,6 +707,58 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-10 (New track: Response Quality Feedback Loop — chunk A of 6,
+"stop discarding it", done and live-verified. Plan shared with the user
+first as an artifact before building — see the artifact for the full
+6-chunk sequence and the "no weight training" scoping decision the user
+made explicitly.)**
+
+The user asked for "RLHF" for chatbot responses, with multi-turn ("to and
+fro") evaluation, not single input/output validation. Research before
+building found the platform already generates exactly the raw material
+this needs and mostly discards it: `runs.human_action`/`human_reply`
+(migration `014`) captures a real (bot draft, human's actual final reply)
+pair every time an escalated Case gets a human response — populated live
+today by `api/worker.py::_check_resolution()` — and nothing has ever read
+it past storing the label. KIL's "Wrong" verdict on a reviewed reply was
+worse: an explicit human-confirmed negative example that only ever posted
+a Slack "coaching" message and vanished. Reasoning sessions (the actual
+multi-turn to-and-fro) store a full transcript with zero quality label at
+all — confirmed as a real, currently-unfilled gap, not something already
+covered elsewhere. The user chose behavior-adaptation-without-weight-
+training over literal fine-tuning (Groq/Anthropic don't offer customer
+fine-tuning today anyway) — full reasoning + the 6-chunk plan (A: stop
+discarding it → B: score existing pairs → C: judge whole sessions → D:
+few-shot exemplars from real feedback → E: threshold/routing proposals →
+F: a feedback dashboard) is in the shared artifact, not duplicated here.
+
+**Chunk A shipped**: migration `107` adds `review_tasks.reviewer_note` —
+set only when a note is actually given, so a note-less Slack quick-action
+resolve never blanks out one a web reviewer already left.
+`interpreter/review.py::resolve()` / `interpreter/approvals.py::
+resolve_review_task()` thread an optional `note` through;
+`POST /api/review-tasks/{id}/resolve` accepts it, `GET /api/review-tasks`
+now returns it. New `GET /api/feedback/corrections` (owner-only, same bar
+as billing) surfaces every existing (draft, human_reply) pair for a
+tenant straight from `runs` — read-only, no judging yet, just making
+already-collected data visible instead of write-only. Web: the Review
+tab's Correct/Wrong/Not-a-conflict buttons gained an optional reason
+field above them, and a resolved task now shows the reviewer's past
+reason inline. 3 new tests (`tests/test_review.py`,
+`tests/test_approvals.py`). **Live-verified against the real Supabase
+project**: inserted a synthetic (draft, human_reply) pair and a synthetic
+open review task for the real Globex tenant, confirmed the corrections
+endpoint returns the pair correctly, confirmed a real
+`POST .../resolve` with a note persists it and that it round-trips back
+through the list endpoint — then cleaned both up.
+
+**Not done yet (chunks B-F)**: nothing judges these pairs or sessions
+yet — chunk A is visibility + a place to put a reason, not scoring.
+Reasoning sessions still have no quality signal at all until chunk C.
+Nothing changes bot behavior yet — that starts at chunk D.
+
+---
+
 **2026-09-10 (Billing & Payments chunks E + F — BYOK-aware metering and
 real, signed-off prices. Both done and live-verified end-to-end. This
 closes the billing track: every chunk (A schema, B Stripe, C Razorpay, D

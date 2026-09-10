@@ -499,7 +499,21 @@ export interface ReviewTask {
   status: "open" | "correct" | "wrong" | "dismissed";
   reviewer_id: string | null;
   reviewed_at: string | null;
+  reviewer_note: string | null;
   kb_change_id: string | null;
+  created_at: string;
+}
+
+export interface Correction {
+  run_id: string;
+  flow_id: string | null;
+  case_id: string | null;
+  subject: string | null;
+  draft: string | null;
+  human_reply: string | null;
+  human_action: "sent_as_is" | "edited" | "rewrote" | "no_reply" | null;
+  outcome: string | null;
+  feedback_checked_at: string | null;
   created_at: string;
 }
 

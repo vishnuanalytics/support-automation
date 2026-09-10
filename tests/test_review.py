@@ -149,6 +149,26 @@ def test_resolve_marks_the_task(monkeypatch):
     assert upd["payload"]["status"] == "correct" and upd["filter"]["status"] == "open"
 
 
+# ── Response Quality Feedback Loop chunk A: reviewer_note ───────────────
+def test_resolve_with_a_note_persists_it():
+    sb = _SB()
+    row = review.resolve(sb, "task-1", status="wrong", reviewer_id="U9",
+                         note="tone was too formal for this account")
+    assert row["reviewer_note"] == "tone was too formal for this account"
+    upd = [o for o in sb.ops if o["op"] == "update"][0]
+    assert upd["payload"]["reviewer_note"] == "tone was too formal for this account"
+
+
+def test_resolve_without_a_note_does_not_touch_the_column():
+    """A Slack quick-action resolve (no note) must not blank out a note a
+    web reviewer already left — reviewer_note is only ever set, never
+    cleared, by an empty/missing note."""
+    sb = _SB()
+    review.resolve(sb, "task-1", status="wrong", reviewer_id="U9")
+    upd = [o for o in sb.ops if o["op"] == "update"][0]
+    assert "reviewer_note" not in upd["payload"]
+
+
 def test_dispatch_action_review_button_resolves(monkeypatch):
     from interpreter import slack_socket
     sb = _SB()

@@ -137,7 +137,7 @@ def test_correct_drafts_and_raises_a_kb_change(monkeypatch):
     from interpreter import kb_writeback, review
 
     task_row = {"id": "task1", "tenant_id": "t1", "statement": "refunds take 30 days"}
-    monkeypatch.setattr(review, "resolve", lambda sb, tid, *, status, reviewer_id: dict(task_row))
+    monkeypatch.setattr(review, "resolve", lambda sb, tid, *, status, reviewer_id, note=None: dict(task_row))
     monkeypatch.setattr(kb_writeback, "draft_change", lambda row: {"op": "supersede", "title": "x"})
     monkeypatch.setattr(kb_writeback, "raise_kb_change",
                         lambda sb, *, tenant_id, task_row, change: {"id": "ar-kb-1"})
@@ -150,7 +150,7 @@ def test_correct_drafts_and_raises_a_kb_change(monkeypatch):
 def test_wrong_and_dismissed_never_draft_a_kb_change(monkeypatch):
     from interpreter import kb_writeback, review
 
-    monkeypatch.setattr(review, "resolve", lambda sb, tid, *, status, reviewer_id: {"id": tid})
+    monkeypatch.setattr(review, "resolve", lambda sb, tid, *, status, reviewer_id, note=None: {"id": tid})
     monkeypatch.setattr(kb_writeback, "draft_change",
                         lambda row: pytest.fail("must not draft a change for a non-correct verdict"))
 
@@ -161,16 +161,29 @@ def test_wrong_and_dismissed_never_draft_a_kb_change(monkeypatch):
 
 def test_resolve_review_task_not_open_is_a_skip(monkeypatch):
     from interpreter import review
-    monkeypatch.setattr(review, "resolve", lambda sb, tid, *, status, reviewer_id: None)
+    monkeypatch.setattr(review, "resolve", lambda sb, tid, *, status, reviewer_id, note=None: None)
 
     out = approvals.resolve_review_task(None, "task1", status="correct", reviewed_by="mgr")
     assert out == {"skipped": "not open", "task_id": "task1"}
 
 
+def test_resolve_review_task_passes_the_note_through(monkeypatch):
+    """Response Quality Feedback Loop chunk A."""
+    from interpreter import review
+
+    captured = {}
+    monkeypatch.setattr(review, "resolve",
+                        lambda sb, tid, *, status, reviewer_id, note=None:
+                        captured.update(note=note) or {"id": tid})
+    approvals.resolve_review_task(None, "task1", status="wrong", reviewed_by="mgr",
+                                  note="tone was off")
+    assert captured["note"] == "tone was off"
+
+
 def test_kb_writeback_failure_on_correct_is_swallowed(monkeypatch):
     from interpreter import kb_writeback, review
 
-    monkeypatch.setattr(review, "resolve", lambda sb, tid, *, status, reviewer_id: {"id": tid})
+    monkeypatch.setattr(review, "resolve", lambda sb, tid, *, status, reviewer_id, note=None: {"id": tid})
     monkeypatch.setattr(kb_writeback, "draft_change",
                         lambda row: (_ for _ in ()).throw(RuntimeError("llm down")))
 

@@ -83,13 +83,22 @@ def open_task(sb, *, tenant_id: str, run_id: str | None, kind: str, trigger: str
         return None
 
 
-def resolve(sb, task_id: str, *, status: str, reviewer_id: str | None = None) -> dict | None:
+def resolve(sb, task_id: str, *, status: str, reviewer_id: str | None = None,
+           note: str | None = None) -> dict | None:
     if status not in _ACTIONS:
         raise ValueError(f"status must be one of {_ACTIONS}")
     try:
-        res = (sb.table("review_tasks").update({
+        update: dict[str, Any] = {
             "status": status, "reviewer_id": reviewer_id, "reviewed_at": "now()",
-        }).eq("id", task_id).eq("status", "open").execute())
+        }
+        # Response Quality Feedback Loop chunk A — a "wrong" verdict used to
+        # discard its own reason; only touch the column when a note was
+        # actually given, so an unrelated Slack-button resolve never blanks
+        # out a note a web reviewer already left.
+        if note:
+            update["reviewer_note"] = note
+        res = (sb.table("review_tasks").update(update)
+               .eq("id", task_id).eq("status", "open").execute())
         return (res.data or [None])[0]
     except Exception as e:  # noqa: BLE001
         log.warning("review.resolve(%s): %s", task_id, e)
