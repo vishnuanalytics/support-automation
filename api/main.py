@@ -1478,7 +1478,11 @@ def billing_usage(tenant_id: str | None = None, period: str | None = None,
         for f in (c.sb.table("flows").select("flow_id, name")
                   .eq("tenant_id", tid).execute().data or [])
     }
-    return {"period_label": period_label,
+    trows = (c.sb.table("tenants")
+             .select("billing_status, trial_ends_at, grace_ends_at, billing_country, payment_provider")
+             .eq("tenant_id", tid).execute().data or [{}])
+    billing_state = trows[0]
+    return {"period_label": period_label, "billing_state": billing_state,
             **billing.usage_summary(rows, plan, limits, period_start, period_end, flow_names)}
 
 
@@ -1536,6 +1540,38 @@ def billing_flow_deltas(tenant_id: str | None = None, c: Caller = Depends(caller
 
 
 # ── Billing chunks B/C: subscribe + provider webhooks ───────────────────
+@app.get("/api/billing/plans")
+def list_plans(tenant_id: str | None = None, c: Caller = Depends(caller)) -> list[dict]:
+    """The pricing catalog for the plan picker. Any tenant member can see
+    prices (nothing sensitive); only an owner can actually subscribe
+    (POST .../subscribe is owner-gated separately). `byok_price_usd`/
+    `byok_price_inr` are computed here so the UI never has to redo the
+    discount math itself."""
+    from interpreter import llm
+
+    tid = _caller_tenant(c, tenant_id)
+    rows = (c.sb.table("plans").select("*").order("base_price_usd").execute().data or [])
+    tenant_has_byok = llm.tenant_has_byok(tid)
+    out = []
+    for p in rows:
+        discount = p.get("byok_discount_pct") or 0
+        out.append({
+            "slug": p["slug"], "name": p["name"],
+            "base_price_usd": p.get("base_price_usd") or 0,
+            "base_price_inr": p.get("base_price_inr") or 0,
+            "byok_price_usd": round((p.get("base_price_usd") or 0) * (100 - discount) / 100),
+            "byok_price_inr": round((p.get("base_price_inr") or 0) * (100 - discount) / 100),
+            "byok_discount_pct": discount,
+            "included_runs": p.get("included_runs"),
+            "included_tokens": p.get("included_tokens"),
+            "overage_per_run_usd": p.get("overage_per_run_usd") or 0,
+            "seats_included": p.get("seats_included"),
+            # can this tenant actually check out into this plan right now?
+            "checkout_available": bool(p.get("razorpay_plan_id") or p.get("stripe_price_id")),
+        })
+    return [{**p, "tenant_has_byok": tenant_has_byok} for p in out]
+
+
 class SubscribeIn(BaseModel):
     plan_slug: str
     billing_country: str | None = None   # required the tenant's first time; ignored after

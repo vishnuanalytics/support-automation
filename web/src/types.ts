@@ -756,10 +756,35 @@ export interface CaseTaxonomy {
   defaults: Required<CaseTaxonomyConfig>;
 }
 
+export interface BillingState {
+  billing_status: "trialing" | "active" | "grace" | "locked" | "canceled" | null;
+  trial_ends_at: string | null;
+  grace_ends_at: string | null;
+  billing_country: string | null;
+  payment_provider: "stripe" | "razorpay" | null;
+}
+
+export interface Plan {
+  slug: string;
+  name: string;
+  base_price_usd: number;   // minor units (cents)
+  base_price_inr: number;   // minor units (paise)
+  byok_price_usd: number;
+  byok_price_inr: number;
+  byok_discount_pct: number;
+  included_runs: number | null;
+  included_tokens: number | null;
+  overage_per_run_usd: number;
+  seats_included: number | null;
+  checkout_available: boolean;
+  tenant_has_byok: boolean;
+}
+
 export interface BillingUsage {
   period_label: string;                 // "2026-09"
   period: { start: string; end: string };
   plan: string;                         // "free" | "pro"
+  billing_state: BillingState;
   limits: { runs: number | null; tokens: number | null };
   runs_count: number;
   tokens_total: number;

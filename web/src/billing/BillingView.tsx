@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
-import type { BillingUsage, FlowCostDelta } from "../types";
-import { Button, Tag, Banner, StatTile, QuotaBar } from "../ui";
+import type { BillingUsage, FlowCostDelta, Plan } from "../types";
+import { Button, Tag, Banner, StatTile, QuotaBar, Select } from "../ui";
+
+function daysUntil(iso: string | null): number | null {
+  if (!iso) return null;
+  return Math.ceil((new Date(iso).getTime() - Date.now()) / 86_400_000);
+}
 
 function shiftPeriod(period: string, delta: number): string {
   const [y, m] = period.split("-").map(Number);
@@ -49,6 +54,8 @@ export function BillingView({ tenantId }: { tenantId: string }) {
         </div>
         {usage && <Tag tone="neutral">{usage.plan} plan</Tag>}
       </div>
+
+      {usage && <BillingStatusBanner state={usage.billing_state} />}
 
       {err && (
         <Banner
@@ -177,11 +184,172 @@ export function BillingView({ tenantId }: { tenantId: string }) {
           )}
 
           <div className="muted" style={{ fontSize: 11 }}>
-            estimated cost is illustrative list pricing, not a real invoice — no payment processing is
-            wired up yet.
+            estimated cost above is illustrative list pricing for LLM usage, not your subscription
+            invoice — that's billed separately by {usage.billing_state.payment_provider || "your plan's payment provider"}.
           </div>
+
+          <PlansSection
+            tenantId={tenantId}
+            currentPlan={usage.plan}
+            billingCountry={usage.billing_state.billing_country}
+          />
         </>
       )}
+    </div>
+  );
+}
+
+function BillingStatusBanner({ state }: { state: BillingUsage["billing_state"] }) {
+  if (!state.billing_status || state.billing_status === "active") return null;
+
+  if (state.billing_status === "trialing") {
+    const days = daysUntil(state.trial_ends_at);
+    return (
+      <Banner
+        tone="accent"
+        title={days != null && days >= 0 ? `Trial — ${days} day${days === 1 ? "" : "s"} left` : "Trial active"}
+        detail="Add a payment method below to keep flows running without interruption once it ends."
+      />
+    );
+  }
+  if (state.billing_status === "grace") {
+    const days = daysUntil(state.grace_ends_at);
+    return (
+      <Banner
+        tone="warn"
+        title="Trial ended — payment needed"
+        detail={
+          days != null && days >= 0
+            ? `Flows pause in ${days} day${days === 1 ? "" : "s"} without a payment method — choose a plan below.`
+            : "Choose a plan below to keep flows running."
+        }
+      />
+    );
+  }
+  if (state.billing_status === "locked") {
+    return (
+      <Banner
+        tone="exception"
+        title="Flows are paused"
+        detail="No payment method was added before the grace period ended. Choose a plan below to resume immediately."
+      />
+    );
+  }
+  if (state.billing_status === "canceled") {
+    return (
+      <Banner tone="warn" title="Subscription canceled" detail="Choose a plan below to reactivate." />
+    );
+  }
+  return null;
+}
+
+function PlansSection({
+  tenantId,
+  currentPlan,
+  billingCountry,
+}: {
+  tenantId: string;
+  currentPlan: string;
+  billingCountry: string | null;
+}) {
+  const [plans, setPlans] = useState<Plan[]>([]);
+  const [country, setCountry] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.billingPlans(tenantId).then(setPlans).catch(() => {});
+  }, [tenantId]);
+
+  const subscribe = async (slug: string) => {
+    setErr(null);
+    if (!billingCountry && !country) {
+      setErr("Choose a billing country first — it decides which payment provider you'll use.");
+      return;
+    }
+    setBusy(slug);
+    try {
+      const res = await api.billingSubscribe({
+        planSlug: slug,
+        tenantId,
+        billingCountry: billingCountry ? undefined : country,
+      });
+      window.location.href = res.checkout_url;
+    } catch (e) {
+      setErr((e as ApiError).message);
+      setBusy(null);
+    }
+  };
+
+  const paid = plans.filter((p) => p.slug !== "free" && p.slug !== "pro");
+  if (paid.length === 0) return null;
+
+  return (
+    <div className="col" style={{ gap: 12, marginTop: 8 }}>
+      <h5 style={{ margin: 0 }}>Plans</h5>
+      {err && <Banner tone="exception" title={err} />}
+      {!billingCountry && (
+        <div className="row" style={{ gap: 8, alignItems: "center" }}>
+          <span className="muted" style={{ fontSize: 13 }}>
+            Billing country
+          </span>
+          <Select
+            options={[
+              { value: "IN", label: "India" },
+              { value: "US", label: "Everywhere else" },
+            ]}
+            placeholder="Choose…"
+            value={country}
+            onChange={(e) => setCountry(e.target.value)}
+          />
+        </div>
+      )}
+      <div className="row" style={{ flexWrap: "wrap", gap: 12 }}>
+        {paid.map((p) => {
+          const isCurrent = p.slug === currentPlan;
+          const usd = p.tenant_has_byok ? p.byok_price_usd : p.base_price_usd;
+          const inr = p.tenant_has_byok ? p.byok_price_inr : p.base_price_inr;
+          return (
+            <div key={p.slug} className="tile" style={{ minWidth: 220, display: "grid", gap: 8 }}>
+              <div className="row" style={{ justifyContent: "space-between" }}>
+                <strong>{p.name}</strong>
+                {isCurrent && <Tag tone="accent">current plan</Tag>}
+              </div>
+              {p.checkout_available ? (
+                <div>
+                  <div style={{ font: "600 22px/1 var(--font-heading)" }}>
+                    ${(usd / 100).toFixed(2)}
+                    <span className="muted" style={{ fontSize: 12 }}>
+                      /mo
+                    </span>
+                  </div>
+                  <div className="muted" style={{ fontSize: 11 }}>
+                    ≈ ₹{(inr / 100).toLocaleString()}/mo
+                  </div>
+                </div>
+              ) : (
+                <div className="muted" style={{ fontSize: 15 }}>
+                  Talk to us
+                </div>
+              )}
+              <div className="muted" style={{ fontSize: 12 }}>
+                {p.included_runs != null ? `${p.included_runs.toLocaleString()} runs/mo` : "custom volume"}
+                {p.seats_included != null ? ` · ${p.seats_included} seats` : " · unlimited seats"}
+              </div>
+              {p.tenant_has_byok && p.byok_discount_pct > 0 && (
+                <div style={{ fontSize: 11, color: "var(--accent)" }}>
+                  {p.byok_discount_pct}% off — using your own LLM key
+                </div>
+              )}
+              {p.checkout_available && !isCurrent && (
+                <Button variant="primary" size="sm" disabled={busy === p.slug} onClick={() => subscribe(p.slug)}>
+                  {busy === p.slug ? "Redirecting…" : `Upgrade to ${p.name}`}
+                </Button>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

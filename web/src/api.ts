@@ -3,6 +3,7 @@ import type {
   AssistResult,
   AuditEvent,
   BillingUsage,
+  Plan,
   FlowCostDelta,
   EmailChannel,
   EmailChannelSave,
@@ -575,6 +576,18 @@ export const api = {
   },
   billingFlowDeltas: (tenantId?: string) =>
     req<FlowCostDelta[]>(`/billing/flow-deltas${tenantId ? `?tenant_id=${tenantId}` : ""}`),
+  billingPlans: (tenantId?: string) =>
+    req<Plan[]>(`/billing/plans${tenantId ? `?tenant_id=${tenantId}` : ""}`),
+  billingSubscribe: (b: { planSlug: string; tenantId: string; billingCountry?: string }) =>
+    req<{ checkout_url: string; provider: string; status: string; byok_discount_applied: boolean }>(
+      "/billing/subscribe",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          plan_slug: b.planSlug, tenant_id: b.tenantId, billing_country: b.billingCountry,
+        }),
+      },
+    ),
 
   listAudit: (q: { tenantId?: string; action?: string; limit?: number } = {}) => {
     const p = new URLSearchParams();

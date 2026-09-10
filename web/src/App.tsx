@@ -375,8 +375,8 @@ export function App() {
         )}
         {view === "billing" && (
           <div className="muted">
-            usage &amp; a notional cost estimate for this workspace, against its
-            plan quota — no payment processing is wired up yet
+            usage against your plan's quota, and the plans you can subscribe or
+            upgrade to — real Stripe/Razorpay checkout, no card ever touches us
           </div>
         )}
       </div>
