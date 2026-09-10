@@ -707,6 +707,108 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-10 (Three bugs reported live: KB cross-tenant leak, crawl-source sync 500, and the Knowledge view's right pane not scrolling.)**
+
+3. **The Knowledge view's right-hand collection pane was "fixed" — didn't
+   scroll, so a lot of content was unreachable.** `ConnectedSources`
+   renders its own connections `<DataTable>` (crawl/gsheets/gdocs rows)
+   *inside* `.kb-collection__head`, which is `flex: none` (deliberately
+   sized to its natural content, meant for a compact title/buttons/banner
+   strip). `DataTable`'s default (non-`flush`) mode wraps in
+   `.ui-table-wrap { height: 100%; overflow: auto }` to create its own
+   scroll region — but `height: 100%` can't resolve against an ancestor
+   with no definite height (`.kb-collection__head` is `auto`-sized), so
+   that inner scroll silently did nothing and the connections table just
+   rendered at full natural height. With enough connected sources the head
+   grows past the viewport; nothing between it and `.pane { overflow:
+   hidden }` (the view frame two levels up) scrolls, so the overflow is
+   just clipped — squeezing `.kb-collection__docs` (the actual KB-entries
+   table below it) down toward zero height and hiding the rest. Confirmed
+   with a static repro of the real markup/CSS at 15 connections: the docs
+   pane's rendered height collapsed to 25px pre-fix vs. 403px after.
+   Fixed by giving the connections table its own bounded box
+   (`.kb-sources__list { max-height: 260px; overflow-y: auto }`) and
+   passing `DataTable`'s existing `flush` prop (exactly documented for
+   this case — "don't create an own scroll context, the sticky header
+   sticks to the nearest scrolling ancestor") so it participates in that
+   box's scroll instead of trying (and failing) to make its own. Also
+   added `overflow-y: auto` to `.kb-collection__docs` itself for
+   consistency with the codebase's own stated pane-scrolling convention,
+   though its existing nested `.ui-table-wrap` was already handling that
+   correctly on its own.
+   **Verified two ways, not just read**: no headless-browser tooling was
+   preinstalled and there's no root in this environment, so `libnspr4` /
+   `libnss3` / `libasound2` were pulled with `apt-get download` (no sudo
+   needed) and extracted to a local prefix via `dpkg-deb -x`, then
+   Playwright's already-installed Chromium ran against that
+   `LD_LIBRARY_PATH`. A static harness reproducing the exact class
+   hierarchy (before/after, real extracted CSS) confirmed the numbers
+   above; the real `web/` dev server + rebuilt `worker`/`api` containers
+   confirm `npm run build` and the offline suite (1064) both stay green.
+
+1. **`GET /api/kb/collections` had no tenant scoping at all** — it looped
+   over *every* tenant the caller belongs to, ran `_ensure_org_kb` on each,
+   then queried `sources` with only `kind=internal_kb` (relying on RLS,
+   which legitimately allows a multi-tenant member to read all of them) and
+   returned the merged list. Any account that's a member of more than one
+   tenant — e.g. `gundamvishnu7@gmail.com`, who owns both the **Acme** demo
+   tenant and the **gunner**/UrbanPiper tenant — saw both tenants' KB
+   collections combined in the Knowledge panel, in the flow editor's
+   `retrieve`/`kb_lookup` node pickers, and in the onboarding wizard's KB
+   step. Fixed to match the sibling `/api/kb/connections` endpoint's
+   existing pattern: takes an optional `tenant_id`, resolved via
+   `_caller_tenant` (still fine for single-tenant callers; a multi-tenant
+   caller must now pass one explicitly — same tradeoff already accepted for
+   `/api/kb/connections` and flagged at 2026-09-08 for
+   `globex-owner@example.test`). Threaded `tenant_id` through everywhere it
+   was being silently dropped: `web/src/api.ts`'s `kb.listCollections`,
+   `KnowledgeView.tsx` (now refetches + clears selection on tenant switch),
+   `Inspector.tsx`'s `RetrieveForm`/`KbLookupForm` (didn't have the
+   `tenantId` prop every sibling form already takes), and
+   `OnboardingWizard.tsx`'s `loadKb`. Updated the two `test_api.py` KB
+   integration tests to pass `tenant_id=GLOBEX_TENANT` explicitly, same fix
+   already applied to the Freshchat tests for the same known
+   multi-tenant-test-account issue.
+2. **Self-serve "public docs site (crawl)" KB source failed every sync**
+   with `No module named 'bs4'`. `interpreter/kb_connectors.py`'s
+   `public_url` connector calls `ingestion/webcrawl.py`, which imports
+   `bs4` — but `webcrawl.py` runs inside the API/worker Docker container at
+   sync time (`api/worker.py`'s `_sync_kb_connection`), and
+   `beautifulsoup4` only lived in `requirements-ingest.txt`, explicitly
+   commented as "Actions only, kept out of the image" from back when
+   `webcrawl.py`'s only caller was the GitHub Actions scraper. Moved
+   `beautifulsoup4` to `requirements.txt`; `trafilatura` (scraper-only, no
+   runtime caller) stays in `requirements-ingest.txt`.
+   **Rebuilt `worker`+`api` and live-verified** — bs4 fixed a second,
+   *distinct* failure surfaced right behind it: `ingestion/webcrawl.py`'s
+   `crawl()` was only bounded by `max_pages`, not wall-clock time, and at
+   this environment's real per-page fetch latency (~6s/page against the
+   UrbanPiper help/API-docs sites) any connection configured for more than
+   ~15-20 pages blew the worker's 120s `WORKER_JOB_TIMEOUT` and reported
+   the whole source as failed (`{"error": "job exceeded 120s"}`) — one of
+   `gunner`'s two `public_url` connections (`max_pages: 50`) hit exactly
+   this. Added a `max_seconds` (default 90s) wall-clock budget to `crawl()`
+   alongside the existing `max_pages`/`max_depth` bounds, and switched the
+   `exhaustive` signal `_sync_public_url` uses to gate archiving from
+   `len(pages) < max_pages` (wrong once a time-truncated run can also land
+   under the page cap — would have wrongly archived live docs) to whether
+   the crawl's queue still had unvisited URLs left when it stopped, via a
+   new `stats` out-param. Re-enqueued `kb_sync` for both of `gunner`'s
+   previously-failing `public_url` connections against the rebuilt worker:
+   both now `status=active` (44 docs / 25 docs, no error).
+
+Full offline **1064 passed** (2 new webcrawl assertions from the
+`stats`/`exhaustive` change); web build green. **Live-verified end-to-end**
+for #2 (real rebuild, real re-synced connections, checked in Supabase).
+#1 is not yet live-verified against real multi-tenant Supabase RLS in a
+browser — same "needs a rebuild to see it" gap as the Broadsheet merge
+noted below, except the `web/` image isn't part of this docker-compose
+stack (only `api`+`worker`), so #1 needs `cd web && npm run dev` (or
+whatever serves it) restarted to pick up the built assets, not a container
+rebuild.
+
+---
+
 **2026-09-08 (Loophole fixes — branch `web-redesign-broadsheet`.)**
 
 Fixed five real gaps found reviewing the session's work:

@@ -1,6 +1,7 @@
 # Runtime deps for the Docker services (poller / worker / cdc / api / slackbot).
 # Split off, NOT here:
-#   requirements-ingest.txt      Phase 1 scraper (Actions only)
+#   requirements-ingest.txt      Phase 1 scraper (Actions only; trafilatura only —
+#                                 beautifulsoup4 lives here, see below)
 #   requirements-connectors.txt  Google Docs / Gmail-OAuth (lazy, optional)
 #   requirements-media.txt       image OCR / video (build with MEDIA=1)
 #   requirements-dev.txt         pytest
@@ -15,6 +16,11 @@ fastembed
 
 # --- graph sync target ---
 neo4j
+
+# --- self-serve KB "public_url" connector (interpreter/kb_connectors.py ->
+# ingestion/webcrawl.py), synced by api/worker.py at runtime — NOT Actions-only
+# despite living alongside the Phase 1 scraper in requirements-ingest.txt.
+beautifulsoup4
 
 # --- interpreter (Phase 2-4) ---
 langgraph

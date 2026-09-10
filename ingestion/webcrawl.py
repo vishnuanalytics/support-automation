@@ -158,7 +158,13 @@ def _links(html: str, base: str) -> list[str]:
 
 
 def crawl(start_url: str, *, max_pages: int = 20, max_depth: int = 2,
-          delay: float = 0.3, timeout: float = 15.0) -> list[dict]:
+          delay: float = 0.3, timeout: float = 15.0, max_seconds: float = 90.0,
+          stats: dict | None = None) -> list[dict]:
+    """`stats`, if given, is filled in with `{"truncated": bool}` — True iff
+    there was still more in-scope, unvisited URL left in the queue when the
+    crawl stopped (hit `max_pages` or `max_seconds`), i.e. this run did NOT
+    see the whole reachable site and a caller should not treat a
+    previously-seen page's absence from this run as "deleted"."""
     if not _ok_host(start_url):
         raise ValueError(f"refusing to crawl {start_url!r} (must be a public http(s) URL)")
     start = urlparse(start_url)
@@ -196,8 +202,15 @@ def crawl(start_url: str, *, max_pages: int = 20, max_depth: int = 2,
 
     start_norm = start_url.split("#", 1)[0]
     start_err: "str | None" = None   # why the start URL itself failed, if it did
+    t0 = time.time()
 
-    while q and len(pages) < max_pages:
+    # `max_pages` alone isn't a real bound in wall-clock terms — a slow site
+    # (or one that's just far away) can take several seconds per page, and
+    # the worker that runs this has its own hard per-job timeout regardless
+    # of how many pages were left to go. `max_seconds` keeps a sync call
+    # returning a real (if partial) result instead of getting killed mid-run
+    # and reporting the whole source as failed.
+    while q and len(pages) < max_pages and (time.time() - t0) < max_seconds:
         url, depth = q.popleft()
         is_start = url == start_norm
         if url in seen:
@@ -238,4 +251,6 @@ def crawl(start_url: str, *, max_pages: int = 20, max_depth: int = 2,
     # no in-scope content, [] is still the right answer.
     if not pages and start_err:
         raise RuntimeError(f"crawl of {start_url!r} found nothing — start URL {start_err}")
+    if stats is not None:
+        stats["truncated"] = bool(q)
     return pages

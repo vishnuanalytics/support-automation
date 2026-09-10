@@ -1215,7 +1215,7 @@ def kb_collection(auth_headers):
 @pytest.mark.integration
 def test_kb_collection_shows_up_scoped(kb_collection, auth_headers):
     sid, name = kb_collection
-    cols = client.get("/api/kb/collections", headers=auth_headers).json()
+    cols = client.get(f"/api/kb/collections?tenant_id={GLOBEX_TENANT}", headers=auth_headers).json()
     mine = [c for c in cols if c["source_id"] == sid]
     assert mine and mine[0]["name"] == name and mine[0]["tenant_id"] == GLOBEX_TENANT
     assert mine[0]["entry_count"] == 0
@@ -1259,7 +1259,7 @@ def test_kb_entry_roundtrip_embeds_and_scopes(kb_collection, auth_headers):
 
 
 def _kb_name(sid, headers):
-    for c in client.get("/api/kb/collections", headers=headers).json():
+    for c in client.get(f"/api/kb/collections?tenant_id={GLOBEX_TENANT}", headers=headers).json():
         if c["source_id"] == sid:
             return c["name"]
     raise AssertionError("collection vanished")

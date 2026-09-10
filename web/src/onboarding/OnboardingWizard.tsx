@@ -48,7 +48,7 @@ export function OnboardingWizard({
 
   const loadKb = () => {
     api.kb
-      .listCollections()
+      .listCollections(tenantId)
       .then((cs) => setOrgKbId(cs.find((c) => c.org_kb)?.source_id ?? cs[0]?.source_id ?? null))
       .catch(() => {});
     api.kb

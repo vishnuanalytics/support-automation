@@ -1,4 +1,9 @@
 # Phase 1 scraper (ingestion/scraper.py) — runs on GitHub Actions
 # (daily-sync.yml), never in the Docker services. Kept out of the image.
-beautifulsoup4
+#
+# beautifulsoup4 moved to requirements.txt (2026-09-10): ingestion/webcrawl.py
+# (which imports it) is also used at runtime by the "public_url" KB connector
+# (interpreter/kb_connectors.py, synced by api/worker.py) — that path was
+# missing from the Docker image and every crawl-source sync failed with
+# "No module named 'bs4'". trafilatura has no runtime caller, stays here.
 trafilatura

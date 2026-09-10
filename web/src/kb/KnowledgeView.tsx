@@ -75,18 +75,22 @@ export function KnowledgeView({ tenantId }: { tenantId: string }) {
 
   const refresh = useCallback(async () => {
     try {
-      const c = await api.kb.listCollections();
+      const c = await api.kb.listCollections(tenantId);
       setCols(c);
       // default to the org KB (server sorts it first)
       setSel((s) => s ?? c.find((x) => x.org_kb)?.source_id ?? c[0]?.source_id ?? null);
     } catch (e) {
       setErr(e instanceof ApiError ? String(e.detail) : String(e));
     }
-  }, []);
+  }, [tenantId]);
 
   useEffect(() => {
+    // switching workspace: drop any collection selected under the old tenant
+    // before refetching, so the panel never renders another tenant's KB.
+    setCols([]);
+    setSel(null);
     void refresh();
-  }, [refresh]);
+  }, [tenantId, refresh]);
 
   const [newColOpen, setNewColOpen] = useState(false);
   const [newColName, setNewColName] = useState("");
@@ -894,13 +898,16 @@ function ConnectedSources({
         </div>
       ) : (
         <>
-          <DataTable
-            columns={connColumns}
-            rows={conns}
-            rowId={(c) => c.connection_id}
-            selectedId={typeof panel === "object" && panel ? panel.edit.connection_id : null}
-            onSelect={(c) => setPanel({ edit: c })}
-          />
+          <div className="kb-sources__list">
+            <DataTable
+              flush
+              columns={connColumns}
+              rows={conns}
+              rowId={(c) => c.connection_id}
+              selectedId={typeof panel === "object" && panel ? panel.edit.connection_id : null}
+              onSelect={(c) => setPanel({ edit: c })}
+            />
+          </div>
           <Button variant="ghost" size="sm" style={{ justifySelf: "start" }} onClick={() => void load()}>
             Refresh
           </Button>

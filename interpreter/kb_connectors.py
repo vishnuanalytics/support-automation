@@ -141,7 +141,8 @@ def _sync_public_url(config: dict, watermark: "dict | None", ctx: SyncCtx) -> KB
     from ingestion.webcrawl import crawl
 
     max_pages = int(config.get("max_pages", 20))
-    pages = crawl(config["url"], max_pages=max_pages)
+    stats: dict = {}
+    pages = crawl(config["url"], max_pages=max_pages, stats=stats)
     docs = [
         KBDocument(
             external_id=pg["title"], title=pg["title"],
@@ -150,8 +151,12 @@ def _sync_public_url(config: dict, watermark: "dict | None", ctx: SyncCtx) -> KB
         )
         for pg in pages
     ]
-    # not truncated => this run exhausted everything reachable; safe to archive misses
-    return KBSyncResult(documents=docs, exhaustive=len(pages) < max_pages)
+    # not truncated (by page cap OR the worker-job time budget) => this run
+    # exhausted everything reachable; safe to archive misses. Fall back to
+    # the old page-count heuristic if `crawl` didn't populate `stats` (e.g.
+    # a test double that doesn't know about it).
+    truncated = stats.get("truncated", len(pages) >= max_pages)
+    return KBSyncResult(documents=docs, exhaustive=not truncated)
 
 
 register(KBConnectorSpec(

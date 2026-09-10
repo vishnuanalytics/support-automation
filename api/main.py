@@ -2019,16 +2019,16 @@ def _ensure_org_kb(tenant_id: str) -> dict:
 
 
 @app.get("/api/kb/collections")
-def kb_list_collections(c: Caller = Depends(caller)) -> list[dict]:
-    for t in [r["tenant_id"] for r in
-              (c.sb.table("tenant_members").select("tenant_id").execute().data or [])]:
-        try:
-            _ensure_org_kb(t)
-        except Exception as e:  # noqa: BLE001
-            log.warning("ensure_org_kb(%s): %s", t, e)
+def kb_list_collections(tenant_id: str | None = None, c: Caller = Depends(caller)) -> list[dict]:
+    tid = _caller_tenant(c, tenant_id)
+    try:
+        _ensure_org_kb(tid)
+    except Exception as e:  # noqa: BLE001
+        log.warning("ensure_org_kb(%s): %s", tid, e)
 
     cols = (c.sb.table("sources").select("*")
-            .eq("kind", "internal_kb").neq("status", "archived").execute().data or [])
+            .eq("kind", "internal_kb").eq("tenant_id", tid)
+            .neq("status", "archived").execute().data or [])
     out = []
     for s in cols:
         entries = (c.sb.table("kb_entries").select("entry_id, status")

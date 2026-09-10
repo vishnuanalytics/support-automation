@@ -555,7 +555,7 @@ export function NodeInspector({
       )}
 
       {node.data.nodeType === "kb_lookup" && (
-        <KbLookupForm config={config} onConfig={onConfig} />
+        <KbLookupForm config={config} onConfig={onConfig} tenantId={tenantId} />
       )}
 
       {node.data.nodeType === "extract" && (
@@ -615,7 +615,7 @@ export function NodeInspector({
       )}
 
       {node.data.nodeType === "retrieve" && (
-        <RetrieveForm config={config} onConfig={onConfig} />
+        <RetrieveForm config={config} onConfig={onConfig} tenantId={tenantId} />
       )}
 
       {node.data.nodeType === "http_request" && (
@@ -1193,17 +1193,19 @@ function SfCaseForm({
 function RetrieveForm({
   config,
   onConfig,
+  tenantId,
 }: {
   config: Record<string, unknown>;
   onConfig: (v: Record<string, unknown>) => void;
+  tenantId: string;
 }) {
   const [cols, setCols] = useState<KbCollection[]>([]);
   const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
   const selected = (config.kb_sources as string[]) || [];
 
   useEffect(() => {
-    api.kb.listCollections().then(setCols).catch(() => setCols([]));
-  }, []);
+    api.kb.listCollections(tenantId).then(setCols).catch(() => setCols([]));
+  }, [tenantId]);
 
   const toggle = (name: string) =>
     set({
@@ -1697,9 +1699,11 @@ function IdentifyForm({
 function KbLookupForm({
   config,
   onConfig,
+  tenantId,
 }: {
   config: Record<string, unknown>;
   onConfig: (v: Record<string, unknown>) => void;
+  tenantId: string;
 }) {
   const [cols, setCols] = useState<KbCollection[]>([]);
   const [err, setErr] = useState<string | null>(null);
@@ -1708,10 +1712,10 @@ function KbLookupForm({
 
   useEffect(() => {
     api.kb
-      .listCollections()
+      .listCollections(tenantId)
       .then(setCols)
       .catch((e) => setErr(String(e)));
-  }, []);
+  }, [tenantId]);
 
   const toggle = (name: string) =>
     set({
