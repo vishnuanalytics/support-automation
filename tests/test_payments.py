@@ -76,7 +76,19 @@ def test_razorpay_create_customer_posts_name_email_and_tenant_note(monkeypatch):
     assert captured["url"].endswith("/customers")
     assert captured["json"] == {
         "name": "Acme Support", "email": "owner@acme.test", "notes": {"tenant_id": "t1"},
+        "fail_existing": "0",
     }
+
+
+def test_razorpay_create_customer_reuses_an_existing_customer_for_the_same_email(monkeypatch):
+    """fail_existing="0" -- a second real subscribe attempt for an email
+    Razorpay already has a customer for must hand back that customer, not
+    500 the request (found live 2026-09-10: a real 400 without this)."""
+    monkeypatch.setattr("requests.request",
+                        lambda *a, **k: _Resp(200, {"id": "cust_existing"}))
+    monkeypatch.setenv("RAZORPAY_KEY_ID", "x")
+    monkeypatch.setenv("RAZORPAY_KEY_SECRET", "y")
+    assert payments.razorpay_create_customer("Acme Support", "owner@acme.test", "t1") == "cust_existing"
 
 
 def test_razorpay_create_customer_without_email_omits_it(monkeypatch):

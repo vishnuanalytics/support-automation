@@ -139,6 +139,17 @@ def _resolve_key(prov: str, tenant_id: str | None) -> str:
     return _tenant_keys(tenant_id).get(prov) or os.environ.get(_PROVIDER_KEY[prov], "")
 
 
+def _is_byok(prov: str, tenant_id: str | None) -> bool:
+    return bool(tenant_id) and prov in _tenant_keys(tenant_id)
+
+
+def tenant_has_byok(tenant_id: "str | None") -> bool:
+    """Does this tenant have at least one of their own LLM keys saved?
+    Billing chunk F's subscribe flow uses this to decide whether a plan's
+    BYOK discount applies at checkout time."""
+    return bool(_tenant_keys(tenant_id))
+
+
 def _roster(capability: str) -> tuple[list[str], list[str]]:
     """(free, premium) model ids from the daily-refreshed `llm_roster` table
     (Phase 26). Every id is OpenRouter-hosted. Empty on any failure."""
@@ -222,6 +233,13 @@ def available(model: str | None = None, tenant_id: str | None = None) -> bool:
 # or None for a stub call. Handlers read this straight after calling complete().
 last_usage: dict[str, int] | None = None
 
+# Billing chunk E (2026-09-10) — companion to last_usage: "byok" if that call
+# used the tenant's own pasted key, "platform" if it used this process's env
+# key, None for a stub/cache-hit (no real provider call made). Same
+# read-straight-after-the-call contract as last_usage; set in _dispatch()
+# and complete_with_tools() (the two places that actually resolve a key).
+last_key_source: "str | None" = None
+
 # clients keyed by the resolved API key string (not by tenant_id, so the
 # platform's own default key — the common case — is built once regardless
 # of which/how many tenants share it). A race populating this dict can only
@@ -268,8 +286,10 @@ def _ckey(model: str, system: str, user: str, max_tokens: int) -> str:
 def _dispatch(model: str, system: str, user: str, max_tokens: int,
               temperature: float, json_object: bool, images=None,
               tenant_id: str | None = None) -> str:
+    global last_key_source
     prov = provider(model)
     key = _resolve_key(prov, tenant_id)
+    last_key_source = "byok" if _is_byok(prov, tenant_id) else "platform"
     if prov == "anthropic":
         return _anthropic_complete(system, user, model, max_tokens, json_object,
                                    images=images, api_key=key)
@@ -312,7 +332,7 @@ def complete(
     key. Omit it (every pre-BYOK caller still does) to always use the
     platform's own keys, unchanged from before BYOK existed.
     """
-    global last_usage
+    global last_usage, last_key_source
     model = model or DEFAULT_MODEL
     if model not in MODELS and not images:
         raise ValueError(f"model {model!r} is not in the roster {sorted(MODELS)}")
@@ -321,6 +341,7 @@ def complete(
         chain = _vision_chain(model if model in MODELS else None, tenant_id=tenant_id)
         if not chain:
             last_usage = None
+            last_key_source = None
             return _stub(system, user + "\n[image omitted — no vision model]",
                          json_object=json_object)
         return _run_chain(chain, system, user, max_tokens, temperature, json_object,
@@ -332,11 +353,13 @@ def complete(
         if hit is not None:
             _cache.move_to_end(ck)
             last_usage = None
+            last_key_source = None
             return hit
 
     chain = _fallback_chain(model, tenant_id=tenant_id)
     if not chain:
         last_usage = None
+        last_key_source = None
         return _stub(system, user, json_object=json_object)
 
     out = _run_chain(chain, system, user, max_tokens, temperature, json_object, tenant_id=tenant_id)
@@ -350,7 +373,7 @@ def complete(
 def _run_chain(chain: list[str], system: str, user: str, max_tokens: int,
                temperature: float, json_object: bool, *, images=None,
                tenant_id: str | None = None) -> str:
-    global last_usage
+    global last_usage, last_key_source
     last_err: Exception | None = None
     for i, m in enumerate(chain):
         try:
@@ -367,6 +390,7 @@ def _run_chain(chain: list[str], system: str, user: str, max_tokens: int,
             raise
     log.warning("llm: all providers exhausted (%s) — offline stub", last_err)
     last_usage = None
+    last_key_source = None
     return _stub(system, user, json_object=json_object)
 
 
@@ -726,12 +750,15 @@ def complete_with_tools(
 
     `tenant_id` — BYOK, same as `complete()`.
     """
+    global last_key_source
     model = model or DEFAULT_MODEL
     if not available(model, tenant_id=tenant_id):
+        last_key_source = None
         return _stub_tool_result(messages, tools)
 
     prov = provider(model)
     key = _resolve_key(prov, tenant_id)
+    last_key_source = "byok" if _is_byok(prov, tenant_id) else "platform"
     if prov == "groq":
         return _groq_complete_tools(messages, system, tools, model, max_tokens, temperature, api_key=key)
     if prov == "anthropic":

@@ -149,7 +149,12 @@ def _razorpay_call(method: str, path: str, **kw) -> dict[str, Any]:
 
 
 def razorpay_create_customer(name: str, email: "str | None", tenant_id: str) -> str:
-    body: dict[str, Any] = {"name": name, "notes": {"tenant_id": tenant_id}}
+    # fail_existing="0": Razorpay 400s on a repeat POST for an email it
+    # already has a customer for, unless told to hand back the existing
+    # customer instead — found live (2026-09-10), not something the docs
+    # make obvious, when a second real subscribe attempt for the same
+    # tenant/owner email failed with a real 400 from api.razorpay.com.
+    body: dict[str, Any] = {"name": name, "notes": {"tenant_id": tenant_id}, "fail_existing": "0"}
     if email:
         body["email"] = email
     return _razorpay_call("POST", "/customers", json=body)["id"]

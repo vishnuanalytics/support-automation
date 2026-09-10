@@ -707,6 +707,81 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-10 (Billing & Payments chunks E + F — BYOK-aware metering and
+real, signed-off prices. Both done and live-verified end-to-end. This
+closes the billing track: every chunk (A schema, B Stripe, C Razorpay, D
+trial enforcement, E BYOK metering, F real prices) is now built and
+live-verified. What's left is entirely product/deployment work — see
+"Not done yet" below, not more billing engineering.)**
+
+**Chunk E — a run entirely on the tenant's own LLM key no longer counts
+against their plan.** `interpreter/llm.py` gained `last_key_source`
+("byok"/"platform"/None), a companion to the existing `last_usage` global,
+set in the two places that actually resolve a key
+(`_dispatch`/`complete_with_tools`) and reset alongside `last_usage` on
+every stub/cache-hit path. `interpreter/registry.py`'s four node types
+that already tracked tokens (classify/draft/agent/ai_prompt) now also tag
+`key_source` on their trace entry — `extract`/`clarify` don't track tokens
+at all today, a pre-existing gap left alone rather than expanding this
+chunk's scope. `interpreter/runs.py::_token_usage` rolls trace entries
+into a new `tokens_by_key_source` ({"platform": n, "byok": n}) alongside
+the existing by-model/by-node breakdowns — migration `105` adds the
+matching `runs` column. `interpreter/billing.py::usage_summary` computes
+`billable_runs_count`/`billable_tokens_total` (excludes a run only when
+**every** LLM call in it was BYOK — a run with any platform-paid call
+still counts, and a row from before this column existed defaults to fully
+platform-billable, never silently zero) and uses those for the actual
+quota percentages; `web/src/billing/BillingView.tsx`'s quota bars now read
+the billable figures instead of the true totals, with a note showing how
+many runs were BYOK-exempted. **Live-verified with real Groq API calls**
+(not mocked): ran a real `classify` node twice against the real Globex
+tenant, once with no key configured (`key_source: platform`, real token
+count) and once with a real BYOK key saved via the actual `/api/integrations/llm`
+endpoint (`key_source: byok`) — both propagated correctly end-to-end into
+`tokens_by_key_source`. 18 new tests (`tests/test_llm.py`, new;
+`tests/test_billing.py`'s BYOK section).
+
+**Chunk F — Starter ($49/mo) and Growth ($199/mo) are now real, working
+plans**, replacing the free/pro placeholders as what a tenant actually
+subscribes to (migration `106`; `plans` gains `razorpay_plan_id_byok`/
+`stripe_price_id_byok` for the BYOK-discounted price alongside the
+standard one). Real test-mode Stripe Products+Prices and Razorpay Plans
+were created live for both tiers, standard and BYOK-discounted (20%/25%
+off) — 8 real provider objects total, ids stored on the `plans` rows.
+New `interpreter/billing.py::resolve_checkout_plan(plan, provider_slug,
+tenant_id)` — pure, unit-tested — swaps in the BYOK price when
+`llm.tenant_has_byok()` is true and the plan has one, leaving
+`interpreter/payments.py` entirely unaware BYOK pricing exists (it just
+reads whichever `razorpay_plan_id`/`stripe_price_id` it's handed).
+**Live-verified end-to-end, including a real bug this caught**: the very
+first real `POST /api/billing/subscribe` call against the real Starter
+plan hit a genuine `razorpay_create_customer` bug — Razorpay 400s a
+second real customer-creation call for an email it already has a
+customer for, unless told `fail_existing: "0"`, which this project's
+first live test of the endpoint (chunk C) hadn't exercised because it was
+that email's *first* customer. Fixed, then re-verified live: a standard
+checkout correctly used the standard Razorpay plan id, and — after saving
+a real BYOK key for the same tenant — a second checkout correctly used
+the BYOK-discounted plan id instead. 5 new tests
+(`tests/test_billing.py`'s `resolve_checkout_plan` section,
+`tests/test_payments.py`'s `fail_existing` regression test). All test
+artifacts cleaned up afterward (both real Razorpay subscriptions
+canceled, the BYOK key removed, the tenant restored to its exact
+pre-test state).
+
+Offline suite across chunks E+F: 1143 passed.
+
+**Not done yet — deployment/product work, not more billing engineering**:
+no web UI for choosing a plan or entering `billing_country` (the
+`/api/billing/subscribe` API works, nothing in `web/` calls it yet); no
+trial-countdown banner or locked-state screen; `STRIPE_CHECKOUT_SUCCESS_URL`/
+`CANCEL_URL` still point at localhost; both providers' webhook secrets
+are still blank (someone needs to actually create the webhook endpoints
+in each dashboard); `plan_id` on `tenants` still isn't shown/switchable
+anywhere in the product past the raw API.
+
+---
+
 **2026-09-10 (Billing & Payments chunk D — trial enforcement, done and
 live-verified end-to-end. Chunks E/F (BYOK metering, real prices) remain
 the only gap before this track is a complete, usable billing system.)**

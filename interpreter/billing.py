@@ -85,6 +85,28 @@ def plan_limits(plan: dict[str, Any]) -> dict[str, int | None]:
     return {"runs": plan.get("included_runs"), "tokens": plan.get("included_tokens")}
 
 
+def resolve_checkout_plan(plan: dict[str, Any], provider_slug: str,
+                          tenant_id: str) -> tuple[dict[str, Any], bool]:
+    """Billing chunk F: a tenant who already brings their own LLM key costs
+    the platform nothing on tokens, so they check out at the plan's BYOK
+    price instead of the standard one — if the plan has one set yet.
+    `create_subscription` only ever reads razorpay_plan_id/stripe_price_id,
+    so swapping those two keys on a copy of the row is the whole mechanism;
+    `interpreter/payments.py` stays entirely unaware BYOK pricing exists.
+
+    Returns (plan_to_use, discount_applied)."""
+    from interpreter import llm
+
+    if not llm.tenant_has_byok(tenant_id):
+        return plan, False
+    byok_id = (plan.get("razorpay_plan_id_byok") if provider_slug == "razorpay"
+              else plan.get("stripe_price_id_byok"))
+    if not byok_id:
+        return plan, False
+    return {**plan, "razorpay_plan_id": plan.get("razorpay_plan_id_byok"),
+            "stripe_price_id": plan.get("stripe_price_id_byok")}, True
+
+
 def estimate_cost_usd(tokens_by_model: dict[str, int]) -> float:
     total = 0.0
     for model, n in (tokens_by_model or {}).items():
@@ -108,6 +130,8 @@ def usage_summary(rows: list[dict[str, Any]], plan_name: str, limits: dict[str, 
 
     runs_count = len(rows)
     tokens_total = 0
+    billable_runs_count = 0
+    billable_tokens_total = 0
     tokens_by_model: dict[str, int] = {}
     tokens_by_node: dict[str, int] = {}
     daily: dict[str, dict[str, int]] = {}
@@ -116,6 +140,24 @@ def usage_summary(rows: list[dict[str, Any]], plan_name: str, limits: dict[str, 
     for r in rows:
         row_tokens = int(r.get("tokens_total") or 0)
         tokens_total += row_tokens
+        # Billing chunk E — a run's own LLM key costs the platform nothing,
+        # so it shouldn't count toward the plan's included runs/tokens. A
+        # run only counts as fully-BYOK (excluded) when EVERY LLM call in
+        # it used the tenant's own key; a run with any platform-paid call
+        # (or none at all — an old/legacy row, or a flow with no LLM node)
+        # still counts, same as before chunk E existed. A row with no
+        # tokens_by_key_source at all (recorded before this column existed)
+        # is the "none at all" case too — its whole tokens_total is
+        # platform-billable, not silently zeroed.
+        row_key_source = r.get("tokens_by_key_source") or {}
+        if row_key_source:
+            platform_tokens = int(row_key_source.get("platform") or 0)
+            byok_tokens = int(row_key_source.get("byok") or 0)
+        else:
+            platform_tokens, byok_tokens = row_tokens, 0
+        billable_tokens_total += platform_tokens
+        if not (byok_tokens > 0 and platform_tokens == 0):
+            billable_runs_count += 1
         row_by_model = r.get("tokens_by_model") or {}
         for model, n in row_by_model.items():
             tokens_by_model[model] = tokens_by_model.get(model, 0) + int(n)
@@ -163,13 +205,18 @@ def usage_summary(rows: list[dict[str, Any]], plan_name: str, limits: dict[str, 
         "limits": limits,
         "runs_count": runs_count,
         "tokens_total": tokens_total,
+        # Billing chunk E — the true totals above are for display
+        # ("you ran 400 automations this month"); these two are what
+        # actually counts against the plan, with fully-BYOK runs excluded.
+        "billable_runs_count": billable_runs_count,
+        "billable_tokens_total": billable_tokens_total,
         "tokens_by_model": tokens_by_model,
         "by_node": by_node_list,
         "by_flow": by_flow_list,
         "estimated_cost_usd": overall_cost,
         "daily": [{"date": d, **daily[d]} for d in sorted(daily)],
-        "pct_runs_used": _pct(runs_count, limits["runs"]),
-        "pct_tokens_used": _pct(tokens_total, limits["tokens"]),
+        "pct_runs_used": _pct(billable_runs_count, limits["runs"]),
+        "pct_tokens_used": _pct(billable_tokens_total, limits["tokens"]),
     }
 
 
@@ -217,7 +264,7 @@ def check_and_warn(sb, tenant_id: str) -> str | None:
         if limits["runs"] is None and limits["tokens"] is None:
             return None  # unlimited plan — nothing to warn about
 
-        rows = (sb.table("runs").select("tokens_total, tokens_by_model, created_at")
+        rows = (sb.table("runs").select("tokens_total, tokens_by_model, tokens_by_key_source, created_at")
                 .eq("tenant_id", tenant_id)
                 .gte("created_at", period_start).lt("created_at", period_end)
                 .limit(5000).execute().data or [])

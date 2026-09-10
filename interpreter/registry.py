@@ -346,7 +346,8 @@ def h_classify(state: CaseState, config: dict) -> dict:
             config["_node_id"], "classify",
             f"tier={tier} region={region} urgency={classification['urgency']} "
             f"topic={topic} type={case_type or '-'} mode={answer_mode}",
-            {**classification, "tokens": llm.last_usage, "model": _model},
+            {**classification, "tokens": llm.last_usage, "model": _model,
+             "key_source": llm.last_key_source},
         ),
     }
 
@@ -1122,6 +1123,7 @@ def h_draft(state: CaseState, config: dict) -> dict:
         tenant_id=state.get("tenant_id"),
     )
     tokens = llm.last_usage
+    key_source = llm.last_key_source
     parsed = _safe_json(raw)
     reply = parsed.get("reply") or parsed.get("draft") or raw
     try:
@@ -1166,7 +1168,7 @@ def h_draft(state: CaseState, config: dict) -> dict:
             f"+{len(prior_as_src)} prior-case",
             {"draft_confidence": model_conf, "chars": len(reply),
              "groundedness": grounded, "integrity": integ, "tokens": tokens,
-             "model": _model,
+             "model": _model, "key_source": key_source,
              "used_internal_kb": bool(internal_matches),
              "prior_cases": [p.get("case_number") for p in prior[:3]],
              "answer_mode": mode},
@@ -1282,6 +1284,7 @@ def h_agent(state: CaseState, config: dict) -> dict:
     best_score = -1.0
     attempts: list[dict[str, Any]] = []
     tokens_total = 0
+    key_sources: set[str] = set()
 
     for i in range(max_iter):
         r_cfg = {**retrieve_cfg, "_node_id": config["_node_id"]}
@@ -1294,8 +1297,10 @@ def h_agent(state: CaseState, config: dict) -> dict:
         d_cfg = {**draft_cfg, "_node_id": config["_node_id"]}
         d_out = h_draft(working, d_cfg)
         working = {**working, **{k: v for k, v in d_out.items() if k != "trace"}}
-        d_tok = ((d_out.get("trace") or [{}])[0].get("data") or {}).get("tokens") or {}
-        tokens_total += int(d_tok.get("total") or 0)
+        d_data = (d_out.get("trace") or [{}])[0].get("data") or {}
+        tokens_total += int((d_data.get("tokens") or {}).get("total") or 0)
+        if d_data.get("key_source"):
+            key_sources.add(d_data["key_source"])
 
         score = float((d_out.get("groundedness") or {}).get("score", 0.0))
         attempts.append({"iteration": i, "query": tried[-1],
@@ -1311,6 +1316,8 @@ def h_agent(state: CaseState, config: dict) -> dict:
         query_override = _agent_reformulate(question, tried, top_titles, unsupported, _model,
                                             tenant_id=state.get("tenant_id"))
         tokens_total += int((llm.last_usage or {}).get("total") or 0)
+        if llm.last_key_source:
+            key_sources.add(llm.last_key_source)
         if not query_override:
             break
 
@@ -1328,7 +1335,9 @@ def h_agent(state: CaseState, config: dict) -> dict:
             f"(threshold {threshold:.2f})",
             {"attempts": attempts, "threshold": threshold,
              "tokens": {"total": tokens_total} if tokens_total else None,
-             "model": draft_cfg.get("model", llm.DEFAULT_MODEL)},
+             "model": draft_cfg.get("model", llm.DEFAULT_MODEL),
+             "key_source": "platform" if "platform" in key_sources
+                          else ("byok" if "byok" in key_sources else None)},
         ),
     }
 
@@ -2331,7 +2340,8 @@ def h_ai_prompt(state: CaseState, config: dict) -> dict:
                  + (f", {len(imgs)} image(s)" if imgs else "")
                  + (f", {usage.get('total')} tok" if usage.get("total") else ""),
                  {"output_key": out_key, "value": value, "images": len(imgs),
-                  "json": want_json, "tokens": usage or None, "model": _model}),
+                  "json": want_json, "tokens": usage or None, "model": _model,
+                  "key_source": llm.last_key_source}),
     }
 
 

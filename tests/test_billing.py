@@ -85,6 +85,53 @@ def test_usage_summary_by_flow_groups_sorts_and_names_flows():
     assert sum(f["runs"] for f in s["by_flow"]) == 3
 
 
+# ── Billing chunk E (2026-09-10): BYOK-excluded quota/overage ──────────
+def test_usage_summary_excludes_a_fully_byok_run_from_billable_counts():
+    rows = [
+        {"tokens_total": 100, "tokens_by_model": {"claude-sonnet-5": 100},
+         "tokens_by_key_source": {"platform": 100}, "created_at": "2026-09-01T10:00:00+00:00"},
+        {"tokens_total": 300, "tokens_by_model": {"claude-sonnet-5": 300},
+         "tokens_by_key_source": {"byok": 300}, "created_at": "2026-09-02T10:00:00+00:00"},
+    ]
+    s = billing.usage_summary(rows, "free", _FREE_LIMITS, "2026-09-01T00:00:00+00:00",
+                              "2026-10-01T00:00:00+00:00")
+    assert s["runs_count"] == 2 and s["tokens_total"] == 400          # true totals, unaffected
+    assert s["billable_runs_count"] == 1 and s["billable_tokens_total"] == 100  # the byok run excluded
+    assert s["pct_runs_used"] == round(1 / 200 * 100, 1)
+    assert s["pct_tokens_used"] == round(100 / 500_000 * 100, 1)
+
+
+def test_usage_summary_a_run_with_any_platform_call_still_counts():
+    """A run that mixed a platform-paid node with a BYOK node still cost
+    the platform something — it counts, unlike a fully-BYOK run."""
+    rows = [{"tokens_total": 150, "tokens_by_key_source": {"platform": 50, "byok": 100},
+            "created_at": "2026-09-01T10:00:00+00:00"}]
+    s = billing.usage_summary(rows, "free", _FREE_LIMITS, "2026-09-01T00:00:00+00:00",
+                              "2026-10-01T00:00:00+00:00")
+    assert s["billable_runs_count"] == 1
+    assert s["billable_tokens_total"] == 50   # only the platform-paid share
+
+
+def test_usage_summary_a_run_predating_key_source_tracking_is_fully_billable():
+    """A row recorded before this column existed has no tokens_by_key_source
+    at all — must count as fully platform-billable, not silently zeroed."""
+    rows = [{"tokens_total": 200, "created_at": "2026-08-01T10:00:00+00:00"}]
+    s = billing.usage_summary(rows, "free", _FREE_LIMITS, "2026-08-01T00:00:00+00:00",
+                              "2026-09-01T00:00:00+00:00")
+    assert s["billable_runs_count"] == 1
+    assert s["billable_tokens_total"] == 200
+
+
+def test_usage_summary_all_byok_never_trips_the_quota():
+    rows = [{"tokens_total": 999_999, "tokens_by_key_source": {"byok": 999_999},
+            "created_at": "2026-09-01T10:00:00+00:00"} for _ in range(500)]
+    s = billing.usage_summary(rows, "free", _FREE_LIMITS, "2026-09-01T00:00:00+00:00",
+                              "2026-10-01T00:00:00+00:00")
+    assert s["runs_count"] == 500                # a lot of real activity
+    assert s["billable_runs_count"] == 0          # none of it billable
+    assert s["pct_runs_used"] == 0.0 and s["pct_tokens_used"] == 0.0
+
+
 def test_usage_summary_pro_plan_has_no_pct_limits():
     s = billing.usage_summary([], "pro", _PRO_LIMITS, "2026-09-01T00:00:00+00:00",
                               "2026-10-01T00:00:00+00:00")
@@ -93,6 +140,52 @@ def test_usage_summary_pro_plan_has_no_pct_limits():
     assert s["pct_tokens_used"] is None
     assert s["runs_count"] == 0
     assert s["daily"] == []
+
+
+# ── Billing chunk F (2026-09-10): resolve_checkout_plan (BYOK pricing) ──
+_STARTER_PLAN = {
+    "plan_id": "p-starter", "slug": "starter",
+    "razorpay_plan_id": "plan_std", "razorpay_plan_id_byok": "plan_byok",
+    "stripe_price_id": "price_std", "stripe_price_id_byok": "price_byok",
+}
+
+
+def test_resolve_checkout_plan_uses_byok_price_when_tenant_has_a_key(monkeypatch):
+    from interpreter import llm
+
+    monkeypatch.setattr(llm, "tenant_has_byok", lambda tid: True)
+    plan, applied = billing.resolve_checkout_plan(_STARTER_PLAN, "razorpay", "t1")
+    assert applied is True
+    assert plan["razorpay_plan_id"] == "plan_byok"
+    assert plan["stripe_price_id"] == "price_byok"   # both swapped, whichever provider is used
+
+
+def test_resolve_checkout_plan_stripe_provider_swaps_stripe_id(monkeypatch):
+    from interpreter import llm
+
+    monkeypatch.setattr(llm, "tenant_has_byok", lambda tid: True)
+    plan, applied = billing.resolve_checkout_plan(_STARTER_PLAN, "stripe", "t1")
+    assert applied is True and plan["stripe_price_id"] == "price_byok"
+
+
+def test_resolve_checkout_plan_no_byok_key_uses_standard_price(monkeypatch):
+    from interpreter import llm
+
+    monkeypatch.setattr(llm, "tenant_has_byok", lambda tid: False)
+    plan, applied = billing.resolve_checkout_plan(_STARTER_PLAN, "razorpay", "t1")
+    assert applied is False
+    assert plan == _STARTER_PLAN   # unchanged
+
+
+def test_resolve_checkout_plan_falls_back_when_no_byok_price_exists(monkeypatch):
+    from interpreter import llm
+
+    monkeypatch.setattr(llm, "tenant_has_byok", lambda tid: True)
+    plan_no_byok = {"plan_id": "p-free", "slug": "free",
+                    "razorpay_plan_id": None, "razorpay_plan_id_byok": None}
+    plan, applied = billing.resolve_checkout_plan(plan_no_byok, "razorpay", "t1")
+    assert applied is False
+    assert plan == plan_no_byok
 
 
 def test_plan_limits_reads_included_runs_and_tokens_off_a_plan_row():
@@ -116,23 +209,37 @@ def test_month_bounds_december_rolls_into_next_year():
 
 def test_token_usage_sums_and_splits_by_model_and_node():
     trace = [
-        {"type": "classify", "data": {"tokens": {"total": 120}, "model": "openai/gpt-oss-20b"}},
-        {"type": "draft", "data": {"tokens": {"total": 380}, "model": "claude-sonnet-5"}},
-        {"type": "draft", "data": {"tokens": {"total": 20}, "model": "claude-sonnet-5"}},
+        {"type": "classify", "data": {"tokens": {"total": 120}, "model": "openai/gpt-oss-20b",
+                                       "key_source": "platform"}},
+        {"type": "draft", "data": {"tokens": {"total": 380}, "model": "claude-sonnet-5",
+                                    "key_source": "byok"}},
+        {"type": "draft", "data": {"tokens": {"total": 20}, "model": "claude-sonnet-5",
+                                    "key_source": "byok"}},
         {"type": "sf_writeback", "data": {}},          # no tokens -> ignored
         {"type": "ai_prompt", "data": {"tokens": None, "model": "openai/gpt-oss-20b"}},
     ]
-    total, by_model, by_node = _token_usage(trace)
+    total, by_model, by_node, by_key_source = _token_usage(trace)
     assert total == 520
     assert by_model == {"openai/gpt-oss-20b": 120, "claude-sonnet-5": 400}
     assert by_node == {"classify": 120, "draft": 400}
+    assert by_key_source == {"platform": 120, "byok": 400}
+
+
+def test_token_usage_missing_key_source_defaults_to_platform():
+    """A trace entry from before chunk E (or a node type that doesn't set
+    key_source, e.g. extract/clarify) must count as platform-billable, not
+    silently vanish from the total or get miscounted as BYOK."""
+    trace = [{"type": "classify", "data": {"tokens": {"total": 50}, "model": "openai/gpt-oss-20b"}}]
+    _, _, _, by_key_source = _token_usage(trace)
+    assert by_key_source == {"platform": 50}
 
 
 def test_token_usage_empty_trace_is_zero_not_a_crash():
-    total, by_model, by_node = _token_usage([])
+    total, by_model, by_node, by_key_source = _token_usage([])
     assert total == 0
     assert by_model == {}
     assert by_node == {}
+    assert by_key_source == {}
 
 
 def test_usage_summary_by_node_splits_cost_proportionally():

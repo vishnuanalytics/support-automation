@@ -1467,7 +1467,7 @@ def billing_usage(tenant_id: str | None = None, period: str | None = None,
 
     rows = (
         c.sb.table("runs")
-        .select("flow_id, tokens_total, tokens_by_model, tokens_by_node, created_at")
+        .select("flow_id, tokens_total, tokens_by_model, tokens_by_node, tokens_by_key_source, created_at")
         .eq("tenant_id", tid)
         .gte("created_at", period_start).lt("created_at", period_end)
         .limit(5000).execute().data
@@ -1547,7 +1547,7 @@ def billing_subscribe(body: SubscribeIn, c: Caller = Depends(caller)) -> dict:
     """Owner picks a plan -> create (or reuse) a provider customer and a
     hosted-checkout subscription, hand back its URL to redirect to. We
     never see a card ourselves — Stripe/Razorpay's own hosted page does."""
-    from interpreter import payments
+    from interpreter import billing, payments
 
     tid = _caller_tenant(c, body.tenant_id)
     _require_owner(c, tid)
@@ -1566,6 +1566,8 @@ def billing_subscribe(body: SubscribeIn, c: Caller = Depends(caller)) -> dict:
     if not prows:
         raise HTTPException(404, f"no such plan {body.plan_slug!r}")
     plan = prows[0]
+
+    plan, byok_discount_applied = billing.resolve_checkout_plan(plan, provider_slug, tid)
 
     provider = payments.get_provider(provider_slug)
     try:
@@ -1591,8 +1593,11 @@ def billing_subscribe(body: SubscribeIn, c: Caller = Depends(caller)) -> dict:
     audit.record(_service, tenant_id=tid, action="billing.subscription_started",
                  actor_id=c.user_id, actor_email=c.email,
                  target_type="plan", target_id=plan["plan_id"],
-                 summary=f"started checkout for plan {plan['slug']!r} via {provider_slug}")
-    return {"checkout_url": result.short_url, "provider": provider_slug, "status": result.status}
+                 summary=f"started checkout for plan {plan['slug']!r} via {provider_slug}"
+                         + (" (BYOK price)" if byok_discount_applied else ""),
+                 metadata={"byok_discount_applied": byok_discount_applied})
+    return {"checkout_url": result.short_url, "provider": provider_slug, "status": result.status,
+            "byok_discount_applied": byok_discount_applied}
 
 
 def _apply_billing_webhook(provider_slug: str, event: "Any", payload: dict) -> None:

@@ -749,6 +749,11 @@ export interface BillingUsage {
   limits: { runs: number | null; tokens: number | null };
   runs_count: number;
   tokens_total: number;
+  // Billing chunk E — true totals above are for display; these are what
+  // actually counts toward the plan (a run entirely on the tenant's own
+  // LLM key costs the platform nothing, so it's excluded here).
+  billable_runs_count: number;
+  billable_tokens_total: number;
   tokens_by_model: Record<string, number>;
   by_node: { node: string; tokens: number; estimated_cost_usd: number }[];
   by_flow: { flow_id: string; name: string; runs: number; tokens: number; estimated_cost_usd: number }[];

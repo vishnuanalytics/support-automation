@@ -87,9 +87,15 @@ export function BillingView({ tenantId }: { tenantId: string }) {
           </div>
 
           <div style={{ display: "grid", gap: 16, maxWidth: 520 }}>
-            <QuotaLine label="runs" used={usage.runs_count} limit={usage.limits.runs} />
-            <QuotaLine label="tokens" used={usage.tokens_total} limit={usage.limits.tokens} />
+            <QuotaLine label="runs" used={usage.billable_runs_count} limit={usage.limits.runs} />
+            <QuotaLine label="tokens" used={usage.billable_tokens_total} limit={usage.limits.tokens} />
           </div>
+          {(usage.runs_count > usage.billable_runs_count) && (
+            <div className="muted" style={{ fontSize: 12 }}>
+              {usage.runs_count - usage.billable_runs_count} of these ran entirely on your own LLM
+              key — not counted toward your plan.
+            </div>
+          )}
 
           <h5>daily usage (tokens)</h5>
           <div className="usage-bars">
