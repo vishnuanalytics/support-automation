@@ -39,8 +39,6 @@ _DEAD_STATES = ("sent", "abandoned")
 _MENTION_RE = re.compile(r"^\s*<@[A-Z0-9]+>\s*")
 _ROUTE_RE = re.compile(r"^\s*route:\s*(support|tier2|csm|sales|offboarding|billing)\b",
                        re.IGNORECASE)
-# single-tenant deployment — the Slack bot token lives on this tenant's row
-_TENANT = os.environ.get("DEFAULT_TENANT_ID", "00000000-0000-0000-0000-000000000000")
 
 
 # ── session lookup ─────────────────────────────────────────────────
@@ -218,13 +216,17 @@ _REDRIVE_MSG = (":arrows_counterclockwise: (reconnected) I'm still here — repl
                 "continue, or @mention me.")
 
 
-def _redrive_open_sessions(sb, post) -> None:
+def _redrive_open_sessions(sb, poster_for) -> None:
     """Phase 27 — after a WSS reconnect, re-post a short nudge into every
     reasoning thread that's still open, so a dialogue that stalled while the
-    socket was down comes back to life. Best-effort, once per connect."""
+    socket was down comes back to life. Best-effort, once per connect.
+
+    `poster_for(tenant_id)` returns a `post(channel, thread_ts, text)`
+    callable using *that tenant's* bot token — sessions span every tenant
+    that has Slack connected, not just one."""
     try:
         rows = (sb.table("reasoning_sessions")
-                .select("session_id,slack_channel,slack_thread_ts,state")
+                .select("session_id,tenant_id,slack_channel,slack_thread_ts,state")
                 .not_.in_("state", _DEAD_STATES).execute().data or [])
     except Exception as e:  # noqa: BLE001
         log.warning("redrive: session query failed: %s", e)
@@ -234,7 +236,7 @@ def _redrive_open_sessions(sb, post) -> None:
         ch, ts = s.get("slack_channel"), s.get("slack_thread_ts")
         if ch and ts:
             try:
-                post(ch, ts, _REDRIVE_MSG)
+                poster_for(s.get("tenant_id"))(ch, ts, _REDRIVE_MSG)
                 n += 1
             except Exception as e:  # noqa: BLE001
                 log.warning("redrive post failed for %s: %s", s.get("session_id"), e)
@@ -326,23 +328,57 @@ def _connection_url(app_token: str) -> str:
     return body["url"]
 
 
-def _make_poster(sb):
+def _make_poster(sb, tenant_id: str):
     def post(channel: str, thread_ts: str, text: str) -> None:
         try:
-            slack._call("chat.postMessage", slack._bot_token(_TENANT, sb),
+            slack._call("chat.postMessage", slack._bot_token(tenant_id, sb),
                         {"channel": channel, "thread_ts": thread_ts, "text": text})
         except Exception as e:  # noqa: BLE001
-            log.warning("chat.postMessage failed: %s", e)
+            log.warning("chat.postMessage failed (tenant %s): %s", tenant_id, e)
     return post
 
 
-def _bot_user_id(sb) -> str | None:
+def _bot_user_id(sb, tenant_id: str) -> str | None:
     try:
-        r = slack._call("auth.test", slack._bot_token(_TENANT, sb), {})
+        r = slack._call("auth.test", slack._bot_token(tenant_id, sb), {})
         return r.get("user_id")
     except Exception as e:  # noqa: BLE001
-        log.warning("auth.test failed: %s", e)
+        log.warning("auth.test failed (tenant %s): %s", tenant_id, e)
         return None
+
+
+class _TenantRouter:
+    """Socket Mode is *one* connection shared by every tenant's install of
+    the platform's single Slack app (interpreter/slack.py's docstring) — each
+    inbound event/interaction carries the workspace (`team_id`) it came from,
+    never a tenant. This resolves that `team_id` to a tenant (and caches both
+    the resolution and the resulting poster/bot-user-id, each cheap to reuse
+    and expensive-ish to redo per message) instead of the old hardcoded
+    single-tenant assumption."""
+
+    def __init__(self, sb):
+        self.sb = sb
+        self._team_to_tenant: dict[str, str | None] = {}
+        self._posters: dict[str, object] = {}
+        self._bot_uids: dict[str, str | None] = {}
+
+    def tenant_for(self, team_id: str | None) -> str | None:
+        if not team_id:
+            return None
+        if team_id not in self._team_to_tenant:
+            self._team_to_tenant[team_id] = slack.tenant_for_team(team_id, self.sb)
+        return self._team_to_tenant[team_id]
+
+    def poster_for(self, tenant_id: str | None):
+        if tenant_id not in self._posters:
+            self._posters[tenant_id] = _make_poster(self.sb, tenant_id) if tenant_id else (
+                lambda *a, **k: log.warning("dropped a post — no tenant resolved"))
+        return self._posters[tenant_id]
+
+    def bot_uid_for(self, tenant_id: str | None) -> str | None:
+        if tenant_id not in self._bot_uids:
+            self._bot_uids[tenant_id] = _bot_user_id(self.sb, tenant_id) if tenant_id else None
+        return self._bot_uids[tenant_id]
 
 
 async def _run_async() -> None:
@@ -353,9 +389,8 @@ async def _run_async() -> None:
         while True:                       # idle, don't crash-loop the container
             await asyncio.sleep(3600)
     sb = get_supabase()
-    post = _make_poster(sb)
-    bot_uid = _bot_user_id(sb)
-    log.info("slackbot starting (bot user %s)", bot_uid)
+    router = _TenantRouter(sb)
+    log.info("slackbot starting (routes events to a tenant per Slack team_id)")
 
     async def _heartbeat() -> None:
         from interpreter.health import beat
@@ -374,8 +409,8 @@ async def _run_async() -> None:
                                           open_timeout=20) as ws:
                 log.info("socket connected")
                 hb = asyncio.create_task(_heartbeat())
-                _redrive_open_sessions(sb, post)   # Phase 27 — a dropped socket
-                #   can strand a dialogue mid-turn; nudge the threads back to life.
+                _redrive_open_sessions(sb, router.poster_for)   # Phase 27 — a dropped
+                #   socket can strand a dialogue mid-turn; nudge the threads back to life.
                 async for raw in ws:
                     msg = json.loads(raw)
                     kind = msg.get("type")
@@ -387,15 +422,29 @@ async def _run_async() -> None:
                         log.info("server asked us to reconnect (%s)", msg.get("reason"))
                         break
                     if kind == "events_api":
-                        ev = ((msg.get("payload") or {}).get("event")) or {}
+                        payload = msg.get("payload") or {}
+                        ev = payload.get("event") or {}
+                        tid = router.tenant_for(payload.get("team_id"))
+                        if not tid:
+                            log.warning("events_api from unconnected team %s — dropped",
+                                       payload.get("team_id"))
+                            continue
                         try:
-                            log.info("dispatch: %s", dispatch(sb, ev, post=post, bot_user_id=bot_uid))
+                            log.info("dispatch: %s", dispatch(
+                                sb, ev, post=router.poster_for(tid),
+                                bot_user_id=router.bot_uid_for(tid)))
                         except Exception as e:  # noqa: BLE001
                             log.exception("dispatch failed: %s", e)
                     if kind == "interactive":                 # Phase 27h — button clicks
+                        payload = msg.get("payload") or {}
+                        tid = router.tenant_for((payload.get("team") or {}).get("id"))
+                        if not tid:
+                            log.warning("interactive from unconnected team %s — dropped",
+                                       (payload.get("team") or {}).get("id"))
+                            continue
                         try:
                             log.info("action: %s",
-                                     dispatch_action(sb, msg.get("payload") or {}, post=post))
+                                     dispatch_action(sb, payload, post=router.poster_for(tid)))
                         except Exception as e:  # noqa: BLE001
                             log.exception("dispatch_action failed: %s", e)
         except Exception as e:  # noqa: BLE001

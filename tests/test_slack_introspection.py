@@ -115,3 +115,73 @@ def test_workspace_meta_combines_all_three_sections(monkeypatch):
     assert m["available"] is True
     assert len(m["channels"]) == 1 and len(m["users"]) == 1 and len(m["usergroups"]) == 1
     assert m["errors"] == []
+
+
+# ── 2026-09-10 -- tenant_for_team: the Socket Mode multi-tenant fix ────────
+# `slack_socket.py` used to hardcode every reply to one `DEFAULT_TENANT_ID`
+# tenant, even though every tenant installs the same platform Slack app
+# separately (this module's own docstring) and Socket Mode is one shared
+# connection across all of them. `tenant_for_team` reverse-looks-up which
+# tenant a given Slack workspace (`team_id`) belongs to, from the `team.id`
+# already stashed on `tenant_integrations.secret` at OAuth-connect time.
+class _TenantsTable:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def select(self, *_a, **_k):
+        return self
+
+    def eq(self, *_a, **_k):
+        return self
+
+    def execute(self):
+        return type("R", (), {"data": self._rows})()
+
+
+class _TenantIntegrationsSb:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def table(self, name):
+        assert name == "tenant_integrations"
+        return _TenantsTable(self._rows)
+
+
+def test_tenant_for_team_matches_by_slack_workspace_id():
+    sb = _TenantIntegrationsSb([
+        {"tenant_id": "acme", "secret": {"team": {"id": "TACME"}}},
+        {"tenant_id": "gunner", "secret": {"team": {"id": "TGUNNER"}}},
+    ])
+    assert slack.tenant_for_team("TACME", sb) == "acme"
+    assert slack.tenant_for_team("TGUNNER", sb) == "gunner"
+
+
+def test_tenant_for_team_no_match_or_no_team_id():
+    sb = _TenantIntegrationsSb([{"tenant_id": "acme", "secret": {"team": {"id": "TACME"}}}])
+    assert slack.tenant_for_team("TUNKNOWN", sb) is None
+    assert slack.tenant_for_team("", sb) is None
+    assert slack.tenant_for_team(None, sb) is None
+
+
+def test_tenant_for_team_tolerates_missing_secret_or_team():
+    sb = _TenantIntegrationsSb([
+        {"tenant_id": "no-secret", "secret": None},
+        {"tenant_id": "no-team", "secret": {"has_credentials": True}},
+        {"tenant_id": "acme", "secret": {"team": {"id": "TACME"}}},
+    ])
+    assert slack.tenant_for_team("TACME", sb) == "acme"
+
+
+def test_tenant_for_team_same_workspace_two_tenants_picks_most_recent(caplog):
+    """One workspace can end up installed for more than one tenant (e.g. a
+    demo/test setup) -- Socket Mode can't disambiguate further, so this must
+    pick deterministically (most recently connected) and say so, not depend
+    on whatever order the DB happens to return rows in."""
+    sb = _TenantIntegrationsSb([
+        {"tenant_id": "acme", "secret": {"team": {"id": "TSAME"}},
+         "updated_at": "2026-08-29T13:39:39+00:00"},
+        {"tenant_id": "gunner", "secret": {"team": {"id": "TSAME"}},
+         "updated_at": "2026-09-06T15:07:10+00:00"},
+    ])
+    assert slack.tenant_for_team("TSAME", sb) == "gunner"
+    assert any("connected to 2 tenants" in r.message for r in caplog.records)

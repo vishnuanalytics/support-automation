@@ -707,7 +707,55 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-09-10 (Three bugs reported live: KB cross-tenant leak, crawl-source sync 500, and the Knowledge view's right pane not scrolling.)**
+**2026-09-10 (Four bugs reported live: KB cross-tenant leak, crawl-source
+sync 500, the Knowledge view's right pane not scrolling, and the Slack
+Socket Mode bot hardcoded to one tenant.)**
+
+4. **`interpreter/slack_socket.py` (the `slackbot` service — one persistent
+   Socket Mode WebSocket) only ever replied as one tenant.** Its own
+   comment said so: `_TENANT = os.environ.get("DEFAULT_TENANT_ID", "0000…")`
+   — every reply, redrive nudge, and self-message filter used *that one*
+   tenant's bot token, no matter which tenant's reasoning-session thread
+   the event actually belonged to. `interpreter/slack.py`'s outbound side
+   (post_message, list_channels, OAuth, …) was already correctly
+   multi-tenant (one platform Slack app, each tenant installs it
+   separately, `tenant_integrations`/Vault keyed by tenant_id) — the
+   Socket Mode listener was the one piece nobody had updated off the old
+   single-tenant assumption. Confirmed live in Supabase: `gunner` has its
+   own separate `tenant_integrations` Slack row from `Acme (demo)`
+   (`00000000…`, the `_TENANT` default) — so `gunner`'s Slack reasoning
+   threads never got proper bot replies.
+
+   Since Socket Mode is one connection shared by every tenant's install of
+   the single platform app, and Slack tags every event/interaction with
+   the workspace it came from (`payload.team_id` for `events_api`,
+   `payload.team.id` for `interactive`), the fix resolves the tenant
+   **per event** instead of hardcoding it: new `slack.tenant_for_team
+   (team_id, sb)` reverse-looks-up the owning tenant from the `team.id`
+   already stashed on `tenant_integrations.secret` at OAuth-connect time
+   (no new migration needed). New `_TenantRouter` in `slack_socket.py`
+   caches that resolution plus the per-tenant poster/bot-user-id, and the
+   main loop + `_redrive_open_sessions` now route every reply through the
+   *correct* tenant's bot token. `dispatch`/`dispatch_action` stayed
+   untouched (they're pure given `post`/`deliver`, unaware of tenant —
+   the fix lives entirely in the transport layer that calls them), so no
+   existing test needed changing beyond `_redrive_open_sessions`'s
+   signature (`post` -> `poster_for(tenant_id)`).
+
+   Live-checked in Supabase: `gunner` and `Acme (demo)` currently point at
+   the **same** real Slack workspace (`T0BTDSDTFB5`, "speedy") — one
+   person's own workspace used to set up two demo tenants, not two real
+   companies. Socket Mode genuinely can't disambiguate an event between
+   two tenants sharing one workspace past this point, so `tenant_for_team`
+   picks deterministically (most-recently-connected) and logs the
+   ambiguity instead of depending on arbitrary row order — correct
+   behavior for this dev setup, and for a real customer (one workspace,
+   one tenant) it's unambiguous and just works.
+
+   Rebuilt + redeployed the `slackbot` container; logs confirm a clean
+   connect ("routes events to a tenant per Slack team_id") with no errors.
+   6 new tests (`tests/test_slack_introspection.py`,
+   `tests/test_slack_socket.py`); offline suite 1071 passed.
 
 3. **The Knowledge view's right-hand collection pane was "fixed" — didn't
    scroll, so a lot of content was unreachable.** `ConnectedSources`

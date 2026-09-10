@@ -179,13 +179,76 @@ def test_route_command_reassigns(monkeypatch):
 
 def test_redrive_nudges_open_sessions():
     posts = []
+    poster_for = lambda _tid: (lambda c, t, x: posts.append((c, t)))  # noqa: E731
     rows = [
-        {"session_id": "a", "slack_channel": "#x", "slack_thread_ts": "1.1", "state": "clarifying"},
-        {"session_id": "b", "slack_channel": "#x", "slack_thread_ts": "2.2", "state": "drafting"},
-        {"session_id": "c", "slack_channel": None, "slack_thread_ts": None, "state": "clarifying"},
+        {"session_id": "a", "tenant_id": "t1", "slack_channel": "#x", "slack_thread_ts": "1.1",
+         "state": "clarifying"},
+        {"session_id": "b", "tenant_id": "t2", "slack_channel": "#x", "slack_thread_ts": "2.2",
+         "state": "drafting"},
+        {"session_id": "c", "tenant_id": "t1", "slack_channel": None, "slack_thread_ts": None,
+         "state": "clarifying"},
     ]
-    slack_socket._redrive_open_sessions(_SB(rows), lambda c, t, x: posts.append((c, t)))
+    slack_socket._redrive_open_sessions(_SB(rows), poster_for)
     assert posts == [("#x", "1.1"), ("#x", "2.2")]      # the channelless one is skipped
+
+
+def test_redrive_uses_each_sessions_own_tenant_poster():
+    """Two tenants each have an open thread — the nudge for each must go out
+    through *that tenant's* bot token, not a single shared one."""
+    calls = []
+
+    def poster_for(tenant_id):
+        def post(c, t, x):
+            calls.append((tenant_id, c, t))
+        return post
+
+    rows = [
+        {"session_id": "a", "tenant_id": "acme", "slack_channel": "#a", "slack_thread_ts": "1.1",
+         "state": "clarifying"},
+        {"session_id": "b", "tenant_id": "gunner", "slack_channel": "#g", "slack_thread_ts": "2.2",
+         "state": "drafting"},
+    ]
+    slack_socket._redrive_open_sessions(_SB(rows), poster_for)
+    assert ("acme", "#a", "1.1") in calls
+    assert ("gunner", "#g", "2.2") in calls
+
+
+class _TenantRouterSB:
+    """A fake `sb` that answers both `tenant_integrations` (for
+    `slack.tenant_for_team`) and `reasoning_sessions` (for `_find_session`)
+    lookups, keyed by table name."""
+
+    def __init__(self, integrations, sessions):
+        self._integrations = integrations
+        self._sessions = sessions
+
+    def table(self, name):
+        if name == "tenant_integrations":
+            return _Q(self._integrations)
+        if name == "reasoning_sessions":
+            return _Q(self._sessions)
+        return _Q([])
+
+
+def test_tenant_router_resolves_by_team_id_and_caches():
+    sb = _TenantRouterSB(
+        [{"tenant_id": "acme", "secret": {"team": {"id": "TACME"}}},
+         {"tenant_id": "gunner", "secret": {"team": {"id": "TGUNNER"}}}],
+        [],
+    )
+    router = slack_socket._TenantRouter(sb)
+    assert router.tenant_for("TACME") == "acme"
+    assert router.tenant_for("TGUNNER") == "gunner"
+    assert router.tenant_for("TUNKNOWN") is None
+    # same poster/bot-uid object reused for a team_id seen twice (cached)
+    assert router.poster_for("acme") is router.poster_for("acme")
+
+
+def test_tenant_router_unknown_team_does_not_resolve():
+    sb = _TenantRouterSB([{"tenant_id": "acme", "secret": {"team": {"id": "TACME"}}}], [])
+    router = slack_socket._TenantRouter(sb)
+    assert router.tenant_for(None) is None
+    assert router.tenant_for("TSOMEONE-ELSE") is None
 
 
 # --------------------------------------------------------------------------

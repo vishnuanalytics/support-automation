@@ -95,6 +95,36 @@ def connected(tenant_id: str, sb) -> bool:
         return False
 
 
+def tenant_for_team(team_id: str, sb) -> str | None:
+    """Reverse-lookup: which tenant installed the platform's one Slack app
+    into this workspace (`team_id`, e.g. `T0123ABC`)?
+
+    Socket Mode is a *single* connection shared by every tenant's install —
+    each inbound event/interaction carries the workspace it came from
+    (`payload.team_id` / `payload.team.id`), and this is how the caller
+    routes it back to that tenant's own bot token instead of guessing.
+
+    Normally one workspace <-> one tenant, but nothing stops two tenants
+    from separately authorizing the *same* Slack workspace (e.g. one
+    person's own workspace used to set up more than one demo/test tenant)
+    -- Socket Mode genuinely can't disambiguate an event between them past
+    that point, so this picks the most-recently-(re)connected one and logs
+    the ambiguity rather than silently depending on row order."""
+    if not team_id:
+        return None
+    rows = (sb.table("tenant_integrations").select("tenant_id, secret, updated_at")
+            .eq("kind", "slack").execute().data or [])
+    matches = [r for r in rows if ((r.get("secret") or {}).get("team") or {}).get("id") == team_id]
+    if not matches:
+        return None
+    if len(matches) > 1:
+        matches.sort(key=lambda r: r.get("updated_at") or "", reverse=True)
+        log.warning("Slack team %s is connected to %d tenants (%s) — routing to the "
+                   "most recently connected: %s", team_id, len(matches),
+                   ", ".join(m["tenant_id"] for m in matches), matches[0]["tenant_id"])
+    return matches[0]["tenant_id"]
+
+
 def _call(method: str, token: str, payload: dict) -> dict:
     import requests
 
