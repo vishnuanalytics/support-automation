@@ -98,6 +98,16 @@ def test_kb_change_kind_maps_to_apply_kb_change_job(monkeypatch):
     assert out["job_kind"] == "apply_kb_change" and enqueued == ["apply_kb_change"]
 
 
+def test_gate_tuning_kind_maps_to_apply_gate_tuning_job(monkeypatch):
+    from interpreter import jobs
+    enqueued = []
+    monkeypatch.setattr(jobs, "enqueue", lambda kind, payload, *, dedupe_key, sb: enqueued.append(kind))
+
+    sb = _SB([_ar(kind="gate_tuning")])
+    out = approvals.decide_action_request(sb, "ar1", approve=True, decided_by="mgr")
+    assert out["job_kind"] == "apply_gate_tuning" and enqueued == ["apply_gate_tuning"]
+
+
 def test_unknown_kind_approves_without_a_job(monkeypatch):
     from interpreter import jobs
     monkeypatch.setattr(jobs, "enqueue", lambda *a, **k: pytest.fail("no job for an unknown kind"))

@@ -733,6 +733,23 @@ def _apply_kb_change(payload: dict, sb) -> dict:
     return {"action_request_id": ar_id, **res}
 
 
+def _apply_gate_tuning(payload: dict, sb) -> dict:
+    """Response Quality Feedback Loop chunk E — a human approved a
+    confidence-gate threshold proposal; patch the one flow_nodes.config it
+    came from."""
+    from interpreter import gate_tuning
+
+    ar_id = payload["action_request_id"]
+    rows = sb.table("action_requests").select("*").eq("id", ar_id).execute().data
+    if not rows:
+        return {"action_request_id": ar_id, "skipped": "gone"}
+    ar = rows[0]
+    if ar["kind"] != "gate_tuning":
+        return {"action_request_id": ar_id, "skipped": f"kind={ar['kind']}"}
+    res = gate_tuning.apply_threshold_change(sb, ar)
+    return {"action_request_id": ar_id, **res}
+
+
 # ── Phase 27d — the case-control-plane safety-net sweeps ──────────────────
 _SWEEP_EVERY_MIN = {"queue_sweep": 5, "cdc_reconcile": 60, "reasoning_ttl": 5,
                     "handoff_watch": 5, "kb_promote": 360,
@@ -740,7 +757,7 @@ _SWEEP_EVERY_MIN = {"queue_sweep": 5, "cdc_reconcile": 60, "reasoning_ttl": 5,
                     "fire_schedules": 1, "kil_digest": 30, "failed_jobs_sweep": 10,
                     "product_analytics_sync": 720, "zendesk_case_graph_sync": 60,
                     "billing_trial_sweep": 60, "correction_review_sweep": 5,
-                    "session_review_sweep": 5}
+                    "session_review_sweep": 5, "gate_tuning_sweep": 1440}
 
 
 def _reschedule(kind: str, sb) -> None:
@@ -768,7 +785,8 @@ def _sweep_handler(fn):
 
 HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
             "embed_kb_entry": _embed_kb_entry, "create_github_issue": _create_github_issue,
-            "apply_kb_change": _apply_kb_change, "kb_sync": _sync_kb_connection,
+            "apply_kb_change": _apply_kb_change, "apply_gate_tuning": _apply_gate_tuning,
+            "kb_sync": _sync_kb_connection,
             "gdoc_writeback": _gdoc_writeback,
             "crawl_site": _crawl_site, "sync_gsheet": _sync_gsheet,
             "import_kb_bundle": _import_kb_bundle,
@@ -786,7 +804,8 @@ HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
             "failed_jobs_sweep": _sweep_handler("failed_jobs_sweep"),
             "billing_trial_sweep": _sweep_handler("billing_trial_sweep"),
             "correction_review_sweep": _sweep_handler("correction_review_sweep"),
-            "session_review_sweep": _sweep_handler("session_review_sweep")}
+            "session_review_sweep": _sweep_handler("session_review_sweep"),
+            "gate_tuning_sweep": _sweep_handler("gate_tuning_sweep")}
 
 JOB_TIMEOUT = int(os.environ.get("WORKER_JOB_TIMEOUT", "120"))
 

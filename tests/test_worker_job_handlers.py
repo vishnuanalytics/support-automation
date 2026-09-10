@@ -16,7 +16,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from api.worker import _apply_kb_change, _create_github_issue
+from api.worker import _apply_gate_tuning, _apply_kb_change, _create_github_issue
 
 
 class _ARTable:
@@ -193,3 +193,40 @@ def test_apply_kb_change_slack_update_failure_is_swallowed(monkeypatch):
     sb = _SB([_kb_ar()])
     out = _apply_kb_change({"action_request_id": "ar2"}, sb)  # must not raise
     assert out["applied"] is True
+
+
+# ── _apply_gate_tuning (Response Quality Feedback Loop chunk E) ─────────
+def _gate_ar(**over) -> dict:
+    row = {"id": "ar3", "tenant_id": "t1", "kind": "gate_tuning", "status": "approved",
+          "payload": {"node_id": "n1", "tier": "basic", "suggested_threshold": 0.45}}
+    row.update(over)
+    return row
+
+
+def test_apply_gate_tuning_calls_the_library_function(monkeypatch):
+    from interpreter import gate_tuning
+
+    captured = {}
+
+    def fake_apply(sb, ar):
+        captured["ar_id"] = ar["id"]
+        return {"applied": True, "node_id": "n1", "tier": "basic", "new_threshold": 0.45}
+    monkeypatch.setattr(gate_tuning, "apply_threshold_change", fake_apply)
+
+    sb = _SB([_gate_ar()])
+    out = _apply_gate_tuning({"action_request_id": "ar3"}, sb)
+
+    assert captured == {"ar_id": "ar3"}
+    assert out == {"action_request_id": "ar3", "applied": True, "node_id": "n1",
+                   "tier": "basic", "new_threshold": 0.45}
+
+
+def test_apply_gate_tuning_missing_action_request_is_a_skip():
+    out = _apply_gate_tuning({"action_request_id": "gone"}, _SB([]))
+    assert out == {"action_request_id": "gone", "skipped": "gone"}
+
+
+def test_apply_gate_tuning_wrong_kind_is_a_skip():
+    sb = _SB([_gate_ar(kind="kb_change")])
+    out = _apply_gate_tuning({"action_request_id": "ar3"}, sb)
+    assert out == {"action_request_id": "ar3", "skipped": "kind=kb_change"}

@@ -54,6 +54,16 @@ They are the backstop for everything the pipeline + Omni-Channel can't catch.
                                bot<->agent dialogue, which had zero quality
                                signal at all before this. Same batching/
                                rate-limit shape as correction_review_sweep.
+  gate_tuning_sweep
+                 daily      — Response Quality Feedback Loop chunk E
+                               (2026-09-10): finds confidence-gate thresholds
+                               that a cluster of judged corrections shows are
+                               stricter than they need to be, and raises a
+                               human-approved proposal (an action_requests
+                               row in the existing P4 approvals inbox) — never
+                               applies anything on its own. See
+                               interpreter/gate_tuning.py for why this can
+                               only ever propose LOWERING a threshold.
 
 SWEEP_DRY_RUN=1 -> log intended actions, change nothing.
 """
@@ -923,3 +933,22 @@ def session_review_sweep(sb, *, dry_run: bool | None = None) -> dict:
         by_category[verdict["category"]] = by_category.get(verdict["category"], 0) + 1
 
     return {"judged": len(judged), "by_category": by_category, "dry_run": dry}
+
+
+# ── gate_tuning_sweep (Response Quality Feedback Loop chunk E) ──────────
+def gate_tuning_sweep(sb, *, dry_run: bool | None = None) -> dict:
+    """Chunk E: scan judged, escalated runs for confidence-gate thresholds
+    a cluster of near-no-op corrections suggests are stricter than they
+    need to be, and raise a human-approved proposal for each. Never
+    applies anything itself -- see `interpreter/gate_tuning.py`."""
+    from interpreter import gate_tuning
+
+    dry = _dry() if dry_run is None else dry_run
+    proposals = gate_tuning.find_proposals(sb)
+    raised = 0
+    for p in proposals:
+        if dry:
+            continue
+        if gate_tuning.raise_proposal(sb, p):
+            raised += 1
+    return {"proposals_found": len(proposals), "raised": raised, "dry_run": dry}

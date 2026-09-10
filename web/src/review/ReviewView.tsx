@@ -335,7 +335,11 @@ export function ReviewView() {
               >
                 <div className="row" style={{ gap: 8, alignItems: "center" }}>
                   <Pill tone="mute">
-                    {ar.kind === "kb_change" ? "KB update" : ar.kind}
+                    {ar.kind === "kb_change"
+                      ? "KB update"
+                      : ar.kind === "gate_tuning"
+                      ? "Gate tuning"
+                      : ar.kind}
                   </Pill>
                   <strong>{p.title || ar.rule_name || ar.kind}</strong>
                   <span style={{ color: "var(--muted, #667)", fontSize: 12 }}>

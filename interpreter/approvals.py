@@ -24,6 +24,7 @@ log = logging.getLogger("interpreter.approvals")
 _FULFIL_JOB = {
     "github_issue": "create_github_issue",
     "kb_change": "apply_kb_change",
+    "gate_tuning": "apply_gate_tuning",
 }
 
 

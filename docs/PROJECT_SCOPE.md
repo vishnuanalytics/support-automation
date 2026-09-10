@@ -707,6 +707,82 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-10 (Response Quality Feedback Loop — chunk E of 6, "confidence-
+gate threshold tuning proposals, human-approved not automatic", done and
+live-verified.)**
+
+New `interpreter/gate_tuning.py`. Key scoping decision, stated up front in
+the module and worth restating here: only escalated cases ever get a
+`human_reply`/correction at all (migration `014`'s `pending` flag — an
+auto-replied case is never reviewed by anyone). So the only direction this
+data can support is detecting a threshold that's **stricter than it needs
+to be** — a cluster of escalated cases that a human barely touched despite
+the gate score falling just under threshold. There is no signal anywhere
+in this data for the opposite (an auto-reply that should have escalated).
+`find_proposals()` says this explicitly in every proposal's rationale
+rather than quietly only ever doing half the job — it will never propose
+raising a threshold, by design, not as a gap to close later.
+
+`find_proposals(sb)` buckets judged, escalated runs by (tenant_id,
+flow_id, node_id, tier) using the `confidence_gate` trace entry's own
+recorded `score`/`threshold`/`tier`/`pass`/`forced_escalation` (skips
+forced escalations — a topic/module/answer_mode/integrity rule, not the
+threshold, caused those) cross-referenced with chunk B's
+`correction_analysis`. A bucket needs >=5 samples and a majority scored
+`category="none"` or `severity<=0.25` before it proposes anything, and the
+step is capped at 0.05 and floored at 0.2 — deliberately conservative.
+
+**No new UI or table.** A proposal is one `action_requests` row (`kind=
+"gate_tuning"`) in the existing P4/FR-44 "one approvals inbox"
+(`GET /api/approvals`, `POST /api/approvals/action-requests/{id}`) —
+`ReviewView.tsx`'s generic card already renders `payload.title`/
+`.rationale`/`.body_md`, which is exactly the shape `raise_proposal()`
+writes, so the only web change needed was one label-mapping line ("Gate
+tuning" for the pill, matching the existing "KB update" one).
+`raise_proposal()` dedupes against a pending proposal for the same
+(flow_id, node_id, tier) so a daily sweep doesn't spam a fresh card every
+run. Approving it (existing endpoint, no new one) enqueues
+`apply_gate_tuning` (new job, `_FULFIL_JOB` in `interpreter/approvals.py`)
+-> `apply_threshold_change()` patches only
+`flow_nodes.config.tier_overrides[tier]` on the one node the evidence came
+from, idempotently, and stamps the result on the action_request. New
+`gate_tuning_sweep` (`interpreter/sweeps.py`, daily) raises proposals for
+the whole backlog. 23 new tests (19 in `tests/test_gate_tuning.py`, 3 in
+`tests/test_worker_job_handlers.py`, 1 in `tests/test_approvals.py`). Full
+offline suite: 1212 passed (was 1189). `cd web && npm run build` clean.
+
+**Live-verified against the real Supabase project, the full approve
+loop**: found the real Globex confidence_gate node (`tier_overrides.basic
+= 1.01` — an intentionally-strict demo setting), inserted 6 synthetic
+escalated+corrected runs for it (`category="none"`, gate `score=0.9` under
+that threshold, no forced escalation), ran the real sweep — it proposed
+lowering `basic` to 0.96 with accurate evidence counts. Confirmed the
+proposal appeared in the real `GET /api/approvals` with zero new endpoint
+work, approved it through the real `POST /api/approvals/action-requests/
+{id}` as `globex-owner@example.test`, confirmed the enqueued job actually
+patched the real `flow_nodes.config.tier_overrides.basic` to 0.96 while
+leaving `premium`/`enterprise`/`weights` untouched, and confirmed calling
+the apply job a second time is a clean idempotent no-op. Restored the
+node's original `1.01` and deleted the synthetic runs + the action_request
+afterward. **The same sweep run also surfaced one genuine, unprompted
+proposal from real pre-existing Acme (demo) tenant data** (11 real
+escalated cases, 10 needing no correction -> propose 0.50 -> 0.45) —
+left it pending in the real approvals inbox since it isn't test
+pollution, it's the feature doing its actual job; a human can approve or
+reject it there like any other card.
+
+**Not done yet (chunk F)**: no dashboard ties `correction_analysis`/
+`session_analysis`/exemplar usage/gate-tuning proposals together in one
+place for a human to browse trends — chunk F. Model-routing proposals
+(the other half of chunk E's original one-line description) are
+deliberately out of scope for this pass: today's flows use one model per
+node, so there's no side-by-side comparison data to justify a routing
+recommendation the way the threshold data supports a threshold one —
+flagging this rather than shipping a proposal type with no real evidence
+behind it.
+
+---
+
 **2026-09-10 (Response Quality Feedback Loop — chunk D of 6, "few-shot
 exemplars from graded examples", done and live-verified. The first chunk
 in this loop that actually changes what the bot says — A-C only ever
