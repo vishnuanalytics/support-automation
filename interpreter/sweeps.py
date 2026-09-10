@@ -37,6 +37,15 @@ They are the backstop for everything the pipeline + Omni-Channel can't catch.
                                webhook can move a tenant to `active` from
                                any of these at any time, independent of
                                this sweep.
+  correction_review_sweep
+                 every 5 min — Response Quality Feedback Loop chunk B
+                               (2026-09-10): judges the backlog of (bot
+                               draft, human's actual reply) pairs — a real
+                               feedback signal `runs` has collected since
+                               migration `014` and never used for anything
+                               past the raw label — via a Groq-routed judge,
+                               batched to stay under Groq's free-tier rate
+                               ceiling.
 
 SWEEP_DRY_RUN=1 -> log intended actions, change nothing.
 """
@@ -815,3 +824,48 @@ def billing_trial_sweep(sb, *, dry_run: bool | None = None) -> dict:
 
     return {"reminded": reminded, "started_grace": started_grace,
             "warned_grace": warned_grace, "locked": locked, "dry_run": dry}
+
+
+# ── correction_review_sweep (Response Quality Feedback Loop chunk B) ────
+CORRECTION_REVIEW_BATCH = int(os.environ.get("SWEEP_CORRECTION_REVIEW_BATCH", "20"))
+
+
+def correction_review_sweep(sb, *, dry_run: bool | None = None) -> dict:
+    """Chunk B: score the (draft, human_reply) pairs chunk A made visible
+    but never judged. Finds `runs` rows with a correction and no verdict
+    yet (`correction_analysis is null`), classifies each via
+    `interpreter.correction_review.judge_correction`, stores the result.
+    Batched (`CORRECTION_REVIEW_BATCH` per tick) to stay well under Groq's
+    free-tier rate ceiling — this sweep just keeps re-running until the
+    backlog is judged, the same shape as every other backlog sweep here."""
+    from interpreter import correction_review
+
+    dry = _dry() if dry_run is None else dry_run
+    try:
+        rows = (sb.table("runs").select("run_id, tenant_id, subject, draft, human_reply")
+                .in_("human_action", ["edited", "rewrote"])
+                .is_("correction_analysis", "null")
+                .order("created_at").limit(CORRECTION_REVIEW_BATCH).execute().data or [])
+    except Exception as e:  # noqa: BLE001
+        log.warning("correction_review_sweep query failed: %s", e)
+        return {"error": str(e)[:200]}
+
+    judged: list[str] = []
+    by_category: dict[str, int] = {}
+    for r in rows:
+        if dry:
+            judged.append(r["run_id"])
+            continue
+        verdict = correction_review.judge_correction(
+            r.get("draft") or "", r.get("human_reply") or "",
+            subject=r.get("subject") or "", tenant_id=r.get("tenant_id"))
+        try:
+            sb.table("runs").update({"correction_analysis": verdict}) \
+              .eq("run_id", r["run_id"]).execute()
+        except Exception as e:  # noqa: BLE001
+            log.warning("correction_review_sweep store %s: %s", r["run_id"], e)
+            continue
+        judged.append(r["run_id"])
+        by_category[verdict["category"]] = by_category.get(verdict["category"], 0) + 1
+
+    return {"judged": len(judged), "by_category": by_category, "dry_run": dry}

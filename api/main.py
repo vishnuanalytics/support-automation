@@ -1741,13 +1741,15 @@ def list_corrections(tenant_id: str | None = None, limit: int = 50,
     actual final reply) pair already sitting in `runs`, surfaced instead of
     left unused after `_check_resolution` records it. `human_action` in
     ('edited','rewrote') means a human changed the bot's draft before it
-    went out to the customer — the raw material a later chunk's judge
-    scores. Read-only, no judging yet. Owner-only, same bar as billing."""
+    went out to the customer. `correction_analysis` (chunk B) is the
+    judge's classification of why, once `sweeps.correction_review_sweep`
+    has gotten to this row — null until then. Owner-only, same bar as
+    billing."""
     tid = _caller_tenant(c, tenant_id)
     _require_owner(c, tid)
     rows = (c.sb.table("runs")
             .select("run_id, flow_id, case_id, subject, draft, human_reply, human_action, "
-                    "outcome, feedback_checked_at, created_at")
+                    "correction_analysis, outcome, feedback_checked_at, created_at")
             .eq("tenant_id", tid).in_("human_action", ["edited", "rewrote"])
             .order("feedback_checked_at", desc=True).limit(min(max(limit, 1), 200))
             .execute().data or [])

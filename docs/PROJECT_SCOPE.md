@@ -707,6 +707,107 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-10 (Response Quality Feedback Loop — chunk B of 6, "score existing
+pairs with an LLM judge", done and live-verified. Resumes the 6-chunk plan
+from chunk A above.)**
+
+Chunk A made every (bot draft, human's actual reply) pair visible but
+unjudged. Chunk B judges the backlog: migration `108` adds
+`runs.correction_analysis jsonb` (null = not yet judged). New
+`interpreter/correction_review.py::judge_correction(draft, human_reply, *,
+subject, tenant_id)` classifies WHY a human changed a draft — `tone`,
+`factual`, `policy`, `brevity`, `none` (no meaningful difference, e.g. a
+typo fix), or `other` — plus a 0–1 `severity` and a one-sentence summary,
+via a single Groq-routed `interpreter/llm.py` call. Deliberately reuses the
+same judge-routing *pattern* as `interpreter/review.py`'s KIL judge and
+`eval/deepeval/groq_model.py`'s `GroqJudge` (Groq via `llm.complete`,
+structured JSON) rather than importing the `deepeval` package itself —
+`deepeval` is dev-only (`requirements-dev.txt`, not in the runtime Docker
+image), and this needs to run continuously in the production `worker` via
+a sweep, not a hand-run script. `category="unknown"` is reserved for "the
+judge couldn't classify it" (missing input, judge failure, malformed
+response) — kept distinct from the real verdict `category="none"` so a
+caller can tell "judged, nothing notable" apart from "needs a retry".
+
+New `interpreter/sweeps.py::correction_review_sweep()` (registered in
+`api/worker.py`, every 5 min): finds `runs` rows with
+`human_action in (edited, rewrote)` and `correction_analysis is null`,
+batched (`SWEEP_CORRECTION_REVIEW_BATCH`, default 20, to stay under Groq's
+free-tier rate ceiling), judges and stores each verdict, returns
+`{judged, by_category, dry_run}`. `GET /api/feedback/corrections`
+(chunk A) now also returns `correction_analysis` per row. 14 new tests
+(`tests/test_correction_review.py`) covering the judge's parsing/clamping/
+failure paths and the sweep's filtering, dry-run, and store-failure
+handling. Full offline suite: 1160 passed (was 1146).
+
+**Live-verified against the real Supabase project**: rebuilt `worker` +
+`api`, inserted one synthetic `runs` row for the real Globex tenant with
+`human_action='edited'` and an obvious policy correction (draft wrongly
+denies refunds; human's actual reply grants a 30-day refund window), ran
+`correction_review_sweep` for real inside the worker container. It picked
+up not just the synthetic row but the tenant's entire real unjudged
+backlog (18 rows) and judged all of them with real Groq calls — confirmed
+the synthetic row got `category="policy"`, `severity=0.9`, and an accurate
+summary. Re-ran the sweep and confirmed 0 rows left in the backlog
+(idempotent — already-judged rows are never re-judged). Deleted the
+synthetic row afterward; left the 18 real rows' new `correction_analysis`
+values in place since judging real backlog is the feature working as
+intended, not test pollution.
+
+**Not done yet (chunks C-F)**: reasoning sessions (the actual multi-turn
+to-and-fro) still have zero quality signal — that's chunk C. Nothing
+changes bot behavior yet — that starts at chunk D (few-shot exemplars).
+No dashboard surfaces `correction_analysis` beyond the raw API field —
+that's chunk F's job.
+
+---
+
+**2026-09-10 (Billing: closed the "backend works, no UI reaches it" gap.
+The user asked "why doesn't the payments option show on the UI" — because
+it never had one; the API was fully built and live-verified over several
+prior chunks but nothing in web/ ever called it.)**
+
+`BillingView.tsx` only ever showed the old usage/quota dashboard. Added:
+- New `GET /api/billing/plans` — the pricing catalog for a picker, with
+  `byok_price_usd`/`byok_price_inr` precomputed server-side (the UI never
+  redoes the discount math) and `tenant_has_byok` so the card can show the
+  discounted price automatically.
+- `GET /api/billing/usage` now also returns `billing_state`
+  (billing_status/trial_ends_at/grace_ends_at/billing_country/
+  payment_provider) — chunk D's trial/grace/lock enforcement had zero UI
+  surface until now.
+- Web: a status banner (trial countdown / grace warning / locked block /
+  canceled) above the usage dashboard, and a new Plans section below it —
+  Starter/Growth cards with a real "Upgrade" button, Enterprise as
+  "Talk to us" with no checkout, a billing-country picker shown only the
+  first time (persisted on the tenant after), all styled with the existing
+  `.tile`/`Tag`/`Banner` primitives, no new CSS. Fixed a stale sidebar
+  description ("no payment processing is wired up yet") left over from
+  before the billing track existed.
+
+**Live-verified in a real browser**, not just curl: logged into the real
+app (a real Supabase session set into localStorage, headless Chromium —
+same setup as earlier UI-verification passes this session), clicked
+through to Billing for the real Globex tenant, confirmed the plan cards
+render with correct real prices ($49/₹4,100 Starter, $199/₹16,600
+Growth), confirmed clicking Upgrade with no country chosen shows a
+validation error and fires no request, then confirmed selecting India and
+clicking Upgrade to Starter for real fires `POST /api/billing/subscribe`,
+creates a real Razorpay subscription, and reaches the "Redirecting…"
+success state (checkout navigation intercepted in the test so it doesn't
+actually leave for rzp.io). Cleaned up afterward — the real subscription
+canceled on Razorpay's side, the tenant's billing fields restored to
+their exact pre-test null state.
+
+**Not done yet**: no "manage subscription" / cancel flow in the UI (only
+new checkout); Stripe's `checkout.success_url`/`cancel_url` still point at
+localhost so a real Stripe checkout's return trip won't land anywhere
+useful yet; both providers' webhook secrets are still blank, so a real
+payment completing won't yet flip `billing_status` to `active` in
+production until someone sets those up in each dashboard.
+
+---
+
 **2026-09-10 (New track: Response Quality Feedback Loop — chunk A of 6,
 "stop discarding it", done and live-verified. Plan shared with the user
 first as an artifact before building — see the artifact for the full
