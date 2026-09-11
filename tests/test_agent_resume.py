@@ -162,6 +162,59 @@ def test_agent_emailed_customer_directly_just_scores_the_draft(monkeypatch):
     assert not [r for r in sb.tables["runs"].inserted if r.get("source") == "agent_resume"]
 
 
+# ── KIL-c widened to internal notes (2026-09-11) ─────────────────────────
+def test_a_new_comment_is_judged_as_an_internal_note(monkeypatch):
+    """The whole point of the widening: real `sent_reply` volume was too
+    thin to ever accumulate KIL-g's prerequisite data, so a plain
+    investigation note now feeds the same judge, distinctly labelled."""
+    sb = _seed_run(FakeSB())
+    monkeypatch.setattr(worker.salesforce, "agent_response_since",
+                        lambda *a, **k: {"guidance": "Checking with billing — will update shortly.",
+                                         "guidance_at": "x", "outbound_email": None})
+    monkeypatch.setattr(worker, "_FEEDBACK_MAX_CHECKS", 3)
+    calls = []
+    monkeypatch.setattr("interpreter.review.judge_human_reply",
+                        lambda sb, **kw: calls.append(kw))
+
+    worker._check_resolution({"run_id": PARENT_RUN, "checks": 0}, sb)
+
+    assert len(calls) == 1
+    assert calls[0]["reply_text"] == "Checking with billing — will update shortly."
+    assert calls[0]["reply_kind"] == "internal_note"
+
+
+def test_the_same_comment_is_not_rejudged_on_a_later_poll(monkeypatch):
+    sb = _seed_run(FakeSB())
+    monkeypatch.setattr(worker.salesforce, "agent_response_since",
+                        lambda *a, **k: {"guidance": "Checking with billing — will update shortly.",
+                                         "guidance_at": "x", "outbound_email": None})
+    monkeypatch.setattr(worker, "_FEEDBACK_MAX_CHECKS", 3)
+    calls = []
+    monkeypatch.setattr("interpreter.review.judge_human_reply",
+                        lambda sb, **kw: calls.append(kw))
+
+    worker._check_resolution({"run_id": PARENT_RUN, "checks": 0}, sb)
+    worker._check_resolution({"run_id": PARENT_RUN, "checks": 1}, sb)
+
+    assert len(calls) == 1        # same content already merged -- not resubmitted
+
+
+def test_a_judge_failure_never_breaks_check_resolution(monkeypatch):
+    sb = _seed_run(FakeSB())
+    monkeypatch.setattr(worker.salesforce, "agent_response_since",
+                        lambda *a, **k: {"guidance": "Checking with billing — will update shortly.",
+                                         "guidance_at": "x", "outbound_email": None})
+    monkeypatch.setattr(worker, "_FEEDBACK_MAX_CHECKS", 3)
+
+    def _boom(sb, **kw):
+        raise RuntimeError("judge is down")
+
+    monkeypatch.setattr("interpreter.review.judge_human_reply", _boom)
+
+    out = worker._check_resolution({"run_id": PARENT_RUN, "checks": 0}, sb)
+    assert out["waiting"] is True   # best-effort: the poll itself still succeeds
+
+
 def test_nothing_yet_reschedules_then_gives_up(monkeypatch):
     sb = _seed_run(FakeSB())
     monkeypatch.setattr(worker.salesforce, "agent_response_since",

@@ -136,6 +136,65 @@ def test_clean_reply_sampled_opens_a_sample_task(monkeypatch):
     assert task["kind"] == "sample" and task["trigger"] == "sample"
 
 
+# ── reply_kind (2026-09-11): internal notes, distinctly labelled ────────
+def test_internal_note_flagged_opens_a_task_and_stores_its_source(monkeypatch):
+    sb = _SB()
+    monkeypatch.setattr(review, "_SAMPLE_RATE", 0.0)
+    monkeypatch.setattr("interpreter.routing.resolve_slack_route",
+                        lambda *a, **k: {"channel": "#cx-l1", "usergroup": "@cx-l1-oncall"})
+    monkeypatch.setattr("interpreter.slack.usergroup_ref", lambda h, **k: "<!subteam^S1>")
+
+    task = review.judge_human_reply(
+        sb, run_row=_RUN,
+        reply_text="Webhooks are available on the Free plan for every account.",
+        reply_kind="internal_note", post=lambda *a, **k: {"sent": True, "channel": "C1", "ts": "1"})
+
+    assert task and task["verdict"]["source"] == "internal_note"
+
+
+def test_internal_note_card_wording_says_internal_note_not_sent_reply(monkeypatch):
+    sb = _SB()
+    monkeypatch.setattr(review, "_SAMPLE_RATE", 0.0)
+    monkeypatch.setattr("interpreter.routing.resolve_slack_route",
+                        lambda *a, **k: {"channel": "#cx-l1", "usergroup": None})
+    monkeypatch.setattr("interpreter.slack.usergroup_ref", lambda h, **k: None)
+    posted = {}
+
+    def fake_post(title, *, tenant_id=None, channel=None, blocks=None, **kw):
+        posted["title"] = title
+        posted["text"] = blocks[0]["text"]["text"]
+        return {"sent": True, "channel": "C1", "ts": "1"}
+
+    review.judge_human_reply(
+        sb, run_row=_RUN,
+        reply_text="Webhooks are available on the Free plan for every account.",
+        reply_kind="internal_note", post=fake_post)
+
+    assert posted["title"] == "An internal note needs review"
+    assert "internal case note" in posted["text"]
+    assert "sent reply" not in posted["text"]
+
+
+def test_sent_reply_wording_is_unchanged_default(monkeypatch):
+    sb = _SB()
+    monkeypatch.setattr(review, "_SAMPLE_RATE", 0.0)
+    monkeypatch.setattr("interpreter.routing.resolve_slack_route",
+                        lambda *a, **k: {"channel": "#cx-l1", "usergroup": None})
+    monkeypatch.setattr("interpreter.slack.usergroup_ref", lambda h, **k: None)
+    posted = {}
+
+    def fake_post(title, *, tenant_id=None, channel=None, blocks=None, **kw):
+        posted["title"] = title
+        return {"sent": True, "channel": "C1", "ts": "1"}
+
+    review.judge_human_reply(
+        sb, run_row=_RUN,
+        reply_text="Webhooks are available on the Free plan for every account.",
+        post=fake_post)
+
+    assert posted["title"] == "A sent reply needs review"
+
+
 def test_resolve_rejects_a_bad_status():
     with pytest.raises(ValueError):
         review.resolve(_SB(), "task-1", status="banana")

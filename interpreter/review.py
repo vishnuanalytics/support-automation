@@ -1,11 +1,17 @@
 """
 KIL-c — the human-reply review queue.
 
-After a human's reply reaches the customer, `judge_human_reply()` runs the
-KIL-b contradiction judge on it against the KB + case history that the run
-already retrieved. A `contradicts` / `novel` verdict — or a random sample of
-the clean ones (`REVIEW_SAMPLE_RATE`, default 5%) — opens a `review_tasks`
-row and posts a card to the routed-team manager usergroup in Slack.
+After a human writes something on a case — a reply that reaches the
+customer, or (2026-09-11) an internal CaseComment/Chatter note that never
+does — `judge_human_reply()` runs the KIL-b contradiction judge on it
+against the KB + case history that the run already retrieved. A
+`contradicts` / `novel` verdict — or a random sample of the clean ones
+(`REVIEW_SAMPLE_RATE`, default 5%) — opens a `review_tasks` row and posts a
+card to the routed-team manager usergroup in Slack. `reply_kind` on
+`judge_human_reply()` ("sent_reply" default, or "internal_note") only
+changes the card wording, so a manager can't mistake an internal note for
+something the customer already saw — the judge, storage, and resolution
+flow are otherwise identical.
 
 The manager's Correct / Wrong / Dismiss lives in `slack_socket.dispatch_action`
 (and the web Review tab). `correct` is where KIL-d picks up to draft a KB
@@ -113,9 +119,21 @@ def integrity_redact(text: str | None) -> str:
 # ── the hook ─────────────────────────────────────────────────────────────
 def judge_human_reply(sb, *, run_row: dict, reply_text: str,
                       sample_rate: float | None = None,
-                      post: "callable | None" = None) -> dict | None:
-    """Run the contradiction judge on a sent human reply; open a review task
-    (+ Slack card) when it's flagged, or on a random sample. Best-effort."""
+                      post: "callable | None" = None,
+                      reply_kind: str = "sent_reply") -> dict | None:
+    """Run the contradiction judge on a human's text; open a review task
+    (+ Slack card) when it's flagged, or on a random sample. Best-effort.
+
+    `reply_kind` — "sent_reply" (default, unchanged behavior: a reply that
+    actually reached the customer) or "internal_note" (2026-09-11: a
+    CaseComment/Chatter note a human left on the case, which never went to
+    the customer). Real "sent_reply" volume turned out to be too low in
+    practice to ever accumulate the adjudication history KIL-g needs (see
+    PROJECT_SCOPE.md's 2026-09-11 entry) — internal guidance notes are a
+    much more common source of the same signal ("does what a human just
+    said match the KB?") and are worth reviewing in their own right, just
+    labelled distinctly so a manager doesn't mistake one for something the
+    customer already saw."""
     if not (reply_text or "").strip():
         return None
     tenant_id = run_row.get("tenant_id")
@@ -127,6 +145,7 @@ def judge_human_reply(sb, *, run_row: dict, reply_text: str,
 
     contexts = assemble_contexts(run_row)
     verdict = integrity.check(reply_text, contexts, kind="human_reply", tenant_id=tenant_id)
+    verdict = {**verdict, "source": reply_kind}
 
     if verdict.get("flagged"):
         trigger, kind = "contradicts", "human_reply_review"
@@ -144,7 +163,8 @@ def judge_human_reply(sb, *, run_row: dict, reply_text: str,
         return None
     slack_meta = _post_card(sb, task_id=task["id"], tenant_id=tenant_id, team=team,
                             reply_text=reply_text, verdict=verdict, case_sf_id=case_sf_id,
-                            case_number=case_number, trigger=trigger, post=post)
+                            case_number=case_number, trigger=trigger, post=post,
+                            reply_kind=reply_kind)
     if slack_meta:
         try:
             sb.table("review_tasks").update({
@@ -156,8 +176,22 @@ def judge_human_reply(sb, *, run_row: dict, reply_text: str,
     return task
 
 
+_HEAD_BY_TRIGGER = {
+    "sent_reply": {
+        "contradicts": ":rotating_light: *A sent reply contradicts the knowledge base / case history*",
+        "novel": ":grey_question: *A sent reply makes a claim nothing in our knowledge supports*",
+        "sample": ":mag: *QA sample — sent reply, please spot-check*",
+    },
+    "internal_note": {
+        "contradicts": ":rotating_light: *An internal case note contradicts the knowledge base / case history*",
+        "novel": ":grey_question: *An internal case note makes a claim nothing in our knowledge supports*",
+        "sample": ":mag: *QA sample — internal note, please spot-check*",
+    },
+}
+
+
 def _post_card(sb, *, task_id, tenant_id, team, reply_text, verdict, case_sf_id,
-               case_number, trigger, post=None) -> dict | None:
+               case_number, trigger, post=None, reply_kind: str = "sent_reply") -> dict | None:
     try:
         from . import routing, slack
         route = routing.resolve_slack_route(tenant_id, routed_team=team or None)
@@ -167,11 +201,8 @@ def _post_card(sb, *, task_id, tenant_id, team, reply_text, verdict, case_sf_id,
             return None
         salient = verdict.get("salient") or []
         ev = "; ".join(v.get("evidence", "") for v in (verdict.get("verdicts") or [])[:2])
-        head = {
-            "contradicts": ":rotating_light: *A sent reply contradicts the knowledge base / case history*",
-            "novel": ":grey_question: *A sent reply makes a claim nothing in our knowledge supports*",
-            "sample": ":mag: *QA sample — sent reply, please spot-check*",
-        }.get(trigger, "*Review*")
+        head = _HEAD_BY_TRIGGER.get(reply_kind, _HEAD_BY_TRIGGER["sent_reply"]).get(
+            trigger, "*Review*")
         text = (
             f"{head}  {who}\n"
             f"Case *{case_number or case_sf_id or '?'}*\n"
@@ -194,8 +225,9 @@ def _post_card(sb, *, task_id, tenant_id, team, reply_text, verdict, case_sf_id,
             ]},
         ]
         sender = post or slack.post_message
-        r = sender("A sent reply needs review", tenant_id=tenant_id,
-                   channel=channel, blocks=blocks)
+        title = "An internal note needs review" if reply_kind == "internal_note" \
+            else "A sent reply needs review"
+        r = sender(title, tenant_id=tenant_id, channel=channel, blocks=blocks)
         if r and r.get("sent"):
             return {"channel": r.get("channel") or channel, "ts": r.get("ts")}
     except Exception as e:  # noqa: BLE001

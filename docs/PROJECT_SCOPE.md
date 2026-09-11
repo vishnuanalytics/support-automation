@@ -707,6 +707,73 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-11 (KIL-g still deferred — but its real blocker, near-zero
+`review_tasks` volume, is now being fixed: KIL-c widened to also judge
+internal case notes, not only replies that reached the customer. Small,
+offline-verified.)**
+
+Asked to "continue with KIL-g" (the atomic claim graph, deferred since
+2026-09-03 pending "the loop having accumulated real adjudications").
+Checked the live DB first rather than starting design work on spec alone:
+**`review_tasks` has exactly 1 row, ever**, against 755 real runs / 104
+human-resolved cases across 5 tenants. So the precondition genuinely isn't
+met — there is still nothing to design KIL-g's claim schema against, and
+building it now would be exactly the "building ahead" CLAUDE.md warns
+against. **Did not build KIL-g.**
+
+Traced *why* the count is so low: `judge_human_reply()` (KIL-c, the thing
+that actually creates `review_tasks` rows) only ever gets called from two
+delivery paths — a human's reply detected via Salesforce outbound-email
+correspondence (`api/worker.py::_check_resolution`), or a Slack-reasoning
+reply that was actually auto-sent (`interpreter/slack_socket.py::_deliver`,
+covers both the free-text dialogue and the `cx_send` button). Both are
+real, both were already correctly wired — but genuine customer-facing
+sends through either path are rare in this environment (most of the 104
+resolved runs are `guided_resume`/`no_reply`/`human_handling`, none of
+which reach the judge at all; even the 20 "email-path" runs are mostly
+from before KIL-c existed on 2026-09-02). Widening the two send-detecting
+queries themselves wasn't attempted — that needs live Salesforce
+inspection this session's tools can't do (no Salesforce MCP; Neo4j MCP is
+currently down) — so this is a scoped fix, not a full audit of detection
+coverage.
+
+**What shipped instead**, confirmed with the user as the sensible next
+step given the finding: `_check_resolution` already captures a human's
+internal `CaseComment`/Chatter note (`resp.get("guidance")`) as context on
+the run — it just never checked that text against the KB. It's real
+human-written signal ("does what a human just said match the KB?") that's
+far more common than an actual customer-facing send, so it's now fed
+through the same KIL-b judge. `interpreter/review.py::judge_human_reply`
+gains `reply_kind` ("sent_reply" default, unchanged; or "internal_note")
+— purely a Slack-card wording switch (`_HEAD_BY_TRIGGER`, "An internal
+case note contradicts…" vs "A sent reply contradicts…", stamped into
+`verdict["source"]` too) so a manager can never mistake an internal note
+for something the customer already saw; judge logic, storage, and the
+Correct/Wrong/Dismiss resolution flow are all identical either way.
+`api/worker.py::_check_resolution` calls it with `reply_kind="internal_note"`
+right where a genuinely *new* guidance note gets merged into
+`runs.human_reply` — gated on that same "is this new content" check, so a
+note already judged on a prior 5-minute poll isn't resubmitted every time,
+and best-effort (a judge failure never breaks the poll itself).
+
+7 new tests (`tests/test_review.py` — internal-note task creation + card
+wording vs. the unchanged default; `tests/test_agent_resume.py` — the new
+comment is judged once as `internal_note`, a re-seen comment isn't
+rejudged, a judge failure doesn't break `_check_resolution`). Full offline
+suite: 1238 passed (was 1232). `cd web && npm run build` clean. No live
+verification this session (needs a real Case with a real CaseComment
+polled by a real worker).
+
+**Not done — explicitly out of scope for this chunk**: KIL-g itself
+(still correctly deferred, now with a real path to accumulating data
+instead of none); auditing whether `agent_response_since`'s outbound-email
+detection is under-counting real customer-facing sends (plausible given
+how few showed up, but needs live SF access to confirm — flagged, not
+chased); wiring this into `handoff_watch.py` (KIL-e) or any other
+KIL step.
+
+---
+
 **2026-09-11 (Security review of the above + a second, pre-existing
 gap fixed while at it. Both small, offline-verified.)**
 

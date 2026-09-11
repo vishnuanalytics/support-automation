@@ -241,9 +241,11 @@ def _check_resolution(payload: dict, sb) -> dict:
     reasoning session (the normal path is the Slack dialogue — Phase 24). It
     never sends: it just records what the human did.
 
-      * a human left a CaseComment -> logged as context on the run.
+      * a human left a CaseComment -> logged as context on the run, and
+        (2026-09-11) checked by KIL-c's judge as an `internal_note`.
       * the agent emailed the customer directly -> score the draft
-        (`sent_as_is` / `edited` / `rewrote`).
+        (`sent_as_is` / `edited` / `rewrote`), and checked by KIL-c's judge
+        as a `sent_reply`.
       * nothing -> re-poll up to FEEDBACK_MAX_CHECKS, then `human_handling`
         (a human engaged) or `no_reply`.
     """
@@ -279,6 +281,20 @@ def _check_resolution(payload: dict, sb) -> dict:
             sb.table("runs").update({
                 "human_reply": merged, "feedback_checked_at": "now()",
             }).eq("run_id", run_id).execute()
+            # KIL-c (widened 2026-09-11) — an internal note never reaches the
+            # customer, but it's real human-written signal the loop can check
+            # against the KB just as well as a sent reply; "sent_reply" volume
+            # alone was too thin to ever accumulate real adjudications (see
+            # PROJECT_SCOPE.md). Gated on the same "is this new content"
+            # check above so a note already judged on a prior poll isn't
+            # re-submitted every 5 minutes.
+            try:
+                from interpreter import review
+                review.judge_human_reply(sb, run_row=row, reply_text=resp["guidance"],
+                                         reply_kind="internal_note")
+            except Exception as e:  # noqa: BLE001
+                log.warning("review.judge_human_reply (internal_note) for %s failed: %s",
+                           run_id, e)
 
     # 2. the agent already replied to the customer -> just score the draft
     if resp.get("outbound_email"):
