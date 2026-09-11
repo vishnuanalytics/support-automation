@@ -707,8 +707,54 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-11 (Security review of the above + a second, pre-existing
+gap fixed while at it. Both small, offline-verified.)**
+
+A `/security-review` pass on the BYOK/trial-cap commit below (before it
+was even a day old) found a real bypass in the exemption it added:
+`assert_not_locked` skipped the cap block whenever `llm.tenant_has_byok()`
+was true, but that flag is "has *any* provider key on file," unverified
+(`PUT /api/integrations/llm` never test-calls the provider) — a trialing
+tenant could paste a throwaway key for a provider their flows never
+actually use (e.g. a fake OpenRouter key, while every real call still
+routes to Groq) and permanently disable the cap for the rest of the
+trial, at zero cost, while every real run kept billing the platform's own
+key. **Fixed**: new `llm.tenant_byok_providers(tenant_id) -> set[str]`
+(which providers has a key on file, vs. `tenant_has_byok`'s blanket
+bool — that one is left alone, it only affects a checkout *discount*
+where a coarse signal is low-stakes). `billing._trial_cap_status`
+(renamed from `_trial_cap_exceeded`, now returns `(exceeded,
+byok_covered)`) derives the providers the tenant's own recorded runs
+actually used from `tokens_by_model` + `llm.provider()`, and only exempts
+if that intersects the tenant's real BYOK providers. 3 new/updated tests
+in `tests/test_billing.py` (`_trial_cap_status` — for-the-used-provider
+passes, for-an-unused-provider still raises) + 1 in `tests/test_llm.py`.
+
+Same pass re-surfaced a sub-threshold note from the 2026-09-03 audit:
+`GET /api/jobs/{job_id}` only tenant-checked jobs carrying a `flow_id` in
+their payload — `kb_sync`/`gdoc_writeback`/`embed_kb_entry`/
+`import_kb_bundle` jobs weren't checked at all, even though `jobs.tenant_id`
+(populated at `enqueue()` or backfilled by the worker,
+`api/worker.py::_resolve_job_tenant`) already carries the right answer for
+every one of those kinds. **Fixed**: `get_job` now checks `job.tenant_id`
+via `_caller_tenant` (403 if the caller isn't a member) when present,
+falling back to the old `flow_id` check only when it isn't (the narrow
+pre-claim window, or a genuinely tenant-less job like `queue_sweep`). 3
+new offline tests in `tests/test_api.py` calling the route function
+directly against a fake `_service`/`Caller.sb` (no live Supabase needed).
+Job ids are unguessable UUIDs, so this was defense-in-depth even before
+the fix — not a live exploit found, just tightened.
+
+`cd web && npm run build` clean; full offline suite green (1232, was
+1220 before this session's two commits).
+
+---
+
 **2026-09-11 (Billing: wired BYOK into the trial's free-credit cap — a
-product-decision fix, not a new feature; small, offline-verified.)**
+product-decision fix, not a new feature; small, offline-verified. Superseded
+in part by the security-review fix directly above — the BYOK-provider
+matching described there replaced this entry's blanket `tenant_has_byok`
+check.)**
 
 Gap found while revisiting the billing track: BYOK (BYOK keys pasted in
 Connections, `/api/integrations/llm`) already excluded a tenant's own-key

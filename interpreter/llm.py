@@ -144,10 +144,28 @@ def _is_byok(prov: str, tenant_id: str | None) -> bool:
 
 
 def tenant_has_byok(tenant_id: "str | None") -> bool:
-    """Does this tenant have at least one of their own LLM keys saved?
-    Billing chunk F's subscribe flow uses this to decide whether a plan's
-    BYOK discount applies at checkout time."""
+    """Does this tenant have at least one of their own LLM keys saved,
+    for ANY provider? Billing chunk F's subscribe flow uses this to decide
+    whether a plan's BYOK discount applies at checkout time -- a coarse
+    "any key" signal is fine there since a real payment still has to be
+    completed either way. NOT a substitute for `tenant_byok_providers()`
+    when the decision actually gates access (see its docstring) -- a
+    tenant could otherwise paste an unverified, unused-provider key
+    purely to flip this flag."""
     return bool(_tenant_keys(tenant_id))
+
+
+def tenant_byok_providers(tenant_id: "str | None") -> set[str]:
+    """Which provider(s) has this tenant pasted their own key for? Unlike
+    `tenant_has_byok`, this lets a caller check BYOK coverage for the
+    *specific* provider(s) a tenant's usage actually routes through --
+    load-bearing for `interpreter/billing.py`'s trial free-credit-cap
+    exemption, where a blanket "has some key" flag would let a tenant
+    dodge the cap with a key for a provider they never actually call
+    (`PUT /api/integrations/llm` never verifies a key against its
+    provider, so presence alone proves nothing about which calls it
+    actually covers)."""
+    return set(_tenant_keys(tenant_id).keys())
 
 
 def _roster(capability: str) -> tuple[list[str], list[str]]:

@@ -110,6 +110,84 @@ def test_job_failures_needs_a_token():
     assert client.get("/api/jobs/failures").status_code == 401
 
 
+# ── GET /api/jobs/{job_id} tenant scoping (2026-09-11 fix) ──────────────
+# Calls the route function directly (bypassing the real bearer-auth /
+# live-Supabase Caller.__init__) so this stays offline: a fake `c.sb`
+# stands in for the RLS-scoped client `_caller_tenant` reads
+# `tenant_members` off, and a fake `main._service` stands in for the
+# service-role client `get_job` reads the `jobs` row off.
+class _FakeQuery:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def select(self, *a, **k):
+        return self
+
+    def eq(self, *a, **k):
+        return self
+
+    def execute(self):
+        return type("R", (), {"data": self._rows})
+
+
+class _FakeSb:
+    def __init__(self, tables):
+        self._tables = tables
+
+    def table(self, name):
+        return _FakeQuery(self._tables.get(name, []))
+
+
+def _fake_caller(my_tenant_ids):
+    from api.main import Caller
+
+    c = Caller.__new__(Caller)
+    c.sb = _FakeSb({"tenant_members": [{"tenant_id": t} for t in my_tenant_ids]})
+    return c
+
+
+def test_get_job_denies_a_job_belonging_to_another_tenant(monkeypatch):
+    from fastapi import HTTPException
+
+    from api import main
+
+    monkeypatch.setattr(main, "_service", _FakeSb({"jobs": [
+        {"job_id": "j1", "kind": "kb_sync", "status": "done", "attempts": 1,
+         "payload": {"connection_id": "c1"}, "result": {"secret": "other tenant's data"},
+         "error": None, "created_at": "t", "updated_at": "t", "tenant_id": "TENANT-OTHER"},
+    ]}))
+    with pytest.raises(HTTPException) as ei:
+        main.get_job("j1", c=_fake_caller(["TENANT-MINE"]))
+    assert ei.value.status_code == 403
+
+
+def test_get_job_allows_a_job_belonging_to_the_callers_own_tenant(monkeypatch):
+    from api import main
+
+    monkeypatch.setattr(main, "_service", _FakeSb({"jobs": [
+        {"job_id": "j1", "kind": "kb_sync", "status": "done", "attempts": 1,
+         "payload": {"connection_id": "c1"}, "result": {"ok": True},
+         "error": None, "created_at": "t", "updated_at": "t", "tenant_id": "TENANT-MINE"},
+    ]}))
+    job = main.get_job("j1", c=_fake_caller(["TENANT-MINE"]))
+    assert job["result"] == {"ok": True} and "tenant_id" not in job and "payload" not in job
+
+
+def test_get_job_with_no_attributable_tenant_falls_back_to_permissive(monkeypatch):
+    """A genuinely cross-tenant infra job (e.g. `queue_sweep`) has no
+    tenant_id and no flow_id -- unchanged, pre-existing permissive
+    behavior for that narrow case (see the fix's comment)."""
+    from api import main
+
+    monkeypatch.setattr(main, "_service", _FakeSb({"jobs": [
+        {"job_id": "j1", "kind": "queue_sweep", "status": "done", "attempts": 1,
+         "payload": {}, "result": {"ok": True}, "error": None,
+         "created_at": "t", "updated_at": "t", "tenant_id": None},
+    ]}))
+    job = main.get_job("j1", c=_fake_caller(["TENANT-MINE"]))
+    assert job["result"] == {"ok": True}
+
+
 def test_posthog_integration_endpoints_need_a_token():
     assert client.get("/api/integrations/posthog").status_code == 401
     assert client.put("/api/integrations/posthog", json={"project_id": "1"}).status_code == 401

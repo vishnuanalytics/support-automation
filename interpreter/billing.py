@@ -52,23 +52,40 @@ class BillingLockedError(RuntimeError):
     — never a generic crash."""
 
 
-def _trial_cap_exceeded(tenant_id: str, sb) -> bool:
-    """Has this trialing tenant used up its plan's included runs/tokens
-    for the current billing period? Mirrors `check_and_warn`'s own usage
-    query — this just acts on it instead of only logging it. An unlimited
-    plan (both limits null) never counts as exceeded."""
+def _trial_cap_status(tenant_id: str, sb) -> tuple[bool, bool]:
+    """(cap_exceeded, byok_covers_actual_usage) for this trialing tenant's
+    current billing period. The first half mirrors `check_and_warn`'s own
+    usage query — this just acts on it instead of only logging it. An
+    unlimited plan (both limits null) never counts as exceeded.
+
+    `byok_covers_actual_usage` is deliberately NOT `llm.tenant_has_byok` —
+    that only proves *some* key is on file for *some* provider, real or
+    not (`PUT /api/integrations/llm` never verifies a key against its
+    provider). Instead it's the providers this tenant's own recorded runs
+    actually used (`tokens_by_model`, mapped through `llm.provider()`)
+    intersected with the providers it has a key for
+    (`llm.tenant_byok_providers`) — so pasting a key for a provider the
+    tenant's flows never call can't exempt it from the cap while every
+    real call still bills the platform's own key."""
     plan_row = get_plan_for_tenant(tenant_id, sb)
     limits = plan_limits(plan_row)
     if limits["runs"] is None and limits["tokens"] is None:
-        return False
+        return False, False
     _, period_start, period_end = month_bounds(None)
     rows = (sb.table("runs").select("tokens_total, tokens_by_model, tokens_by_key_source, created_at")
             .eq("tenant_id", tenant_id)
             .gte("created_at", period_start).lt("created_at", period_end)
             .limit(5000).execute().data or [])
     s = usage_summary(rows, plan_row["slug"], limits, period_start, period_end)
-    return ((limits["runs"] is not None and s["billable_runs_count"] >= limits["runs"])
-            or (limits["tokens"] is not None and s["billable_tokens_total"] >= limits["tokens"]))
+    exceeded = ((limits["runs"] is not None and s["billable_runs_count"] >= limits["runs"])
+                or (limits["tokens"] is not None and s["billable_tokens_total"] >= limits["tokens"]))
+    if not exceeded:
+        return False, False
+    from interpreter import llm
+
+    used_providers = {llm.provider(m) for r in rows for m in (r.get("tokens_by_model") or {})}
+    byok_covered = bool(used_providers & llm.tenant_byok_providers(tenant_id))
+    return True, byok_covered
 
 
 def assert_not_locked(tenant_id: "str | None", sb) -> None:
@@ -84,11 +101,12 @@ def assert_not_locked(tenant_id: "str | None", sb) -> None:
         flips `billing_status` to `locked` -> blocked here, always,
         BYOK or not. The trial window itself is not extendable by BYOK.
       - the plan's included runs/tokens run out *before* day 7 -> blocked
-        here too, UNLESS the tenant has pasted their own LLM key: a BYOK
-        run doesn't spend the platform's credits (chunk E already excludes
-        it from `billable_*`), so there's nothing to protect by blocking
-        it — it just lets them keep testing until the trial clock itself
-        ends."""
+        here too, UNLESS the tenant's own recorded usage was actually
+        covered by their own key for the provider(s) it used (see
+        `_trial_cap_status`) — a real BYOK run doesn't spend the
+        platform's credits (chunk E already excludes it from
+        `billable_*`), so there's nothing to protect by blocking it — it
+        just lets them keep testing until the trial clock itself ends."""
     if not tenant_id:
         return
     rows = (sb.table("tenants").select("billing_status").eq("tenant_id", tenant_id)
@@ -101,12 +119,13 @@ def assert_not_locked(tenant_id: "str | None", sb) -> None:
             "This workspace's trial has ended and no payment method is on file — "
             "flows are paused until billing is reactivated.")
     if status == "trialing":
-        from interpreter import llm
-        if not llm.tenant_has_byok(tenant_id) and _trial_cap_exceeded(tenant_id, sb):
+        exceeded, byok_covered = _trial_cap_status(tenant_id, sb)
+        if exceeded and not byok_covered:
             raise BillingLockedError(
                 "This workspace has used its free trial credits for this period — "
-                "add your own LLM key in Connections to keep testing until your "
-                "trial ends, or choose a plan to keep going without one.")
+                "add your own LLM key in Connections (for the model your flows "
+                "actually use) to keep testing until your trial ends, or choose "
+                "a plan to keep going without one.")
 
 
 def get_plan_for_tenant(tenant_id: str, sb) -> dict[str, Any]:

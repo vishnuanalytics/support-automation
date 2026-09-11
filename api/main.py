@@ -1365,16 +1365,25 @@ def salesforce_case_hook(
 def get_job(job_id: str, c: Caller = Depends(caller)) -> dict:
     rows = (
         _service.table("jobs")
-        .select("job_id, kind, status, attempts, payload, result, error, created_at, updated_at")
+        .select("job_id, kind, status, attempts, payload, result, error, created_at, updated_at, tenant_id")
         .eq("job_id", job_id).execute().data
     )
     if not rows:
         raise HTTPException(404, "job not found")
     job = rows[0]
-    fid = (job.get("payload") or {}).get("flow_id")
-    if fid:
-        _require_visible(c, fid)          # only see jobs for flows in your tenant
+    tid = job.get("tenant_id")
+    if tid:
+        _caller_tenant(c, tid)            # 403 if the caller isn't a member of this job's tenant
+    else:
+        # `jobs.tenant_id` is backfilled by the worker (api/worker.py::_resolve_job_tenant)
+        # once a job is claimed/processed -- this is the pre-claim fallback, and the only
+        # jobs with no tenant_id and no flow_id are genuinely cross-tenant infra sweeps
+        # (e.g. `queue_sweep`), which have no owner to check against.
+        fid = (job.get("payload") or {}).get("flow_id")
+        if fid:
+            _require_visible(c, fid)
     job.pop("payload", None)
+    job.pop("tenant_id", None)
     return job
 
 

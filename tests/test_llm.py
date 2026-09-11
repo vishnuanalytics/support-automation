@@ -37,6 +37,13 @@ def test_tenant_has_byok_true_iff_any_key_saved(monkeypatch):
     assert llm.tenant_has_byok("t1") is False
 
 
+def test_tenant_byok_providers_is_the_set_of_providers_with_a_saved_key(monkeypatch):
+    monkeypatch.setattr(llm, "_tenant_keys", lambda tid: {"groq": "x", "anthropic": "y"})
+    assert llm.tenant_byok_providers("t1") == {"groq", "anthropic"}
+    monkeypatch.setattr(llm, "_tenant_keys", lambda tid: {})
+    assert llm.tenant_byok_providers("t1") == set()
+
+
 def test_dispatch_sets_platform_key_source_by_default(monkeypatch):
     monkeypatch.setattr(llm, "_tenant_keys", lambda tid: {})
     monkeypatch.setattr(llm, "_groq_complete", lambda *a, **k: "reply")
