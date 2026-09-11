@@ -44,25 +44,69 @@ _FREE_PLAN_FALLBACK: dict[str, Any] = {
 
 class BillingLockedError(RuntimeError):
     """Raised by `assert_not_locked` when a tenant's trial (or grace
-    period) has lapsed with no payment on file. Callers turn this into a
-    clear, actionable failure — a 402 for the interactive "run" endpoint,
-    a job that fails (and retries a few times, harmlessly, before settling
-    as an error) for the worker's queued path — never a generic crash."""
+    period) has lapsed with no payment on file, or a trialing tenant has
+    used up its free credits for the period with no BYOK key to fall back
+    on. Callers turn this into a clear, actionable failure — a 402 for the
+    interactive "run" endpoint, a job that fails (and retries a few times,
+    harmlessly, before settling as an error) for the worker's queued path
+    — never a generic crash."""
+
+
+def _trial_cap_exceeded(tenant_id: str, sb) -> bool:
+    """Has this trialing tenant used up its plan's included runs/tokens
+    for the current billing period? Mirrors `check_and_warn`'s own usage
+    query — this just acts on it instead of only logging it. An unlimited
+    plan (both limits null) never counts as exceeded."""
+    plan_row = get_plan_for_tenant(tenant_id, sb)
+    limits = plan_limits(plan_row)
+    if limits["runs"] is None and limits["tokens"] is None:
+        return False
+    _, period_start, period_end = month_bounds(None)
+    rows = (sb.table("runs").select("tokens_total, tokens_by_model, tokens_by_key_source, created_at")
+            .eq("tenant_id", tenant_id)
+            .gte("created_at", period_start).lt("created_at", period_end)
+            .limit(5000).execute().data or [])
+    s = usage_summary(rows, plan_row["slug"], limits, period_start, period_end)
+    return ((limits["runs"] is not None and s["billable_runs_count"] >= limits["runs"])
+            or (limits["tokens"] is not None and s["billable_tokens_total"] >= limits["tokens"]))
 
 
 def assert_not_locked(tenant_id: "str | None", sb) -> None:
-    """The billing-enforcement gate (chunk D): called before a flow
-    actually runs, so a locked tenant never spends an LLM call. A missing/
-    unresolvable tenant_id is let through — this is a billing gate, not a
-    tenant-existence check; other code already handles that."""
+    """The billing-enforcement gate (chunk D, extended 2026-09-11 for the
+    trial free-credit cap): called before a flow actually runs, so a
+    locked-out tenant never spends an LLM call. A missing/unresolvable
+    tenant_id is let through — this is a billing gate, not a
+    tenant-existence check; other code already handles that.
+
+    Two independent ways a trialing tenant can be stopped, matching the
+    product framing "free credits for the first 7 days, up to this cap":
+      - the 7-day trial clock lapses (+ grace) -> `billing_trial_sweep`
+        flips `billing_status` to `locked` -> blocked here, always,
+        BYOK or not. The trial window itself is not extendable by BYOK.
+      - the plan's included runs/tokens run out *before* day 7 -> blocked
+        here too, UNLESS the tenant has pasted their own LLM key: a BYOK
+        run doesn't spend the platform's credits (chunk E already excludes
+        it from `billable_*`), so there's nothing to protect by blocking
+        it — it just lets them keep testing until the trial clock itself
+        ends."""
     if not tenant_id:
         return
     rows = (sb.table("tenants").select("billing_status").eq("tenant_id", tenant_id)
             .execute().data or [])
-    if rows and rows[0].get("billing_status") == "locked":
+    if not rows:
+        return
+    status = rows[0].get("billing_status")
+    if status == "locked":
         raise BillingLockedError(
             "This workspace's trial has ended and no payment method is on file — "
             "flows are paused until billing is reactivated.")
+    if status == "trialing":
+        from interpreter import llm
+        if not llm.tenant_has_byok(tenant_id) and _trial_cap_exceeded(tenant_id, sb):
+            raise BillingLockedError(
+                "This workspace has used its free trial credits for this period — "
+                "add your own LLM key in Connections to keep testing until your "
+                "trial ends, or choose a plan to keep going without one.")
 
 
 def get_plan_for_tenant(tenant_id: str, sb) -> dict[str, Any]:

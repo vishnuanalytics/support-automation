@@ -413,3 +413,74 @@ def test_get_plan_for_tenant_falls_back_to_hardcoded_limits_if_plans_table_is_em
     plan = billing.get_plan_for_tenant("t1", sb)
     assert plan["slug"] == "free"
     assert billing.plan_limits(plan) == _FREE_LIMITS
+
+
+# ── assert_not_locked (2026-09-11): the 7-day lock + a trial free-credit cap ──
+def _runs_at_cap():
+    return [{"tokens_total": 0, "tokens_by_model": {}, "tokens_by_key_source": {},
+              "created_at": _period_start()} for _ in range(200)]  # 200/200 included_runs
+
+
+def test_assert_not_locked_no_tenant_id_is_a_noop():
+    billing.assert_not_locked(None, _SB())  # must not raise / must not touch the client
+
+
+def test_assert_not_locked_active_tenant_ignores_usage(monkeypatch):
+    from interpreter import llm
+
+    monkeypatch.setattr(llm, "tenant_has_byok", lambda tid: False)
+    sb = _SB({"tenants": [{"billing_status": "active", "plan_id": "p-free"}],
+              "plans": [_FREE_PLAN], "runs": _runs_at_cap()})
+    billing.assert_not_locked("t1", sb)  # over the "cap" but not trialing -- not this gate's job
+
+
+def test_assert_not_locked_locked_status_always_raises_even_with_byok(monkeypatch):
+    from interpreter import llm
+
+    monkeypatch.setattr(llm, "tenant_has_byok", lambda tid: True)
+    sb = _SB({"tenants": [{"billing_status": "locked", "plan_id": "p-free"}], "plans": [_FREE_PLAN]})
+    try:
+        billing.assert_not_locked("t1", sb)
+        assert False, "expected BillingLockedError"
+    except billing.BillingLockedError:
+        pass  # the 7-day trial clock isn't extendable by BYOK
+
+
+def test_assert_not_locked_trialing_under_cap_is_fine(monkeypatch):
+    from interpreter import llm
+
+    monkeypatch.setattr(llm, "tenant_has_byok", lambda tid: False)
+    sb = _SB({"tenants": [{"billing_status": "trialing", "plan_id": "p-free"}],
+              "plans": [_FREE_PLAN], "runs": []})
+    billing.assert_not_locked("t1", sb)
+
+
+def test_assert_not_locked_trialing_over_cap_no_byok_raises(monkeypatch):
+    from interpreter import llm
+
+    monkeypatch.setattr(llm, "tenant_has_byok", lambda tid: False)
+    sb = _SB({"tenants": [{"billing_status": "trialing", "plan_id": "p-free"}],
+              "plans": [_FREE_PLAN], "runs": _runs_at_cap()})
+    try:
+        billing.assert_not_locked("t1", sb)
+        assert False, "expected BillingLockedError"
+    except billing.BillingLockedError as e:
+        assert "own LLM key" in str(e)
+
+
+def test_assert_not_locked_trialing_over_cap_with_byok_is_fine(monkeypatch):
+    from interpreter import llm
+
+    monkeypatch.setattr(llm, "tenant_has_byok", lambda tid: True)
+    sb = _SB({"tenants": [{"billing_status": "trialing", "plan_id": "p-free"}],
+              "plans": [_FREE_PLAN], "runs": _runs_at_cap()})
+    billing.assert_not_locked("t1", sb)  # BYOK usage doesn't spend the platform's credits
+
+
+def test_assert_not_locked_trialing_unlimited_plan_never_capped(monkeypatch):
+    from interpreter import llm
+
+    monkeypatch.setattr(llm, "tenant_has_byok", lambda tid: False)
+    sb = _SB({"tenants": [{"billing_status": "trialing", "plan_id": "p-pro"}],
+              "plans": [_PRO_PLAN], "runs": _runs_at_cap()})
+    billing.assert_not_locked("t1", sb)

@@ -208,7 +208,7 @@ function BillingStatusBanner({ state }: { state: BillingUsage["billing_state"] }
       <Banner
         tone="accent"
         title={days != null && days >= 0 ? `Trial — ${days} day${days === 1 ? "" : "s"} left` : "Trial active"}
-        detail="Add a payment method below to keep flows running without interruption once it ends."
+        detail="Free credits included until the trial ends or your plan's usage cap is hit, whichever comes first — add your own LLM key in Connections to keep testing past the cap, or add a payment method below to keep flows running once the trial itself ends."
       />
     );
   }

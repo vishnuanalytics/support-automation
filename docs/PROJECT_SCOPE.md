@@ -707,6 +707,58 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-11 (Billing: wired BYOK into the trial's free-credit cap — a
+product-decision fix, not a new feature; small, offline-verified.)**
+
+Gap found while revisiting the billing track: BYOK (BYOK keys pasted in
+Connections, `/api/integrations/llm`) already excluded a tenant's own-key
+usage from the quota count (chunk E) and got them a checkout discount
+(chunk F), but the 7-day-trial enforcement (`billing_trial_sweep` /
+`assert_not_locked`, chunk D) never looked at it at all — a trialing
+tenant who pasted their own key still got hard-`locked` the moment the
+*free plan's* included runs/tokens ran out, even though further usage on
+their own key would have cost the platform nothing. There was also no
+gate at all on the plan's quota *during* the trial (`check_and_warn` is
+warn-only) — a trialing tenant could in principle run past the "free
+credits" cap for days before the 7-day clock even mattered.
+
+**Confirmed product intent directly with the user before changing
+enforcement logic** (this is a business-model decision, not something to
+infer): free credits run out at whichever comes first — the plan's
+included-runs/tokens cap, or the 7-day trial clock. BYOK lets a trialing
+tenant keep going *past the cap* (their runs cost the platform nothing),
+but **not past the 7-day clock itself** — once `billing_status` flips to
+`grace`/`locked`, everyone stops, BYOK or not.
+
+`interpreter/billing.py::assert_not_locked` (the one gate both `api/main.py`'s
+`POST /run` and `api/worker.py`'s job runner already called before every
+flow run — no new call sites needed) now also checks, only while
+`billing_status == "trialing"`: has this tenant's current-period usage
+(`usage_summary`'s existing `billable_runs_count`/`billable_tokens_total`,
+which already excludes BYOK tokens) hit the plan's `included_runs`/
+`included_tokens`? If so and the tenant has **no** LLM key of their own
+(`llm.tenant_has_byok`), raise `BillingLockedError` (same 402 / job-retry
+path as the existing lock) with a message pointing at Connections. A tenant
+with a key just keeps running — nothing else changes for them. The
+day-7-then-grace-then-`locked` transition itself (`billing_trial_sweep`)
+is untouched and still applies to everyone regardless of BYOK, per the
+confirmed intent above. No migration needed — the free plan's quota and
+`trial_ends_at` already existed; this only connects enforcement that
+existed in two disconnected places.
+
+`web/src/billing/BillingView.tsx`'s trialing banner text updated to state
+both boundaries and the BYOK option. **6 new tests**
+(`tests/test_billing.py`'s `assert_not_locked` section — locked always
+wins even with BYOK, trialing+under-cap fine, trialing+over-cap+no-BYOK
+raises, trialing+over-cap+BYOK fine, unlimited plan never capped).
+`cd web && npm run build` clean. **Not done — flagged, not built**:
+no live/browser verification (no real trialing tenant with a real BYOK
+key pushed past cap in this session); the quota-warning email/Slack copy
+(`check_and_warn`, `billing_trial_sweep`'s reminder text) doesn't yet
+mention BYOK as an option, only the new hard-block error message does.
+
+---
+
 **2026-09-10 (Response Quality Feedback Loop — chunk F of 6, "a feedback
 dashboard tying it together", done and live-verified. This closes the
 6-chunk plan: A stop discarding signal, B score corrections, C score
