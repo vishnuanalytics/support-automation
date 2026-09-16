@@ -97,14 +97,9 @@ export function Login() {
       </div>
 
       <div className="login-split__aside">
-        <div className="login-bars" aria-hidden>
-          <span style={{ background: "var(--accent-pressed)", height: "60%" }} />
-          <span style={{ background: "var(--accent)", height: "100%" }} />
-          <span style={{ background: "var(--exception)", height: "44%" }} />
-          <span style={{ background: "var(--warn)", height: "72%" }} />
-        </div>
-        <div style={{ font: "600 15px/1.35 var(--font-body)" }}>The agent is data, not code.</div>
-        <div className="muted" style={{ font: "400 12.5px/1.6 var(--font-body)" }}>
+        <div className="login-split__mark" aria-hidden>A</div>
+        <div style={{ font: "600 20px/1.35 var(--font-heading)" }}>The agent is data, not code.</div>
+        <div className="muted" style={{ font: "400 13.5px/1.6 var(--font-body)" }}>
           Node types, edges and config live in Postgres; this editor is a second client on the
           same schema.
         </div>

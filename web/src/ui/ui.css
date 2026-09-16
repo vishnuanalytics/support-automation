@@ -21,7 +21,7 @@
 .ui-btn--sm { height: 30px; padding: 0 var(--space-3); font-size: 13px; }
 .ui-btn--primary { background: var(--accent); border-color: var(--accent); color: var(--accent-on); }
 .ui-btn--primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
-.ui-btn--primary:active:not(:disabled) { background: var(--accent-pressed); border-color: var(--accent-pressed); color: #e9f8ff; }
+.ui-btn--primary:active:not(:disabled) { background: var(--accent-pressed); border-color: var(--accent-pressed); color: var(--accent-on); }
 .ui-btn--secondary { border-color: var(--border-button); color: var(--text); }
 .ui-btn--secondary:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-hover); }
 .ui-btn--ghost { color: var(--accent); padding: 0 var(--space-3); }
