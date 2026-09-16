@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
-import { Banner, Input } from "../ui";
+import { Banner, Input, Tag, StatTile } from "../ui";
 import type {
   ActionRequest,
   Correction,
@@ -103,7 +103,7 @@ export function ReviewView({ tenantId }: { tenantId?: string | null }) {
   return (
     <div className="view-scroll col" style={{ gap: 16, padding: "var(--content-pad)" }}>
       <h2 style={{ margin: 0 }}>Approvals</h2>
-      <p style={{ margin: 0, color: "var(--muted, #667)" }}>
+      <p style={{ margin: 0, color: "var(--text-muted)" }}>
         Everything waiting on a human — knowledge-base changes and internal task
         requests to approve, plus sent replies the contradiction judge flagged
         against the KB or case history.
@@ -111,7 +111,7 @@ export function ReviewView({ tenantId }: { tenantId?: string | null }) {
 
       {health && (
         <div className="col" style={{ gap: 4 }}>
-          <strong style={{ fontSize: 12, color: "var(--muted, #667)" }}>Bot health (24h)</strong>
+          <strong style={{ fontSize: 12, color: "var(--text-muted)" }}>Bot health (24h)</strong>
           <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
             <Tile
               label="sources failing"
@@ -157,7 +157,7 @@ export function ReviewView({ tenantId }: { tenantId?: string | null }) {
             )}
           </div>
           {health.connections.sample && (
-            <span style={{ fontSize: 12, color: "var(--crit, #b4432a)" }}>
+            <span style={{ fontSize: 12, color: "var(--exception-text)" }}>
               ⚠ {health.connections.sample}
             </span>
           )}
@@ -262,7 +262,7 @@ export function ReviewView({ tenantId }: { tenantId?: string | null }) {
             whiteSpace: "pre-wrap",
             fontSize: 13,
             lineHeight: 1.5,
-            background: "var(--card, #f6f7f9)",
+            background: "var(--surface-raised)",
             borderRadius: 8,
           }}
         >
@@ -408,7 +408,7 @@ export function ReviewView({ tenantId }: { tenantId?: string | null }) {
                 className="col"
                 style={{
                   gap: 8,
-                  border: "1px solid var(--hair, #ddd)",
+                  border: "1px solid var(--line)",
                   borderRadius: 10,
                   padding: "12px 14px",
                 }}
@@ -422,7 +422,7 @@ export function ReviewView({ tenantId }: { tenantId?: string | null }) {
                       : ar.kind}
                   </Pill>
                   <strong>{p.title || ar.rule_name || ar.kind}</strong>
-                  <span style={{ color: "var(--muted, #667)", fontSize: 12 }}>
+                  <span style={{ color: "var(--text-muted)", fontSize: 12 }}>
                     {new Date(ar.created_at).toLocaleString()}
                   </span>
                 </div>
@@ -431,7 +431,7 @@ export function ReviewView({ tenantId }: { tenantId?: string | null }) {
                     style={{
                       whiteSpace: "pre-wrap",
                       fontSize: 13,
-                      background: "var(--sunk, #f0f2f3)",
+                      background: "var(--ground-sunk)",
                       borderRadius: 8,
                       padding: "8px 10px",
                       margin: 0,
@@ -441,7 +441,7 @@ export function ReviewView({ tenantId }: { tenantId?: string | null }) {
                   </pre>
                 )}
                 {p.rationale && (
-                  <div style={{ fontSize: 12, color: "var(--muted, #667)" }}>
+                  <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
                     why: {p.rationale}
                   </div>
                 )}
@@ -464,7 +464,7 @@ export function ReviewView({ tenantId }: { tenantId?: string | null }) {
       )}
 
       <h3 style={{ margin: "8px 0 0" }}>Flagged replies</h3>
-      {rows.length === 0 && <p style={{ color: "var(--muted, #667)" }}>Nothing here.</p>}
+      {rows.length === 0 && <p style={{ color: "var(--text-muted)" }}>Nothing here.</p>}
 
       <div className="col" style={{ gap: 12 }}>
         {rows.map((t) => (
@@ -473,7 +473,7 @@ export function ReviewView({ tenantId }: { tenantId?: string | null }) {
             className="col"
             style={{
               gap: 8,
-              border: "1px solid var(--hair, #ddd)",
+              border: "1px solid var(--line)",
               borderRadius: 10,
               padding: "12px 14px",
             }}
@@ -481,7 +481,7 @@ export function ReviewView({ tenantId }: { tenantId?: string | null }) {
             <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
               <Pill tone={t.trigger === "sample" ? "mute" : "crit"}>{t.trigger}</Pill>
               <strong>Case {t.case_number || t.case_sf_id || "?"}</strong>
-              <span style={{ color: "var(--muted, #667)", fontSize: 12 }}>
+              <span style={{ color: "var(--text-muted)", fontSize: 12 }}>
                 {new Date(t.created_at).toLocaleString()}
               </span>
               {t.status !== "open" && <Pill tone="mute">{t.status}</Pill>}
@@ -490,7 +490,7 @@ export function ReviewView({ tenantId }: { tenantId?: string | null }) {
             <div style={{ whiteSpace: "pre-wrap", fontSize: 14 }}>{t.statement}</div>
 
             {t.status !== "open" && t.reviewer_note && (
-              <div style={{ fontSize: 13, color: "var(--muted, #667)" }}>
+              <div style={{ fontSize: 13, color: "var(--text-muted)" }}>
                 <b>Reviewer's reason:</b> {t.reviewer_note}
               </div>
             )}
@@ -505,7 +505,7 @@ export function ReviewView({ tenantId }: { tenantId?: string | null }) {
                 <summary style={{ cursor: "pointer", fontSize: 13 }}>
                   Judged against {t.contexts.length} passage(s)
                 </summary>
-                <ul style={{ fontSize: 12, color: "var(--muted, #667)" }}>
+                <ul style={{ fontSize: 12, color: "var(--text-muted)" }}>
                   {t.contexts.map((c, i) => (
                     <li key={i}>
                       <code>{c.ref || c.kind}</code>: {c.text.slice(0, 240)}
@@ -553,16 +553,16 @@ function pct(v: number | null): string {
 }
 
 function DocWritebacksTable({ rows }: { rows: KbDocWriteback[] }) {
-  const color = (s: string) =>
+  const statusTone = (s: string) =>
     s === "verified"
-      ? "#2b6a2b"
+      ? ("success" as const)
       : s === "suggested" || s === "applied"
-        ? "#33608a"
+        ? ("accent" as const)
         : s === "partial"
-          ? "#8a5a00"
+          ? ("warn" as const)
           : s === "reverted"
-            ? "#555"
-            : "#9b2c2c";
+            ? ("neutral" as const)
+            : ("exception" as const);
   return (
     <div style={{ overflowX: "auto" }}>
       <table className="runs-table" style={{ minWidth: 640 }}>
@@ -587,21 +587,13 @@ function DocWritebacksTable({ rows }: { rows: KbDocWriteback[] }) {
                   w.connection_label || "Google Doc"
                 )}
               </td>
-              <td>
-                <span
-                  title={w.error ?? undefined}
-                  style={{
-                    fontSize: 11, padding: "1px 6px", borderRadius: 8, color: "#fff",
-                    background: color(w.status),
-                  }}
-                >
-                  {w.status}
-                </span>
+              <td title={w.error ?? undefined}>
+                <Tag tone={statusTone(w.status)}>{w.status}</Tag>
               </td>
-              <td style={{ color: "var(--muted, #667)" }}>
+              <td style={{ color: "var(--text-muted)" }}>
                 {w.blocks.filter((b) => b.applied).length}/{w.blocks.length}
               </td>
-              <td style={{ color: "var(--muted, #667)" }}>
+              <td style={{ color: "var(--text-muted)" }}>
                 {new Date(w.applied_at).toLocaleString()}
               </td>
               <td>
@@ -610,7 +602,7 @@ function DocWritebacksTable({ rows }: { rows: KbDocWriteback[] }) {
                     {w.github_repo}#{w.github_issue_number}
                   </a>
                 ) : (
-                  <span style={{ color: "var(--muted, #667)" }}>—</span>
+                  <span style={{ color: "var(--text-muted)" }}>—</span>
                 )}
               </td>
             </tr>
@@ -625,7 +617,7 @@ function CategoryTable({ title, counts }: { title: string; counts: Record<string
   const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
   return (
     <div className="col" style={{ gap: 4 }}>
-      <strong style={{ fontSize: 12, color: "var(--muted, #667)" }}>{title}</strong>
+      <strong style={{ fontSize: 12, color: "var(--text-muted)" }}>{title}</strong>
       <table className="runs-table" style={{ minWidth: 220 }}>
         <tbody>
           {entries.map(([cat, n]) => (
@@ -717,29 +709,13 @@ function SessionsTable({ rows }: { rows: ReasoningSessionRow[] }) {
 }
 
 function Tile({ label, value, warn }: { label: string; value: number | string; warn?: boolean }) {
-  return (
-    <div className="tile" style={warn ? { borderColor: "var(--crit, #b4432a)" } : undefined}>
-      <div className="v">{value}</div>
-      <div className="l">{label}</div>
-    </div>
-  );
+  return <StatTile label={label} value={value} tone={warn ? "exception" : "neutral"} />;
 }
 
 function Pill({ tone, children }: { tone: "crit" | "mute"; children: React.ReactNode }) {
-  const bg = tone === "crit" ? "var(--crit-bg, #f6e4df)" : "var(--surface-2, #eee)";
-  const fg = tone === "crit" ? "var(--crit, #b4432a)" : "var(--muted, #667)";
   return (
-    <span
-      style={{
-        background: bg,
-        color: fg,
-        borderRadius: 6,
-        padding: "1px 8px",
-        fontSize: 12,
-        fontFamily: "ui-monospace, monospace",
-      }}
-    >
-      {children}
-    </span>
+    <Tag tone={tone === "crit" ? "exception" : "neutral"}>
+      <span style={{ fontFamily: "ui-monospace, monospace" }}>{children}</span>
+    </Tag>
   );
 }

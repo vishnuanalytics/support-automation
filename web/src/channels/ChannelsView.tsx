@@ -561,7 +561,7 @@ function FreshchatPanel({ tenantId }: { tenantId: string }) {
         </span>
       </div>
 
-      <div className="col" style={{ gap: 8, borderTop: "1px solid var(--hair,#ddd)", paddingTop: 12, marginTop: 4 }}>
+      <div className="col" style={{ gap: 8, borderTop: "1px solid var(--line)", paddingTop: 12, marginTop: 4 }}>
         <strong style={{ fontSize: 13 }}>Or connect via OAuth</strong>
         <p className="muted" style={{ fontSize: 12, margin: 0 }}>
           For an account whose only credential is a Custom/External App (client_id + client_secret,

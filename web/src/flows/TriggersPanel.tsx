@@ -45,7 +45,7 @@ export function TriggersPanel({ flowId, canEdit }: { flowId: string; canEdit: bo
       : `${webhookCount} webhook${webhookCount === 1 ? "" : "s"} · ${scheduleCount} schedule${scheduleCount === 1 ? "" : "s"}`;
 
   return (
-    <div style={{ borderTop: "1px solid var(--hair, #ddd)", fontSize: 13 }}>
+    <div style={{ borderTop: "1px solid var(--line)", fontSize: 13 }}>
       <button
         className="nav-group-header"
         style={{ width: "100%", padding: "6px 10px", textTransform: "none", letterSpacing: 0, fontSize: 13 }}
@@ -77,7 +77,7 @@ export function TriggersPanel({ flowId, canEdit }: { flowId: string; canEdit: bo
               style={{
                 gap: 6,
                 alignItems: "center",
-                background: "var(--surface-2, #eee)",
+                background: "var(--surface-raised)",
                 borderRadius: 6,
                 padding: "2px 8px",
               }}

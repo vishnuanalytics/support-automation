@@ -115,7 +115,7 @@ export function ConnectionsView({ tenantId }: { tenantId: string }) {
         </tbody>
       </table>
 
-      <div className="col" style={{ gap: 8, borderTop: "1px solid var(--hair,#ddd)", paddingTop: 12 }}>
+      <div className="col" style={{ gap: 8, borderTop: "1px solid var(--line)", paddingTop: 12 }}>
         <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
           <input
             placeholder="slug (e.g. vendor-api)"
@@ -226,7 +226,7 @@ function CaseConnectorPicker({ tenantId }: { tenantId: string }) {
   return (
     <div className="int-card">
       <h3>Case system</h3>
-      <p style={{ margin: 0, color: "var(--muted, #667)" }}>
+      <p style={{ margin: 0, color: "var(--text-muted)" }}>
         Which connected system your case-touching flow nodes (routing, notes, assignment,
         replies) write to by default. Connect it below before switching to it.
       </p>
@@ -319,7 +319,7 @@ function CaseTaxonomyPanel({ tenantId }: { tenantId: string }) {
       >
         The built-in default taxonomy is restored and your override is discarded.
       </Dialog>
-      <p style={{ margin: 0, color: "var(--muted, #667)" }}>
+      <p style={{ margin: 0, color: "var(--text-muted)" }}>
         Which keywords map a case to Module / Sub-module / Region / Type. Only the keys you
         include here override the built-in default — an empty <code>{"{}"}</code> uses it as-is.
       </p>
@@ -344,7 +344,7 @@ function CaseTaxonomyPanel({ tenantId }: { tenantId: string }) {
         )}
       </div>
       {showDefaults && (
-        <pre style={{ fontSize: 11, maxHeight: 240, overflow: "auto", background: "var(--bg-2,#f6f6f6)", padding: 8 }}>
+        <pre style={{ fontSize: 11, maxHeight: 240, overflow: "auto", background: "var(--ground-sunk)", padding: 8 }}>
           {JSON.stringify(tax.defaults, null, 2)}
         </pre>
       )}
@@ -426,7 +426,7 @@ function ZendeskPanel({ tenantId }: { tenantId: string }) {
       >
         This tenant stops using Zendesk as its case system.
       </Dialog>
-      <p style={{ margin: 0, color: "var(--muted, #667)" }}>
+      <p style={{ margin: 0, color: "var(--text-muted)" }}>
         Connect a Zendesk account to use it as this tenant's case system (pick it above once
         connected). Ticket comments/status/assignment map onto Zendesk's own model — see the
         Zendesk connector's own notes for where that mapping is intentionally partial.
@@ -633,7 +633,7 @@ function AiModelsPanel({ tenantId }: { tenantId: string }) {
   return (
     <div className="int-card">
       <h3>AI models</h3>
-      <p style={{ margin: 0, color: "var(--muted, #667)" }}>
+      <p style={{ margin: 0, color: "var(--text-muted)" }}>
         Every flow node that calls an LLM (drafting a reply, classifying, judging)
         uses this deployment's own key by default — Groq's free tier needs nothing
         set up. Paste your own key for a provider to use it (and its usage) instead,
@@ -793,7 +793,7 @@ function SalesforceOrgsPanel({ tenantId }: { tenantId: string }) {
   return (
     <div className="int-card">
       <h3>Salesforce</h3>
-      <p style={{ margin: 0, color: "var(--muted, #667)" }}>
+      <p style={{ margin: 0, color: "var(--text-muted)" }}>
         Connect one or more Salesforce orgs (e.g. a production org + a sandbox) using a Connected
         App's JWT bearer credentials. "Fetch from org" pulls your real Case fields, picklist values,
         and Queues — nothing about your org's setup is assumed or hardcoded.
