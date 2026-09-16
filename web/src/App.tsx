@@ -1,5 +1,11 @@
 import { useEffect, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
+import type { LucideIcon } from "lucide-react";
+import {
+  Workflow, History, Activity as ActivityIcon, CheckCircle2, Search,
+  BookOpen, HelpCircle, ListChecks, ClipboardList, Compass, Users, Plug,
+  CreditCard, Settings, LogOut,
+} from "lucide-react";
 import { supabase } from "./supabase";
 import { api } from "./api";
 import { Login } from "./auth/Login";
@@ -38,36 +44,36 @@ type View =
 
 type TenantMembership = { tenant_id: string; role: string; name?: string | null };
 
-const NAV_GROUPS: { key: string; label: string; items: { view: View; label: string; ownerOnly?: boolean }[] }[] = [
+const NAV_GROUPS: { key: string; label: string; items: { view: View; label: string; icon: LucideIcon; ownerOnly?: boolean }[] }[] = [
   {
     key: "build",
     label: "Build",
     items: [
-      { view: "editor", label: "Editor" },
-      { view: "runs", label: "Runs" },
-      { view: "activity", label: "Activity" },
-      { view: "review", label: "Approvals" },
-      { view: "trace", label: "Trace" },
+      { view: "editor", label: "Editor", icon: Workflow },
+      { view: "runs", label: "Runs", icon: History },
+      { view: "activity", label: "Activity", icon: ActivityIcon },
+      { view: "review", label: "Approvals", icon: CheckCircle2 },
+      { view: "trace", label: "Trace", icon: Search },
     ],
   },
   {
     key: "knowledge",
     label: "Knowledge",
     items: [
-      { view: "knowledge", label: "Knowledge" },
-      { view: "ask", label: "Ask" },
-      { view: "rules", label: "Rules" },
-      { view: "intake", label: "Intake" },
-      { view: "guide", label: "Guide" },
+      { view: "knowledge", label: "Knowledge", icon: BookOpen },
+      { view: "ask", label: "Ask", icon: HelpCircle },
+      { view: "rules", label: "Rules", icon: ListChecks },
+      { view: "intake", label: "Intake", icon: ClipboardList },
+      { view: "guide", label: "Guide", icon: Compass },
     ],
   },
   {
     key: "admin",
     label: "Admin",
     items: [
-      { view: "team", label: "Team", ownerOnly: true },
-      { view: "connections", label: "Connections", ownerOnly: true },
-      { view: "billing", label: "Billing", ownerOnly: true },
+      { view: "team", label: "Team", icon: Users, ownerOnly: true },
+      { view: "connections", label: "Connections", icon: Plug, ownerOnly: true },
+      { view: "billing", label: "Billing", icon: CreditCard, ownerOnly: true },
     ],
   },
 ];
@@ -91,6 +97,12 @@ export function App() {
     knowledge: true,
     admin: false,
   });
+  const [navCollapsed, setNavCollapsed] = useState(
+    () => typeof window !== "undefined" && window.localStorage.getItem("sidebar-collapsed") === "1",
+  );
+  useEffect(() => {
+    window.localStorage.setItem("sidebar-collapsed", navCollapsed ? "1" : "0");
+  }, [navCollapsed]);
 
   useEffect(() => {
     const owning = NAV_GROUPS.find((g) => g.items.some((i) => i.view === view));
@@ -255,10 +267,13 @@ export function App() {
 
   const sidebar = (
     <Sidebar
+      collapsed={navCollapsed}
+      onToggleCollapsed={() => setNavCollapsed((v) => !v)}
       head={
         <div className="row" style={{ justifyContent: "space-between", flexWrap: "wrap" }}>
           {tenants.length > 1 && (
             <select
+              className="sidebar-collapsible"
               value={tenantId}
               onChange={(e) => chooseTenant(e.target.value)}
               title="switch workspace"
@@ -271,21 +286,29 @@ export function App() {
             </select>
           )}
           {role && !canEdit && (
-            <span className="pill" title="your access is view-only">view-only</span>
+            <span className="pill sidebar-collapsible" title="your access is view-only">view-only</span>
           )}
         </div>
       }
       foot={
         <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
           <span
-            className="muted"
+            className="muted sidebar-collapsible"
             style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12 }}
             title={session.user.email ?? ""}
           >
             {session.user.email}
           </span>
           <ThemeToggle />
-          <button onClick={() => supabase.auth.signOut()}>Sign out</button>
+          <Button
+            variant="icon"
+            size="sm"
+            title="Sign out"
+            aria-label="Sign out"
+            onClick={() => supabase.auth.signOut()}
+          >
+            <LogOut size={16} />
+          </Button>
         </div>
       }
     >
@@ -294,14 +317,16 @@ export function App() {
           <button
             className={"nav-item" + (view === "setup" ? " active" : "")}
             style={{ fontWeight: 600 }}
+            title="Setup"
             onClick={() => setView("setup")}
           >
-            ⚙ Setup
+            <Settings size={17} />
+            <span className="sidebar-collapsible">Setup</span>
           </button>
           {NAV_GROUPS.map((g) => {
             const items = g.items.filter((i) => !i.ownerOnly || isOwner);
             if (items.length === 0) return null;
-            const open = openGroups[g.key];
+            const open = openGroups[g.key] || navCollapsed;
             return (
               <div key={g.key} className="nav-group">
                 <button
@@ -317,9 +342,11 @@ export function App() {
                       <button
                         key={i.view}
                         className={"nav-item" + (view === i.view ? " active" : "")}
+                        title={i.label}
                         onClick={() => setView(i.view)}
                       >
-                        {i.label}
+                        <i.icon size={17} />
+                        <span className="sidebar-collapsible">{i.label}</span>
                       </button>
                     ))}
                   </div>
@@ -328,6 +355,7 @@ export function App() {
             );
           })}
         </nav>
+        <div className="sidebar-collapsible col">
         {view === "editor" && (
           <FlowList
             key={`${tenantId}:${reloadKey}`}
@@ -380,6 +408,7 @@ export function App() {
             upgrade to — real Stripe/Razorpay checkout, no card ever touches us
           </div>
         )}
+        </div>
       </div>
     </Sidebar>
   );
