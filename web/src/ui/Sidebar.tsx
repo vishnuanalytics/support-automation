@@ -93,19 +93,20 @@ export function Sidebar({
 
   return (
     <aside className={"app-sidebar" + (collapsed ? " app-sidebar--collapsed" : "")}>
-      {head != null && <div className="app-sidebar-head">{head}</div>}
+      <div className="app-sidebar-head app-sidebar-head--row">
+        {head != null && <div className="app-sidebar-head-content">{head}</div>}
+        <button
+          type="button"
+          className="sidebar-collapse-btn"
+          onClick={onToggleCollapsed}
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        >
+          {collapsed ? <ChevronsRight size={15} /> : <ChevronsLeft size={15} />}
+        </button>
+      </div>
       <div className="app-sidebar-scroll">{children}</div>
       {foot != null && <div className="app-sidebar-foot">{foot}</div>}
-
-      <button
-        type="button"
-        className="sidebar-collapse-btn"
-        onClick={onToggleCollapsed}
-        title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-        aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-      >
-        {collapsed ? <ChevronsRight size={13} /> : <ChevronsLeft size={13} />}
-      </button>
 
       {!collapsed && (
         <div

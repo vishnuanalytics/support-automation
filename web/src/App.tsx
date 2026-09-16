@@ -273,7 +273,7 @@ export function App() {
         <div className="row" style={{ justifyContent: "space-between", flexWrap: "wrap" }}>
           {tenants.length > 1 && (
             <select
-              className="sidebar-collapsible"
+              className="sidebar-collapsible workspace-select"
               value={tenantId}
               onChange={(e) => chooseTenant(e.target.value)}
               title="switch workspace"

@@ -355,31 +355,34 @@ code { font-family: var(--font-mono); }
 .app-sidebar-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: var(--space-2); }
 .app-sidebar-foot { flex: none; padding: var(--space-3); border-top: 1px solid var(--line); }
 
-/* Collapse toggle — a small circular button straddling the sidebar's right
-   border, vertically centered, so it reads the same collapsed or not. */
+/* Head row: whatever the caller passes (workspace switcher, etc.) on the
+   left, the collapse toggle pinned on the right — inline, in normal flow,
+   not floating over the border (nothing to clip against .app-sidebar's
+   overflow:hidden, nothing to obscure scrolling nav content beneath it). */
+.app-sidebar-head--row { display: flex; align-items: flex-start; gap: var(--space-2); }
+.app-sidebar-head-content { flex: 1; min-width: 0; }
+.app-sidebar--collapsed .app-sidebar-head-content { display: none; }
+.app-sidebar--collapsed .app-sidebar-head--row { justify-content: center; }
+
 .sidebar-collapse-btn {
-  position: absolute;
-  /* pinned to the head row's height, not vertically centered on the whole
-     rail — centering on the full height would float it over scrolling nav
-     items and obscure whatever row happens to sit at the midpoint. */
-  top: 13px;
-  /* .app-sidebar clips overflow (it contains independently-scrolling
-     regions), so this sits just inside the edge rather than straddling it. */
-  right: 4px;
-  z-index: 6;
-  width: 22px;
-  height: 22px;
+  flex: none;
+  width: 24px;
+  height: 24px;
   padding: 0;
   display: grid;
   place-items: center;
-  border-radius: 50%;
-  border: 1px solid var(--line-strong);
-  background: var(--surface);
-  color: var(--text-muted);
-  box-shadow: var(--shadow-sm);
+  border-radius: var(--radius-sm);
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
   cursor: pointer;
 }
-.sidebar-collapse-btn:hover { color: var(--text); border-color: var(--accent); }
+.sidebar-collapse-btn:hover { color: var(--text); background: var(--surface-raised); }
+
+/* Compact workspace switcher — a plain <select> defaults to 100% width
+   (the global `select` rule); this one sits in a tight header row next to
+   the collapse toggle, not stretched across it. */
+.workspace-select { width: auto; max-width: 155px; font-size: 13px; padding: 6px 8px; }
 
 /* Resize handle — a thin, mostly-invisible strip on the right edge; visible
    on hover/drag so it doesn't add visual noise the rest of the time. */
