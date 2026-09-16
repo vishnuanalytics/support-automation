@@ -7,7 +7,7 @@ export function Skeleton({
   variant?: "text" | "row" | "card";
 }) {
   return (
-    <div aria-hidden>
+    <div aria-hidden style={{ width: "100%" }}>
       {Array.from({ length: lines }, (_, i) => (
         <div
           key={i}

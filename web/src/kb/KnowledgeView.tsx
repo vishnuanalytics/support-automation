@@ -72,6 +72,7 @@ export function KnowledgeView({ tenantId }: { tenantId: string }) {
   const [cols, setCols] = useState<KbCollection[]>([]);
   const [sel, setSel] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async () => {
     try {
@@ -81,6 +82,8 @@ export function KnowledgeView({ tenantId }: { tenantId: string }) {
       setSel((s) => s ?? c.find((x) => x.org_kb)?.source_id ?? c[0]?.source_id ?? null);
     } catch (e) {
       setErr(e instanceof ApiError ? String(e.detail) : String(e));
+    } finally {
+      setLoading(false);
     }
   }, [tenantId]);
 
@@ -89,6 +92,7 @@ export function KnowledgeView({ tenantId }: { tenantId: string }) {
     // before refetching, so the panel never renders another tenant's KB.
     setCols([]);
     setSel(null);
+    setLoading(true);
     void refresh();
   }, [tenantId, refresh]);
 
@@ -139,36 +143,44 @@ export function KnowledgeView({ tenantId }: { tenantId: string }) {
         </div>
         <div className="kb-rail__scroll">
           {err && <Banner tone="exception" title={err} actions={<Button variant="ghost" size="sm" onClick={() => setErr(null)}>Dismiss</Button>} />}
-          <div style={{ display: "grid", gap: 2 }}>{orgKb.map(railItem)}</div>
+          {loading ? (
+            <Skeleton variant="row" lines={3} />
+          ) : (
+            <>
+              <div style={{ display: "grid", gap: 2 }}>{orgKb.map(railItem)}</div>
 
-          <div className="row" style={{ justifyContent: "space-between", margin: "12px 0 4px" }}>
-            <span className="muted" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".12em" }}>
-              Additional collections
-            </span>
-            <Button
-              variant="icon"
-              size="sm"
-              aria-label="New collection"
-              title="Optional — a separate collection a flow can scope to."
-              onClick={() => {
-                setNewColName("");
-                setNewColOpen(true);
-              }}
-            >
-              ＋
-            </Button>
-          </div>
-          <div style={{ display: "grid", gap: 2 }}>
-            {teamCols.map(railItem)}
-            {teamCols.length === 0 && (
-              <div className="muted" style={{ fontSize: 11 }}>none — everything feeds the org KB</div>
-            )}
-          </div>
+              <div className="row" style={{ justifyContent: "space-between", margin: "12px 0 4px" }}>
+                <span className="muted" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".12em" }}>
+                  Additional collections
+                </span>
+                <Button
+                  variant="icon"
+                  size="sm"
+                  aria-label="New collection"
+                  title="Optional — a separate collection a flow can scope to."
+                  onClick={() => {
+                    setNewColName("");
+                    setNewColOpen(true);
+                  }}
+                >
+                  ＋
+                </Button>
+              </div>
+              <div style={{ display: "grid", gap: 2 }}>
+                {teamCols.map(railItem)}
+                {teamCols.length === 0 && (
+                  <div className="muted" style={{ fontSize: 11 }}>none — everything feeds the org KB</div>
+                )}
+              </div>
+            </>
+          )}
         </div>
       </aside>
 
       <div className="kb-main">
-        {sel && cols.find((c) => c.source_id === sel) ? (
+        {loading ? (
+          <Skeleton variant="card" lines={4} />
+        ) : sel && cols.find((c) => c.source_id === sel) ? (
           <Collection key={sel} col={cols.find((c) => c.source_id === sel)!} onChange={refresh} />
         ) : (
           <EmptyState title="Select a collection" body="Pick one from the list on the left." />

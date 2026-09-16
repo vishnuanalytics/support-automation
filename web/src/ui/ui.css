@@ -336,8 +336,20 @@ select.ui-select[multiple] { max-width: 100%; }
 .ui-banner__detail { font: 400 14px/1.6 var(--font-body); margin-top: 4px; }
 .ui-banner__actions { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
 
-/* Toast */
-.ui-toast-host { position: fixed; right: 20px; bottom: 20px; z-index: 60; display: grid; gap: 8px; }
+/* Toast — top-center, not a corner: every view's canvas/table chrome
+   (flow editor minimap, zoom control, add-node button) already claims a
+   viewport corner, so a corner-anchored toast host intermittently covers
+   one of them. Top-center is unclaimed by any view. */
+.ui-toast-host {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+}
 .ui-toast {
   background: var(--surface-raised);
   border: 1px solid var(--line-strong);
@@ -351,7 +363,7 @@ select.ui-select[multiple] { max-width: 100%; }
   gap: 14px;
   animation: ui-toast-in var(--motion-toast);
 }
-@keyframes ui-toast-in { from { opacity: 0; transform: translateY(6px); } }
+@keyframes ui-toast-in { from { opacity: 0; transform: translateY(-6px); } }
 .ui-toast__undo { font: var(--type-label); color: var(--accent); background: 0; border: 0; cursor: pointer; }
 
 /* EmptyState */

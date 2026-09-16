@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
 import type { Invitation, Member } from "../types";
-import { Button, Tag, Banner, Dialog, Field, Input, Select, ConfirmButton } from "../ui";
+import { Button, Tag, Banner, Dialog, Field, Input, Select, ConfirmButton, Skeleton } from "../ui";
 
 export function TeamView({ tenantId }: { tenantId: string }) {
   const [members, setMembers] = useState<Member[]>([]);
@@ -11,12 +11,16 @@ export function TeamView({ tenantId }: { tenantId: string }) {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   function load() {
-    api.team.members(tenantId).then(setMembers).catch((e: ApiError) => setErr(e.message));
+    api.team.members(tenantId).then(setMembers).catch((e: ApiError) => setErr(e.message)).finally(() => setLoading(false));
     api.team.invitations().then(setInvites).catch(() => {});
   }
-  useEffect(load, [tenantId]);
+  useEffect(() => {
+    setLoading(true);
+    load();
+  }, [tenantId]);
 
   async function invite() {
     if (!email.trim()) return;
@@ -57,6 +61,9 @@ export function TeamView({ tenantId }: { tenantId: string }) {
 
       <div>
         <h5>Members</h5>
+        {loading ? (
+          <Skeleton variant="row" lines={3} />
+        ) : (
         <table className="runs-table">
           <thead>
             <tr>
@@ -94,9 +101,10 @@ export function TeamView({ tenantId }: { tenantId: string }) {
             ))}
           </tbody>
         </table>
+        )}
       </div>
 
-      {pending.length > 0 && (
+      {!loading && pending.length > 0 && (
         <div>
           <h5>Pending invites</h5>
           <table className="runs-table">

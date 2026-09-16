@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
 import type { BillingUsage, FlowCostDelta, Plan } from "../types";
-import { Button, Tag, Banner, StatTile, QuotaBar, Select } from "../ui";
+import { Button, Tag, Banner, StatTile, QuotaBar, Select, Skeleton } from "../ui";
 
 function daysUntil(iso: string | null): number | null {
   if (!iso) return null;
@@ -23,13 +23,16 @@ export function BillingView({ tenantId }: { tenantId: string }) {
   const [usage, setUsage] = useState<BillingUsage | null>(null);
   const [deltas, setDeltas] = useState<FlowCostDelta[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     setErr(null);
+    setLoading(true);
     api
       .billingUsage({ period, tenantId })
       .then(setUsage)
-      .catch((e: ApiError) => setErr(e.message));
+      .catch((e: ApiError) => setErr(e.message))
+      .finally(() => setLoading(false));
     api.billingFlowDeltas(tenantId).then(setDeltas).catch(() => {});
   }, [period, tenantId]);
 
@@ -84,6 +87,8 @@ export function BillingView({ tenantId }: { tenantId: string }) {
           }
         />
       )}
+
+      {loading && <Skeleton variant="card" lines={5} />}
 
       {usage && (
         <>
