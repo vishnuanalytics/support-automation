@@ -17,6 +17,19 @@ export function ActivityView({ tenantId }: { tenantId: string }) {
 
   const actions = useMemo(() => Array.from(new Set(rows.map((r) => r.action))).sort(), [rows]);
 
+  // Grouped by namespace (the part before the first ".") instead of a flat
+  // wall of ~30 individually-styled chip buttons — one per distinct event
+  // kind gets overwhelming fast. "flow.created"/"flow.deleted"/… collapse
+  // into one "flow" optgroup with just the verb shown per option.
+  const actionGroups = useMemo(() => {
+    const byNamespace = new Map<string, string[]>();
+    for (const a of actions) {
+      const ns = a.includes(".") ? a.slice(0, a.indexOf(".")) : "other";
+      (byNamespace.get(ns) ?? byNamespace.set(ns, []).get(ns)!).push(a);
+    }
+    return Array.from(byNamespace.entries()).sort(([a], [b]) => a.localeCompare(b));
+  }, [actions]);
+
   const columns: Column<AuditEvent>[] = [
     {
       key: "when",
@@ -43,20 +56,32 @@ export function ActivityView({ tenantId }: { tenantId: string }) {
 
   return (
     <div style={{ display: "grid", gap: 12 }}>
-      <div className="row" style={{ gap: 4, flexWrap: "wrap" }}>
-        <Button variant={filter === "" ? "primary" : "ghost"} size="sm" onClick={() => setFilter("")}>
-          all
-        </Button>
-        {actions.map((a) => (
-          <Button
-            key={a}
-            variant={filter === a ? "primary" : "ghost"}
-            size="sm"
-            onClick={() => setFilter(a)}
+      <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <span className="muted" style={{ fontSize: 13 }}>Filter by action</span>
+        <span className="ui-select-wrap">
+          <select
+            className="ui-select"
+            style={{ minWidth: 220 }}
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
           >
-            {a}
+            <option value="">All actions</option>
+            {actionGroups.map(([ns, items]) => (
+              <optgroup key={ns} label={ns}>
+                {items.map((a) => (
+                  <option key={a} value={a}>
+                    {ns === "other" ? a : a.slice(ns.length + 1)}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+        </span>
+        {filter && (
+          <Button variant="ghost" size="sm" onClick={() => setFilter("")}>
+            Clear ✕
           </Button>
-        ))}
+        )}
       </div>
 
       {err && <Banner tone="exception" title={err} />}
