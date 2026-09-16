@@ -18,7 +18,7 @@ import { FlowGuideView } from "./guide/FlowGuideView";
 import { OnboardingWizard } from "./onboarding/OnboardingWizard";
 import { AppShell } from "./ui/AppShell";
 import { Sidebar } from "./ui/Sidebar";
-import { Button, Dialog, Field, Input, Banner } from "./ui";
+import { Button, Dialog, Field, Input, Banner, ThemeToggle } from "./ui";
 
 type View =
   | "setup"
@@ -284,6 +284,7 @@ export function App() {
           >
             {session.user.email}
           </span>
+          <ThemeToggle />
           <button onClick={() => supabase.auth.signOut()}>Sign out</button>
         </div>
       }

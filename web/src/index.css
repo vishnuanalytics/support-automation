@@ -1,53 +1,58 @@
 :root {
-  /* ── Broadsheet, dark inversion ──
-     The app's tokens mirror the Broadsheet design canvas (linked in
-     CLAUDE.md): Source Serif 4 everywhere, process cyan (--accent) +
-     magenta (--exception) on a dark press-proof ground, 1·2·4px radii, the
-     5·10·15·20·30·40 space scale. Press yellow (--warn) is a print ink in
-     the canvas — here it's the caution accent only. Retune in the canvas
-     first, then here. */
-  --ground: #1a1918;
-  --ground-sunk: #141312;
-  --surface: #211f1e;
-  --surface-raised: #2d2b2b;
-  --line: #3a3736;
-  --line-strong: #444141;
-  --border-input: #444141;
-  --border-button: #605d5d;
-  --text: #f8f4f4;
-  --text-secondary: #c9c5c4;
-  --text-muted: #9b9797;
-  --text-faint: #7d7979;
-  --accent: #62c5ee;
-  --accent-hover: #99e0ff;
-  --accent-pressed: #1186ac;
-  --accent-on: #0a303e;
-  --accent-wash: rgba(98, 197, 238, 0.14);
-  --exception: #ff458e;
-  --exception-text: #ff90b1;
-  --exception-wash: rgba(255, 69, 142, 0.14);
-  --warn: #edbb00;
-  --warn-text: #f0d787;
-  --warn-wash: rgba(237, 187, 0, 0.14);
+  /* ── design system: neutral/shadcn-style, light + dark ──
+     Replaces the former "Broadsheet" system (see git history / PROJECT_SCOPE.md
+     for that era) — this repo no longer follows an external canvas artifact
+     as source of truth; these tokens are it. Palette is shadcn's default
+     zinc/neutral theme: a monochrome primary (near-black on light, near-white
+     on dark) plus restrained semantic colors (--success/--warn/--exception)
+     for status only — color is not used decoratively. Light values are the
+     default `:root`; dark values are repeated verbatim under both a
+     `prefers-color-scheme` media query and a `[data-theme="dark"]` override
+     so the explicit toggle (Sidebar account row) always wins over system
+     preference, in both directions. */
+  --ground: #ffffff;
+  --ground-sunk: #f4f4f5;
+  --surface: #ffffff;
+  --surface-raised: #f4f4f5;
+  --line: #e4e4e7;
+  --line-strong: #d4d4d8;
+  --border-input: #d4d4d8;
+  --border-button: #d4d4d8;
+  --text: #09090b;
+  --text-secondary: #3f3f46;
+  --text-muted: #71717a;
+  --text-faint: #a1a1aa;
+  --accent: #18181b;
+  --accent-hover: #27272a;
+  --accent-pressed: #09090b;
+  --accent-on: #fafafa;
+  --accent-wash: rgba(24, 24, 27, 0.06);
+  --success: #16a34a;
+  --success-text: #15803d;
+  --success-wash: rgba(22, 163, 74, 0.1);
+  --exception: #dc2626;
+  --exception-text: #b91c1c;
+  --exception-wash: rgba(220, 38, 38, 0.1);
+  --warn: #d97706;
+  --warn-text: #b45309;
+  --warn-wash: rgba(217, 119, 6, 0.12);
 
-  /* Broadsheet — Source Serif 4 for heading and body (see the design canvas
-     linked in CLAUDE.md). One family, one weight pair. */
-  --font-heading: "Source Serif 4", Georgia, "Times New Roman", serif;
-  --font-body: "Source Serif 4", Georgia, "Times New Roman", serif;
+  --font-heading: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-body: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
 
-  /* Type scale — the Broadsheet family, sized for comfortable on-screen
-     reading: 16px body, one clear step between roles, nothing below 12px. */
-  --type-display: 600 34px/1.15 var(--font-heading);
+  /* Type scale — structure unchanged from before, retuned for Inter. */
+  --type-display: 700 34px/1.15 var(--font-heading);
   --type-view-title: 600 24px/1.25 var(--font-heading);
   --type-section: 600 18px/1.35 var(--font-heading);
   --type-body: 400 16px/1.6 var(--font-body);
-  --type-label: 600 14px/1.4 var(--font-body);
+  --type-label: 500 14px/1.4 var(--font-body);
   --type-kicker: 600 12px/1.4 var(--font-body);
   --type-mono: 400 13px/1.6 var(--font-mono);
 
-  /* Broadsheet space scale — 5 · 10 · 15 · 20 · 30 · 40 (with a 25 in-between
-     step for control padding). Every gap, pad and control size is a multiple. */
+  /* Space scale — 5 · 10 · 15 · 20 · 30 · 40 (25 in-between step for control
+     padding). Kept as-is: close enough to a 4px rhythm, no visual gain in
+     renumbering it. */
   --space-1: 5px;
   --space-2: 10px;
   --space-3: 15px;
@@ -56,14 +61,14 @@
   --space-6: 30px;
   --space-8: 40px;
 
-  /* Broadsheet radii — 1 · 2 · 4px. Corners stay sharp. */
-  --radius-sm: 1px;
-  --radius-md: 2px;
-  --radius-lg: 4px;
+  /* Radii — shadcn's default scale. */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
 
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
-  --shadow-md: 0 3px 10px rgba(0, 0, 0, 0.4);
-  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.55);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.08), 0 2px 4px -2px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.08);
 
   --sidebar-w: 260px;
   --flow-list-w: 180px;
@@ -93,6 +98,74 @@
   --surface-2: var(--surface-raised);
 }
 
+/* Dark tokens — same variables, repeated verbatim under system preference
+   and under an explicit `data-theme="dark"` (set by the Sidebar toggle,
+   persisted in localStorage) so the explicit choice always wins. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #09090b;
+    --ground-sunk: #050506;
+    --surface: #18181b;
+    --surface-raised: #27272a;
+    --line: #27272a;
+    --line-strong: #3f3f46;
+    --border-input: #3f3f46;
+    --border-button: #3f3f46;
+    --text: #fafafa;
+    --text-secondary: #d4d4d8;
+    --text-muted: #a1a1aa;
+    --text-faint: #71717a;
+    --accent: #fafafa;
+    --accent-hover: #e4e4e7;
+    --accent-pressed: #d4d4d8;
+    --accent-on: #18181b;
+    --accent-wash: rgba(250, 250, 250, 0.08);
+    --success: #22c55e;
+    --success-text: #4ade80;
+    --success-wash: rgba(34, 197, 94, 0.14);
+    --exception: #ef4444;
+    --exception-text: #f87171;
+    --exception-wash: rgba(239, 68, 68, 0.14);
+    --warn: #f59e0b;
+    --warn-text: #fbbf24;
+    --warn-wash: rgba(245, 158, 11, 0.14);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -2px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.4);
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #09090b;
+  --ground-sunk: #050506;
+  --surface: #18181b;
+  --surface-raised: #27272a;
+  --line: #27272a;
+  --line-strong: #3f3f46;
+  --border-input: #3f3f46;
+  --border-button: #3f3f46;
+  --text: #fafafa;
+  --text-secondary: #d4d4d8;
+  --text-muted: #a1a1aa;
+  --text-faint: #71717a;
+  --accent: #fafafa;
+  --accent-hover: #e4e4e7;
+  --accent-pressed: #d4d4d8;
+  --accent-on: #18181b;
+  --accent-wash: rgba(250, 250, 250, 0.08);
+  --success: #22c55e;
+  --success-text: #4ade80;
+  --success-wash: rgba(34, 197, 94, 0.14);
+  --exception: #ef4444;
+  --exception-text: #f87171;
+  --exception-wash: rgba(239, 68, 68, 0.14);
+  --warn: #f59e0b;
+  --warn-text: #fbbf24;
+  --warn-wash: rgba(245, 158, 11, 0.14);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -2px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.4);
+}
+
 * { box-sizing: border-box; }
 
 /* The shell fits the viewport and its panes scroll independently — until
@@ -107,9 +180,10 @@ body {
   color: var(--text);
   font: var(--type-body);
   -webkit-font-smoothing: antialiased;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
-::selection { background: rgba(98, 197, 238, 0.28); }
+::selection { background: color-mix(in srgb, var(--accent) 25%, transparent); }
 
 /* Focus is visible on every interactive element — 2px accent, 2px offset —
    and the browser-default ring never survives. */
@@ -145,7 +219,7 @@ button.primary:hover:not(:disabled) {
 button.primary:active:not(:disabled) {
   background: var(--accent-pressed);
   border-color: var(--accent-pressed);
-  color: #e9f8ff;
+  color: var(--accent-on);
 }
 
 input, textarea, select {
@@ -163,7 +237,7 @@ input:focus, textarea:focus, select:focus {
   outline-offset: 1px;
 }
 textarea { resize: vertical; }
-a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(98, 197, 238, 0.35); }
+a { color: var(--accent); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); }
 a:hover { color: var(--accent-hover); border-bottom-color: var(--accent-hover); }
 code { font-family: var(--font-mono); }
 
@@ -171,7 +245,7 @@ code { font-family: var(--font-mono); }
 .col { display: flex; flex-direction: column; gap: 8px; }
 .muted { color: var(--text-muted); }
 .err { color: var(--exception-text); }
-.ok { color: var(--accent); }
+.ok { color: var(--success); }
 .pill {
   font: 600 13px/1.35 var(--font-body);
   letter-spacing: 0.04em;

@@ -1,7 +1,8 @@
-// Broadsheet UI kit — see ui-mockups-for-forms/project/design/components.json
+// Shared UI kit — plain-CSS components driven by the tokens in index.css.
 export { AppShell } from "./AppShell";
 export { Sidebar } from "./Sidebar";
 export { Toolbar } from "./Toolbar";
+export { ThemeToggle } from "./ThemeToggle";
 
 export { Button, type ButtonProps } from "./Button";
 export { Tag, valueToTone, type TagTone } from "./Tag";
