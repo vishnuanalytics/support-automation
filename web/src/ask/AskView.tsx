@@ -309,7 +309,7 @@ function GraphAskPanel({ tenantId }: { tenantId: string }) {
 
 export function AskView({ tenantId }: { tenantId: string }) {
   return (
-    <div className="pane" style={{ padding: "var(--space-4)", maxWidth: 860 }}>
+    <div className="view-scroll" style={{ padding: "var(--space-4)", maxWidth: 860 }}>
       <GraphAskPanel tenantId={tenantId} />
     </div>
   );

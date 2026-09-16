@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { ChevronsLeft, ChevronsRight } from "lucide-react";
 import { api, ApiError } from "../api";
 import type { IntakeChecklist, IntakePreview, IntakeSignal } from "../types";
 import { Banner, Button, ConfirmButton, Field, Input, Select, Textarea, Toggle } from "../ui";
@@ -124,6 +125,12 @@ export function IntakeView({ tenantId }: { tenantId: string }) {
   const [err, setErr] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [listCollapsed, setListCollapsed] = useState(
+    () => typeof window !== "undefined" && window.localStorage.getItem("intake-list-collapsed") === "1",
+  );
+  useEffect(() => {
+    window.localStorage.setItem("intake-list-collapsed", listCollapsed ? "1" : "0");
+  }, [listCollapsed]);
 
   const refresh = useCallback(async () => {
     try {
@@ -202,7 +209,7 @@ export function IntakeView({ tenantId }: { tenantId: string }) {
   }
 
   return (
-    <div className="col" style={{ gap: "var(--space-3)", padding: "var(--space-3)" }}>
+    <div className="view-scroll col" style={{ gap: "var(--space-3)", padding: "var(--space-3)" }}>
       <div>
         <h2 style={{ margin: 0 }}>Intake checklists</h2>
         <div className="muted" style={{ fontSize: 13, marginTop: 4, maxWidth: 720 }}>
@@ -220,51 +227,65 @@ export function IntakeView({ tenantId }: { tenantId: string }) {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "minmax(220px, 280px) minmax(0, 1fr)",
+          gridTemplateColumns: listCollapsed ? "auto minmax(0, 1fr)" : "minmax(220px, 280px) minmax(0, 1fr)",
           gap: "var(--space-4)",
           alignItems: "start",
+          transition: "grid-template-columns 0.18s ease",
         }}
       >
         {/* list */}
         <div className="col" style={{ gap: 4 }}>
-          <Button size="sm" variant="primary" onClick={() => setSel("new")}>
-            + New checklist
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => setListCollapsed((v) => !v)}
+            title={listCollapsed ? "Show checklists" : "Hide checklists"}
+            aria-label={listCollapsed ? "Show checklists" : "Hide checklists"}
+          >
+            {listCollapsed ? <ChevronsRight size={15} /> : <ChevronsLeft size={15} />}
           </Button>
-          {rows.length === 0 && (
-            <div className="muted" style={{ fontSize: 12, padding: "var(--space-2) 0" }}>
-              none yet
-            </div>
-          )}
-          {rows.map((r) => {
-            const req = r.signals.filter((s) => s.required ?? true).length;
-            return (
-              <button
-                key={r.checklist_id}
-                className={"nav-item" + (sel === r.checklist_id ? " active" : "")}
-                style={{ textAlign: "left", height: "auto", padding: "var(--space-2)" }}
-                onClick={() => setSel(r.checklist_id)}
-              >
-                <div className="col" style={{ gap: 2, width: "100%" }}>
-                  <span style={{ fontWeight: 600, display: "flex", gap: 6, alignItems: "center" }}>
-                    <span
-                      aria-hidden
-                      style={{
-                        width: 7,
-                        height: 7,
-                        borderRadius: "50%",
-                        background: r.enabled ? "var(--accent)" : "var(--line-strong)",
-                        flex: "none",
-                      }}
-                    />
-                    {r.label}
-                  </span>
-                  <span className="muted" style={{ fontSize: 11 }}>
-                    priority {r.priority} · {req}/{r.signals.length} required
-                  </span>
+          {!listCollapsed && (
+            <>
+              <Button size="sm" variant="primary" onClick={() => setSel("new")}>
+                + New checklist
+              </Button>
+              {rows.length === 0 && (
+                <div className="muted" style={{ fontSize: 12, padding: "var(--space-2) 0" }}>
+                  none yet
                 </div>
-              </button>
-            );
-          })}
+              )}
+              {rows.map((r) => {
+                const req = r.signals.filter((s) => s.required ?? true).length;
+                return (
+                  <button
+                    key={r.checklist_id}
+                    className={"nav-item" + (sel === r.checklist_id ? " active" : "")}
+                    style={{ textAlign: "left", height: "auto", padding: "var(--space-2)" }}
+                    onClick={() => setSel(r.checklist_id)}
+                  >
+                    <div className="col" style={{ gap: 2, width: "100%" }}>
+                      <span style={{ fontWeight: 600, display: "flex", gap: 6, alignItems: "center" }}>
+                        <span
+                          aria-hidden
+                          style={{
+                            width: 7,
+                            height: 7,
+                            borderRadius: "50%",
+                            background: r.enabled ? "var(--accent)" : "var(--line-strong)",
+                            flex: "none",
+                          }}
+                        />
+                        {r.label}
+                      </span>
+                      <span className="muted" style={{ fontSize: 11 }}>
+                        priority {r.priority} · {req}/{r.signals.length} required
+                      </span>
+                    </div>
+                  </button>
+                );
+              })}
+            </>
+          )}
         </div>
 
         {/* editor */}
