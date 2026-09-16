@@ -1,21 +1,19 @@
 /**
- * "Flow Guide" — a faithful port of the Claude Design broadsheet
- * `Support Automation Flow.dc.html`: an editorial explainer of how an
- * inbound email becomes a handled Salesforce Case. Read-only reference
- * content; self-contained styling (serif / paper) so it doesn't inherit
- * the app's dark editor chrome.
+ * "Flow Guide" — an editorial explainer of how an inbound email becomes a
+ * handled Salesforce Case. Read-only reference content, styled from the
+ * app's own tokens (index.css) so it follows the light/dark toggle like
+ * every other view instead of carrying its own fixed palette.
  */
 
-const INK = "#201e1d";
-const PAPER = "#f3f2f2";
-const FILL = "#eae9e9";
-const CYAN = "#0088b0";
-const CYAN_D = "#006786";
-const CYAN_DD = "#004961";
-const CYAN_TINT = "#e9f8ff";
-const MAGENTA = "#d6006c";
+const INK = "var(--text)";
+const PAPER = "var(--ground)";
+const FILL = "var(--surface-raised)";
+const CYAN = "var(--accent)";
+const CYAN_D = "var(--text-secondary)";
+const CYAN_DD = "var(--accent-on)";
+const CYAN_TINT = "var(--accent-wash)";
 
-const serif = "'Source Serif 4', Georgia, 'Times New Roman', serif";
+const serif = "var(--font-heading)";
 
 type Stage = { n: number; node: string; title: string; body: string; hasArrow: boolean };
 type Team = { name: string; desc: string };
@@ -72,7 +70,7 @@ const NODE_REF: NodeRef[] = [
 
 const h2: React.CSSProperties = { fontSize: 28, margin: "0 0 6px", fontWeight: 600, letterSpacing: "-0.01em" };
 const h2Later: React.CSSProperties = { ...h2, margin: "56px 0 6px" };
-const lede: React.CSSProperties = { fontSize: 14, color: "rgba(32,30,29,0.65)", margin: "0 0 24px", maxWidth: 660 };
+const lede: React.CSSProperties = { fontSize: 14, color: "color-mix(in srgb, var(--text) 65%, transparent)", margin: "0 0 24px", maxWidth: 660 };
 
 function Kicker({ children, color = CYAN }: { children: React.ReactNode; color?: string }) {
   return (
@@ -88,7 +86,7 @@ function OutcomeCard({
       <Kicker color={kickerColor}>{kicker}</Kicker>
       <div style={{ fontFamily: serif, fontWeight: 600, fontSize: 17 }}>{title}</div>
       <div style={{ fontSize: 13, lineHeight: 1.55, opacity: 0.8, flex: 1 }}>{body}</div>
-      <div style={{ fontSize: 11, color: "rgba(32,30,29,0.5)" }}>{meta}</div>
+      <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--text) 50%, transparent)" }}>{meta}</div>
     </div>
   );
 }
@@ -110,12 +108,12 @@ export function FlowGuideView() {
             <div style={{ fontSize: 11, letterSpacing: "0.12em", textTransform: "uppercase", color: CYAN }}>
               Support Automation — Internal Brief
             </div>
-            <div style={{ fontSize: 11, letterSpacing: "0.05em", color: "rgba(32,30,29,0.55)" }}>August 30, 2026</div>
+            <div style={{ fontSize: 11, letterSpacing: "0.05em", color: "color-mix(in srgb, var(--text) 55%, transparent)" }}>August 30, 2026</div>
           </div>
           <h1 style={{ fontSize: 44, lineHeight: 1.08, margin: "18px 0 10px", letterSpacing: "-0.015em", fontWeight: 600 }}>
             Email to Salesforce: how a case gets handled
           </h1>
-          <p style={{ fontSize: 17, lineHeight: 1.55, color: "rgba(32,30,29,0.75)", margin: "0 0 36px", maxWidth: 640 }}>
+          <p style={{ fontSize: 17, lineHeight: 1.55, color: "color-mix(in srgb, var(--text) 75%, transparent)", margin: "0 0 36px", maxWidth: 640 }}>
             An inbound email becomes a Salesforce Case, gets triaged by an automated agent, and either gets
             answered, escalated to a person, or handed to the right team — depending on who the customer is
             and how confident the agent is in its own answer. This is the actual shape of the{" "}
@@ -141,11 +139,11 @@ export function FlowGuideView() {
                         {stage.node}
                       </div>
                     </div>
-                    <div style={{ fontSize: 14, lineHeight: 1.6, color: "rgba(32,30,29,0.8)" }}>{stage.body}</div>
+                    <div style={{ fontSize: 14, lineHeight: 1.6, color: "color-mix(in srgb, var(--text) 80%, transparent)" }}>{stage.body}</div>
                   </div>
                 </div>
                 {stage.hasArrow && (
-                  <div style={{ display: "flex", justifyContent: "flex-start", paddingLeft: 32, height: 20, alignItems: "center", color: "rgba(32,30,29,0.35)", fontSize: 13 }}>
+                  <div style={{ display: "flex", justifyContent: "flex-start", paddingLeft: 32, height: 20, alignItems: "center", color: "color-mix(in srgb, var(--text) 35%, transparent)", fontSize: 13 }}>
                     ↓
                   </div>
                 )}
@@ -160,17 +158,17 @@ export function FlowGuideView() {
           </p>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16 }}>
             <OutcomeCard
-              kicker="Auto-reply" kickerColor={CYAN} title="Bot sends the email"
+              kicker="Auto-reply" kickerColor="var(--success)" title="Bot sends the email"
               body="Gate passes and tier isn't enterprise. The drafted reply goes straight to the customer."
               meta="Threshold: basic 0.5 · premium 0.6"
             />
             <OutcomeCard
-              kicker="Ask human" kickerColor={MAGENTA} title="Post to the Case"
+              kicker="Ask human" kickerColor="var(--warn)" title="Post to the Case"
               body="Gate fails, or the topic is billing / refund / legal / cancellation and always needs a person. A Chatter post goes on the Case, @mentioning the assigned person or queue."
               meta="Channel: salesforce_chatter"
             />
             <OutcomeCard
-              kicker="Handover" kickerColor={MAGENTA} title="Full handover"
+              kicker="Handover" kickerColor="var(--exception)" title="Full handover"
               body="Enterprise accounts always land here, regardless of confidence — the highest-value customers never get an unreviewed reply."
               meta="Reason: enterprise_tier"
             />
@@ -184,7 +182,7 @@ export function FlowGuideView() {
           </p>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 32 }}>
             <div>
-              <div style={{ fontFamily: serif, fontStyle: "italic", fontSize: 19, color: CYAN_D, marginBottom: 10 }}>
+              <div style={{ fontFamily: serif, fontStyle: "italic", fontSize: 19, color: "var(--warn)", marginBottom: 10 }}>
                 Doubt — ask, then answer
               </div>
               <div style={{ fontSize: 14, lineHeight: 1.65, opacity: 0.85 }}>
@@ -195,7 +193,7 @@ export function FlowGuideView() {
               </div>
             </div>
             <div>
-              <div style={{ fontFamily: serif, fontStyle: "italic", fontSize: 19, color: MAGENTA, marginBottom: 10 }}>
+              <div style={{ fontFamily: serif, fontStyle: "italic", fontSize: 19, color: "var(--exception)", marginBottom: 10 }}>
                 Dead end — ask, then hand off
               </div>
               <div style={{ fontSize: 14, lineHeight: 1.65, opacity: 0.85 }}>
@@ -215,7 +213,7 @@ export function FlowGuideView() {
           </p>
           <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
             {TEAMS.map((team) => (
-              <div key={team.name} style={{ display: "flex", gap: 16, alignItems: "baseline", padding: "14px 0", borderBottom: "1px solid rgba(32,30,29,0.1)" }}>
+              <div key={team.name} style={{ display: "flex", gap: 16, alignItems: "baseline", padding: "14px 0", borderBottom: "1px solid color-mix(in srgb, var(--text) 10%, transparent)" }}>
                 <div style={{ minWidth: 110, flex: "none", fontFamily: serif, fontWeight: 600, fontSize: 14, color: CYAN }}>
                   {team.name}
                 </div>
@@ -233,7 +231,7 @@ export function FlowGuideView() {
           <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
             {TRACE.map((step) => (
               <div key={step.n} style={{ display: "flex", gap: 16, padding: "10px 0" }}>
-                <div style={{ width: 20, flex: "none", textAlign: "right", fontSize: 12, color: "rgba(32,30,29,0.4)", paddingTop: 2 }}>
+                <div style={{ width: 20, flex: "none", textAlign: "right", fontSize: 12, color: "color-mix(in srgb, var(--text) 40%, transparent)", paddingTop: 2 }}>
                   {step.n}
                 </div>
                 <div style={{ flex: 1, fontSize: 14, lineHeight: 1.6 }}>
@@ -249,24 +247,24 @@ export function FlowGuideView() {
           <div style={{ display: "table", width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
             <div style={{ display: "table-row" }}>
               {["Node", "What it does"].map((head) => (
-                <div key={head} style={{ display: "table-cell", textAlign: "left", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "rgba(32,30,29,0.6)", padding: 10, borderBottom: "1px solid rgba(32,30,29,0.16)" }}>
+                <div key={head} style={{ display: "table-cell", textAlign: "left", fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "color-mix(in srgb, var(--text) 60%, transparent)", padding: 10, borderBottom: "1px solid color-mix(in srgb, var(--text) 16%, transparent)" }}>
                   {head}
                 </div>
               ))}
             </div>
             {NODE_REF.map((row) => (
               <div key={row.type} style={{ display: "table-row" }}>
-                <div style={{ display: "table-cell", padding: 10, borderBottom: "1px solid rgba(32,30,29,0.08)", fontWeight: 600, whiteSpace: "nowrap", verticalAlign: "top" }}>
+                <div style={{ display: "table-cell", padding: 10, borderBottom: "1px solid color-mix(in srgb, var(--text) 8%, transparent)", fontWeight: 600, whiteSpace: "nowrap", verticalAlign: "top" }}>
                   {row.type}
                 </div>
-                <div style={{ display: "table-cell", padding: 10, borderBottom: "1px solid rgba(32,30,29,0.08)", opacity: 0.85, verticalAlign: "top" }}>
+                <div style={{ display: "table-cell", padding: 10, borderBottom: "1px solid color-mix(in srgb, var(--text) 8%, transparent)", opacity: 0.85, verticalAlign: "top" }}>
                   {row.desc}
                 </div>
               </div>
             ))}
           </div>
 
-          <div style={{ marginTop: 48, paddingTop: 16, borderTop: "1px solid rgba(32,30,29,0.16)", fontSize: 11, color: "rgba(32,30,29,0.5)" }}>
+          <div style={{ marginTop: 48, paddingTop: 16, borderTop: "1px solid color-mix(in srgb, var(--text) 16%, transparent)", fontSize: 11, color: "color-mix(in srgb, var(--text) 50%, transparent)" }}>
             Source: vishnuanalytics/support-automation, branch main. Knowledge base is synced from Google Drive
             and Zapier&rsquo;s public docs into Supabase + Neo4j; the &ldquo;automation engine&rdquo; is this
             repo&rsquo;s interpreter, reading flow rules stored as data rather than code.
