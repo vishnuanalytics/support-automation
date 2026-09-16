@@ -595,11 +595,29 @@ select.ui-select[multiple] { max-width: 100%; }
 }
 .palette__item:hover { background: var(--accent-wash); color: var(--accent-hover); }
 
-/* DateRangeFilter's custom from/to section, inside the same popover as the
-   preset list. */
-.date-range-custom {
-  margin-top: 6px;
-  padding: 10px 8px 4px;
-  border-top: 1px solid var(--line);
+/* react-day-picker (DateRangeFilter's "Custom range…" dialog) — retuned
+   from its default blue/circular look to this app's tokens. Only the
+   custom properties it already exposes for exactly this purpose, so a
+   library update doesn't fight local overrides. Themes for free: these
+   all resolve through tokens that already flip for light/dark. */
+.rdp-root {
+  --rdp-accent-color: var(--accent);
+  --rdp-accent-background-color: var(--accent-wash);
+  --rdp-today-color: var(--accent);
+  --rdp-range_middle-background-color: var(--accent-wash);
+  --rdp-range_middle-color: var(--text);
+  --rdp-range_start-color: var(--accent-on);
+  --rdp-range_start-date-background-color: var(--accent);
+  --rdp-range_end-color: var(--accent-on);
+  --rdp-range_end-date-background-color: var(--accent);
+  --rdp-selected-border: 1px solid var(--accent);
+  --rdp-day_button-border-radius: var(--radius-md);
+  --rdp-outside-opacity: 0.4;
+  --rdp-disabled-opacity: 0.35;
+  font-family: var(--font-body);
+  color: var(--text);
 }
-.date-range-custom input[type="datetime-local"] { font-size: 13px; }
+.rdp-weekday { color: var(--text-faint); }
+.rdp-caption_label, .rdp-month_caption { color: var(--text); font-weight: 600; }
+.rdp-button_next, .rdp-button_previous { color: var(--text-muted); border-radius: var(--radius-sm); }
+.rdp-button_next:hover:not(:disabled), .rdp-button_previous:hover:not(:disabled) { background: var(--surface-raised); }

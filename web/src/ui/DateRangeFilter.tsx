@@ -1,7 +1,10 @@
 import { useRef, useState } from "react";
-import { Calendar } from "lucide-react";
+import { Calendar as CalendarIcon } from "lucide-react";
+import { DayPicker, type DateRange as PickedRange } from "react-day-picker";
+import "react-day-picker/style.css";
 import { Button } from "./Button";
 import { Popover } from "./Popover";
+import { Dialog } from "./Dialog";
 
 // `label` is set when the range came from a preset, so the button can show
 // "Last 1 hour" verbatim instead of re-deriving it later by comparing
@@ -64,12 +67,14 @@ function presetRange(key: PresetKey): DateRange {
   }
 }
 
-// datetime-local wants "YYYY-MM-DDTHH:mm" in *local* time, with no
-// timezone suffix — new Date(iso).toISOString() would silently shift it.
-function toLocalInputValue(iso: string): string {
-  const d = new Date(iso);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+const pad = (n: number) => String(n).padStart(2, "0");
+const toTimeInput = (d: Date) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+
+function withTime(date: Date, time: string): Date {
+  const [h, m] = time.split(":").map(Number);
+  const d = new Date(date);
+  d.setHours(h || 0, m || 0, 0, 0);
+  return d;
 }
 
 export function rangeLabel(range: DateRange): string {
@@ -85,9 +90,10 @@ export function rangeLabel(range: DateRange): string {
 /**
  * Preset + custom date/time range picker — a Button showing the current
  * range opens a Popover of presets (last N hours/days, today, yesterday,
- * this month/quarter) plus a custom `datetime-local` from/to pair. Presets
- * apply and close immediately; custom range needs an explicit Apply since
- * both ends need to be set before it means anything.
+ * this month/quarter). Presets apply and close immediately. "Custom
+ * range…" opens a Dialog with an actual calendar (click a start day, then
+ * an end day — react-day-picker's range mode) instead of typing dates by
+ * hand, plus two time-of-day inputs to refine the exact from/to instant.
  */
 export function DateRangeFilter({
   value,
@@ -97,27 +103,33 @@ export function DateRangeFilter({
   onChange: (range: DateRange) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [customFrom, setCustomFrom] = useState("");
-  const [customTo, setCustomTo] = useState("");
+  const [customOpen, setCustomOpen] = useState(false);
+  const [picked, setPicked] = useState<PickedRange | undefined>();
+  const [fromTime, setFromTime] = useState("00:00");
+  const [toTime, setToTime] = useState("23:59");
   const anchorRef = useRef<HTMLButtonElement>(null);
-
-  function openPopover() {
-    setCustomFrom(value.since ? toLocalInputValue(value.since) : "");
-    setCustomTo(value.until ? toLocalInputValue(value.until) : "");
-    setOpen(true);
-  }
 
   function applyPreset(key: PresetKey) {
     onChange(presetRange(key));
     setOpen(false);
   }
 
-  function applyCustom() {
-    onChange({
-      since: customFrom ? new Date(customFrom).toISOString() : null,
-      until: customTo ? new Date(customTo).toISOString() : null,
-    });
+  function openCustom() {
     setOpen(false);
+    const from = value.since ? new Date(value.since) : undefined;
+    const to = value.until ? new Date(value.until) : undefined;
+    setPicked(from ? { from, to } : undefined);
+    setFromTime(from ? toTimeInput(from) : "00:00");
+    setToTime(to ? toTimeInput(to) : "23:59");
+    setCustomOpen(true);
+  }
+
+  function applyCustom() {
+    if (!picked?.from) return;
+    const since = withTime(picked.from, fromTime).toISOString();
+    const until = picked.to ? withTime(picked.to, toTime).toISOString() : null;
+    onChange({ since, until });
+    setCustomOpen(false);
   }
 
   const active = !!(value.since || value.until);
@@ -128,12 +140,12 @@ export function DateRangeFilter({
         ref={anchorRef}
         variant={active ? "secondary" : "ghost"}
         size="sm"
-        onClick={openPopover}
+        onClick={() => setOpen(true)}
       >
-        <Calendar size={14} style={{ marginRight: 6 }} />
+        <CalendarIcon size={14} style={{ marginRight: 6 }} />
         {rangeLabel(value)}
       </Button>
-      <Popover anchorRef={anchorRef} open={open} onClose={() => setOpen(false)} width={260}>
+      <Popover anchorRef={anchorRef} open={open} onClose={() => setOpen(false)} width={220}>
         <div className="col" style={{ gap: 2 }}>
           <button className="palette__item" onClick={() => applyPreset("all")}>All time</button>
           {PRESETS.map((p) => (
@@ -141,28 +153,56 @@ export function DateRangeFilter({
               {p.label}
             </button>
           ))}
-        </div>
-        <div className="date-range-custom">
-          <div className="ui-field__label" style={{ marginBottom: 6 }}>Custom range</div>
-          <div className="col" style={{ gap: 8 }}>
-            <input
-              type="datetime-local"
-              className="ui-input"
-              value={customFrom}
-              onChange={(e) => setCustomFrom(e.target.value)}
-            />
-            <input
-              type="datetime-local"
-              className="ui-input"
-              value={customTo}
-              onChange={(e) => setCustomTo(e.target.value)}
-            />
-            <Button variant="primary" size="sm" onClick={applyCustom} disabled={!customFrom && !customTo}>
-              Apply
-            </Button>
-          </div>
+          <button className="palette__item" onClick={openCustom} style={{ borderTop: "1px solid var(--line)", marginTop: 2, paddingTop: 10 }}>
+            Custom range…
+          </button>
         </div>
       </Popover>
+
+      <Dialog
+        open={customOpen}
+        onClose={() => setCustomOpen(false)}
+        title="Custom date range"
+        actions={[
+          { label: "Cancel", variant: "ghost", onClick: () => setCustomOpen(false) },
+          { label: "Apply", variant: "primary", onClick: applyCustom, disabled: !picked?.from },
+        ]}
+      >
+        <div className="col" style={{ gap: 12 }}>
+          <div className="muted" style={{ fontSize: 12 }}>
+            Click a start day, then an end day — or just a start day for an open-ended range.
+          </div>
+          <DayPicker
+            mode="range"
+            selected={picked}
+            onSelect={setPicked}
+            numberOfMonths={1}
+            showOutsideDays
+          />
+          <div className="row" style={{ gap: 10 }}>
+            <div style={{ flex: 1 }}>
+              <div className="ui-field__label">Start time</div>
+              <input
+                type="time"
+                className="ui-input"
+                value={fromTime}
+                disabled={!picked?.from}
+                onChange={(e) => setFromTime(e.target.value)}
+              />
+            </div>
+            <div style={{ flex: 1 }}>
+              <div className="ui-field__label">End time</div>
+              <input
+                type="time"
+                className="ui-input"
+                value={toTime}
+                disabled={!picked?.to}
+                onChange={(e) => setToTime(e.target.value)}
+              />
+            </div>
+          </div>
+        </div>
+      </Dialog>
     </>
   );
 }

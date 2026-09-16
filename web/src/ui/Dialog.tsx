@@ -7,6 +7,7 @@ export type DialogAction = {
   label: string;
   onClick: () => void;
   variant?: "primary" | "secondary" | "ghost" | "danger";
+  disabled?: boolean;
 };
 
 /**
@@ -44,7 +45,7 @@ export function Dialog({
         {actions.length > 0 && (
           <div className="ui-dialog__actions">
             {actions.map((a) => (
-              <Button key={a.label} variant={a.variant ?? "secondary"} onClick={a.onClick}>
+              <Button key={a.label} variant={a.variant ?? "secondary"} onClick={a.onClick} disabled={a.disabled}>
                 {a.label}
               </Button>
             ))}
