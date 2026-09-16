@@ -23,16 +23,30 @@ export function Popover({
   children: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+  const [pos, setPos] = useState<
+    { left: number; maxHeight: number } & ({ top: number; bottom?: undefined } | { top?: undefined; bottom: number })
+  >();
 
   useLayoutEffect(() => {
     if (!open || !anchorRef.current) return;
     const r = anchorRef.current.getBoundingClientRect();
     const left = align === "end" ? r.right - width : r.left;
-    setPos({
-      top: Math.round(r.bottom + 6),
-      left: Math.round(Math.max(8, Math.min(left, window.innerWidth - width - 8))),
-    });
+    const spaceBelow = window.innerHeight - r.bottom - 6 - 8;
+    const spaceAbove = r.top - 6 - 8;
+    // Content taller than a popover's content ever used to be (the
+    // date-range picker's preset list + custom range) can run past the
+    // bottom of the viewport with no way to reach the rest of it — open
+    // upward instead when there's genuinely more room there (anchored by
+    // `bottom`, not a computed `top`, so it grows from the anchor without
+    // needing to know its own height up front), and always cap height +
+    // scroll internally as a backstop either way.
+    const openUpward = spaceBelow < 160 && spaceAbove > spaceBelow;
+    const clampedLeft = Math.round(Math.max(8, Math.min(left, window.innerWidth - width - 8)));
+    setPos(
+      openUpward
+        ? { bottom: Math.round(window.innerHeight - r.top + 6), left: clampedLeft, maxHeight: Math.max(120, Math.round(spaceAbove)) }
+        : { top: Math.round(r.bottom + 6), left: clampedLeft, maxHeight: Math.max(120, Math.round(spaceBelow)) },
+    );
   }, [open, anchorRef, width, align]);
 
   useOverlay(open, onClose, ref);
@@ -44,7 +58,14 @@ export function Popover({
       ref={ref}
       className="ui-popover"
       role="dialog"
-      style={{ top: pos.top, left: pos.left, width: Math.min(width, 280) }}
+      style={{
+        top: pos.top,
+        bottom: pos.bottom,
+        left: pos.left,
+        width: Math.min(width, 280),
+        maxHeight: pos.maxHeight,
+        overflowY: "auto",
+      }}
     >
       {children}
     </div>,

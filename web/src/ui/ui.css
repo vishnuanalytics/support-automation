@@ -381,6 +381,7 @@ select.ui-select[multiple] { max-width: 100%; }
   box-shadow: var(--shadow-lg);
   padding: 6px;
   max-width: var(--popover-max);
+  overflow-y: auto;
   animation: ui-pop-in var(--motion-popover);
 }
 @keyframes ui-pop-in { from { opacity: 0; transform: translateY(-4px); } }
