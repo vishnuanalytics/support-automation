@@ -942,3 +942,32 @@ export interface IntakePreview {
   field_writes: Record<string, string>;
 }
 
+// notify_targets (migration 045/063) — who the `notify` node pings for a
+// Case Type / Module / routed_team, and where the Slack handoff card goes.
+export type NotifyMatchKind = "case_type" | "module" | "routed_team";
+export type NotifyResolver = "static" | "sf_team_role" | "sf_queue";
+
+export interface NotifyTarget {
+  id: string;
+  tenant_id: string;
+  match_kind: NotifyMatchKind;
+  match_value: string;
+  resolver: NotifyResolver;
+  sf_target_id: string | null;
+  sf_target_type: "user" | "group" | "queue" | null;
+  sf_team: string | null;
+  sf_role: string | null;
+  sf_queue: string | null;
+  label: string | null;
+  active: boolean;
+  slack_channel: string | null;
+  slack_usergroup: string | null;
+  urgency: "normal" | "high" | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type NotifyTargetIn = Omit<NotifyTarget, "id" | "tenant_id" | "created_at" | "updated_at"> & {
+  tenant_id?: string;
+};
+

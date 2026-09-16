@@ -63,6 +63,8 @@ import type {
   CaseConnector,
   CaseTaxonomy,
   CaseTaxonomyConfig,
+  NotifyTarget,
+  NotifyTargetIn,
 } from "./types";
 
 const BASE = (import.meta.env.VITE_API_BASE as string) || ""; // "" -> vite proxy
@@ -255,6 +257,21 @@ export const api = {
       }),
     reset: (tenantId?: string) =>
       req<void>(`/tenants/case-taxonomy${tenantId ? `?tenant_id=${tenantId}` : ""}`, { method: "DELETE" }),
+  },
+
+  notifyTargets: {
+    list: (tenantId?: string) =>
+      req<NotifyTarget[]>(`/notify-targets${tenantId ? `?tenant_id=${tenantId}` : ""}`),
+    create: (b: NotifyTargetIn, tenantId?: string) =>
+      req<NotifyTarget>("/notify-targets", {
+        method: "POST", body: JSON.stringify({ ...b, tenant_id: tenantId }),
+      }),
+    update: (id: string, b: NotifyTargetIn, tenantId?: string) =>
+      req<NotifyTarget>(`/notify-targets/${id}`, {
+        method: "PUT", body: JSON.stringify({ ...b, tenant_id: tenantId }),
+      }),
+    remove: (id: string, tenantId?: string) =>
+      req<void>(`/notify-targets/${id}${tenantId ? `?tenant_id=${tenantId}` : ""}`, { method: "DELETE" }),
   },
 
   rollbackFlow: (id: string, version: number) =>

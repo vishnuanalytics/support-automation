@@ -1,10 +1,10 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
 import type {
-  CaseTaxonomy, Connection, ConnectionAction, SalesforceOrg, SalesforceOrgSchema,
-  ZendeskConnection, ZendeskConnectionSave,
+  CaseTaxonomy, Connection, ConnectionAction, NotifyMatchKind, NotifyResolver, NotifyTarget,
+  NotifyTargetIn, SalesforceOrg, SalesforceOrgSchema, ZendeskConnection, ZendeskConnectionSave,
 } from "../types";
-import { Banner, Button, Dialog } from "../ui";
+import { Banner, Button, ConfirmButton, DataTable, Dialog, Field, Input, Select, Tag, Toggle, type Column } from "../ui";
 
 const AUTH_TYPES = ["none", "bearer", "header", "basic"] as const;
 
@@ -183,6 +183,7 @@ export function ConnectionsView({ tenantId }: { tenantId: string }) {
 
       <CaseConnectorPicker tenantId={tenantId} />
       <CaseTaxonomyPanel tenantId={tenantId} />
+      <NotifyTargetsPanel tenantId={tenantId} />
       <SalesforceOrgsPanel tenantId={tenantId} />
       <ZendeskPanel tenantId={tenantId} />
       <AiModelsPanel tenantId={tenantId} />
@@ -348,6 +349,285 @@ function CaseTaxonomyPanel({ tenantId }: { tenantId: string }) {
           {JSON.stringify(tax.defaults, null, 2)}
         </pre>
       )}
+    </div>
+  );
+}
+
+const MATCH_KINDS: { value: NotifyMatchKind; label: string }[] = [
+  { value: "case_type", label: "Case Type" },
+  { value: "module", label: "Module" },
+  { value: "routed_team", label: "Routed team" },
+];
+const RESOLVERS: { value: NotifyResolver; label: string }[] = [
+  { value: "static", label: "A specific User / Group / Queue" },
+  { value: "sf_team_role", label: "Whoever holds a team role right now" },
+  { value: "sf_queue", label: "A Salesforce Queue" },
+];
+
+function summarizeTarget(t: NotifyTarget): string {
+  if (t.resolver === "static") return `${t.sf_target_type ?? "id"}: ${t.sf_target_id ?? "—"}`;
+  if (t.resolver === "sf_team_role") return `${t.sf_team ?? "?"} team's ${t.sf_role ?? "Manager"}`;
+  return `Queue: ${t.sf_queue ?? "—"}`;
+}
+
+const BLANK_TARGET: NotifyTargetIn = {
+  match_kind: "case_type",
+  match_value: "",
+  resolver: "static",
+  sf_target_id: null,
+  sf_target_type: null,
+  sf_team: null,
+  sf_role: "Manager",
+  sf_queue: null,
+  label: null,
+  active: true,
+  slack_channel: null,
+  slack_usergroup: null,
+  urgency: null,
+};
+
+/** FR-27b — `notify_targets` (migration 045/063) was SQL-only: an owner had
+ * no way to change who the `notify` node pings for a Case Type/Module/
+ * routed team without an engineer running raw SQL. This is the admin UI
+ * for that table — `interpreter/routing.py` (TTL-cached) reads it at run
+ * time, unchanged. */
+function NotifyTargetsPanel({ tenantId }: { tenantId: string }) {
+  const [rows, setRows] = useState<NotifyTarget[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [editing, setEditing] = useState<NotifyTarget | null>(null);
+  const [draft, setDraft] = useState<NotifyTargetIn | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = () => {
+    api.notifyTargets.list(tenantId).then(setRows).catch((e: ApiError) => setErr(e.message));
+  };
+  useEffect(load, [tenantId]);
+
+  function openNew() {
+    setEditing(null);
+    setErr(null);
+    setDraft({ ...BLANK_TARGET });
+  }
+  function openEdit(t: NotifyTarget) {
+    setEditing(t);
+    setErr(null);
+    const { id: _id, tenant_id: _tid, created_at: _c, updated_at: _u, ...rest } = t;
+    setDraft(rest);
+  }
+
+  const patch = (p: Partial<NotifyTargetIn>) => setDraft((d) => (d ? { ...d, ...p } : d));
+
+  async function save() {
+    if (!draft) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      if (editing) await api.notifyTargets.update(editing.id, draft, tenantId);
+      else await api.notifyTargets.create(draft, tenantId);
+      setMsg(editing ? "saved" : "route added");
+      setDraft(null);
+      setEditing(null);
+      load();
+    } catch (e) {
+      setErr((e as ApiError).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(t: NotifyTarget) {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await api.notifyTargets.remove(t.id, tenantId);
+      setMsg("route deleted");
+      load();
+    } catch (e) {
+      setErr((e as ApiError).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const columns: Column<NotifyTarget>[] = [
+    {
+      key: "match",
+      header: "when",
+      cell: (t) => (
+        <span className="row" style={{ gap: 6 }}>
+          <Tag tone="neutral">{t.match_kind}</Tag> {t.match_value}
+        </span>
+      ),
+    },
+    { key: "target", header: "pings", cell: summarizeTarget },
+    { key: "label", header: "label", cell: (t) => t.label || <span className="muted">—</span> },
+    {
+      key: "slack",
+      header: "slack",
+      cell: (t) =>
+        t.slack_channel
+          ? `${t.slack_channel}${t.slack_usergroup ? ` (${t.slack_usergroup})` : ""}`
+          : <span className="muted">—</span>,
+    },
+    {
+      key: "active",
+      header: "",
+      cell: (t) => <Tag tone={t.active ? "success" : "neutral"}>{t.active ? "active" : "off"}</Tag>,
+    },
+    {
+      key: "actions",
+      header: "",
+      cell: (t) => (
+        <div className="row" style={{ gap: 4 }}>
+          <Button variant="ghost" size="sm" onClick={() => openEdit(t)}>Edit</Button>
+          <ConfirmButton
+            label="Delete"
+            size="sm"
+            title="Delete this route?"
+            body={`Cases matching ${t.match_kind} = ${t.match_value} fall back to the flow's own node config.`}
+            confirmLabel="Delete"
+            onConfirm={() => remove(t)}
+          />
+        </div>
+      ),
+    },
+  ];
+
+  return (
+    <div className="int-card">
+      <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+        <h3 style={{ margin: 0 }}>Notify routing</h3>
+        <Button variant="secondary" size="sm" onClick={openNew}>+ Add route</Button>
+      </div>
+      <p style={{ margin: 0, color: "var(--text-muted)" }}>
+        Who the <code>notify</code> node pings for a given Case Type, Module, or routed team —
+        and, if set, which Slack channel/usergroup the handoff card goes to. No match falls back
+        to the flow's own node config.
+      </p>
+      {err && <Banner tone="exception" title={err} />}
+      {msg && <Banner tone="success" title={msg} />}
+      {rows.length === 0 ? (
+        <div className="muted" style={{ fontSize: 13 }}>
+          No routing rules yet — the notify node falls back to its own config.
+        </div>
+      ) : (
+        <DataTable flush columns={columns} rows={rows} rowId={(t) => t.id} />
+      )}
+
+      <Dialog
+        open={!!draft}
+        onClose={() => setDraft(null)}
+        title={editing ? "Edit route" : "Add route"}
+        actions={[
+          { label: "Cancel", variant: "ghost", onClick: () => setDraft(null) },
+          { label: busy ? "Saving…" : "Save", variant: "primary", onClick: save, disabled: busy },
+        ]}
+      >
+        {draft && (
+          <div className="col" style={{ gap: 12 }}>
+            <div className="row" style={{ gap: 8 }}>
+              <Field label="Match on">
+                <Select
+                  value={draft.match_kind}
+                  options={MATCH_KINDS}
+                  onChange={(e) => patch({ match_kind: e.target.value as NotifyMatchKind })}
+                />
+              </Field>
+              <Field label="Value" hint="exact Case.Type / Module__c / routed_team value">
+                <Input value={draft.match_value} onChange={(e) => patch({ match_value: e.target.value })} />
+              </Field>
+            </div>
+            <Field label="Resolve to">
+              <Select
+                value={draft.resolver}
+                options={RESOLVERS}
+                onChange={(e) => patch({ resolver: e.target.value as NotifyResolver })}
+              />
+            </Field>
+            {draft.resolver === "static" && (
+              <div className="row" style={{ gap: 8 }}>
+                <Field label="Salesforce id">
+                  <Input
+                    value={draft.sf_target_id ?? ""}
+                    placeholder="005… / 00G…"
+                    onChange={(e) => patch({ sf_target_id: e.target.value })}
+                  />
+                </Field>
+                <Field label="Id type">
+                  <Select
+                    value={draft.sf_target_type ?? "user"}
+                    options={[
+                      { value: "user", label: "User" },
+                      { value: "group", label: "Group" },
+                      { value: "queue", label: "Queue" },
+                    ]}
+                    onChange={(e) => patch({ sf_target_type: e.target.value as "user" | "group" | "queue" })}
+                  />
+                </Field>
+              </div>
+            )}
+            {draft.resolver === "sf_team_role" && (
+              <div className="row" style={{ gap: 8 }}>
+                <Field label="Team">
+                  <Input
+                    value={draft.sf_team ?? ""}
+                    placeholder="Support"
+                    onChange={(e) => patch({ sf_team: e.target.value })}
+                  />
+                </Field>
+                <Field label="Role">
+                  <Input
+                    value={draft.sf_role ?? ""}
+                    placeholder="Manager"
+                    onChange={(e) => patch({ sf_role: e.target.value })}
+                  />
+                </Field>
+              </div>
+            )}
+            {draft.resolver === "sf_queue" && (
+              <Field label="Queue developer name">
+                <Input value={draft.sf_queue ?? ""} onChange={(e) => patch({ sf_queue: e.target.value })} />
+              </Field>
+            )}
+            <Field label="Label" hint="shown in the Chatter note">
+              <Input value={draft.label ?? ""} onChange={(e) => patch({ label: e.target.value || null })} />
+            </Field>
+            <div className="row" style={{ gap: 8 }}>
+              <Field label="Slack channel (optional)">
+                <Input
+                  value={draft.slack_channel ?? ""}
+                  placeholder="#cx-billing"
+                  onChange={(e) => patch({ slack_channel: e.target.value || null })}
+                />
+              </Field>
+              <Field label="Slack usergroup (optional)">
+                <Input
+                  value={draft.slack_usergroup ?? ""}
+                  placeholder="@billing-oncall"
+                  onChange={(e) => patch({ slack_usergroup: e.target.value || null })}
+                />
+              </Field>
+            </div>
+            <div className="row" style={{ gap: 16, alignItems: "center" }}>
+              <Field label="Urgency (optional)">
+                <Select
+                  value={draft.urgency ?? ""}
+                  placeholder="—"
+                  options={[
+                    { value: "normal", label: "normal" },
+                    { value: "high", label: "high" },
+                  ]}
+                  onChange={(e) => patch({ urgency: (e.target.value || null) as "normal" | "high" | null })}
+                />
+              </Field>
+              <Toggle checked={draft.active} onChange={(v) => patch({ active: v })}>
+                <span style={{ fontSize: 13 }}>Active</span>
+              </Toggle>
+            </div>
+          </div>
+        )}
+      </Dialog>
     </div>
   );
 }

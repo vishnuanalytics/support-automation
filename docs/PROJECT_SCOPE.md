@@ -7572,9 +7572,14 @@ Default to Groq for any LLM calls (classification, draft generation).
   no wildcard+credentials hole. One sub-threshold note, not a finding:
   `GET /api/jobs/{job_id}` only tenant-checks jobs with a `flow_id` in
   their payload (`crawl_site`/`import_kb_bundle`/`embed_kb_entry` don't);
-  not fixed since no endpoint anywhere leaks another tenant's `job_id` for
-  an attacker to exploit it with — worth tightening for defense-in-depth,
-  not urgent. **Injection/SSRF: two real findings, both fixed.**
+  not fixed here since no endpoint anywhere leaks another tenant's
+  `job_id` for an attacker to exploit it with — worth tightening for
+  defense-in-depth, not urgent. **Stale note (fixed 2026-09-11):** this
+  was picked up again in the BYOK-trial-cap security review and actually
+  closed — `get_job` now checks `job.tenant_id` via `_caller_tenant` when
+  present, falling back to the old `flow_id` check only when it isn't
+  (see that day's "Immediate next step" entry / `tests/test_api.py`).
+  **Injection/SSRF: two real findings, both fixed.**
   (1) `ingestion/webcrawl.py`'s "crawl this site" KB feature validated the
   *hostname string* against a private/loopback prefix regex before the
   initial request and before queueing each discovered link, but never

@@ -4013,6 +4013,120 @@ def reset_case_taxonomy(tenant_id: str | None = None, c: Caller = Depends(caller
                  summary="case taxonomy reset to defaults")
 
 
+# ── notify_targets admin (migration 045/063) — was SQL-only: FR-27b calls
+# for an owner to change who a Case Type/Module/routed_team pings without
+# an engineer running raw SQL. interpreter/routing.py reads this table
+# (TTL-cached, NOTIFY_ROUTE_TTL_S — a write here is visible to a running
+# worker within that window, not instantly; same eventual-consistency
+# trade-off case_taxonomy's cache already has). ──
+class NotifyTargetIn(BaseModel):
+    tenant_id: str | None = None
+    match_kind: str
+    match_value: str
+    resolver: str = "static"
+    sf_target_id: str | None = None
+    sf_target_type: str | None = None
+    sf_team: str | None = None
+    sf_role: str | None = "Manager"
+    sf_queue: str | None = None
+    label: str | None = None
+    active: bool = True
+    slack_channel: str | None = None
+    slack_usergroup: str | None = None
+    urgency: str | None = None
+
+
+def _validate_notify_target(body: NotifyTargetIn) -> None:
+    """Mirrors migration 045/063's CHECK constraints so a bad value 422s
+    with a plain-words message instead of a raw Postgres error string."""
+    if body.match_kind not in ("case_type", "module", "routed_team"):
+        raise HTTPException(422, "match_kind must be case_type, module, or routed_team")
+    if not body.match_value.strip():
+        raise HTTPException(422, "match_value is required")
+    if body.resolver not in ("static", "sf_team_role", "sf_queue"):
+        raise HTTPException(422, "resolver must be static, sf_team_role, or sf_queue")
+    if body.resolver == "static" and not (body.sf_target_id or "").strip():
+        raise HTTPException(422, "resolver=static needs sf_target_id")
+    if body.resolver == "sf_team_role" and not (body.sf_team or "").strip():
+        raise HTTPException(422, "resolver=sf_team_role needs sf_team")
+    if body.resolver == "sf_queue" and not (body.sf_queue or "").strip():
+        raise HTTPException(422, "resolver=sf_queue needs sf_queue")
+    if body.sf_target_type is not None and body.sf_target_type not in ("user", "group", "queue"):
+        raise HTTPException(422, "sf_target_type must be user, group, or queue")
+    if body.urgency is not None and body.urgency not in ("normal", "high"):
+        raise HTTPException(422, "urgency must be normal or high")
+
+
+@app.get("/api/notify-targets")
+def list_notify_targets(tenant_id: str | None = None, c: Caller = Depends(caller)) -> list[dict]:
+    tid = _caller_tenant(c, tenant_id)
+    return (c.sb.table("notify_targets").select("*").eq("tenant_id", tid)
+            .order("match_kind").order("match_value").execute().data or [])
+
+
+@app.post("/api/notify-targets", status_code=201)
+def create_notify_target(body: NotifyTargetIn, c: Caller = Depends(caller)) -> dict:
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_editor(c, tid)
+    _validate_notify_target(body)
+    rec = body.model_dump(exclude={"tenant_id"})
+    rec["tenant_id"] = tid
+    try:
+        rows = _service.table("notify_targets").insert(rec).execute().data or []
+    except Exception as e:  # noqa: BLE001 — most likely the unique(tenant,match_kind,match_value)
+        raise HTTPException(409, f"could not create route: {e}") from e
+    if not rows:
+        raise HTTPException(500, "insert returned no row")
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="notify_target.created",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="notify_target", target_id=rows[0]["id"],
+                 summary=f"routing rule added for {body.match_kind}={body.match_value!r}")
+    return rows[0]
+
+
+@app.put("/api/notify-targets/{target_id}")
+def update_notify_target(target_id: str, body: NotifyTargetIn, c: Caller = Depends(caller)) -> dict:
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_editor(c, tid)
+    _validate_notify_target(body)
+    from datetime import datetime, timezone
+
+    rec = body.model_dump(exclude={"tenant_id"})
+    rec["updated_at"] = datetime.now(timezone.utc).isoformat()
+    try:
+        rows = (_service.table("notify_targets").update(rec)
+                .eq("id", target_id).eq("tenant_id", tid).execute().data or [])
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(409, f"could not update route: {e}") from e
+    if not rows:
+        raise HTTPException(404, "route not found")
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="notify_target.updated",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="notify_target", target_id=target_id,
+                 summary=f"routing rule updated for {body.match_kind}={body.match_value!r}")
+    return rows[0]
+
+
+@app.delete("/api/notify-targets/{target_id}", status_code=204)
+def delete_notify_target(target_id: str, tenant_id: str | None = None, c: Caller = Depends(caller)) -> None:
+    tid = _caller_tenant(c, tenant_id)
+    _require_editor(c, tid)
+    rows = (_service.table("notify_targets").delete()
+            .eq("id", target_id).eq("tenant_id", tid).execute().data or [])
+    if not rows:
+        raise HTTPException(404, "route not found")
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="notify_target.deleted",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="notify_target", target_id=target_id,
+                 summary="routing rule deleted")
+
+
 # ── Phase 16: policy rules ───────────────────────────────────────────
 class RuleIn(BaseModel):
     team: str
