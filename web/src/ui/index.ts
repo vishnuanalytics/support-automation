@@ -2,7 +2,7 @@
 export { AppShell } from "./AppShell";
 export { Sidebar } from "./Sidebar";
 export { Toolbar } from "./Toolbar";
-export { ThemeToggle } from "./ThemeToggle";
+export { ThemeToggle, useColorMode } from "./ThemeToggle";
 
 export { Button, type ButtonProps } from "./Button";
 export { Tag, valueToTone, type TagTone } from "./Tag";

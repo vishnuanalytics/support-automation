@@ -28,7 +28,7 @@ import { EdgeLabel } from "./EdgeLabel";
 import { ZoomControl } from "./ZoomControl";
 import { InspectorPanel } from "./InspectorPanel";
 import { TriggersPanel } from "./TriggersPanel";
-import { Popover, Toolbar, Button, Banner, Dialog, SlideOver, Field, Input, Textarea, Toggle, useToast } from "../ui";
+import { Popover, Toolbar, Button, Banner, Dialog, SlideOver, Field, Input, Textarea, Toggle, useToast, useColorMode } from "../ui";
 
 export function FlowEditor(props: {
   flowId: string;
@@ -51,6 +51,7 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
   onSaved: () => void;
   onDeleted: () => void;
 }) {
+  const colorMode = useColorMode();
   const [flow, setFlow] = useState<Flow | null>(null);
   const [nodes, setNodes, onNodesChange] = useNodesState<RFNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<RFEdge>([]);
@@ -660,7 +661,7 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
                React Flow's default panOnScrollMode is "free"); pinch or
                ⌘/Ctrl+wheel still zooms */
             panOnScroll
-            colorMode="dark"
+            colorMode={colorMode}
             proOptions={{ hideAttribution: true }}
           >
             <Background gap={18} />
@@ -668,7 +669,7 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
               className="flow-minimap"
               pannable
               zoomable
-              maskColor="rgba(20, 19, 18, 0.62)"
+              maskColor="rgba(0, 0, 0, 0.4)"
               nodeColor="var(--accent)"
               nodeStrokeColor="transparent"
             />

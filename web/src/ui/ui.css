@@ -427,21 +427,24 @@ select.ui-select[multiple] { max-width: 100%; }
 .ui-dialog__body { font: 400 14px/1.6 var(--font-body); color: var(--text-secondary); margin: 8px 0 15px; }
 .ui-dialog__actions { display: flex; gap: 10px; justify-content: flex-end; }
 
-/* ── Flow editor — nodes, edges, zoom, palette (Component 04 + Screen 02) ── */
+/* ── Flow editor — nodes, edges, zoom, palette ──
+   Node cards are flat and neutral by default — a colored left-border
+   stripe on every card in the canvas reads as decoration, not signal.
+   Color is reserved for the two states that actually matter: a terminal
+   node (warn) and a failed-validation node (exception). */
 .nodecard {
-  background: var(--surface-raised);
+  background: var(--surface);
   border: 1px solid var(--line-strong);
-  border-left: 3px solid var(--accent);
   border-radius: var(--radius-md);
   padding: var(--space-3);
   min-width: 168px;
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-sm);
   color: var(--text);
 }
-.nodecard--terminal { border-left-color: var(--warn); }
-.nodecard--invalid { border-left-color: var(--exception); }
-.nodecard.is-selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), var(--shadow-md); }
-.nodecard__kind { font: 700 12px/1 var(--font-body); letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+.nodecard--terminal { border-color: color-mix(in srgb, var(--warn) 50%, var(--line-strong)); }
+.nodecard--invalid { border-color: var(--exception); }
+.nodecard.is-selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), var(--shadow-sm); }
+.nodecard__kind { font: 700 11px/1 var(--font-body); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-faint); }
 .nodecard--terminal .nodecard__kind { color: var(--warn); }
 .nodecard--invalid .nodecard__kind { color: var(--exception-text); }
 .nodecard__label { font: 600 16px/1.25 var(--font-body); margin-top: var(--space-1); }
@@ -456,8 +459,8 @@ select.ui-select[multiple] { max-width: 100%; }
   background: var(--surface-raised);
   color: var(--text-secondary);
 }
-.edgelabel--pass { color: var(--accent); background: rgba(98, 197, 238, 0.12); border-color: rgba(98, 197, 238, 0.3); }
-.edgelabel--fail { color: var(--exception-text); background: rgba(255, 69, 142, 0.12); border-color: rgba(255, 69, 142, 0.3); }
+.edgelabel--pass { color: var(--success-text); background: var(--success-wash); border-color: color-mix(in srgb, var(--success) 30%, transparent); }
+.edgelabel--fail { color: var(--exception-text); background: var(--exception-wash); border-color: color-mix(in srgb, var(--exception) 30%, transparent); }
 
 .zoomctl {
   position: absolute;
@@ -530,7 +533,7 @@ select.ui-select[multiple] { max-width: 100%; }
 }
 .react-flow__minimap.flow-minimap svg { display: block; background: transparent; }
 .react-flow__minimap-mask {
-  fill: rgba(20, 19, 18, 0.62);  /* dims everything outside the current view */
+  fill: rgba(0, 0, 0, 0.4);  /* dims everything outside the current view */
   stroke: var(--accent);
   stroke-width: 2px;
 }
