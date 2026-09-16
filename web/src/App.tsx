@@ -103,6 +103,11 @@ export function App() {
   useEffect(() => {
     window.localStorage.setItem("sidebar-collapsed", navCollapsed ? "1" : "0");
   }, [navCollapsed]);
+  // The flow list nested under "Editor" — clicking it while already on the
+  // editor view toggles it shut instead of just sitting open forever;
+  // clicking it from anywhere else always opens it (it'd be confusing for
+  // a stale "closed" from a previous visit to swallow the first click).
+  const [editorListOpen, setEditorListOpen] = useState(true);
 
   useEffect(() => {
     const owning = NAV_GROUPS.find((g) => g.items.some((i) => i.view === view));
@@ -343,17 +348,31 @@ export function App() {
                         <button
                           className={"nav-item" + (view === i.view ? " active" : "")}
                           title={i.label}
-                          onClick={() => setView(i.view)}
+                          onClick={() => {
+                            if (i.view === "editor" && view === "editor") {
+                              setEditorListOpen((v) => !v);
+                            } else {
+                              setView(i.view);
+                              if (i.view === "editor") setEditorListOpen(true);
+                            }
+                          }}
                         >
                           <i.icon size={17} />
                           <span className="sidebar-collapsible">{i.label}</span>
+                          {i.view === "editor" && (
+                            <span className="nav-item__caret sidebar-collapsible" aria-hidden>
+                              {editorListOpen ? "▾" : "▸"}
+                            </span>
+                          )}
                         </button>
                         {/* the flow picker opens right under Editor, not after
                             every other nav group — otherwise a long BUILD/
                             KNOWLEDGE/ADMIN list buries it below the fold every
                             time (reported: "saved editors showing bottom of
-                            the page"). */}
-                        {i.view === "editor" && view === "editor" && !navCollapsed && (
+                            the page"). Clicking Editor again while already
+                            there toggles it shut instead of it just sitting
+                            open forever. */}
+                        {i.view === "editor" && view === "editor" && editorListOpen && !navCollapsed && (
                           <div className="nav-flowlist sidebar-collapsible">
                             <FlowList
                               key={`${tenantId}:${reloadKey}`}
