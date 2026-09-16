@@ -707,6 +707,89 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-16 (Web UI redesign — Broadsheet replaced with a shadcn-style
+neutral system. Branch `web-redesign-shadcn`, off `main`, NOT merged. Not
+a backend phase — see `CLAUDE.md`'s Frontend section for the new rules.)**
+
+User feedback: the app looked "made with AI," not professional; asked for
+a ui.shadcn.com-style minimalistic, professional look, explicitly
+**replacing** Broadsheet rather than tuning it (retiring the Claude
+Design canvas as source of truth), reskinning the existing hand-built
+`web/src/ui/` kit (no Tailwind/Radix added), light + dark with a toggle.
+Full design decisions and the chunk breakdown are in the plan file
+`/home/vishnuv/.claude/plans/luminous-coalescing-quilt.md` (local to the
+machine this was built on — not in the repo).
+
+Delivered as 7 chunks, each its own commit, matching how Broadsheet
+itself was built:
+
+1. **Tokens + global elements** — `:root` rewritten to shadcn's default
+   neutral/zinc palette (monochrome primary, Inter, 6/8/12px radii),
+   real light+dark token blocks, `ui/ThemeToggle.tsx` in the Sidebar
+   account row (persisted in `localStorage`).
+2. **`ui/ui.css` primitive sweep** — every hardcoded `rgba(hex,…)`
+   literal converted to a `color-mix()` derived from a token (so washes/
+   borders actually re-theme); fixed a real bug the token change exposed:
+   `--accent` used to double as both "primary brand color" and "this
+   outcome was positive" (auto_reply/published tags, healthy quota,
+   PASS gates, valid-JSON status, "saved" banners) — added a real
+   `--success` token throughout Tag/Banner/StatTile/QuotaBar/GateStrip/
+   JsonEditor so a monochrome primary doesn't erase every success signal
+   in the app. Also fixed `TraceView`'s retry banner reusing one state
+   var for both success and failure text (would've shown failures in a
+   green banner), and its outcome tag being hardcoded instead of using
+   `valueToTone`. Deleted confirmed-dead CSS (`.rf-node`, `.assist-*`,
+   `.trace-step`, `.quota-bar*` — all superseded, zero tsx references)
+   and modernized `RunPanel.tsx` (never migrated in the original
+   Broadsheet build) onto the shared components.
+3. **Nav/login/setup shell** — nav active state drops the colored
+   left-border+wash for a soft neutral highlight (shadcn's sidebar
+   convention); Login's split-panel aside drops the old 4-color
+   "process-ink" bar swatch (would've been a mismatched near-black/red/
+   amber cluster under the new monochrome palette) for a dot-grid
+   background + a simple mark.
+4. **Flow canvas** — node cards drop the colored left-border stripe that
+   sat on every card regardless of state (now flat/neutral, color
+   reserved for terminal=warn / invalid=exception); edge pass/fail labels
+   use the success/exception split. Real bug found: `<ReactFlow
+   colorMode="dark">` was hardcoded, so the canvas chrome would've stayed
+   dark-styled even in light mode — added `useColorMode()` (in
+   `ThemeToggle.tsx`) and wired it in.
+5. **Legacy inline-style sweep** — `ReviewView.tsx`, `ConnectionsView.tsx`,
+   `ChannelsView.tsx`, `TriggersPanel.tsx` were never migrated off
+   pre-Broadsheet inline styles; several used `var(--name, #hexfallback)`
+   where `--name` (`--crit`, `--card`, `--sunk`, `--bg-2`) was never
+   actually defined anywhere, so they always rendered the hardcoded
+   fallback regardless of theme — invisible under the old dark-only
+   system, would've been visibly broken under a real light/dark toggle.
+   Repointed at real tokens; `ReviewView`'s local `Tile`/`Pill` helpers
+   and doc-writeback status badges now delegate to the shared `StatTile`/
+   `Tag` components.
+6. **`guide/FlowGuideView.tsx`** — the standalone "Guide" nav page had its
+   own hardcoded ink/paper/cyan/magenta palette and Source Serif 4,
+   permanently isolated from the app's theme by design. Repointed at the
+   shared tokens (now follows the toggle); improved the outcome-card
+   coloring to the same success/warn/exception split used everywhere
+   else instead of a two-color cyan/magenta grouping.
+7. **Docs** — this entry, and `CLAUDE.md`'s Frontend section rewritten
+   (no more canvas-artifact source of truth; `web/design/
+   broadsheet.reference.css` deleted — read Broadsheet's history from
+   git log on `web/src/index.css` if ever needed).
+
+`cd web && npm run build` (tsc + vite) and `npx vitest run` clean after
+every chunk. **Not browser-verified** — this sandbox's Playwright
+Chromium can't launch (`libnspr4.so`, no root; same constraint noted for
+the original Broadsheet build). A repo-wide grep confirms zero hardcoded
+hex/rgba left in `web/src/**/*.tsx` outside one intentional neutral
+`rgba(0,0,0,.4)` minimap mask.
+
+**Not done — explicitly out of scope**: merging `web-redesign-shadcn` to
+`main` (needs a human look at it first, given no browser verification was
+possible here); an actual browser/visual QA pass in both themes across
+every view; a docker rebuild to deploy once merged.
+
+---
+
 **2026-09-11 (KIL-g still deferred — but its real blocker, near-zero
 `review_tasks` volume, is now being fixed: KIL-c widened to also judge
 internal case notes, not only replies that reached the customer. Small,
@@ -2122,6 +2205,12 @@ Sequenced, one verifiable chunk at a time, checkpointed with the user:
   portal hierarchies (chunk 3's deferred half).
 
 ---
+
+**Superseded 2026-09-16 — Broadsheet was replaced, not tuned, by a
+shadcn-style neutral system (branch `web-redesign-shadcn`; see the
+"Immediate next step" entry above). The canvas artifact this section
+describes is no longer the frontend's source of truth. Kept below for
+history.**
 
 **2026-09-07 (Web UI redesign — "Broadsheet on dark" — branch
 `web-redesign-broadsheet`, off `main`.

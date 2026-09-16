@@ -103,24 +103,44 @@ mentioned. Don't let that happen again:
 
 ## Frontend — the web UI (`web/`)
 
-- **The design system is "Broadsheet". Its source of truth is a Claude
-  Design canvas artifact (owned by the user):**
-  <https://claude.ai/code/artifact/afee490d-276a-4674-9872-05094facad0a>
-  A decompressed copy of its token/component CSS lives at
-  `web/design/broadsheet.reference.css` (regenerate it from the artifact if
-  the artifact moves or is republished). `web/src/index.css` `:root` mirrors
-  those tokens; the app is the **dark inversion** of the canvas's light
-  palette. Fixed by the canvas, don't drift from them without changing the
-  canvas first:
-  - **Source Serif 4** for `--font-heading` *and* `--font-body` (loaded in
-    `web/index.html`). Not a system sans.
+- **The design system replaced "Broadsheet" (2026-09-16) with a
+  shadcn-style neutral system.** There is no external canvas artifact as
+  source of truth anymore — `web/src/index.css`'s `:root` tokens are it,
+  reskinning the same hand-built `web/src/ui/` component kit (no Tailwind/
+  Radix added). The old `web/design/broadsheet.reference.css` dump is gone
+  along with the canvas it mirrored; if you want a full history of the
+  Broadsheet system, read it out of git history (`git log -p -- web/src/
+  index.css`) rather than a live file. Fixed by the tokens now, so retune
+  there rather than hardcoding a color in a component:
+  - **Inter** for `--font-heading` *and* `--font-body` (loaded in
+    `web/index.html`). Not a serif.
+  - shadcn's default neutral/zinc palette: a **monochrome primary**
+    (`--accent*` — near-black on light, near-white on dark; it's the
+    button/focus-ring/link color, not a status signal), plus a dedicated
+    **`--success`** token so "this outcome was positive" (auto_reply/
+    published tags, healthy quota, PASS gates, valid-JSON status, "saved"
+    confirmations) doesn't collide with the primary now that it's
+    monochrome. `--warn` (amber) and `--exception` (red) are unchanged in
+    name, retuned to shadcn-standard hues.
+  - **real light + dark**, both defined on every token (`@media
+    (prefers-color-scheme: dark)` + a `[data-theme="dark"]` override so an
+    explicit choice always wins) — a `ThemeToggle` in the Sidebar's account
+    row persists the pick in `localStorage`. Any new color needs both a
+    light and a dark value; don't add a color that only works in one mode.
+  - **shadcn's radius scale** — `--radius-sm/md/lg` = 6/8/12px. Corners are
+    soft, not sharp.
+  - hardcode a hex/rgba color in a component only as a last resort — prefer
+    a token, or `color-mix(in srgb, var(--token) N%, transparent)` for a
+    tinted wash/border derived from a token (this is what makes the
+    light/dark toggle actually re-theme washes instead of leaving a
+    literal color pinned to the old palette).
   - the **5 · 10 · 15 · 20 · 30 · 40** space scale (`--space-1..8`, plus a
-    local `--space-5: 25px` in-between step) — every gap, pad and control
-    height is a multiple of 5.
-  - the **1 · 2 · 4px** radii (`--radius-sm/md/lg`) — corners stay sharp.
-  - the ramps: `--accent*` = process cyan, `--exception*` = magenta,
-    `--warn` = press yellow (a print ink in the canvas; caution accent only
-    here — never body copy or chrome).
+    local `--space-5: 25px` in-between step) is unchanged from before —
+    every gap, pad and control height is a multiple of 5.
+  - **color signals real status, not decoration** — don't add a colored
+    left-border stripe or tinted background to a card just to differentiate
+    it; reserve color for an actual state (success/warn/exception) or the
+    functional flow-canvas node-kind indicators.
 - **One aligned frame, not four separate fixes.** Text size, page/pane
   scroll, browser-zoom tolerance and full-viewport width are one system and
   change together:
