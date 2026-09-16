@@ -27,3 +27,4 @@ export { Popover } from "./Popover";
 export { SlideOver, type SlideOverTab } from "./SlideOver";
 export { Dialog, type DialogAction } from "./Dialog";
 export { ConfirmButton } from "./ConfirmButton";
+export { DateRangeFilter, rangeLabel, type DateRange } from "./DateRangeFilter";

@@ -593,3 +593,12 @@ select.ui-select[multiple] { max-width: 100%; }
   text-align: left;
 }
 .palette__item:hover { background: var(--accent-wash); color: var(--accent-hover); }
+
+/* DateRangeFilter's custom from/to section, inside the same popover as the
+   preset list. */
+.date-range-custom {
+  margin-top: 6px;
+  padding: 10px 8px 4px;
+  border-top: 1px solid var(--line);
+}
+.date-range-custom input[type="datetime-local"] { font-size: 13px; }

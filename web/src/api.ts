@@ -570,11 +570,19 @@ export const api = {
       ),
   },
 
-  runStats: () => req<RunStats>("/runs/stats"),
-  listRuns: (q: { flow_id?: string; outcome?: string; limit?: number } = {}) => {
+  runStats: (q: { since?: string; until?: string } = {}) => {
+    const p = new URLSearchParams();
+    if (q.since) p.set("since", q.since);
+    if (q.until) p.set("until", q.until);
+    const qs = p.toString();
+    return req<RunStats>(`/runs/stats${qs ? `?${qs}` : ""}`);
+  },
+  listRuns: (q: { flow_id?: string; outcome?: string; since?: string; until?: string; limit?: number } = {}) => {
     const p = new URLSearchParams();
     if (q.flow_id) p.set("flow_id", q.flow_id);
     if (q.outcome) p.set("outcome", q.outcome);
+    if (q.since) p.set("since", q.since);
+    if (q.until) p.set("until", q.until);
     if (q.limit) p.set("limit", String(q.limit));
     const qs = p.toString();
     return req<RunRow[]>(`/runs${qs ? `?${qs}` : ""}`);
@@ -603,10 +611,12 @@ export const api = {
       },
     ),
 
-  listAudit: (q: { tenantId?: string; action?: string; limit?: number } = {}) => {
+  listAudit: (q: { tenantId?: string; action?: string; since?: string; until?: string; limit?: number } = {}) => {
     const p = new URLSearchParams();
     if (q.tenantId) p.set("tenant_id", q.tenantId);
     if (q.action) p.set("action", q.action);
+    if (q.since) p.set("since", q.since);
+    if (q.until) p.set("until", q.until);
     if (q.limit) p.set("limit", String(q.limit));
     const qs = p.toString();
     return req<AuditEvent[]>(`/audit${qs ? `?${qs}` : ""}`);

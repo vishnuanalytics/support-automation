@@ -12,7 +12,10 @@ import {
   GateStrip,
   TraceStep,
   EmptyState,
+  DateRangeFilter,
+  rangeLabel,
   type Column,
+  type DateRange,
 } from "../ui";
 
 const DETAIL_WIDTH_KEY = "runs-detail-width";
@@ -49,6 +52,7 @@ export function RunsView() {
   const [stats, setStats] = useState<RunStats | null>(null);
   const [rows, setRows] = useState<RunRow[]>([]);
   const [filter, setFilter] = useState("");
+  const [range, setRange] = useState<DateRange>({ since: null, until: null });
   const [sel, setSel] = useState<RunDetail | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const detailWidthRef = useRef(DETAIL_DEFAULT_WIDTH);
@@ -91,14 +95,22 @@ export function RunsView() {
   }
 
   useEffect(() => {
-    api.runStats().then(setStats).catch(() => {});
-  }, []);
+    api
+      .runStats({ since: range.since ?? undefined, until: range.until ?? undefined })
+      .then(setStats)
+      .catch(() => {});
+  }, [range]);
   useEffect(() => {
     api
-      .listRuns({ outcome: filter || undefined, limit: 100 })
+      .listRuns({
+        outcome: filter || undefined,
+        since: range.since ?? undefined,
+        until: range.until ?? undefined,
+        limit: 100,
+      })
       .then(setRows)
       .catch((e: ApiError) => setErr(e.message));
-  }, [filter]);
+  }, [filter, range]);
 
   const columns: Column<RunRow>[] = [
     {
@@ -151,7 +163,7 @@ export function RunsView() {
   return (
     <div className="runs-shell">
       <div className="app-toolbar">
-        <Toolbar title="Runs" meta={`last 100 · ${filter || "all outcomes"}`} />
+        <Toolbar title="Runs" meta={`last 100 · ${filter || "all outcomes"} · ${rangeLabel(range).toLowerCase()}`} />
       </div>
       <div className="runs-view">
         <div className="runs-list">
@@ -180,8 +192,9 @@ export function RunsView() {
               </div>
             )}
           </div>
-          <div className="runs-filter">
+          <div className="runs-filter row" style={{ gap: 8, flexWrap: "wrap" }}>
             <Segmented options={OUTCOMES} value={filter} onChange={setFilter} aria-label="Filter by outcome" />
+            <DateRangeFilter value={range} onChange={setRange} />
           </div>
           {err && (
             <div style={{ padding: "0 20px 12px" }}>

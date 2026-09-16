@@ -1,19 +1,26 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
 import type { AuditEvent } from "../types";
-import { Button, Tag, Banner, DataTable, EmptyState, type Column } from "../ui";
+import { Button, Tag, Banner, DataTable, EmptyState, DateRangeFilter, type Column, type DateRange } from "../ui";
 
 export function ActivityView({ tenantId }: { tenantId: string }) {
   const [rows, setRows] = useState<AuditEvent[]>([]);
   const [filter, setFilter] = useState("");
+  const [range, setRange] = useState<DateRange>({ since: null, until: null });
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     api
-      .listAudit({ action: filter || undefined, limit: 200, tenantId })
+      .listAudit({
+        action: filter || undefined,
+        since: range.since ?? undefined,
+        until: range.until ?? undefined,
+        limit: 200,
+        tenantId,
+      })
       .then(setRows)
       .catch((e: ApiError) => setErr(e.message));
-  }, [filter, tenantId]);
+  }, [filter, range, tenantId]);
 
   const actions = useMemo(() => Array.from(new Set(rows.map((r) => r.action))).sort(), [rows]);
 
@@ -82,6 +89,7 @@ export function ActivityView({ tenantId }: { tenantId: string }) {
             Clear ✕
           </Button>
         )}
+        <DateRangeFilter value={range} onChange={setRange} />
       </div>
 
       {err && <Banner tone="exception" title={err} />}

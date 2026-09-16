@@ -1390,26 +1390,37 @@ def get_job(job_id: str, c: Caller = Depends(caller)) -> dict:
 # ── runs (Phase 6 observability) ──────────────────────────────────────
 @app.get("/api/audit")
 def list_audit(tenant_id: str | None = None, action: str | None = None,
+               since: str | None = None, until: str | None = None,
                limit: int = 100, c: Caller = Depends(caller)) -> list[dict]:
-    """Phase 28 — the platform activity log. Member-readable, like Runs."""
+    """Phase 28 — the platform activity log. Member-readable, like Runs.
+    `since`/`until` are ISO-8601 datetimes (any offset the client sends —
+    Postgres compares timestamptz columns correctly regardless)."""
     tid = _caller_tenant(c, tenant_id)
     q = (c.sb.table("audit_log").select("*").eq("tenant_id", tid)
          .order("created_at", desc=True).limit(min(max(limit, 1), 300)))
     if action:
         q = q.eq("action", action)
+    if since:
+        q = q.gte("created_at", since)
+    if until:
+        q = q.lte("created_at", until)
     return q.execute().data or []
 
 
 @app.get("/api/runs/stats")
-def runs_stats(c: Caller = Depends(caller)) -> dict:
-    rows = (
+def runs_stats(since: str | None = None, until: str | None = None,
+               c: Caller = Depends(caller)) -> dict:
+    q = (
         c.sb.table("runs")
         .select("outcome, tier, team, confidence, human_action, created_at")
         .order("created_at", desc=True)
         .limit(500)
-        .execute().data
-        or []
     )
+    if since:
+        q = q.gte("created_at", since)
+    if until:
+        q = q.lte("created_at", until)
+    rows = q.execute().data or []
     by_outcome: dict[str, int] = {}
     by_tier: dict[str, int] = {}
     by_human: dict[str, int] = {}
@@ -1434,6 +1445,8 @@ def runs_stats(c: Caller = Depends(caller)) -> dict:
 def list_runs(
     flow_id: str | None = None,
     outcome: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
     limit: int = 60,
     c: Caller = Depends(caller),
 ) -> list[dict]:
@@ -1448,6 +1461,10 @@ def list_runs(
         q = q.eq("flow_id", flow_id)
     if outcome:
         q = q.eq("outcome", outcome)
+    if since:
+        q = q.gte("created_at", since)
+    if until:
+        q = q.lte("created_at", until)
     return q.execute().data or []
 
 
