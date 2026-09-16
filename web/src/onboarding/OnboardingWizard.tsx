@@ -19,7 +19,7 @@ export function OnboardingWizard({
 }: {
   tenantId: string;
   isOwner: boolean;
-  onNavigate: (view: "connections" | "rules" | "knowledge") => void;
+  onNavigate: (view: "connections" | "rules" | "knowledge" | "editor") => void;
   onFlowCreated: (id: string) => void;
   onDismiss: () => void;
 }) {
@@ -153,7 +153,12 @@ export function OnboardingWizard({
             flows read/write Case fields, Queues and Users from your org.
           </p>
           {sfDone ? (
-            <span className="muted" style={{ fontSize: 12 }}>{sfCount} org connected</span>
+            <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <span className="muted" style={{ fontSize: 12 }}>{sfCount} org connected</span>
+              <Button variant="ghost" size="sm" onClick={() => onNavigate("connections")}>
+                Manage →
+              </Button>
+            </div>
           ) : (
             <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
               {sfOauthConfigured ? (
@@ -191,7 +196,12 @@ export function OnboardingWizard({
               Not set up on this server yet — an owner can configure it under Rules.
             </div>
           ) : slackConnected ? (
-            <span className="muted" style={{ fontSize: 12 }}>connected</span>
+            <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <span className="muted" style={{ fontSize: 12 }}>connected</span>
+              <Button variant="ghost" size="sm" onClick={() => onNavigate("rules")}>
+                Manage →
+              </Button>
+            </div>
           ) : (
             <Button variant="secondary" size="sm" onClick={connectSlack}>
               Connect Slack
@@ -230,9 +240,14 @@ export function OnboardingWizard({
             Fastest start: crawl a public docs / help-center site (no login needed).
           </p>
           {kbDone ? (
-            <span className="muted" style={{ fontSize: 12 }}>
-              {kbSourceCount} source{kbSourceCount === 1 ? "" : "s"}
-            </span>
+            <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <span className="muted" style={{ fontSize: 12 }}>
+                {kbSourceCount} source{kbSourceCount === 1 ? "" : "s"}
+              </span>
+              <Button variant="ghost" size="sm" onClick={() => onNavigate("knowledge")}>
+                Manage sources →
+              </Button>
+            </div>
           ) : (
             <>
               <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
@@ -273,9 +288,14 @@ export function OnboardingWizard({
               : "Connect a knowledge source above first."}
           </p>
           {flowDone ? (
-            <span className="muted" style={{ fontSize: 12 }}>
-              {flowCount} flow{flowCount === 1 ? "" : "s"}
-            </span>
+            <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <span className="muted" style={{ fontSize: 12 }}>
+                {flowCount} flow{flowCount === 1 ? "" : "s"}
+              </span>
+              <Button variant="ghost" size="sm" onClick={() => onNavigate("editor")}>
+                Manage flows →
+              </Button>
+            </div>
           ) : (
             <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
               <Select
