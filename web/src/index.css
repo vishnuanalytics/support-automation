@@ -10,6 +10,11 @@
      `prefers-color-scheme` media query and a `[data-theme="dark"]` override
      so the explicit toggle (Sidebar account row) always wins over system
      preference, in both directions. */
+  /* Tells the browser which palette to use for chrome it renders itself —
+     the native <input type="time"> clock icon, <select> popup lists, form
+     control borders — so those match the app instead of defaulting to a
+     light-scheme icon that's invisible against a dark input. */
+  color-scheme: light;
   --ground: #ffffff;
   --ground-sunk: #f4f4f5;
   --surface: #ffffff;
@@ -103,6 +108,7 @@
    persisted in localStorage) so the explicit choice always wins. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
+    color-scheme: dark;
     --ground: #09090b;
     --ground-sunk: #050506;
     --surface: #18181b;
@@ -135,6 +141,7 @@
   }
 }
 :root[data-theme="dark"] {
+  color-scheme: dark;
   --ground: #09090b;
   --ground-sunk: #050506;
   --surface: #18181b;

@@ -1,7 +1,8 @@
 import { useRef, useState } from "react";
 import { Calendar as CalendarIcon } from "lucide-react";
 import { DayPicker, type DateRange as PickedRange } from "react-day-picker";
-import "react-day-picker/style.css";
+// stylesheet is imported once in main.tsx, before ui.css, so our --rdp-*
+// overrides there always win the cascade — see the comment there.
 import { Button } from "./Button";
 import { Popover } from "./Popover";
 import { Dialog } from "./Dialog";
@@ -178,6 +179,8 @@ export function DateRangeFilter({
             onSelect={setPicked}
             numberOfMonths={1}
             showOutsideDays
+            captionLayout="dropdown-years"
+            endMonth={new Date()}
           />
           <div className="row" style={{ gap: 10 }}>
             <div style={{ flex: 1 }}>
