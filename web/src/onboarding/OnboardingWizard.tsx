@@ -307,6 +307,7 @@ export function OnboardingWizard({
   ];
 
   const doneCount = steps.filter((s) => s.done).length;
+  const allDone = doneCount === steps.length;
   const firstIncomplete = steps.findIndex((s) => !s.done);
   const activeStep = openStep ?? (firstIncomplete === -1 ? steps.length - 1 : firstIncomplete);
 
@@ -315,13 +316,13 @@ export function OnboardingWizard({
       <div className="app-toolbar">
         <Toolbar title="Setup" meta={`${doneCount} of ${steps.length} done`}>
           <Button
-            variant="ghost"
+            variant={allDone ? "primary" : "ghost"}
             size="sm"
             disabled={!kbDone}
             title={kbDone ? "" : "Connect a knowledge source first — the bot has nothing to answer from otherwise."}
             onClick={onDismiss}
           >
-            {kbDone ? "Skip for now" : "Connect a source to continue"}
+            {allDone ? "Done" : kbDone ? "Skip remaining steps" : "Connect a source to continue"}
           </Button>
         </Toolbar>
       </div>
