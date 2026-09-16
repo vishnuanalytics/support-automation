@@ -215,7 +215,7 @@ export function IntakeView({ tenantId }: { tenantId: string }) {
       </div>
 
       {err && <Banner tone="exception" title={err} />}
-      {note && <Banner tone="accent" title={note} />}
+      {note && <Banner tone="success" title={note} />}
 
       <div
         style={{

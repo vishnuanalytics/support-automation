@@ -394,7 +394,7 @@ export function ReviewView({ tenantId }: { tenantId?: string | null }) {
         ))}
       </div>
 
-      {note && <Banner tone="accent" title={note} />}
+      {note && <Banner tone="success" title={note} />}
       {err && <Banner tone="exception" title={err} />}
 
       {ars.length > 0 && (

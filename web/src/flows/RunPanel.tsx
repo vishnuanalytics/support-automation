@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api, ApiError } from "../api";
 import type { RunResult } from "../types";
+import { Button, Banner, TraceStep } from "../ui";
 
 const SAMPLE = JSON.stringify(
   {
@@ -37,9 +38,9 @@ export function RunPanel({ flowId }: { flowId: string }) {
     <div className="run-panel col">
       <div className="row" style={{ justifyContent: "space-between" }}>
         <strong>Run a case</strong>
-        <button className="primary" onClick={run} disabled={busy}>
-          {busy ? "running…" : "Run"}
-        </button>
+        <Button variant="primary" size="sm" onClick={run} loading={busy}>
+          Run
+        </Button>
       </div>
       <textarea rows={10} value={text} onChange={(e) => setText(e.target.value)} />
       <div className="muted" style={{ fontSize: 11 }}>
@@ -47,20 +48,23 @@ export function RunPanel({ flowId }: { flowId: string }) {
         server has creds; otherwise stub / dry-run.
       </div>
 
-      {err && <div className="banner err">{err}</div>}
+      {err && <Banner tone="exception" title={err} />}
 
       {res && (
         <div className="col">
           {res.trace.map((s, i) => (
-            <div className="trace-step" key={i}>
-              <span className="ty">{s.type}</span> — {s.summary}
-            </div>
+            <TraceStep key={i} name={s.type} summary={s.summary} />
           ))}
-          <div className="banner ok">
-            outcome: <strong>{(res.outcome as { action?: string })?.action ?? "—"}</strong>
-            {res.tier ? ` · tier ${res.tier}` : ""}
-            {res.confidence != null ? ` · confidence ${res.confidence}` : ""}
-          </div>
+          <Banner
+            tone="success"
+            title={
+              <>
+                outcome: <strong>{(res.outcome as { action?: string })?.action ?? "—"}</strong>
+                {res.tier ? ` · tier ${res.tier}` : ""}
+                {res.confidence != null ? ` · confidence ${res.confidence}` : ""}
+              </>
+            }
+          />
           {res.confidence_gate && (
             <div className="muted" style={{ fontSize: 12 }}>
               gate: {JSON.stringify(res.confidence_gate)}

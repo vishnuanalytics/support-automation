@@ -1,6 +1,6 @@
 /**
- * Usage against a plan quota. Fill is accent below 80%, warn 80–99%,
- * exception at 100%.
+ * Usage against a plan quota. Fill is success (healthy) below 80%, warn
+ * 80–99%, exception at 100%.
  */
 export function QuotaBar({
   used,
@@ -14,7 +14,7 @@ export function QuotaBar({
   format?: (n: number) => string;
 }) {
   const ratio = limit > 0 ? used / limit : 0;
-  const tone = ratio >= 1 ? "exception" : ratio >= 0.8 ? "warn" : "accent";
+  const tone = ratio >= 1 ? "exception" : ratio >= 0.8 ? "warn" : "success";
   return (
     <div className="ui-quota">
       <div className="ui-quota__head">
@@ -25,7 +25,7 @@ export function QuotaBar({
       </div>
       <div className="ui-quota__track">
         <span
-          className={"ui-quota__fill" + (tone === "accent" ? "" : ` ui-quota__fill--${tone}`)}
+          className={"ui-quota__fill" + (tone === "success" ? "" : ` ui-quota__fill--${tone}`)}
           style={{ width: `${Math.min(100, Math.max(0, ratio * 100))}%` }}
         />
       </div>

@@ -35,7 +35,7 @@ export function GateStrip({
         </span>
         <span className="ui-gate__vs">vs</span>
         <span>{f(threshold)}</span>
-        <Tag tone={passed ? "accent" : "warn"}>{passed ? "PASS" : "FAIL"}</Tag>
+        <Tag tone={passed ? "success" : "warn"}>{passed ? "PASS" : "FAIL"}</Tag>
       </div>
       <div className="ui-gate__track">
         <span

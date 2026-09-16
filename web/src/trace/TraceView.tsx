@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api, ApiError } from "../api";
 import type { TraceEvent, TraceResult } from "../types";
-import { Toolbar, Button, Tag, TraceStep, Banner, Input, EmptyState } from "../ui";
+import { Toolbar, Button, Tag, valueToTone, TraceStep, Banner, Input, EmptyState } from "../ui";
 
 const MARK: Record<TraceEvent["kind"], string> = {
   job: "▸",
@@ -19,6 +19,7 @@ export function TraceView() {
   const [copied, setCopied] = useState(false);
   const [raw, setRaw] = useState<string | null>(null);
   const [retryMsg, setRetryMsg] = useState<string | null>(null);
+  const [retryFailed, setRetryFailed] = useState(false);
 
   const load = () => {
     if (!key.trim()) return;
@@ -55,12 +56,14 @@ export function TraceView() {
     if (!key.trim() || busy) return;
     setBusy(true);
     setRetryMsg(null);
+    setRetryFailed(false);
     try {
       const r = await api.trace.retry(key);
       setRetryMsg(`re-queued Case ${r.sf_id} — job ${r.job_id?.slice(0, 8) ?? "?"}`);
       setTimeout(load, 1500);
     } catch (e) {
       setRetryMsg((e as ApiError).message);
+      setRetryFailed(true);
     } finally {
       setBusy(false);
     }
@@ -102,7 +105,7 @@ export function TraceView() {
           number, Case id, run id, or job id.
         </div>
 
-        {retryMsg && <Banner tone="accent" title={retryMsg} />}
+        {retryMsg && <Banner tone={retryFailed ? "exception" : "success"} title={retryMsg} />}
         {err && <Banner tone="exception" title={err} />}
 
         {raw != null && (
@@ -123,7 +126,7 @@ export function TraceView() {
             <div className="trace-summary">
               <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                 <strong>{t.case_number || t.sf_id || t.key}</strong>
-                {t.outcome && <Tag tone="accent">outcome: {t.outcome}</Tag>}
+                {t.outcome && <Tag tone={valueToTone(t.outcome)}>outcome: {t.outcome}</Tag>}
                 {t.human_action && <Tag tone="neutral">human: {t.human_action}</Tag>}
                 {t.flow_version != null && <Tag tone="neutral">flow v{t.flow_version}</Tag>}
                 {t.degraded_llm && <Tag tone="warn">LLM STUB (quota)</Tag>}

@@ -26,7 +26,7 @@
 .ui-btn--secondary:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-hover); }
 .ui-btn--ghost { color: var(--accent); padding: 0 var(--space-3); }
 .ui-btn--ghost:hover:not(:disabled) { background: var(--accent-wash); }
-.ui-btn--danger { color: var(--exception-text); border-color: rgba(255, 69, 142, 0.5); }
+.ui-btn--danger { color: var(--exception-text); border-color: color-mix(in srgb, var(--exception) 50%, transparent); }
 .ui-btn--danger:hover:not(:disabled) { background: var(--exception-wash); border-color: var(--exception); }
 .ui-btn--icon { width: 40px; padding: 0; border-color: var(--border-button); }
 .ui-btn--icon.ui-btn--sm { width: 30px; }
@@ -64,10 +64,11 @@
   border: 1px solid var(--border-button);
   color: var(--text-secondary);
 }
-.ui-tag--accent { background: rgba(98, 197, 238, 0.16); color: var(--accent-hover); border-color: rgba(98, 197, 238, 0.4); }
-.ui-tag--warn { background: var(--warn-wash); color: var(--warn); border-color: rgba(237, 187, 0, 0.4); }
-.ui-tag--warn-soft { background: rgba(237, 187, 0, 0.08); color: #e0c56a; border-color: rgba(237, 187, 0, 0.28); }
-.ui-tag--exception { background: var(--exception-wash); color: var(--exception-text); border-color: rgba(255, 69, 142, 0.42); }
+.ui-tag--accent { background: color-mix(in srgb, var(--accent) 8%, transparent); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 25%, transparent); }
+.ui-tag--success { background: var(--success-wash); color: var(--success-text); border-color: color-mix(in srgb, var(--success) 40%, transparent); }
+.ui-tag--warn { background: var(--warn-wash); color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
+.ui-tag--warn-soft { background: color-mix(in srgb, var(--warn) 8%, transparent); color: var(--warn-text); border-color: color-mix(in srgb, var(--warn) 28%, transparent); }
+.ui-tag--exception { background: var(--exception-wash); color: var(--exception-text); border-color: color-mix(in srgb, var(--exception) 42%, transparent); }
 .ui-tag--neutral { background: var(--surface-raised); color: var(--text-secondary); border-color: var(--line-strong); }
 .ui-tag--outline { background: transparent; }
 .ui-tag__dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
@@ -243,7 +244,7 @@ select.ui-select[multiple] { max-width: 100%; }
 }
 .ui-json__code--invalid { border-color: var(--exception); }
 .ui-json__status { font: 400 13.5px/1.5 var(--font-body); margin-top: 10px; }
-.ui-json__status--ok { color: var(--accent); }
+.ui-json__status--ok { color: var(--success); }
 .ui-json__status--err { color: var(--exception-text); }
 
 /* DataTable */
@@ -272,12 +273,14 @@ select.ui-select[multiple] { max-width: 100%; }
 
 /* StatTile */
 .ui-tile { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 10px 15px; min-width: 92px; }
-.ui-tile--warn { border-color: rgba(237, 187, 0, 0.45); }
-.ui-tile--exception { border-color: rgba(255, 69, 142, 0.45); }
+.ui-tile--warn { border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+.ui-tile--exception { border-color: color-mix(in srgb, var(--exception) 45%, transparent); }
+.ui-tile--success { border-color: color-mix(in srgb, var(--success) 45%, transparent); }
 .ui-tile__v { font: 600 24px/1 var(--font-body); }
-.ui-tile--accent .ui-tile__v { color: var(--accent-hover); }
+.ui-tile--accent .ui-tile__v { color: var(--accent); }
 .ui-tile--warn .ui-tile__v { color: var(--warn); }
 .ui-tile--exception .ui-tile__v { color: var(--exception-text); }
+.ui-tile--success .ui-tile__v { color: var(--success-text); }
 .ui-tile__l { font: 700 11px/1 var(--font-body); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-muted); margin-top: 5px; }
 
 /* QuotaBar */
@@ -285,26 +288,28 @@ select.ui-select[multiple] { max-width: 100%; }
 .ui-quota__head { display: flex; justify-content: space-between; font: 400 14px/1.4 var(--font-body); color: var(--text-secondary); }
 .ui-quota__num { font: var(--type-mono); }
 .ui-quota__track { height: 8px; background: var(--surface-raised); border: 1px solid var(--line-strong); border-radius: var(--radius-md); overflow: hidden; }
-.ui-quota__fill { display: block; height: 100%; background: var(--accent); }
+.ui-quota__fill { display: block; height: 100%; background: var(--success); }
 .ui-quota__fill--warn { background: var(--warn); }
 .ui-quota__fill--exception { background: var(--exception); }
 
 /* GateStrip */
 .ui-gate__row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font: var(--type-mono); color: var(--text-secondary); }
 .ui-gate__num { color: var(--text); }
-.ui-gate__arrow { color: var(--accent); }
+.ui-gate__arrow { color: var(--text-faint); }
 .ui-gate__vs { color: var(--text-faint); }
 .ui-gate__track { height: 6px; background: var(--surface-raised); border-radius: var(--radius-md); margin-top: 12px; position: relative; }
-.ui-gate__fill { position: absolute; inset: 0; border-radius: var(--radius-md); background: var(--accent); }
+.ui-gate__fill { position: absolute; inset: 0; border-radius: var(--radius-md); background: var(--success); }
 .ui-gate__fill--fail { background: var(--warn); }
 .ui-gate__tick { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--text); }
 
-/* TraceStep */
-.ui-trace { border-left: 2px solid var(--accent); padding: 8px 12px; background: var(--ground); }
+/* TraceStep — "ok" is the overwhelming default state for a run's steps, so
+   it stays neutral; only warn/failed earn a colored rule (matches the
+   card-motif rule: color signals real status, not decoration). */
+.ui-trace { border-left: 2px solid var(--line-strong); padding: 8px 12px; background: var(--ground-sunk); }
 .ui-trace--warn { border-left-color: var(--warn); }
 .ui-trace--failed { border-left-color: var(--exception); }
 .ui-trace__head { display: flex; gap: 10px; align-items: baseline; cursor: pointer; width: 100%; background: 0; border: 0; text-align: left; padding: 0; }
-.ui-trace__name { font: 600 14px/1.4 var(--font-body); color: var(--accent); }
+.ui-trace__name { font: 600 14px/1.4 var(--font-body); color: var(--text); }
 .ui-trace--warn .ui-trace__name { color: var(--warn); }
 .ui-trace--failed .ui-trace__name { color: var(--exception-text); }
 .ui-trace__meta { font: var(--type-mono); color: var(--text-muted); }
@@ -323,9 +328,10 @@ select.ui-select[multiple] { max-width: 100%; }
 
 /* Banner */
 .ui-banner { border-radius: var(--radius-md); padding: 12px 15px; border: 1px solid; }
-.ui-banner--accent { background: var(--accent-wash); border-color: rgba(98, 197, 238, 0.4); color: var(--text-secondary); }
-.ui-banner--warn { background: var(--warn-wash); border-color: rgba(237, 187, 0, 0.4); color: var(--warn-text); }
-.ui-banner--exception { background: var(--exception-wash); border-color: rgba(255, 69, 142, 0.42); color: var(--exception-text); }
+.ui-banner--accent { background: var(--surface-raised); border-color: var(--line-strong); color: var(--text-secondary); }
+.ui-banner--success { background: var(--success-wash); border-color: color-mix(in srgb, var(--success) 35%, transparent); color: var(--success-text); }
+.ui-banner--warn { background: var(--warn-wash); border-color: color-mix(in srgb, var(--warn) 40%, transparent); color: var(--warn-text); }
+.ui-banner--exception { background: var(--exception-wash); border-color: color-mix(in srgb, var(--exception) 42%, transparent); color: var(--exception-text); }
 .ui-banner__title { font: var(--type-label); }
 .ui-banner__detail { font: 400 14px/1.6 var(--font-body); margin-top: 4px; }
 .ui-banner__actions { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; }

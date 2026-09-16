@@ -7,7 +7,7 @@ export function StatTile({
 }: {
   value: ReactNode;
   label: ReactNode;
-  tone?: "neutral" | "accent" | "warn" | "exception";
+  tone?: "neutral" | "accent" | "success" | "warn" | "exception";
 }) {
   return (
     <div className={"ui-tile" + (tone === "neutral" ? "" : ` ui-tile--${tone}`)}>

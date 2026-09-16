@@ -11,7 +11,7 @@ export function Banner({
   detail,
   actions,
 }: {
-  tone?: "accent" | "warn" | "exception";
+  tone?: "accent" | "success" | "warn" | "exception";
   title: ReactNode;
   detail?: ReactNode;
   actions?: ReactNode;

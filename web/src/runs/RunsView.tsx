@@ -23,7 +23,7 @@ const OUTCOMES = [
   { value: "handover", label: "handover" },
 ];
 
-function tileTone(key: string): "neutral" | "accent" | "warn" | "exception" {
+function tileTone(key: string): "neutral" | "accent" | "success" | "warn" | "exception" {
   const t = valueToTone(key);
   return t === "warn-soft" ? "warn" : t;
 }

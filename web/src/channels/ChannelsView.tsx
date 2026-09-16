@@ -180,7 +180,7 @@ function PostHogPanel({ tenantId }: { tenantId: string }) {
       </label>
 
       {err && <Banner tone="exception" title={err} />}
-      {msg && <Banner tone="accent" title={msg} />}
+      {msg && <Banner tone="success" title={msg} />}
 
       <div className="row" style={{ gap: 6, marginTop: 12 }}>
         <button className="primary" disabled={busy}
@@ -393,7 +393,7 @@ function EmailPanel({ tenantId }: { tenantId: string }) {
       </label>
 
       {err && <Banner tone="exception" title={err} />}
-      {msg && <Banner tone="accent" title={msg} />}
+      {msg && <Banner tone="success" title={msg} />}
 
       <div className="row" style={{ gap: 6, marginTop: 10 }}>
         {f.provider === "imap" && (
@@ -623,7 +623,7 @@ function FreshchatPanel({ tenantId }: { tenantId: string }) {
       </label>
 
       {err && <Banner tone="exception" title={err} />}
-      {msg && <Banner tone="accent" title={msg} />}
+      {msg && <Banner tone="success" title={msg} />}
 
       <div className="row" style={{ gap: 6, marginTop: 10 }}>
         <button onClick={testConn} disabled={busy || !f.domain}>
