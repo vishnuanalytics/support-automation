@@ -24,15 +24,12 @@ function initial(): Theme {
 /**
  * Icon button that flips `data-theme` on `<html>` and persists the choice —
  * an explicit pick always wins over `prefers-color-scheme` (see index.css).
- * Mounted once, in the Sidebar's pinned account row.
+ * The saved theme is applied before first paint by an inline script in
+ * index.html (so it covers pre-auth screens too, which never mount this
+ * component) — this button only needs to handle the click.
  */
 export function ThemeToggle() {
   const [theme, setTheme] = useState<Theme>(initial);
-
-  useEffect(() => {
-    const stored = window.localStorage.getItem(STORAGE_KEY);
-    apply(stored === "light" || stored === "dark" ? stored : null);
-  }, []);
 
   function toggle() {
     const next: Theme = theme === "dark" ? "light" : "dark";
