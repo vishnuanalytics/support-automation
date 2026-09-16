@@ -339,15 +339,36 @@ export function App() {
                 {open && (
                   <div className="nav-group-items col">
                     {items.map((i) => (
-                      <button
-                        key={i.view}
-                        className={"nav-item" + (view === i.view ? " active" : "")}
-                        title={i.label}
-                        onClick={() => setView(i.view)}
-                      >
-                        <i.icon size={17} />
-                        <span className="sidebar-collapsible">{i.label}</span>
-                      </button>
+                      <div key={i.view} className="col" style={{ gap: 0 }}>
+                        <button
+                          className={"nav-item" + (view === i.view ? " active" : "")}
+                          title={i.label}
+                          onClick={() => setView(i.view)}
+                        >
+                          <i.icon size={17} />
+                          <span className="sidebar-collapsible">{i.label}</span>
+                        </button>
+                        {/* the flow picker opens right under Editor, not after
+                            every other nav group — otherwise a long BUILD/
+                            KNOWLEDGE/ADMIN list buries it below the fold every
+                            time (reported: "saved editors showing bottom of
+                            the page"). */}
+                        {i.view === "editor" && view === "editor" && !navCollapsed && (
+                          <div className="nav-flowlist sidebar-collapsible">
+                            <FlowList
+                              key={`${tenantId}:${reloadKey}`}
+                              tenantId={tenantId}
+                              activeId={flowId}
+                              canEdit={canEdit}
+                              onSelect={setFlowId}
+                              onCreated={(id) => {
+                                setReloadKey((k) => k + 1);
+                                setFlowId(id);
+                              }}
+                            />
+                          </div>
+                        )}
+                      </div>
                     ))}
                   </div>
                 )}
@@ -356,19 +377,6 @@ export function App() {
           })}
         </nav>
         <div className="sidebar-collapsible col">
-        {view === "editor" && (
-          <FlowList
-            key={`${tenantId}:${reloadKey}`}
-            tenantId={tenantId}
-            activeId={flowId}
-            canEdit={canEdit}
-            onSelect={setFlowId}
-            onCreated={(id) => {
-              setReloadKey((k) => k + 1);
-              setFlowId(id);
-            }}
-          />
-        )}
         {view === "runs" && <div className="muted">observability — recent interpreter runs across your tenants</div>}
         {view === "activity" && <div className="muted">who did what — flow publishes/rollbacks, approvals, membership, connections</div>}
         {view === "trace" && <div className="muted">one timeline per Case — jobs, runs, nodes and errors, in order</div>}
