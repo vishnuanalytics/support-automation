@@ -707,9 +707,66 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-16 (Post-redesign gap-analysis pass — the shadcn redesign below
+was merged to `main` the same day it shipped; this entry is the session
+after, spent closing gaps a UI/UX + spec-vs-implementation audit found.
+Everything in this entry is committed to `main` and pushed except where
+noted.)**
+
+Ran a two-pronged gap audit (UI/UX sweep + spec-vs-implementation diff
+against `REQUIREMENTS.md`) per user request ("any gap was there in
+product"). Fixed, live-verified against a throwaway Supabase test tenant
++ (for FR-13) the real Salesforce org, and shipped:
+
+- **notify_targets admin UI** (closes FR-27b's missing surface) — new
+  `GET/POST/PUT/DELETE /api/notify-targets` in `api/main.py` (validates
+  against the same CHECK constraints migration 045/063 enforce at the DB
+  layer) + a `NotifyTargetsPanel` on the Connections page
+  (`web/src/channels/ConnectionsView.tsx`). Create/edit/delete all
+  verified end-to-end via Playwright against a live test tenant: DOM state
+  + audit log both correct, zero console errors. Also fixed
+  `delete_notify_target` unconditionally logging a `.deleted` audit event
+  even when the delete matched no row — it now 404s instead.
+- **FR-41 (provisional-aware retrieval)** — re-verified as actually wired,
+  not just present: migration `068`'s functions and `retrieval.py`'s Neo4j
+  expansion both exclude `superseded` chunks; `registry.py`'s `h_draft`
+  down-weights `provisional` context in a labelled block. Spec row updated
+  with the verification detail.
+- **FR-13 (`ask_human` draft email)** — the spec's claim "Salesforce
+  rejects an API-created outbound draft `EmailMessage`" had never actually
+  been tested in code (`_EM_DRAFT` is dead — both real callers always pass
+  `status=_EM_SENT`, post-send). Live-tested directly against the real org
+  with `sf_jwt` creds: `EmailMessage.create({Incoming: false, Status:
+  'Draft', ...})` fails with `INVALID_OPERATION: operation is not
+  allowed` — confirmed a genuine platform restriction, not a config gap.
+  No record was created (create itself failed), nothing to clean up.
+- **UI/UX**: Team/Billing/Knowledge showed 1.5–2s of blank chrome on
+  initial load (no skeleton) — added a `loading` flag + the existing
+  `Skeleton` component to all three; while wiring Knowledge's up, found
+  `Skeleton.tsx`'s wrapper `<div>` had no explicit width and collapsed to
+  0px inside any flex-row container (`.kb-main` is `display:flex`) —
+  fixed by giving it `width:100%`. Also moved `.ui-toast-host` from
+  bottom-right (the same corner the Flow Editor's minimap anchors to — a
+  toast would intermittently cover it) to top-center, the one region no
+  view's corner-anchored chrome claims.
+
+**Still open, blocked on the user, not on scope:**
+- Freshchat/Zendesk connectors (FR-51, built 2026-09-05) — never
+  live-verified against a real account; needs real credentials from the
+  user.
+- Google OAuth provider status — couldn't confirm via Supabase MCP
+  (`get_project` doesn't expose auth provider config); would need
+  `execute_sql` against `auth.identities`-equivalent or the user to check
+  the Supabase dashboard directly.
+- "No always-on host" (infra — the dev box needs to stay up for the
+  poller/worker/webhooks to run) — explicitly out of scope for this pass
+  per the user ("except the hosting fix, everything else").
+
+---
+
 **2026-09-16 (Web UI redesign — Broadsheet replaced with a shadcn-style
-neutral system. Branch `web-redesign-shadcn`, off `main`, NOT merged. Not
-a backend phase — see `CLAUDE.md`'s Frontend section for the new rules.)**
+neutral system. Merged to `main` the same day. Not a backend phase — see
+`CLAUDE.md`'s Frontend section for the new rules.)**
 
 User feedback: the app looked "made with AI," not professional; asked for
 a ui.shadcn.com-style minimalistic, professional look, explicitly
@@ -7339,9 +7396,12 @@ Case.** Five spec gaps closed (`docs/REQUIREMENTS.md` §9):
 - **FR-12** `api/worker._email_post_run` replies via
   `salesforce.send_case_reply()` (outbound `EmailMessage`, threaded on the
   Case) whenever the case has an `sf_id`; SMTP is the fallback.
-- **FR-13** `ask_human` leaves the drafted reply on the Case as a
-  `Status='Draft'` `EmailMessage` (recipient + `Re:` subject prefilled)
-  beside the Chatter note.
+- **FR-13** `ask_human` leaves the drafted reply on the Case as an internal
+  `CaseComment` beside the Chatter note, not a `Status='Draft'`
+  `EmailMessage` as this row previously said (stale — that shape was never
+  built). Confirmed live 2026-09-16 why: the API rejects a freestanding
+  draft `EmailMessage` outright (`INVALID_OPERATION`); see REQUIREMENTS.md
+  FR-13.
 - **FR-14** `handover` calls `salesforce.assign_case(queue=…)` when the
   node has a `queue` / `owner_user_id` (resolves a Queue by DeveloperName
   or Name, sets `Case.OwnerId`); no target → outcome only.
