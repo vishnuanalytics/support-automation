@@ -659,11 +659,39 @@ code { font-family: var(--font-mono); }
 /* runs view */
 .runs-shell { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .runs-shell > .app-toolbar { flex: none; }
-.runs-view { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) var(--runs-detail-w); min-height: 0; min-width: 0; }
+.runs-view {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--runs-detail-w);
+  min-height: 0;
+  min-width: 0;
+  transition: grid-template-columns 0.18s ease;
+}
+.is-resizing-panel .runs-view { transition: none; }
 .runs-list { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .runs-summary { flex: none; padding: var(--space-4) var(--space-4) 12px; }
 .runs-filter { flex: none; padding: 0 var(--space-4) 12px; }
-.run-detail { border-left: 1px solid var(--line-strong); background: var(--surface); padding: var(--space-4); overflow-y: auto; min-height: 0; }
+.run-detail { position: relative; border-left: 1px solid var(--line-strong); background: var(--surface); padding: var(--space-4); overflow-y: auto; min-height: 0; }
+/* Drag handle on the detail rail's left edge — same pattern as the
+   sidebar's resize handle (ui/Sidebar.tsx): flush within the panel's own
+   bounds rather than overhanging it, since a panel with overflow-y:auto
+   also computes overflow-x as auto (not visible) per spec and would clip
+   anything positioned outside its box. */
+.run-detail-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 5;
+  background: transparent;
+}
+.run-detail-resize-handle:hover,
+.is-resizing-panel .run-detail-resize-handle {
+  background: var(--accent);
+  opacity: 0.5;
+}
 .run-detail h5 { margin: 0 0 8px; color: var(--text-faint); font: 700 12px/1.4 var(--font-body); text-transform: uppercase; letter-spacing: 0.12em; }
 .tile { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 10px 15px; min-width: 92px; }
 .tile .v { font: 600 24px/1 var(--font-body); }

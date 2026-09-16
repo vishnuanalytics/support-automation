@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, ApiError } from "../api";
 import type { RunDetail, RunRow, RunStats, TraceStep as TraceStepData } from "../types";
 import {
@@ -14,6 +14,17 @@ import {
   EmptyState,
   type Column,
 } from "../ui";
+
+const DETAIL_WIDTH_KEY = "runs-detail-width";
+const DETAIL_MIN_WIDTH = 320;
+const DETAIL_MAX_WIDTH = 720;
+const DETAIL_DEFAULT_WIDTH = 420;
+
+function loadDetailWidth(): number {
+  const raw = typeof window !== "undefined" ? Number(window.localStorage.getItem(DETAIL_WIDTH_KEY)) : NaN;
+  if (!Number.isFinite(raw) || raw <= 0) return DETAIL_DEFAULT_WIDTH;
+  return Math.min(DETAIL_MAX_WIDTH, Math.max(DETAIL_MIN_WIDTH, raw));
+}
 
 const OUTCOMES = [
   { value: "", label: "All" },
@@ -40,6 +51,44 @@ export function RunsView() {
   const [filter, setFilter] = useState("");
   const [sel, setSel] = useState<RunDetail | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const detailWidthRef = useRef(DETAIL_DEFAULT_WIDTH);
+
+  useEffect(() => {
+    detailWidthRef.current = loadDetailWidth();
+    document.documentElement.style.setProperty("--runs-detail-w", `${detailWidthRef.current}px`);
+  }, []);
+
+  // Drag-to-resize the detail rail — same pattern as ui/Sidebar.tsx's
+  // resize handle: update the CSS var directly per mousemove (no React
+  // re-render per pixel), commit to state/localStorage only on mouseup,
+  // and always detach both window listeners there.
+  function onDetailResizeStart(e: React.MouseEvent) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = detailWidthRef.current;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    document.documentElement.classList.add("is-resizing-panel");
+
+    const clamp = (w: number) => Math.min(DETAIL_MAX_WIDTH, Math.max(DETAIL_MIN_WIDTH, w));
+    const onMove = (ev: MouseEvent) => {
+      // dragging left grows the panel — it's anchored to the right edge
+      const next = clamp(startWidth - (ev.clientX - startX));
+      document.documentElement.style.setProperty("--runs-detail-w", `${next}px`);
+    };
+    const onUp = (ev: MouseEvent) => {
+      const next = clamp(startWidth - (ev.clientX - startX));
+      detailWidthRef.current = next;
+      window.localStorage.setItem(DETAIL_WIDTH_KEY, String(next));
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      document.documentElement.classList.remove("is-resizing-panel");
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
 
   useEffect(() => {
     api.runStats().then(setStats).catch(() => {});
@@ -157,6 +206,13 @@ export function RunsView() {
         </div>
 
         <div className="run-detail">
+          <div
+            className="run-detail-resize-handle"
+            onMouseDown={onDetailResizeStart}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize run detail panel"
+          />
           {sel ? (
             <Detail run={sel} />
           ) : (
