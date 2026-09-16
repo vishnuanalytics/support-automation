@@ -777,16 +777,30 @@ itself was built:
    git log on `web/src/index.css` if ever needed).
 
 `cd web && npm run build` (tsc + vite) and `npx vitest run` clean after
-every chunk. **Not browser-verified** — this sandbox's Playwright
-Chromium can't launch (`libnspr4.so`, no root; same constraint noted for
-the original Broadsheet build). A repo-wide grep confirms zero hardcoded
-hex/rgba left in `web/src/**/*.tsx` outside one intentional neutral
-`rgba(0,0,0,.4)` minimap mask.
+every chunk. A repo-wide grep confirms zero hardcoded hex/rgba left in
+`web/src/**/*.tsx` outside one intentional neutral `rgba(0,0,0,.4)`
+minimap mask.
+
+**Update, same day — actually got it browser-verified.** The "sandbox
+Playwright can't launch Chromium" note above (and the same one on the
+original Broadsheet build) turned out to be fixable without root: `ldd`
+showed 4 missing shared libs (`libnspr4`/`libnss3`/`libnssutil3`/
+`libasound.so.2`); `apt-get download` + `dpkg-deb -x` into a scratch dir +
+`LD_LIBRARY_PATH` got Chromium actually launching. Logged in with a
+throwaway Supabase test account (self-registered via the admin API,
+tenant + user deleted again afterward) and screenshotted Login, Setup,
+Editor, Runs, and Knowledge in both themes. Found one more real bug this
+way: the theme toggle only lived in the authenticated Sidebar, so Login
+and the workspace picker never applied the saved theme at all — fixed
+with an inline `data-theme` script in `index.html` that runs before first
+paint, on every screen. Everything else screenshotted clean — see
+`/home/vishnuv/.claude/projects/-home-vishnuv-projects-support-automation/
+memory/playwright-sandbox-fix.md` for the exact fix steps so this doesn't
+need rediscovering next time.
 
 **Not done — explicitly out of scope**: merging `web-redesign-shadcn` to
-`main` (needs a human look at it first, given no browser verification was
-possible here); an actual browser/visual QA pass in both themes across
-every view; a docker rebuild to deploy once merged.
+`main` (still worth a human look, even with the screenshots above); a
+docker rebuild to deploy once merged.
 
 ---
 
