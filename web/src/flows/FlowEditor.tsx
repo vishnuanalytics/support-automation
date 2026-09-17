@@ -494,7 +494,18 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
     const ifExpr = (c as { if?: string }).if ?? "";
     setEdges((es) =>
       es.map((e) =>
-        e.id === id ? { ...e, data: { condition: c }, label: ifExpr, animated: !!ifExpr } : e,
+        // spread the existing data bag, not replace it -- a plain
+        // `data: { condition: c }` here would silently drop `data.name`
+        // (the edge's own display name) every time the condition changes.
+        e.id === id ? { ...e, data: { ...e.data, condition: c }, label: ifExpr, animated: !!ifExpr } : e,
+      ),
+    );
+    mark();
+  }
+  function setEdgeLabel(id: string, v: string) {
+    setEdges((es) =>
+      es.map((e) =>
+        e.id === id ? { ...e, data: { condition: e.data?.condition ?? {}, name: v } } : e,
       ),
     );
     mark();
@@ -1078,6 +1089,7 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
         inCount={selectedNode ? edges.filter((e) => e.target === selectedNode.id).length : 0}
         outCount={selectedNode ? edges.filter((e) => e.source === selectedNode.id).length : 0}
         onLabel={(v) => selectedNode && setLabel(selectedNode.id, v)}
+        onEdgeLabel={(v) => selectedEdge && setEdgeLabel(selectedEdge.id, v)}
         onConfig={(v) => selectedNode && setConfig(selectedNode.id, v)}
         onCondition={(c) => selectedEdge && setEdgeCond(selectedEdge.id, c)}
         onRevert={() => {

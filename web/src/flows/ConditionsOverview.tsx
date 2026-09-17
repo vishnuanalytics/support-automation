@@ -62,9 +62,12 @@ export function ConditionsOverview({
           {group.map((e) => {
             const ifExpr = (e.data?.condition as { if?: string }).if ?? "";
             const clauses = parseCondition(ifExpr);
+            const name = typeof e.data?.name === "string" ? e.data.name.trim() : "";
             return (
               <div key={e.id} className="condbuilder__group">
                 <div className="muted" style={{ fontSize: 11, marginBottom: 4 }}>
+                  {name && <strong style={{ color: "var(--text)" }}>{name}</strong>}
+                  {name && " — "}
                   → {labelOf(e.target)}
                 </div>
                 {clauses !== null ? (

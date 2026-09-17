@@ -16,7 +16,14 @@ export type RFNode = Node<{
   /** outside the selected node's focus neighborhood — display-only, never saved */
   dimmed?: boolean;
 }>;
-export type RFEdge = Edge<{ condition: Record<string, unknown> }>;
+export type RFEdge = Edge<{
+  condition: Record<string, unknown>;
+  /** user-typed display name (e.g. "VIP escalation") — separate from React
+   *  Flow's own `.label` prop, which this codebase already uses for the
+   *  condition's `if` expression text. Null/blank -> the canvas falls back
+   *  to showing the expression, same as before this existed. */
+  name?: string | null;
+}>;
 
 // Node types that can end a path — each produces a final `outcome` (or, for
 // `notify_human`, is the real end of every escalation now that Phase 24
@@ -68,7 +75,7 @@ export function toReactFlow(flow: Flow): { nodes: RFNode[]; edges: RFEdge[] } {
     source: e.source_node_id,
     target: e.target_node_id,
     label: (e.condition as { if?: string })?.if ?? "",
-    data: { condition: e.condition || {} },
+    data: { condition: e.condition || {}, name: e.label ?? null },
     animated: !!(e.condition as { if?: string })?.if,
   }));
 
@@ -108,6 +115,7 @@ export function toFlowPayload(
     source_node_id: e.source,
     target_node_id: e.target,
     condition: (e.data?.condition as Record<string, unknown>) ?? {},
+    label: e.data?.name ?? null,
   }));
   return { name: flow.name, status: flow.status, version: flow.version, nodes, edges };
 }

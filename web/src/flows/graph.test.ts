@@ -13,7 +13,7 @@ const flow: Flow = {
   ],
   edges: [
     { edge_id: "e1", source_node_id: "r", target_node_id: "g", condition: {} },
-    { edge_id: "e2", source_node_id: "g", target_node_id: "a", condition: { if: "confidence_gate.pass" } },
+    { edge_id: "e2", source_node_id: "g", target_node_id: "a", condition: { if: "confidence_gate.pass" }, label: "Pass path" },
   ],
 };
 
@@ -26,7 +26,11 @@ describe("toReactFlow", () => {
     // conditional edge is animated and carries its expression
     const e2 = edges.find((e) => e.id === "e2")!;
     expect(e2.animated).toBe(true);
-    expect(e2.label).toBe("confidence_gate.pass");
+    expect(e2.label).toBe("confidence_gate.pass"); // RF's own .label — still the expression, unchanged
+    expect(e2.data?.name).toBe("Pass path"); // the user-given display name, separately
+    // an edge with no saved label round-trips to null, not undefined/""
+    const e1 = edges.find((e) => e.id === "e1")!;
+    expect(e1.data?.name).toBeNull();
   });
 
   it("auto-lays-out nodes that have no saved position", () => {
@@ -47,6 +51,8 @@ describe("toFlowPayload", () => {
     expect(payload.edges!.find((e) => e.edge_id === "e2")!.condition).toEqual({
       if: "confidence_gate.pass",
     });
+    expect(payload.edges!.find((e) => e.edge_id === "e2")!.label).toBe("Pass path");
+    expect(payload.edges!.find((e) => e.edge_id === "e1")!.label).toBeNull();
     expect(payload.name).toBe("n");
   });
 });

@@ -25,7 +25,8 @@ def definition_hash(nodes: list[dict], edges: list[dict]) -> str:
 
     def norm_edge(e: dict) -> dict:
         return {"edge_id": e["edge_id"], "source_node_id": e["source_node_id"],
-                "target_node_id": e["target_node_id"], "condition": e.get("condition") or {}}
+                "target_node_id": e["target_node_id"], "condition": e.get("condition") or {},
+                "label": e.get("label")}
 
     payload = {
         "nodes": sorted((norm_node(n) for n in nodes), key=lambda x: x["node_id"]),
@@ -55,7 +56,7 @@ def _draft_graph(sb, fid: str) -> tuple[list[dict], list[dict]]:
     )
     edges = (
         sb.table("flow_edges")
-        .select("edge_id, source_node_id, target_node_id, condition")
+        .select("edge_id, source_node_id, target_node_id, condition, label")
         .eq("flow_id", fid).execute().data or []
     )
     return nodes, edges
@@ -149,6 +150,7 @@ def load_flow(
                 "source_node_id": e["source_node_id"],
                 "target_node_id": e["target_node_id"],
                 "condition": e.get("condition") or {},
+                "label": e.get("label"),
             }
             for e in edges
         ],

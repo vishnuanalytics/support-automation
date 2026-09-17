@@ -22,6 +22,7 @@ class FlowEdge(BaseModel):
     source_node_id: str
     target_node_id: str
     condition: dict = Field(default_factory=dict)
+    label: str | None = None
 
 
 class Flow(BaseModel):

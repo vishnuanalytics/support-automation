@@ -1753,18 +1753,21 @@ function KbLookupForm({
 export function EdgeInspector({
   edge,
   onCondition,
+  onLabel,
   onDelete,
   tenantId,
   embedded = false,
 }: {
   edge: RFEdge;
   onCondition: (c: Record<string, unknown>) => void;
+  onLabel: (v: string) => void;
   onDelete: () => void;
   tenantId: string;
   embedded?: boolean;
 }) {
   const ifExpr = (edge.data?.condition as { if?: string })?.if ?? "";
   const conditional = ifExpr !== "";
+  const edgeName = typeof edge.data?.name === "string" ? edge.data.name : "";
   // Default org's schema -- an edge isn't scoped to one node's `config.org`,
   // so this offers real values from whichever org this tenant treats as
   // primary. Good enough for "insert a real picklist value"; a multi-org
@@ -1838,6 +1841,16 @@ export function EdgeInspector({
   return (
     <div>
       {!embedded && <h4>edge</h4>}
+      <ConfigField
+        label="name (optional)"
+        hint="shown on the canvas instead of the condition below — the condition itself is unchanged, this is purely a display name."
+      >
+        <input
+          value={edgeName}
+          placeholder="e.g. VIP escalation"
+          onChange={(e) => onLabel(e.target.value)}
+        />
+      </ConfigField>
       <div className="field">
         <label className="row" style={{ gap: 6 }}>
           <input

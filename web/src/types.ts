@@ -19,6 +19,10 @@ export interface FlowEdge {
   source_node_id: string;
   target_node_id: string;
   condition: Record<string, unknown>; // {} or {"if": "..."}
+  /** user-typed display name (e.g. "VIP escalation") — shown on the canvas
+   *  instead of the raw condition expression when set. Purely cosmetic,
+   *  not part of the routing logic (mirrors flow_nodes.label). */
+  label?: string | null;
 }
 
 export interface FlowMeta {

@@ -2,8 +2,13 @@ import { BaseEdge, EdgeLabelRenderer, getBezierPath, type EdgeProps } from "@xyf
 import type { RFEdge } from "./graph";
 
 /**
- * A conditional edge always prints its expression — an unlabelled
- * conditional edge is a bug. `pass` reads cyan, `fail`/`else` magenta.
+ * A conditional edge always prints something — an unlabelled conditional
+ * edge is a bug. A user-given name (edge.label, "VIP escalation") takes
+ * over the pill's visible text when set; the raw condition expression
+ * still decides the pass/fail color and always shows in the hover tooltip,
+ * so naming an edge never hides what it actually does, just what you see
+ * at a glance. No name -> exactly the old behaviour, the expression itself
+ * is the pill text.
  */
 export function EdgeLabel({
   id,
@@ -29,16 +34,19 @@ export function EdgeLabel({
   const expr =
     (data?.condition as { if?: string } | undefined)?.if ??
     (typeof label === "string" ? label : "");
+  const name = typeof data?.name === "string" ? data.name.trim() : "";
+  const displayText = name || expr;
+  const tooltip = name && expr ? `${name}\n${expr}` : name || expr;
   const kind = !expr ? "plain" : /\b(fail|else|not)\b|[<!]|>=?\s*0/i.test(expr) ? "fail" : "pass";
 
   return (
     <>
       <BaseEdge id={id} path={path} markerEnd={markerEnd} style={style} />
-      {expr && (
+      {displayText && (
         <EdgeLabelRenderer>
           <div
             className={`edgelabel edgelabel--${kind}`}
-            title={expr}
+            title={tooltip}
             style={{
               position: "absolute",
               transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
@@ -49,7 +57,7 @@ export function EdgeLabel({
               opacity: style?.opacity,
             }}
           >
-            {expr}
+            {displayText}
           </div>
         </EdgeLabelRenderer>
       )}

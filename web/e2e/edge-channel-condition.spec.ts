@@ -154,3 +154,68 @@ test("repeat-picking a quick-insert option doesn't duplicate it, and back-to-bac
     "tier == 'enterprise' or region == 'us' and case.channel == 'email' and case.channel == 'hubspot'",
   );
 });
+
+test("naming an edge shows the name on the canvas instead of the raw condition, and survives a save", async ({ page }) => {
+  // migration 111 / "the user should enter the edge names rather than
+  // taking the if expression names" — edges get an optional display
+  // `label` (surfaced as `data.name` on the RF edge) shown on the canvas
+  // pill in place of the raw condition text; the condition itself, and the
+  // expression in the pill's hover tooltip, are unchanged.
+  let savedBody: { edges?: { edge_id: string; label?: string | null }[] } | null = null;
+  await installApiMocks(page, { onSave: (b) => (savedBody = b as typeof savedBody) });
+
+  const flow = {
+    flow_id: FAKE_FLOW_ID, tenant_id: FAKE_TENANT_ID, team: "support",
+    name: "E2E Test Flow", status: "draft", version: 1, published_version: null,
+    sf_entry: false,
+    nodes: [
+      { node_id: "n1", type: "confidence_gate", label: "Gate", position_x: 100, position_y: 100, config: {} },
+      { node_id: "n2", type: "auto_reply", label: "Auto reply", position_x: 400, position_y: 100, config: {} },
+    ],
+    edges: [{ edge_id: "e1", source_node_id: "n1", target_node_id: "n2", condition: { if: "tier == 'enterprise'" }, label: null }],
+  };
+  await page.route(`**/api/flows/${FAKE_FLOW_ID}`, (route) => {
+    const method = route.request().method();
+    if (method === "GET") return route.fulfill({ json: flow });
+    if (method === "PUT") {
+      const body = route.request().postDataJSON();
+      savedBody = body;
+      flow.edges = body.edges;
+      flow.version = flow.version + 1;
+      return route.fulfill({ json: flow });
+    }
+    return route.fallback();
+  });
+  await page.route("**/api/case-connector/meta*", (route) =>
+    route.fulfill({ json: { available: false, queues: [], case_types: [], modules: [], case_fields: [] } }));
+
+  await page.goto("/");
+  await page.locator(".flow-item", { hasText: "E2E Test Flow" }).click();
+  await page.getByRole("button", { name: "🗺️ Graph" }).click();
+  await page.getByText("Gate", { exact: true }).waitFor();
+
+  // before naming: canvas shows the raw condition expression
+  await expect(page.locator(".edgelabel", { hasText: "tier == 'enterprise'" })).toBeVisible();
+
+  await page.locator(".react-flow__edge").first().click({ force: true });
+  const nameInput = page.getByPlaceholder("e.g. VIP escalation");
+  await expect(nameInput).toBeVisible();
+  await nameInput.fill("VIP customers");
+
+  // the inspector's own title picks up the name
+  await expect(page.locator(".ui-slideover__title", { hasText: "VIP customers" })).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  // the canvas pill now shows the name, not the expression — but the
+  // expression is still there on hover (title attribute)
+  const pill = page.locator(".edgelabel");
+  await expect(pill).toHaveText("VIP customers");
+  await expect(pill).toHaveAttribute("title", /tier == 'enterprise'/);
+
+  // Save draft round-trips the name through the API
+  await page.getByRole("button", { name: "Save draft" }).click();
+  await expect(page.getByText(/Saved · draft v/)).toBeVisible();
+  expect(savedBody).not.toBeNull();
+  const savedEdge = savedBody!.edges!.find((e) => e.edge_id === "e1")!;
+  expect(savedEdge.label).toBe("VIP customers");
+});

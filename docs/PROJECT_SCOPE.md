@@ -707,6 +707,68 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-17 (Edges get a user-given display name, shown on the canvas
+instead of the raw condition expression.)** User: "In the edge condition
+the user should enter the edge names rather than taking the if expression
+names and can you improve or simplify the if condition selections to users
+easily understadable." Clarified via AskUserQuestion into a concrete scope
+before touching code: the user picked "Let me name the edge itself" — a
+free-text name field, shown on the canvas pill in place of the condition
+expression, with the condition itself unchanged and edited separately below
+the name.
+
+**Schema:** new migration `db/migrations/111_flow_edge_label.sql` adds
+`flow_edges.label text` and reissues `replace_flow_graph()` to pass it
+through (its column list is an explicit whitelist — a field left out here
+would silently never persist). Verified the live schema and the live
+`replace_flow_graph` definition via Supabase MCP `execute_sql` *before*
+writing the migration (no drift from migration-file history), applied it
+live via MCP `apply_migration` (never `supabase db push`, per CLAUDE.md),
+then re-verified the column exists live.
+
+**Backend allowlists updated to match** (each one a place a new field can
+silently vanish if missed, mapped up front with a research subagent before
+editing): `interpreter/loader.py` (`definition_hash()`'s `norm_edge()`, the
+draft-graph `SELECT`, and the `flow_dict["edges"]` reshape), `FlowEdge` in
+`interpreter/flows/validate_flow.py` (`label: str | None = None`), and
+`EdgeIn` in `api/main.py`.
+
+**Frontend:** `FlowEdge.label` in `types.ts`; `graph.ts`'s `RFEdge.data`
+gained a `name` field deliberately separate from React Flow's own `.label`
+(which still holds the condition expression text) — `toReactFlow` reads
+`e.label` into `data.name`, `toFlowPayload` writes `data.name` back out to
+`label`. `EdgeLabel.tsx`'s canvas pill now shows `name || expr`, with a
+`title` tooltip of `"${name}\n${expr}"` when both exist, so the condition
+is always one hover away. `Inspector.tsx`'s `EdgeInspector` gained a "name
+(optional)" field at the top, explicitly captioned "shown on the canvas
+instead of the condition below — the condition itself is unchanged, this
+is purely a display name"; `InspectorPanel.tsx`'s slide-over title and
+`ConditionsOverview.tsx`'s per-edge grouping both prefer the name over the
+raw expression when one is set.
+
+**Bug caught and fixed proactively, not by a user report:** `FlowEditor.tsx`'s
+existing `setEdgeCond` replaced an edge's entire `data` object
+(`data: { condition: c }`) rather than merging into it — harmless before
+`data.name` existed, but would have silently dropped a saved edge name the
+moment its condition was next edited. Fixed to `data: { ...e.data,
+condition: c }` before it could ever ship broken.
+
+**Verify:** offline pytest 1308/1308 unchanged; `npm run build` clean;
+`vitest run` 20/20 (extended `graph.test.ts` with the `toReactFlow`/
+`toFlowPayload` label round-trip, including the "no label set → `null`,
+not `undefined`/`""`" case). Browser-verified the full user-facing flow
+end to end via a throwaway Playwright spec, then promoted it to a
+permanent regression test in the already-committed
+`edge-channel-condition.spec.ts` (naming an edge swaps the canvas pill
+from expression to name, keeps the expression in the hover tooltip,
+updates the inspector's own title, and round-trips `label` through a
+mocked `PUT /api/flows/:id`). Full e2e suite: same 5 pre-existing failures
+as the established baseline, no new regressions, this new test passing.
+Not yet committed — awaiting explicit go-ahead to commit, per this
+session's convention of committing only when asked.
+
+---
+
 **2026-09-17 (Bug fix — the Advanced condition box's quick-insert
 dropdowns duplicated clauses on a repeat pick, and a related join bug.)**
 User: "if I click multiple times the option it was creating multiple

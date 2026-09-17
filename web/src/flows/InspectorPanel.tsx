@@ -24,6 +24,7 @@ export function InspectorPanel({
   inCount,
   outCount,
   onLabel,
+  onEdgeLabel,
   onConfig,
   onCondition,
   onRevert,
@@ -39,6 +40,7 @@ export function InspectorPanel({
   inCount: number;
   outCount: number;
   onLabel: (v: string) => void;
+  onEdgeLabel: (v: string) => void;
   onConfig: (v: Record<string, unknown>) => void;
   onCondition: (c: Record<string, unknown>) => void;
   onRevert: () => void;
@@ -82,6 +84,7 @@ export function InspectorPanel({
                 edge={edge}
                 tenantId={tenantId}
                 onCondition={onCondition}
+                onLabel={onEdgeLabel}
                 onDelete={onDeleteEdge}
               />
             ),
@@ -110,7 +113,9 @@ export function InspectorPanel({
       </span>
     </span>
   ) : (
-    <span>Edge condition</span>
+    <span>
+      {typeof edge?.data?.name === "string" && edge.data.name ? edge.data.name : "Edge condition"}
+    </span>
   );
 
   return (

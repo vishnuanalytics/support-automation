@@ -240,6 +240,7 @@ class EdgeIn(BaseModel):
     source_node_id: str
     target_node_id: str
     condition: dict[str, Any] = {}
+    label: str | None = None
 
 
 class FlowIn(BaseModel):
