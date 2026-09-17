@@ -9,13 +9,20 @@ import { nodeKind } from "./nodeSummary";
  */
 export function NodeCard({ data, selected }: NodeProps<RFNode>) {
   const kind = nodeKind(data);
+  const kindLabel = data.invalid ? "invalid" : data.tooManyDefaults ? "won't build" : data.nodeType;
   return (
-    <div className={`nodecard nodecard--${kind}${selected ? " is-selected" : ""}`}>
+    <div
+      className={`nodecard nodecard--${kind}${selected ? " is-selected" : ""}${data.dimmed ? " nodecard--dimmed" : ""}`}
+    >
       <Handle type="target" position={Position.Left} />
-      <div className="nodecard__kind">{data.invalid ? "invalid" : data.nodeType}</div>
+      <div className="nodecard__kind">{kindLabel}</div>
       <div className="nodecard__label">{data.label}</div>
       {data.invalid ? (
         <div className="nodecard__summary nodecard__summary--bad">unknown node type</div>
+      ) : data.tooManyDefaults ? (
+        <div className="nodecard__summary nodecard__summary--bad">
+          more than one unconditional outgoing edge — give all but one a condition
+        </div>
       ) : (
         data.summary && <div className="nodecard__summary">{data.summary}</div>
       )}

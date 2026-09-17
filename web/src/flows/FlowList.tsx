@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
 import type { FlowCandidate, FlowMeta, TemplateMeta } from "../types";
 import { Button, Dialog, Field, Input, Textarea, Banner, useToast } from "../ui";
+import { GuidedSetup } from "./GuidedSetup";
 
 type Handoff = { candidate?: FlowCandidate; mermaidPrompt?: boolean };
 
@@ -32,6 +33,7 @@ export function FlowList({
   const [promptText, setPromptText] = useState("");
   const [promptTeam, setPromptTeam] = useState("support");
   const [manageOpen, setManageOpen] = useState(false);
+  const [wizardOpen, setWizardOpen] = useState(false);
   const [confirmDel, setConfirmDel] = useState<string | null>(null);
 
   function reloadTemplates() {
@@ -85,6 +87,11 @@ export function FlowList({
     }
   }
 
+  function fromGuidedSetup(cand: FlowCandidate, suggestedName: string) {
+    setWizardOpen(false);
+    openNewFlow(suggestedName, { candidate: cand }, "wizard");
+  }
+
   async function submitPrompt() {
     if (!promptText.trim()) return;
     setBusy(true);
@@ -122,8 +129,8 @@ export function FlowList({
   const visible = flows.filter((f) => f.tenant_id === tenantId);
   const customTemplates = templates.filter((t) => t.source === "custom");
   const handoffNote =
-    newFlow?.from === "template"
-      ? "Starts from the template draft — review and Save in the editor."
+    newFlow?.from === "template" || newFlow?.from === "wizard"
+      ? "Starts from that draft — review and Save in the editor."
       : newFlow?.from === "mermaid"
         ? "Opens the Mermaid importer once the flow is created."
         : null;
@@ -132,6 +139,14 @@ export function FlowList({
     <div className="col">
       {canEdit && (
         <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => setWizardOpen(true)}
+            title="answer a few plain questions, no canvas required"
+          >
+            🧭 Set up a flow
+          </Button>
           <Button variant="secondary" size="sm" onClick={() => openNewFlow("Untitled flow", {}, "blank")}>
             ＋ New flow
           </Button>
@@ -206,13 +221,13 @@ export function FlowList({
           <strong>Get started</strong>
           <ol style={{ margin: 0, paddingLeft: 18, lineHeight: 1.7 }}>
             <li>
-              Start from a template —{" "}
-              <Button variant="ghost" size="sm" onClick={() => fromTemplate("support-autoreply")}>
-                Support auto-reply
+              Answer a few questions —{" "}
+              <Button variant="ghost" size="sm" onClick={() => setWizardOpen(true)}>
+                🧭 Set up a flow
               </Button>
             </li>
             <li>Add knowledge in the Knowledge tab (upload a file or crawl your docs)</li>
-            <li>Open the flow, send a test in the Run panel, then Publish</li>
+            <li>Open the flow, try a real case in the Test run panel, then Publish</li>
           </ol>
         </div>
       )}
@@ -233,6 +248,8 @@ export function FlowList({
         </div>
       ))}
       {visible.length === 0 && !err && <div className="muted">no flows in this workspace</div>}
+
+      <GuidedSetup open={wizardOpen} onClose={() => setWizardOpen(false)} onGenerate={fromGuidedSetup} />
 
       <Dialog
         open={!!newFlow}

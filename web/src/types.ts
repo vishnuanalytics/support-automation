@@ -29,7 +29,7 @@ export interface FlowMeta {
   status: "draft" | "published" | "archived";
   version: number;
   published_version: number | null;
-  sf_entry?: boolean;          // the Salesforce Case hook runs this flow
+  sf_entry?: boolean;          // this flow is the case-system entry point (any connector)
   updated_at?: string;
 }
 
@@ -82,8 +82,14 @@ export interface TraceResult {
   timeline: TraceEvent[];
 }
 
-/** Phase 20o — Salesforce routing metadata for the flow editor's dropdowns
- *  (notify / clarify node forms). `available:false` when the API has no SF creds. */
+/** Case-connector routing metadata for the flow editor's dropdowns (notify /
+ *  clarify / sf_writeback / ask_human / handover node forms). Originally
+ *  Salesforce-only (Phase 20o); `GET /api/case-connector/meta` now returns
+ *  this same shape for whichever connector a tenant is actually on
+ *  (Salesforce or HubSpot today — see that endpoint's own docstring),
+ *  tagged with `connector` so the editor can hide connector-specific UI
+ *  (e.g. Salesforce's multi-org `org` picker). `available:false` when that
+ *  connector has no live creds for this tenant. */
 export interface SfMeta {
   available: boolean;
   queues: { id: string; name: string; developer_name: string | null }[];
@@ -91,7 +97,29 @@ export interface SfMeta {
   modules: string[];
   case_fields?: SalesforceCaseField[];
   users?: { id: string; name: string; email: string | null }[];
+  connector?: string;
   error?: string;
+}
+
+/** A real Case/ticket from the tenant's connected case system, already
+ *  shaped as the flow `case` dict a run expects (Record<string, unknown>
+ *  when actually run — this is just enough of the shape to render a
+ *  picker row). Salesforce and HubSpot fill different subsets of these
+ *  fields (see interpreter/salesforce.py's `_case_row_to_dict` / hubspot.
+ *  py's `ticket_as_case`), so everything but `subject` is optional. */
+export interface RecentCase {
+  sf_id?: string | null;
+  case_id?: string | null;
+  case_number?: string | null;
+  subject: string;
+  body?: string;
+  status?: string | null;
+  channel?: string;
+  account?: { name?: string | null; customer_type?: string | null; region?: string | null };
+  contact?: { name?: string | null; email?: string | null };
+  from?: string;
+  from_name?: string;
+  [key: string]: unknown;
 }
 
 /** Slack workspace metadata for the flow editor's pickers (`notify_human`
@@ -788,9 +816,33 @@ export interface ZendeskConnectionSave {
   auto_send_enabled?: boolean;
 }
 
+export interface HubSpotConnection {
+  tenant_id: string;
+  configured: boolean;
+  status: "none" | "inactive" | "active" | "error";
+  portal_id?: string;
+  auto_send_enabled?: boolean;
+  webhooks_configured?: boolean;
+}
+
+export interface HubSpotConnectionSave {
+  tenant_id?: string;
+  access_token?: string;
+  auto_send_enabled?: boolean;
+}
+
 export interface CaseConnector {
   tenant_id: string;
   case_connector: string;
+}
+
+/** migration 110 — which connector each case CHANNEL (email/hubspot/
+ * freshchat/zendesk/...) routes to, so one flow serves every channel
+ * without duplicating the graph. Missing/empty for a channel means it
+ * falls through to the tenant's `case_connector` default. */
+export interface ChannelConnectorMap {
+  tenant_id: string;
+  channel_connector_map: Record<string, string>;
 }
 
 export interface CaseTaxonomyRule {

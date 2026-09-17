@@ -438,24 +438,9 @@ _CASE_SOQL_BASE = (
 )
 
 
-def get_case(case_id: str) -> dict[str, Any]:
-    """Fetch a Case (+ Account/Contact) and shape it as a flow `case` dict."""
-    if not available():
-        raise RuntimeError(
-            "--sf-case needs SF_USERNAME / SF_PASSWORD / SF_SECURITY_TOKEN in .env"
-        )
-    rows: list[dict] = []
-    for soql in (_CASE_SOQL_TIER, _CASE_SOQL_BASE):
-        try:
-            rows = _client().query(soql.format(cid=case_id)).get("records", [])
-            break
-        except Exception as e:  # noqa: BLE001  -- Tier__c absent -> try the base query
-            if _bad_field(e):
-                continue
-            raise
-    if not rows:
-        raise LookupError(f"no Salesforce Case with Id {case_id!r}")
-    r = rows[0]
+def _case_row_to_dict(r: dict[str, Any]) -> dict[str, Any]:
+    """Shape one Case (+ Account/Contact sub-query) SOQL row as a flow
+    `case` dict — the piece `get_case` and `list_recent_cases` share."""
     acct = r.get("Account") or {}
     con = r.get("Contact") or {}
     return {
@@ -473,6 +458,64 @@ def get_case(case_id: str) -> dict[str, Any]:
         },
         "contact": {"name": con.get("Name"), "email": con.get("Email")},
     }
+
+
+def get_case(case_id: str) -> dict[str, Any]:
+    """Fetch a Case (+ Account/Contact) and shape it as a flow `case` dict."""
+    if not available():
+        raise RuntimeError(
+            "--sf-case needs SF_USERNAME / SF_PASSWORD / SF_SECURITY_TOKEN in .env"
+        )
+    rows: list[dict] = []
+    for soql in (_CASE_SOQL_TIER, _CASE_SOQL_BASE):
+        try:
+            rows = _client().query(soql.format(cid=case_id)).get("records", [])
+            break
+        except Exception as e:  # noqa: BLE001  -- Tier__c absent -> try the base query
+            if _bad_field(e):
+                continue
+            raise
+    if not rows:
+        raise LookupError(f"no Salesforce Case with Id {case_id!r}")
+    return _case_row_to_dict(rows[0])
+
+
+_RECENT_CASES_SOQL_TIER = (
+    "SELECT Id, CaseNumber, Subject, Description, Status, Priority, OwnerId, "
+    "Account.Name, Account.Tier__c, Account.Type, Account.BillingCountry, "
+    "Contact.Name, Contact.Email "
+    "FROM Case ORDER BY CreatedDate DESC LIMIT {limit}"
+)
+_RECENT_CASES_SOQL_BASE = (
+    "SELECT Id, CaseNumber, Subject, Description, Status, Priority, OwnerId, "
+    "Account.Name, Account.Type, Account.BillingCountry, "
+    "Contact.Name, Contact.Email "
+    "FROM Case ORDER BY CreatedDate DESC LIMIT {limit}"
+)
+
+
+def list_recent_cases(tenant_id: str | None, org_label: str | None = None,
+                      limit: int = 10) -> list[dict[str, Any]]:
+    """The tenant's most recently created real Cases, shaped as flow `case`
+    dicts — powers the flow editor's "try a real recent case" test picker,
+    so testing a flow doesn't mean hand-writing sample JSON. Tolerant like
+    `org_metadata`: any failure (no org connected, a query error) is an
+    empty list, never an exception into the API layer."""
+    try:
+        sf = client_for(tenant_id, org_label)
+        rows: list[dict] = []
+        for soql in (_RECENT_CASES_SOQL_TIER, _RECENT_CASES_SOQL_BASE):
+            try:
+                rows = sf.query(soql.format(limit=limit)).get("records", [])
+                break
+            except Exception as e:  # noqa: BLE001 -- Tier__c absent -> try the base query
+                if _bad_field(e):
+                    continue
+                raise
+        return [_case_row_to_dict(r) for r in rows]
+    except Exception as e:  # noqa: BLE001
+        log.warning("list_recent_cases(tenant=%s org=%s): %s", tenant_id, org_label, e)
+        return []
 
 
 def latest_inbound_email(case_id: str, *, tenant_id: str | None = None,

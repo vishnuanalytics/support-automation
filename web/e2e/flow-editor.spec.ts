@@ -25,6 +25,10 @@ test("stubbed auth -> load a flow -> add a node -> save the draft", async ({ pag
   await expect(flowItem).toBeVisible();
   await flowItem.click();
 
+  // the editor lands on the chat view by default (AI-edit as the front
+  // door) — switch to the graph to reach the canvas
+  await page.getByRole("button", { name: "🗺️ Graph" }).click();
+
   // the canvas rendered the flow's one seeded `retrieve` node
   await expect(page.getByText("retrieve", { exact: true }).first()).toBeVisible();
 

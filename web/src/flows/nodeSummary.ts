@@ -1,14 +1,24 @@
 import { TERMINAL } from "./graph";
 
-export type NodeKind = "trigger" | "work" | "terminal" | "invalid";
+export type NodeKind = "trigger" | "work" | "terminal" | "invalid" | "broken";
 
 const TRIGGERS = new Set(["trigger", "inbound_email", "webhook", "schedule", "sf_case_hook"]);
 
 /** The left-rule colour: cyan for work, yellow for a terminal, magenta for an
  *  unknown type. `data.invalid` (stamped once the type registry has loaded)
- *  wins. */
-export function nodeKind(data: { nodeType: string; terminal?: boolean; invalid?: boolean }): NodeKind {
+ *  wins, then `data.tooManyDefaults` — both are build-time errors
+ *  (`interpreter/builder.py`'s `build_graph` raises `FlowBuildError` for an
+ *  unregistered type or a node with >1 unconditional outgoing edge), so both
+ *  get the same "this won't build" red treatment rather than waiting for
+ *  Validate/Publish to say so. */
+export function nodeKind(data: {
+  nodeType: string;
+  terminal?: boolean;
+  invalid?: boolean;
+  tooManyDefaults?: boolean;
+}): NodeKind {
   if (data.invalid) return "invalid";
+  if (data.tooManyDefaults) return "broken";
   if (data.terminal || TERMINAL.has(data.nodeType)) return "terminal";
   if (TRIGGERS.has(data.nodeType)) return "trigger";
   return "work";

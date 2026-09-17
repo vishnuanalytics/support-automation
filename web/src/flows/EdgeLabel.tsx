@@ -38,10 +38,15 @@ export function EdgeLabel({
         <EdgeLabelRenderer>
           <div
             className={`edgelabel edgelabel--${kind}`}
+            title={expr}
             style={{
               position: "absolute",
               transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
               pointerEvents: "all",
+              // focus mode (FlowEditor's `displayEdges`) sets opacity on the
+              // edge's own `style` to dim it — without this, the line would
+              // fade but its label pill would stay at full strength.
+              opacity: style?.opacity,
             }}
           >
             {expr}

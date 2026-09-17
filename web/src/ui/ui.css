@@ -443,28 +443,82 @@ select.ui-select[multiple] { max-width: 100%; }
 /* ── Flow editor — nodes, edges, zoom, palette ──
    Node cards are flat and neutral by default — a colored left-border
    stripe on every card in the canvas reads as decoration, not signal.
-   Color is reserved for the two states that actually matter: a terminal
-   node (warn) and a failed-validation node (exception). */
+   Color is reserved for the states that actually matter: an entry-point
+   trigger (accent), a terminal node (warn), and a failed-validation node
+   (exception) — see CanvasLegend for the key shown on the canvas. */
 .nodecard {
   background: var(--surface);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-md);
   padding: var(--space-3);
   min-width: 168px;
+  max-width: 220px;
   box-shadow: var(--shadow-sm);
   color: var(--text);
 }
 .nodecard--terminal { border-color: color-mix(in srgb, var(--warn) 50%, var(--line-strong)); }
-.nodecard--invalid { border-color: var(--exception); }
+.nodecard--trigger { border-color: color-mix(in srgb, var(--accent) 40%, var(--line-strong)); }
+.nodecard--invalid, .nodecard--broken { border-color: var(--exception); }
 .nodecard.is-selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), var(--shadow-sm); }
+/* Focus mode (FlowEditor's `displayNodes`) — selecting a node fades every
+   card outside its up/downstream neighborhood instead of removing it, so
+   the layout and handles never jump; a sibling branch you're not looking
+   at recedes but stays clickable. */
+.nodecard--dimmed { opacity: 0.28; }
 .nodecard__kind { font: 700 11px/1 var(--font-body); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-faint); }
 .nodecard--terminal .nodecard__kind { color: var(--warn); }
-.nodecard--invalid .nodecard__kind { color: var(--exception-text); }
-.nodecard__label { font: 600 16px/1.25 var(--font-body); margin-top: var(--space-1); }
-.nodecard__summary { font: var(--type-mono); color: var(--text-muted); margin-top: var(--space-1); }
+.nodecard--trigger .nodecard__kind { color: var(--accent); }
+.nodecard--invalid .nodecard__kind, .nodecard--broken .nodecard__kind { color: var(--exception-text); }
+/* a long hand-typed label wraps onto its own lines instead of stretching
+   the card wider than its neighbours — every node stays the same width so
+   the canvas reads as a clean grid regardless of label length. */
+.nodecard__label { font: 600 16px/1.25 var(--font-body); margin-top: var(--space-1); overflow-wrap: break-word; }
+.nodecard__summary {
+  font: var(--type-mono); color: var(--text-muted); margin-top: var(--space-1);
+  overflow-wrap: break-word;
+}
 .nodecard__summary--bad { color: var(--exception-text); font-family: var(--font-body); }
 
+/* Edge condition builder (Inspector.tsx's EdgeInspector) — one bordered
+   chip per AND-ed clause: field+operator on one line, value+remove on the
+   next. Two lines, not one — the inspector panel is a fixed 380px, and a
+   single native <select> silently clips long option text (no ellipsis)
+   instead of wrapping, so cramming all four controls on one line traded
+   "compact" for "unreadable." Each control gets `flex: 1` so it uses
+   whatever room the chip has rather than a guessed pixel width. */
+.condbuilder__row {
+  padding: 6px;
+  margin-bottom: 6px;
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.condbuilder__remove { width: auto; flex: none; padding: 5px 9px; }
+
+/* ConditionsOverview — the flow-wide "every branch in this flow" panel.
+   One `condbuilder__group` per edge: the target label, then either the row
+   builder (reused as-is) or, for an or/not/nested expression the builder
+   can't represent, its raw text plus a link back to that edge's own
+   Advanced box on the canvas. */
+.condbuilder__group { margin-bottom: 10px; }
+.condbuilder__raw {
+  flex: 1;
+  min-width: 0;
+  font: var(--type-mono);
+  padding: 8px 10px;
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .edgelabel {
+  display: block;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font: 11px/1.4 var(--font-mono);
   padding: 2px 7px;
   border-radius: var(--radius-md);
@@ -474,6 +528,29 @@ select.ui-select[multiple] { max-width: 100%; }
 }
 .edgelabel--pass { color: var(--success-text); background: var(--success-wash); border-color: color-mix(in srgb, var(--success) 30%, transparent); }
 .edgelabel--fail { color: var(--exception-text); background: var(--exception-wash); border-color: color-mix(in srgb, var(--exception) 30%, transparent); }
+
+/* The chat/graph toggle in the toolbar — same segmented-button look as
+   .zoomctl, but inline (not an absolute canvas overlay) since it sits
+   among the other toolbar actions. */
+.view-toggle {
+  display: inline-flex;
+  align-items: center;
+  background: var(--surface-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.view-toggle button {
+  background: 0;
+  border: 0;
+  color: var(--text-secondary);
+  font: var(--type-label);
+  padding: 7px 12px;
+  cursor: pointer;
+}
+.view-toggle button + button { border-left: 1px solid var(--line-strong); }
+.view-toggle button:hover:not(.is-active) { color: var(--accent); }
+.view-toggle button.is-active { background: var(--accent); color: var(--accent-on); }
 
 .zoomctl {
   position: absolute;
@@ -507,11 +584,18 @@ select.ui-select[multiple] { max-width: 100%; }
   border-left: 1px solid var(--line-strong);
 }
 
-.canvas-fab {
+/* Top-left canvas overlay buttons ("Add node", "Find") share one flex row
+   so either can be absent (view-only has no "Add node") without the other
+   needing to know a hardcoded offset. */
+.canvas-toolbar-tl {
   position: absolute;
   left: var(--space-4);
   top: var(--space-4);
   z-index: 5;
+  display: flex;
+  gap: var(--space-2);
+}
+.canvas-fab {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
@@ -526,6 +610,28 @@ select.ui-select[multiple] { max-width: 100%; }
   cursor: pointer;
 }
 .canvas-fab:hover { border-color: var(--accent); color: var(--accent-hover); }
+
+.canvas-legend {
+  position: absolute;
+  right: var(--space-4);
+  top: var(--space-4);
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  background: var(--surface-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  padding: var(--space-1) var(--space-3);
+  font: var(--type-label);
+  color: var(--text-secondary);
+}
+.canvas-legend__item { display: inline-flex; align-items: center; gap: var(--space-1); white-space: nowrap; }
+.canvas-legend__dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.canvas-legend__dash { width: 12px; height: 2px; border-radius: 1px; flex: none; }
+.canvas-legend__sep { width: 1px; align-self: stretch; background: var(--line-strong); }
 
 /* ── React Flow chrome — minimap + zoom controls ──
    <ReactFlow colorMode="dark"> flips the built-in --xy-* variables; this

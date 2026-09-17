@@ -1,20 +1,25 @@
 import { SlideOver, Button, JsonEditor, type SlideOverTab } from "../ui";
 import type { RFEdge, RFNode } from "./graph";
 import { EdgeInspector, NodeInspector } from "./Inspector";
-import { RunPanel } from "./RunPanel";
 
 /**
- * The inspector as a right-hand slide-over (Screen 02): Config / JSON /
- * Recent-runs tabs, a sticky footer with Revert + Delete, and the canvas at
- * full width behind it. Edits apply live — the real commit is "Save draft" in
- * the toolbar — so the footer reflects the unsaved state rather than staging.
+ * The inspector as a right-hand slide-over (Screen 02): Config / JSON tabs,
+ * a sticky footer with Revert + Delete, and the canvas at full width behind
+ * it. Edits apply live — the real commit is "Save draft" in the toolbar —
+ * so the footer reflects the unsaved state rather than staging.
+ *
+ * "Test run" used to live here as a third tab on a selected node, mislabeled
+ * "Recent runs" even though it actually runs a *new* sample case (not
+ * history) — and, since it always runs the whole flow regardless of which
+ * node happened to be selected, gating it behind "select a node first" was
+ * itself the bug. Moved to a toolbar action in FlowEditor.tsx, reachable
+ * with nothing selected.
  */
 export function InspectorPanel({
   node,
   edge,
   config,
   tenantId,
-  flowId,
   dirty,
   inCount,
   outCount,
@@ -30,7 +35,6 @@ export function InspectorPanel({
   edge: RFEdge | null;
   config: Record<string, unknown>;
   tenantId: string;
-  flowId: string;
   dirty: boolean;
   inCount: number;
   outCount: number;
@@ -65,11 +69,6 @@ export function InspectorPanel({
           key: "json",
           label: "JSON",
           content: <JsonEditor value={config} onChange={onConfig} />,
-        },
-        {
-          key: "runs",
-          label: "Recent runs",
-          content: <RunPanel flowId={flowId} />,
         },
       ]
     : edge

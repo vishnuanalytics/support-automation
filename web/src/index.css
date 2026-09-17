@@ -550,9 +550,49 @@ code { font-family: var(--font-mono); }
 /* the canvas owns the whole workarea now — the inspector is a slide-over */
 .workarea { display: flex; min-width: 0; min-height: 0; }
 .canvas-wrap { flex: 1; position: relative; min-width: 0; min-height: 0; overflow: hidden; }
+
+/* ChatEditView — the default landing view in canvas-wrap's slot (flows/
+   ChatEditView.tsx), a plain-English "describe what you want" front door
+   instead of the node graph. Centered, readable-width column; the log
+   scrolls, the composer stays put at the bottom. */
+.chat-edit {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 640px;
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-4) var(--space-4);
+  overflow: hidden;
+}
+.chat-edit__log { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: var(--space-3); }
+.chat-edit__entry {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  padding: var(--space-3);
+}
+.chat-edit__prompt { font: 600 13px/1.4 var(--font-body); margin-bottom: var(--space-1); }
+.chat-edit__result { font-size: 12.5px; color: var(--text-secondary); }
+.chat-edit__result--err { color: var(--exception-text); }
+.chat-edit__list { margin: var(--space-1) 0 0; padding-left: 18px; font-size: 12px; color: var(--text-secondary); }
+.chat-edit__composer { flex: none; display: flex; gap: var(--space-2); align-items: flex-end; }
+.chat-edit__composer textarea { flex: 1; resize: vertical; }
 .inspector h4 { margin: 0 0 var(--space-2); }
 .field { margin-bottom: var(--space-3); }
 .field label { display: block; color: var(--text-muted); margin-bottom: var(--space-1); font: var(--type-label); }
+
+/* Node-config form primitives (ConfigField/ConfigRow, flows/ConfigControls.
+   tsx) — every per-node-type form in Inspector.tsx used to repeat this
+   exact border/padding for its outer section, and a fixed-width label
+   column picked "by feel" per form (90/110/130). Named here once so a new
+   node type's form has an obvious width to reach for instead of another
+   one-off number. */
+.field--section { border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+.field-label { width: 90px; flex: none; }
+.field-label--md { width: 110px; flex: none; }
+.field-label--lg { width: 130px; flex: none; }
 
 .banner { padding: 10px 14px; border-radius: var(--radius-md); font-size: 14px; }
 .banner.err { background: var(--exception-wash); color: var(--exception-text); border: 1px solid color-mix(in srgb, var(--exception) 42%, transparent); }

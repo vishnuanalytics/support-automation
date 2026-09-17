@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Flow } from "../types";
-import { candidateToCanvas, layout, toFlowPayload, toReactFlow, uuid } from "./graph";
+import { candidateToCanvas, layout, neighborhood, toFlowPayload, toReactFlow, uuid } from "./graph";
+import type { RFEdge } from "./graph";
 
 const flow: Flow = {
   flow_id: "f", tenant_id: "t", team: "support", name: "n",
@@ -85,5 +86,34 @@ describe("uuid", () => {
     const b = uuid();
     expect(a).not.toBe(b);
     expect(a).toMatch(/^[0-9a-f-]{36}$/i);
+  });
+});
+
+describe("neighborhood", () => {
+  // trigger -> gate -> {a, b, c} — a real branch, like confidence_gate's
+  // fan-out. Focusing "a" should keep the shared upstream (trigger, gate)
+  // but drop the sibling branches (b, c) it shares no path with.
+  const branchEdges: RFEdge[] = [
+    { id: "e0", source: "trigger", target: "gate", data: { condition: {} } },
+    { id: "e1", source: "gate", target: "a", data: { condition: { if: "x" } } },
+    { id: "e2", source: "gate", target: "b", data: { condition: { if: "y" } } },
+    { id: "e3", source: "gate", target: "c", data: { condition: {} } },
+  ];
+
+  it("keeps shared upstream but drops sibling branches", () => {
+    const { nodeIds, edgeIds } = neighborhood("a", branchEdges);
+    expect(nodeIds).toEqual(new Set(["a", "gate", "trigger"]));
+    expect(edgeIds).toEqual(new Set(["e0", "e1"]));
+  });
+
+  it("includes full downstream from an upstream node", () => {
+    const { nodeIds } = neighborhood("gate", branchEdges);
+    expect(nodeIds).toEqual(new Set(["gate", "a", "b", "c", "trigger"]));
+  });
+
+  it("a node with no edges at all is its own singleton neighborhood", () => {
+    const { nodeIds, edgeIds } = neighborhood("orphan", branchEdges);
+    expect(nodeIds).toEqual(new Set(["orphan"]));
+    expect(edgeIds.size).toBe(0);
   });
 });

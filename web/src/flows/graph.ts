@@ -11,6 +11,10 @@ export type RFNode = Node<{
   summary?: string;
   /** type is not in the loaded registry */
   invalid?: boolean;
+  /** >1 unconditional outgoing edge — builder.py's build_graph rejects this */
+  tooManyDefaults?: boolean;
+  /** outside the selected node's focus neighborhood — display-only, never saved */
+  dimmed?: boolean;
 }>;
 export type RFEdge = Edge<{ condition: Record<string, unknown> }>;
 
@@ -21,6 +25,26 @@ export type RFEdge = Edge<{ condition: Record<string, unknown> }>;
 export const TERMINAL = new Set([
   "auto_reply", "ask_human", "handover", "clarify", "notify", "notify_human",
 ]);
+
+// Friendly, connector-neutral display names for node types whose internal
+// slug predates multi-provider connectors (FR-51) and reads as
+// Salesforce-only even though the node itself now works against whichever
+// case system a tenant has connected (Salesforce, HubSpot, ...) — `sf_case`/
+// `sf_writeback` route through `connectors.resolve_case_connector` same as
+// every other case-touching node. `sf_context` is the one genuine exception
+// (Salesforce-only, no other-connector equivalent yet — see its own
+// NODE_HELP entry in Inspector.tsx), labelled to say so. The node's own
+// `type` string is unchanged (stored in flow_nodes.type) — this is display
+// only, used by the palette.
+export const NODE_LABELS: Record<string, string> = {
+  sf_case: "Case lookup / create",
+  sf_writeback: "Write case fields",
+  sf_context: "Salesforce context (SF only)",
+};
+
+export function nodeLabel(type: string): string {
+  return NODE_LABELS[type] || type;
+}
 
 export function toReactFlow(flow: Flow): { nodes: RFNode[]; edges: RFEdge[] } {
   const needsLayout = flow.nodes.some(
@@ -90,6 +114,49 @@ export function toFlowPayload(
 
 export function uuid(): string {
   return crypto.randomUUID();
+}
+
+/**
+ * A node's full "focus neighborhood" — every node reachable from it
+ * (downstream) and every node that can reach it (upstream), both ways,
+ * plus every edge along those paths. On a real flow with genuine branches
+ * (e.g. a confidence_gate fanning out 6 ways to different terminals),
+ * focusing one terminal dims the *other* branches while still showing the
+ * shared upstream chain — "just the path that leads here," not just the
+ * clicked node's immediate neighbors.
+ */
+export function neighborhood(
+  nodeId: string,
+  edges: RFEdge[],
+): { nodeIds: Set<string>; edgeIds: Set<string> } {
+  const outBySource = new Map<string, RFEdge[]>();
+  const inByTarget = new Map<string, RFEdge[]>();
+  for (const e of edges) {
+    (outBySource.get(e.source) ?? outBySource.set(e.source, []).get(e.source)!).push(e);
+    (inByTarget.get(e.target) ?? inByTarget.set(e.target, []).get(e.target)!).push(e);
+  }
+
+  const nodeIds = new Set<string>([nodeId]);
+  const edgeIds = new Set<string>();
+
+  const walk = (start: string, by: Map<string, RFEdge[]>, other: (e: RFEdge) => string) => {
+    const queue = [start];
+    while (queue.length) {
+      const id = queue.shift()!;
+      for (const e of by.get(id) ?? []) {
+        edgeIds.add(e.id);
+        const next = other(e);
+        if (!nodeIds.has(next)) {
+          nodeIds.add(next);
+          queue.push(next);
+        }
+      }
+    }
+  };
+  walk(nodeId, outBySource, (e) => e.target); // downstream
+  walk(nodeId, inByTarget, (e) => e.source); // upstream
+
+  return { nodeIds, edgeIds };
 }
 
 /** Phase 19 — a proposed graph (Mermaid import / AI assist) -> canvas state.

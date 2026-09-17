@@ -707,6 +707,1262 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-17 (AI-edit as the default front door — the last of the "make
+this simple" asks.)** User: "Go for it" — the one remaining item from the
+entry below (the guided wizard shipped first; this was explicitly deferred
+at the time as the bigger of the two).
+
+**What changed:** opening a flow now lands on a "What would you like to
+change?" chat view by default — the node/edge canvas moved behind a
+"🗺️ Graph" toggle in the toolbar, next to a new "💬 Chat" button (a real
+segmented control, `.view-toggle` in `index.css`, same visual language as
+the zoom control). New `web/src/flows/ChatEditView.tsx` occupies the exact
+DOM slot the canvas used to own by default (`canvas-wrap`); picking "Graph"
+swaps it for the unchanged `<ReactFlow>` tree, nothing about the canvas
+itself was touched. Default is genuinely "chat," not "chat once" — but a
+manual switch is remembered per flow (`localStorage`, `flow-mainview:
+${flowId}`) so a session spent in Graph doesn't get yanked back to Chat on
+next load. **View-only callers never see the toggle at all** — always land
+straight on Graph, since there's nothing to generate without edit rights;
+confirmed this is genuinely branch-free (not just default-then-hide) by
+browser-testing a viewer-role session.
+
+**Reused, not rebuilt:** the "✨ AI edit" feature already existed — buried
+in the "More ▾" menu as a SlideOver overlay, calling `api.assistEditFlow`
+(`POST /flows/{id}/assist`) and landing the result via the same
+`putCandidate` unsaved-draft mechanism Mermaid-import/From-template/the
+guided wizard all already use. This chunk didn't touch that backend path
+at all — it promoted the existing feature from "buried menu item" to "the
+first thing you see," and gave it a proper home: a running, **session-only**
+log of every ask + result (no backend chat memory exists, so the UI says so
+rather than implying persistence that isn't there), each successful edit
+ending in a direct "View the graph to review »" link. Split the old shared
+`runAssist()` (which branched on `assist === "mermaid" | "ai-edit"`) into
+`runMermaidImport()` (unchanged behavior, still a SlideOver — a one-time
+bulk-paste action suits an overlay better than an inline chat) and
+`runChatEdit()` (new, chat-only, its own `chatBusy`/`chatErr` state
+separate from the Mermaid overlay's — sharing one busy/error pair would
+have shown a stale Mermaid error inside the chat view or vice versa).
+Removed the now-redundant "✨ AI edit" entry from "More ▾" instead of
+leaving two ways to reach the same action.
+
+**Two real, pre-existing e2e tests broke and were fixed, not silently
+tolerated:** `edge-channel-condition.spec.ts` and `flow-editor.spec.ts`
+both drove straight into canvas interactions assuming the graph was the
+default view. Both fixed with one added line each (`click "🗺️ Graph"`
+right after opening the flow) — confirmed `flow-editor.spec.ts` then fails
+at the exact same pre-existing `.ui-scrim` issue it already had before any
+of today's work (verified via the full suite's failure list, not assumed).
+
+**Verify:** `npm run build` clean, `vitest run` 20/20 unchanged, full e2e
+suite back to the same 5 pre-existing failures (was 6 immediately after
+this change — 2 broken tests fixed, not skipped), browser-verified
+(throwaway specs, deleted after use): a flow opens on chat with zero canvas
+nodes rendered; generating an edit shows the diff summary inline and a
+working "view the graph" link that lands on the actual updated graph;
+switching back to chat still shows that session's log; a view-only session
+never sees the toggle and lands straight on the graph.
+
+**This closes out every option from "make this simple for users" — nothing
+proposed in that thread remains unbuilt.**
+
+---
+
+**2026-09-17 (Guided flow-creation wizard — "🧭 Set up a flow".)** User:
+"Do that to[o]" after the one-click-testing entry below offered 2 more
+options (AI-edit as the default front door / a guided template wizard).
+Asked which, since the two are very different in size; user picked just
+the wizard.
+
+Researched before building (per this file's rule): confirmed no existing
+plain-English-Q&A-to-flow feature — "+ New flow" is a blank draft,
+"✨ From prompt" is free-text-to-AI (still intimidating: a blank box, not
+guided), "📋 From template" is a raw template picker with no questions.
+All three (plus this new one) share one hand-off mechanism worth knowing
+cold: fetch/generate a `FlowCandidate` client-side, `api.createFlow(...)`
+for an empty flow row, stash the candidate in `sessionStorage.
+setItem('pendingCandidate:'+flow_id, ...)`, navigate to the editor, which
+reads-and-clears it on load. **Reused this exact mechanism — zero backend
+changes.**
+
+**What shipped:** new `web/src/flows/GuidedSetup.tsx`, a `SlideOver`
+opened from a new, most-prominent ("🧭 Set up a flow", `variant="primary"`,
+first in the row) button in `FlowList.tsx`. Two steps:
+1. Pick a goal from 4 plain-English options — one-to-one with the 4
+   built-in templates (`interpreter/flows/templates/*.json`), but worded as
+   outcomes ("Answer common questions automatically") not template names.
+   A user's own *custom* saved templates are deliberately NOT offered here
+   — their node shape isn't known ahead of time, so there'd be nothing to
+   hang adaptive questions on; "📋 From template" still covers those.
+2. Up to 3 short questions, **adaptive to whichever tunable node types
+   that specific template actually has** (`TUNABLES` array keyed by node
+   `type`, matched against the fetched candidate's real nodes) — a
+   confidence-threshold picker only appears if the template has a
+   `confidence_gate` node, a queue question only if it has `ask_human`/
+   `handover`, a Slack-channel question only if it has `notify_human`.
+   The webhook-Q&A template has none of these, so step 2 just says
+   "nothing to fine-tune yet" and lets the user straight through — checked
+   this renders correctly rather than assuming. Blank answers keep the
+   template's own default (nothing is forced).
+
+On finish: patches the fetched candidate's node `config` (e.g.
+`confidence_gate.default_threshold`, `ask_human.queue` — the exact keys
+`GateForm`/`ClarifyForm`'s inputs already write, confirmed against
+`interpreter/registry.py`'s real handler configs) and hands off through
+the *existing* `openNewFlow`/`submitNewFlow` team+name dialog every other
+creation path already uses — no new persistence/validation code, no new
+review UI to learn.
+
+**A real dead-end hit and fixed during verification, not a product bug:**
+first attempt at proving the answers landed used the `pendingCandidate`
+sessionStorage key directly — came back empty every time despite the flow
+visibly working (canvas showed the right nodes, a "loaded onto the canvas
+— review, then Save draft" banner appeared). Root cause: `FlowEditor`
+consumes and clears that key the instant it applies the candidate — by
+the time a test checks it afterward, it's *supposed* to be gone. Not a
+bug; switched verification to opening the actual node inspectors on the
+canvas (confidence threshold, queue value) instead of racing a one-shot
+hand-off key. Worth remembering next time something here needs a
+sessionStorage-based check.
+
+**Verify:** `npm run build` clean, `vitest run` 20/20 unchanged, full e2e
+suite unchanged (same 5 pre-existing failures), browser-verified
+(throwaway specs, deleted after use): picking "Answer common questions
+automatically" shows exactly the confidence + queue questions (screenshot
+confirms clean, friendly copy); picking "Answer questions from an app or
+website" (no tunable nodes) correctly shows the "nothing to fine-tune yet"
+message instead of two useless questions; answers for `0.2` confidence +
+`"VIP Queue"` were confirmed present on the actual `confidence_gate` and
+`ask_human` nodes' inputs after landing in the editor.
+
+**Still open from the original ask: AI-edit as the default front door**
+(bigger UX restructuring — opening a flow lands on a "describe what you
+want" box by default, canvas moves behind an "Advanced" toggle) —
+proposed, not built, not requested this round.
+
+---
+
+**2026-09-17 (One-click real-case testing — a new, 5th track beyond the
+original 4-track "editor feels complicated" plan.)** After all 4 tracks
+shipped, user pushed further: "I am not even capable of testing this and
+still feels overwhelming to me." That's a different problem than anything
+the 4-track plan addressed — canvas/config polish doesn't help if someone
+still has to hand-write a sample-case JSON and read a raw trace to know
+whether a flow works. Proposed 3 options (one-click real-case testing /
+AI-edit as the default front door / guided template wizard); user picked
+the smallest, most direct one.
+
+**What shipped — real Cases/tickets, not synthetic ones, one click away:**
+- **Backend:** new `GET /api/case-connector/recent-cases` (`api/main.py`),
+  same connector-dispatch seam as the existing `case_connector_meta`
+  (resolves `tenants.case_connector`, routes to Salesforce or HubSpot).
+  New `interpreter/salesforce.py::list_recent_cases` (SOQL `ORDER BY
+  CreatedDate DESC`, same Tier__c-then-fallback dance and tenant+org
+  scoping as the existing `client_for`-based functions; refactored the
+  row-shaping logic out of `get_case` into a shared `_case_row_to_dict` so
+  both use it). New `interpreter/hubspot.py::list_recent_tickets` —
+  deliberately a NEW function, not a reuse of `list_new_tickets` (that one
+  is hardcoded to the pipeline's "New" stage + a short lookback window,
+  correct for its actual job of driving the trigger/watcher, wrong for
+  "any recent case is a fine test case" — a closed or in-progress ticket
+  should still show up in the picker).
+- **Frontend:** `RunPanel.tsx` (the "Test run" panel from the earlier
+  Track D work) rebuilt around a plain-English result as the PRIMARY
+  thing shown, not the raw trace: a "Try a real recent case" button opens
+  a small picker (subject + requester name) fetched from the new
+  endpoint; picking one runs the flow immediately (no separate "now click
+  Run" step) and shows one sentence — "✅ This case would be answered
+  automatically (confidence 0.91)" / "🙋 This case would be sent to a
+  human for review" / etc. — translated from the real `outcome.action`
+  values every terminal node handler actually sets (`interpreter/
+  registry.py`: auto_reply/notify/ask_human/handover/need_info/
+  task_dispatched/task_skipped), plus the relevant text (the drafted
+  reply, or the questions it would ask) inline. The old raw trace/JSON/
+  confidence-gate/retrieval view still exists, unchanged, just demoted to
+  an opt-in "show technical details" toggle — collapsed by default, not
+  removed (an advanced user who wants the trace still gets it).
+
+**Verify:** offline pytest 1308 passed (2 new — a 401-without-token check
+and an offline dispatch test that fakes the tenant lookup + `hubspot.
+list_recent_tickets`/`ticket_as_case`, same monkeypatch pattern as the
+existing slack_meta RLS-leak regression test, not `@pytest.mark.
+integration` since it needs no real creds). Frontend: `npm run build`
+clean, `vitest run` 20/20 unchanged, full e2e suite unchanged (same 5
+pre-existing failures), browser-verified (throwaway specs, deleted after
+use) for both an `auto_reply` and an `ask_human` outcome — picker shows
+real case previews, plain-English summary appears immediately with no
+JSON/trace visible until "show technical details" is clicked, and
+expanding it reveals the same trace view as before.
+
+**Not done / explicitly out of scope (deferred to the user's next "go" if
+they want it):** the other two options from this ask — AI-edit as the
+default front door for the whole editor, and a guided template wizard for
+creating a new flow — are still just proposed, not built.
+
+---
+
+**2026-09-17 (Editor-complexity plan, Track B shipped: consistent
+node-config layout — genuinely all 4 tracks done now.)** User said "Go"
+after Track A. Last of the 4-track plan (see below) — this one was
+flagged from the start as the biggest effort / least immediately visible
+payoff, saved for last on purpose. **Correction to this file's own prior
+entry:** the Track A entry below said "all 4 tracks now done" — that was
+wrong at the time (B hadn't been started); flagging it here rather than
+quietly editing the past entry, per this file's own rule about not letting
+a stale claim stand uncorrected.
+
+Read the whole of `Inspector.tsx` (1983 lines) before touching anything —
+cataloged every occurrence of the two repeated idioms: ~16 identical
+`<div className="field" style={{ borderBottom: "1px solid var(--border)",
+paddingBottom: 8 }}>` section wrappers, and ~40 `<div className="row">
+<span className="muted" style={{ width: N }}>` label rows (N picked "by
+feel" per form — 23× 90, 11× 110, 5× 130, no shared convention). Confirmed
+one assumption was wrong before committing to an approach: node forms are
+never shown side-by-side (only one node is ever selected at a time), so
+the width *inconsistency* isn't actually a live cross-form readability
+problem the way it first looked — the real cost is duplicated code and
+drift risk for whoever writes the next node type's form. That reframed
+what "done" should mean: not a visual re-skin, byte-for-byte preservation
+of every form's current appearance, just de-duplicated.
+
+**What shipped:** new `web/src/flows/ConfigControls.tsx` — `ConfigField`
+(the bordered-section wrapper, `bordered` opt-in since roughly a third of
+`<div className="field">` uses were an unbordered nested field, not a
+whole section) and `ConfigRow` (label + control row, `width` prop
+defaulting to 90, matching the plurality case so most call sites don't
+need to specify one). New CSS in `index.css`: `.field--section`,
+`.field-label`/`--md`/`--lg` — the three widths keep their exact original
+pixel values, this is not a "pick one true width" redesign.
+
+**Migrated all ~15 form functions** (`GateForm`, `ExtractForm`,
+`ClarifyForm`, `NotifyForm`, `AiPromptForm`, `SfContextForm`, `SfCaseForm`,
+`RetrieveForm`, `HttpRequestForm`, `ConnectorActionForm`,
+`AttachmentsForm`, `NotifyHumanForm`, `ByTeamOverride`, `IdentifyForm`,
+`KbLookupForm`, plus the inline `ask_human`/`handover` block in
+`NodeInspector`) — each done as a single full-body edit (open AND close
+tag together) rather than a fragment-level find/replace, specifically to
+avoid the "which closing `</div>` matches which opening tag" ambiguity a
+blind global replace would risk across 15 functions full of nested divs.
+Verified with a full rebuild after every 2-3 forms, not just once at the
+end. **Left as raw JSX on purpose** (not a shared shape, converting would
+add code, not remove it): `AiPromptForm`'s model-picker row (label needs
+its own `marginTop`) and max-tokens/temp combo row (two labels in one
+row), `AttachmentsForm`'s keyframes/max-secs combo row — 5 occurrences
+total out of ~40, all genuine one-offs.
+
+**Verify:** `npm run build` clean after every incremental chunk (checked
+~6 times through the migration, not just at the end), `vitest run` 20/20
+unchanged, full e2e suite unchanged (same 5 pre-existing failures),
+browser-verified in light theme across 6 migrated node types (confidence_
+gate, clarify, sf_case, attachments with its un-migrated combo row,
+notify_human with its 130px rows and composite "(live)" label, identify
+with its nested unbordered field) — pixel-identical alignment, editing a
+value in a migrated row round-trips correctly. `Inspector.tsx`: 1983 →
+1939 lines despite the new import and more explicit props in places; the
+real win is one named place to change the pattern instead of 15.
+
+**All 4 tracks from the "editor feels complicated" plan are done: D**
+(test-run discoverability + live build-error warnings), **C** (flow-wide
+conditions overview), **A** (focus mode + canvas search), **B** (this
+entry). No open item from that plan remains.
+
+---
+
+**2026-09-17 (Editor-complexity plan, Track A shipped: focus mode + canvas
+search — all 4 tracks now done.)** User said "go" after Track C. Last of
+the 4-track plan from the same day (see below):
+
+1. **Focus mode.** Selecting a node now dims (opacity 0.28, not removed —
+   layout/handles never jump) every node/edge outside its "neighborhood":
+   new pure `neighborhood(nodeId, edges)` in `graph.ts` walks both
+   directions (full downstream reachability + full upstream reachability),
+   unit-tested (3 new cases) against a real branching shape — trigger →
+   gate → {a, b, c} — confirming focusing "a" keeps the shared upstream
+   (trigger, gate) but drops sibling branches (b, c). This is exactly the
+   28-node demo flow's shape (confidence_gate fanning 6 ways): focusing one
+   outcome hides the *other* branches, not just the clicked node's
+   immediate neighbors. Derived into new `displayNodes`/`displayEdges`
+   (`FlowEditor.tsx`) computed via `useMemo` and passed to `<ReactFlow>` —
+   deliberately never routed through `setNodes`/`setEdges`, so it can't
+   mark the flow dirty or enter undo/redo history; it's a pure render-time
+   overlay tied to the existing selection, not a new mode/toggle to learn.
+   `EdgeLabel.tsx`'s label pill now also respects the edge's `style.opacity`
+   (previously only the line itself would have dimmed, leaving the label
+   pill behind at full strength — inconsistent).
+2. **Canvas search ("🔎 Find").** A new button beside "Add node" (both now
+   share a `.canvas-toolbar-tl` flex row instead of two independently
+   absolutely-positioned buttons, so either can be absent — Find is
+   available to view-only users, "Add node" isn't — without hardcoding an
+   offset). Filters by node label or type, click a result to select it
+   (same `setSelNode`/`setSelEdge` pattern the Validate-error banner's
+   "jump to node" links already used) — reuses the existing `Popover`/
+   `.palette__list` styling from the "Add node" picker, no new CSS pattern.
+
+**Verify:** `npm run build` clean, `vitest run` 20/20 (3 new `neighborhood`
+cases), full e2e suite unchanged (same 5 pre-existing failures), browser-
+verified (throwaway spec, deleted after use): a 4-node branching fixture
+confirmed sibling-branch dimming + shared-upstream preservation + dimming
+clears on deselect; Find correctly jumped to and opened a node by a partial
+label match.
+
+**All 4 tracks from the "editor feels complicated" plan are now shipped**
+(D: test-run discoverability + live structural warnings; C: conditions
+overview; A: focus mode + search). **B (consistent node-config layout —
+refactor `Inspector.tsx`'s 1900+ lines, one bespoke form per node type,
+onto a shared field-row pattern) remains the one open item**, flagged from
+the start as the biggest effort / least immediately visible payoff, saved
+for last. Not started.
+
+---
+
+**2026-09-17 (Editor-complexity plan, Track C shipped: a flow-wide
+Conditions overview.)** Continuing the 4-track plan from the same day (see
+below) — user said "continue to next" after Track D. New `ConditionsOverview.
+tsx`, opened from a new "Conditions" toolbar button next to "Test run":
+every conditional edge in the flow in one place, grouped by the node they
+branch from ("Confidence gate branches 2 ways"), instead of clicking each
+edge one at a time to audit routing logic. Directly reuses the row builder
+shipped earlier the same day rather than building a second condition UI: a
+"simple" (AND-only) condition renders as fully-editable `ConditionBuilder`
+rows right there in the overview (edits call the same `setEdgeCond` the
+canvas inspector uses — verified an edit here round-trips onto the canvas's
+edge label); an "advanced" (or/not/nested) one shows its raw expression
+plus an "Edit on canvas »" link that selects that edge and opens its own
+Advanced box, rather than duplicating the raw-textarea-plus-quick-insert UI
+a second time. Unconditional (default/fallback) edges are deliberately
+excluded — this view is about branching logic, not every edge. Exported
+`useCaseMeta` from `Inspector.tsx` (was module-private) so the new
+component can populate the same known-value dropdowns (case type, etc.).
+
+**Verify:** `npm run build` clean, `vitest run` 17/17 (unchanged), full e2e
+suite unchanged (same 5 pre-existing failures), browser-verified
+(throwaway spec, deleted after use) — grouping/branch-counts correct, an
+in-place edit in the overview persisted onto the canvas, and "Edit on
+canvas »" correctly opened the exact edge's own inspector. One rabbit hole
+worth noting for next time: a test assertion using `hasText: "Conditions"`
+against a `.ui-slideover` false-matched the *other* ("Edge condition")
+panel too, because its own helper text says "...conditions run through a
+Python expression evaluator..." — not a product bug, just a reminder that
+`hasText` substring-matches a container's entire text content, not just
+its title; scope to `.ui-slideover__title` instead.
+
+**Remaining from the plan: A (focus mode + canvas search) and B (consistent
+node-config layout, saved for last — biggest effort).**
+
+---
+
+**2026-09-17 (Editor complexity — a 5-track plan, Track D shipped: test-run
+discoverability + live structural warnings.)** User: "Even for me it feels
+complicated to manage the nodes, edges, conditionals. Give me a plan for a
+better approach." Diagnosed 5 separate, independent sources of complexity
+(not one problem) and proposed a track per cause rather than one big
+redesign:
+- **A** — canvas doesn't scale with real flow size (28-node demo): a focus
+  mode + node search. Not started.
+- **B** — `Inspector.tsx` (1900+ lines) has one bespoke config form per node
+  type with no shared layout convention. Not started — biggest effort,
+  least immediately visible payoff, saved for last.
+- **C** — branching logic is invisible until you click each edge one at a
+  time; a flow-wide conditions-overview panel (reusing the row builder just
+  shipped) would fix this. Not started.
+- **D** — testing/validation exists but is hidden/after-the-fact. **Shipped
+  this session.**
+
+User picked all four; sequenced by effort/leverage, D first since it was
+smallest and safest. **D, in full:**
+1. **"Test run" promoted from a mislabeled, hard-to-find node tab to an
+   always-visible toolbar button.** It used to live under a *node's* 3rd tab
+   labeled "Recent runs" — misleading (it runs a *new* sample case, not
+   history; the real run-history view is the separate top-level "Runs" nav
+   item) and pointlessly gated behind "select a node first" even though
+   `RunPanel` always runs the *whole* flow regardless of which node (if any)
+   is selected. Moved to a `SlideOver` opened from a new "Test run" button
+   next to Validate in `FlowEditor.tsx`'s toolbar — reachable with nothing
+   selected. `InspectorPanel.tsx` lost its now-redundant "runs" tab and the
+   `flowId` prop it only existed for.
+2. **Two of `interpreter/builder.py`'s `build_graph` structural checks now
+   surface live, on the canvas, while editing** — not just at Validate/
+   Publish:
+   - **A node with >1 unconditional outgoing edge** (`FlowBuildError` —
+     router precedence for two "always take this" edges is undefined) gets
+     a new `NodeCard` state, "won't build" (red, same visual severity as an
+     unregistered node type — both are the identical class of error). New
+     `RFNode.data.tooManyDefaults`, computed in a `useEffect` keyed on
+     `edges` (same pattern as the existing invalid-type-flagging effect).
+   - **More than one node with no incoming edge** (`build_graph` requires
+     exactly one entry point) — a plausible accidental mistake (drag a node
+     onto the canvas, forget to wire it in) that was otherwise invisible
+     until Publish. Shown as a red "⚠ N disconnected entry points" pill next
+     to the flow name, listing the orphaned nodes' labels in its tooltip.
+   - Deliberately did **not** reimplement referential integrity or cycle
+     detection client-side — those stay server-side in `validate_flow.py`/
+     Validate; forking that heavier logic into two places that could drift
+     apart isn't worth it for a live-typing check. Only the two structural
+     rules cheap enough to recompute on every edit, and simple enough to
+     have zero realistic chance of disagreeing with the backend, moved
+     client-side.
+3. `CanvasLegend`/the minimap's node-kind coloring extended for the new
+   "won't build" kind (shares the "invalid" swatch — both are the same red
+   build-time-error signal, not two different ones).
+
+**Verify:** `npm run build` clean, `vitest run` 17/17 (unchanged — no logic
+in `conditionBuilder.ts` touched this chunk), full e2e suite back to the
+same 5 pre-existing unrelated failures, browser-verified (throwaway specs,
+deleted after use): Test run reachable with nothing selected and produces a
+real trace against the mocked `/run` endpoint; a 2-unconditional-edge node
+renders "won't build" with the exact reason spelled out on the card; two
+disconnected roots render the toolbar warning pill.
+
+**Not started — A, B, C above remain open**, to be picked up in a future
+session; this file's row for each should move to "in progress"/"done" as
+they land rather than only updating this log.
+
+---
+
+**2026-09-17 (Edge-condition row builder — replaces hand-typed expressions
+for the common case, plus a real correctness bug found and fixed.)** User
+pasted a real example they found hard to read:
+`policy.task != None && routed_team == 'support' && case.channel == 'email'`
+and asked for a friendlier, "full support" way to configure conditions, not
+just better display. Investigated before building anything (per this file's
+"flag one option, wait" rule) and found the request was masking a real bug,
+not just a UX complaint:
+
+**The bug:** `Inspector.tsx`'s `EdgeInspector` quick-insert joined
+conditions with literal `&&`/`||` (there was a `<button>&&</button>` and a
+`<button>||</button>`), but the backend evaluator (`interpreter/
+conditions.py`) parses `condition.if` as a **Python** expression via
+`ast.parse` — it only understands `and`/`or`, not `&&`/`||`. Confirmed with
+a standalone Python check that `&&` raises `SyntaxError` there, and that
+`validate_flow.py` never validates condition syntax at save time (`condition`
+is modeled as an opaque dict) — so a `&&`-joined edge would save and publish
+fine and only blow up with a `ConditionError` the first time a real case
+actually reached that edge. Checked the live DB directly (`flow_edges`
+across all tenants) — no saved condition currently contains `&&`/`||`, so
+nothing is broken in production today, but the UI was actively generating
+broken output. Fixed: quick-insert and the manual buttons now join with
+`and`/`or`.
+
+**The bigger ask — a row-based builder, confirmed with the user over the
+raw-textarea-preview alternative:** new `conditionBuilder.ts` (pure parse/
+serialize, unit-tested — 17 vitest cases, including a round-trip through the
+exact expression from this session's motivating example) turns a flat
+AND-chain of comparisons into `{field, op, value}` rows; `or`/`not`/nested
+parens return `null` and the UI falls back to the raw box (renamed
+"Advanced") — nothing is lost, the builder just doesn't claim to handle
+everything. New `ConditionBuilder.tsx` renders one bordered "chip" per
+clause (field + operator on line 1, value + remove on line 2 — the
+inspector panel is a fixed 380px and a native `<select>` clips long option
+text with no ellipsis, so one line for all 4 controls looked compact but
+was actually unreadable; two lines grouped by a border reads as one unit).
+`EdgeInspector` shows the builder by default when the current expression
+parses, with an "Advanced (type an expression) »" escape hatch and a "«
+Back to the simple builder" return path; `advanced` state resets on
+`edge.id` change since `EdgeInspector` isn't remounted per edge (no `key`)
+— without that, choosing Advanced on one edge would leak into the next
+edge's inspector view.
+
+**A second real bug found while verifying in-browser (not just unit
+tests):** `serializeLiteral("")` special-cased an empty value box as Python
+`None` — harmless-looking, but it meant adding a brand-new row (`{field:
+"routed_team", op: "eq", value: ""}`, before the user has picked a value
+yet) round-tripped through serialize→re-parse (which happens on every
+render) and silently flipped to `is_not_set`, changing the operator the
+user saw without them doing anything. Reproduced via Playwright (add a row,
+screenshot, see "not set" instead of "equals"), fixed by only mapping
+`None` through the explicit `is_set`/`is_not_set` clause ops, never as an
+empty-string default; regression-tested in `conditionBuilder.test.ts`.
+
+**Verified against the real backend, not just the JS's own round-trip:**
+loaded `interpreter/conditions.py` standalone (bypassing the `langgraph`
+dependency the package `__init__` pulls in, unavailable in this sandbox)
+and ran the builder's exact serialized output — including the motivating
+example and a bracket-list `in`/`not_in` (`routed_team in ['support',
+'sales']`, a list not a tuple — `(x)` alone isn't a 1-element Python tuple)
+— through the real `evaluate()`. All matched expectations.
+
+**Verify:** `npm run build` clean, `vitest run` 17/17 (new
+`conditionBuilder.test.ts`), full e2e suite back to the same 5 pre-existing
+unrelated failures after rewriting `edge-channel-condition.spec.ts` (its
+old assertions encoded the `&&`-join bug and a raw-textarea UI the builder
+replaced as the default view) — browser-verified in light+dark via
+Playwright/Chromium ([[playwright-sandbox-fix]]), throwaway spec deleted
+after use.
+
+---
+
+**2026-09-17 (Editor visibility follow-up to step 4j — node-kind coloring,
+minimap, a canvas legend, and long edge-condition labels.)** User asked to
+continue last session's "improve node/edge visibility" thread. Read the
+actual current code rather than assuming step 4j's label/width fix was the
+whole story — found `NodeCard.tsx`'s own comment claimed a colored border
+per node kind ("cyan for work, yellow for a terminal, magenta for an
+unknown type") that `ui.css` never actually implemented: only
+`.nodecard--terminal` and `.nodecard--invalid` had rules, so a `trigger`
+node and a plain `work` node were visually identical on the canvas — the
+CSS class was applied by `nodeKind()` but silently unstyled. Confirmed with
+the user this was worth doing (plus 3 related gaps) before touching
+anything, per this file's "flag one option, wait" rule.
+
+Four changes, all CSS/presentation only (`web/`), no backend touched:
+1. **`.nodecard--trigger`** added (`ui.css`) — border tinted with `--accent`
+   (the monochrome primary), same `color-mix` pattern as `--terminal`/
+   `--warn`. Confirmed this is allowed by this file's own Frontend section:
+   "reserve color for an actual state... or the functional flow-canvas
+   node-kind indicators" is the explicit carve-out.
+2. **Minimap dots now colored by kind** (`FlowEditor.tsx`) — was a flat
+   `nodeColor="var(--accent)"` for every node regardless of kind; now a
+   `nodeKind()`-keyed lookup (`MINIMAP_KIND_COLOR`) mirroring the card
+   border colors, so the zoomed-out view is actually useful for spotting a
+   trigger/terminal/invalid node.
+3. **`CanvasLegend.tsx`** (new) — a small always-on key, top-right corner of
+   the canvas (mirrors `canvas-fab`'s top-left / `zoomctl`'s bottom-left
+   placement), spelling out what the node border colors and the edge
+   label's pass(green)/fail(red) colors mean.
+4. **Long edge-condition labels truncate** (`ui.css` `.edgelabel` +
+   `EdgeLabel.tsx`) — `max-width: 200px` + ellipsis, `title={expr}` for the
+   full expression on hover. Before this a compound condition like
+   `classification.case_type == 'Question' && tier == 'enterprise'` just
+   ran on at full width, unreadable, on a dense flow with edges close
+   together (exactly the shape of step 4k's 32-edge demo flow).
+
+**A real, pre-existing bug found and fixed while browser-verifying (not
+just a clean build) — directly relevant to the invalid-node visibility
+this session was improving:** the `useEffect` that flags a node whose
+`type` isn't in the loaded registry (`FlowEditor.tsx`, "once the type
+registry has loaded, flag any node whose type isn't in it") depended only
+on `[types, setNodes]`. The type registry and the flow's own nodes load via
+two independent fetches; when the node-types fetch happened to resolve
+*before* the flow's nodes were set, the effect ran once against the
+still-empty node list and never fired again once the real nodes showed up
+— silently leaving a genuinely invalid node type unflagged (no red border,
+no "invalid" label, no legend match). Reproduced reliably via a Playwright
+reload (works on first load, breaks on reload — a real timing race, not a
+one-off flake: same screenshot, same result across reruns). Fixed by adding
+`nodes.length` to the effect's dependency array; the inner `setNodes` call
+already bails out to the same array reference when nothing changed, so this
+doesn't introduce extra re-renders once the flag has settled.
+
+**Verified in a real browser, both themes** (Playwright/Chromium via
+[[playwright-sandbox-fix]]'s local-lib extraction — a throwaway spec under
+`web/e2e/`, screenshotted, deleted after use, same pattern as step 4j): a
+4-node/3-edge fixture (trigger → work → terminal, plus an unregistered
+type to exercise "invalid") confirmed all four kinds render distinctly in
+light AND dark, the legend renders correctly in both, the minimap dots
+match, the long edge label truncates with a working hover tooltip, and the
+invalid-node fix holds after a page reload in both themes.
+
+**Verify:** `npm run build` clean (tsc + vite), `vitest run` 6/6, full e2e
+suite — same 5 pre-existing unrelated failures (`channels.spec.ts` Freshchat
+step, `flow-editor.spec.ts`'s save-draft click intercepted by a stray
+`.ui-scrim`, 3 `ui-walk.spec.ts` cases), confirmed pre-existing by
+re-running against a `git stash` of this session's changes — identical
+failure, so none of the four changes here are the cause.
+
+---
+
+**2026-09-16 (FR-51 step 4k — "Multi Connection", a demo flow exercising
+every applicable node type + the real Salesforce/HubSpot routing.)** User:
+"Create a demo workflow that combines the salesforce and hubspot and name
+it multi connection with maximum using all edges and nodes."
+
+New `scripts/build_multi_connection_demo_flow.py` (`python -m scripts.
+build_multi_connection_demo_flow`, `--print` to dry-run) writes flow
+`8e8e8e8e-…`, "Multi Connection — Salesforce + HubSpot", on the gunner
+tenant: **28 of the 29 registered node types** (every one except `trigger`,
+deliberately excluded — it's for Case-less webhook/schedule flows,
+structurally incompatible with a `CASE_ACTIONS`-shaped Case flow) and **32
+edges**. Demonstrates the actual multi-connector mechanism (migration 110,
+step 4g), not a fake one: right after `attachments`, the graph branches on
+`case.channel` — `sf_context` (genuinely Salesforce-only, see its own
+NODE_HELP entry) runs only for `case.channel == 'salesforce'`, then both
+paths converge into one shared pipeline whose case-touching nodes
+(`sf_case`/`sf_writeback`/`notify`/`ask_human`/`handover`/`clarify`/
+`notify_human`) resolve to Salesforce or HubSpot automatically per the
+tenant's `channel_connector_map` — **no per-node connector override
+needed anywhere in this flow**, unlike step 4f's abandoned duplicated-graph
+approach.
+
+Other genuine (not just token) uses of node types along the way:
+`policy_gate`→`task_dispatch` only when a rule matches (else straight to
+`kb_lookup`); `kb_lookup`→`agent` (a real alternative to `retrieve`+`draft`
+for `answer_mode == 'diagnostic'`, not additive redundancy — `agent`
+already does its own bounded retrieve+draft loop) vs. `kb_lookup`→
+`retrieve`→`correction_exemplars`→`case_lookup`→`draft` for every other
+case; both drafting paths join at `connector_action` (calls the `slack`
+builtin's `post_message` — a real registered connector, not a placeholder)
+→ `http_request`; `confidence_gate` fans out **six** ways, extending the
+real flow's original 5-condition design with a new, still mutually-
+exclusive `auto_reply` branch (`tier == 'basic'`) alongside `handover`/
+`notify_human`/`notify`/`clarify`/`ask_human`.
+
+**Labels kept short from the start** (13-24 chars, e.g. "Detect urgency &
+language", "Post draft to Slack") — applying step 4j's own lesson
+immediately rather than repeating the mistake in new content.
+
+**Verified for real, not just "it exists":**
+- `build_graph(...)` — structural validation (referential integrity, no
+  cycles) — passes.
+- Re-loaded through the actual production path, not just the seed
+  script's own check: `interpreter.loader.load_flow(flow_id=…,
+  status="draft", validate=True)` + `build_graph()` on the result — passes.
+- Confirmed live against the DB: 28 nodes / 32 edges round-tripped intact;
+  `hubspot.resolve_entry_flow(gunner)` still resolves to the real
+  `"salesforce flow"`, proving this new flow (draft, `sf_entry=False`,
+  `team="demo"`) cannot interfere with live entry-flow routing.
+- Full offline suite re-run: 1306, unchanged (no application code touched,
+  only new flow data + one new script).
+
+**Deliberately left as a draft, not published** — a showcase to open and
+read in the editor, not something meant to run live over real traffic
+unsupervised; the first real execution of a genuinely novel path (e.g. the
+`agent` branch, or `auto_reply` for `tier=='basic'`) hasn't happened yet.
+
+---
+
+**2026-09-16 (FR-51 step 4j — a second UI gap review, this time on node
+labels: "elaborative/over extensive node names".)** User asked to check
+the UI for gaps again, specifically flagging node names as too long. Pulled
+the real gunner tenant's flow's actual labels from the DB rather than
+guessing — found the real issue is two compounding problems, not one:
+
+1. **The labels themselves are full sentences**, up to 62 characters
+   (`ask_human`: "Escalate to the owning team (csm / sales) — reassigns the
+   Case"; `case_lookup`: "Recall similar resolved Cases (Phase 21)" — the
+   latter leaking an internal phase-number reference onto the canvas). A
+   newly-added node's default label is also just its raw type string
+   (`FlowEditor.tsx`'s `addNode` sets `label: t`) — step 4h's friendly
+   `nodeLabel()` mapping only ever applied to the palette *picker*, never
+   to what a placed node actually shows.
+2. **`.nodecard` (the CSS class rendering every node on the canvas) had no
+   `max-width`** — `min-width: 168px` only, nothing capping the top end —
+   so a long label just stretched that one card wider than its neighbours
+   instead of wrapping, making the canvas look visually inconsistent/messy
+   regardless of label content.
+
+**Fixed both.** CSS: `.nodecard` gets `max-width: 220px` +
+`overflow-wrap: break-word` on both the label and summary lines, so every
+node stays the same width and only its height varies. Content: shortened
+all 11 needlessly-long labels on the gunner tenant's real flow directly
+(e.g. "Escalate to human", "Recall similar cases", "Write triage fields")
+— verb-first, 13-22 characters, matching the style of the 3 labels that
+were already fine ("Resolve the sender", "Retrieve KB context", "Gate on
+answer quality"). Connector-neutral wording used where the node is
+generic ("Create/reuse the case", not "...the Salesforce Case" — this
+flow now serves HubSpot too, per step 4g). **Deliberately edited only the
+DRAFT** (`flow_nodes.label`), not re-published — confirmed via a live DB
+read that `published_version` stayed at 3 while the draft `version`
+bumped to 7, meaning the actually-*running* flow is unchanged until the
+user reviews and hits Publish themselves.
+
+**A real, non-obvious bug found and worked around while verifying the CSS
+fix visually (browser screenshots, not just a clean build):** a
+`getComputedStyle` read showing the correct `220px` `max-width` initially
+looked contradicted by a screenshot showing an ~440px-wide card —
+traced to React Flow's own canvas zoom (`getBoundingClientRect` showed
+440px, exactly `220 * 2.0` — the canvas had auto-fit-zoomed to ~200% for a
+sparse single-node test flow). Not a CSS bug at all; re-verified at an
+explicit 100% zoom and got a clean, consistent-width, correctly-wrapped
+result. Documented here specifically so a future screenshot-based UI
+check doesn't waste time chasing the same false lead.
+
+**Verify:** full offline suite (1306, unchanged — no backend touched),
+full e2e suite (same 5 pre-existing unrelated failures, unchanged; the 4
+tests this session's earlier chunks own still pass), `npm run build`
+clean. No new committed e2e test for the node-card sizing itself (the
+verification was a throwaway screenshot script, deleted after use) — the
+CSS mechanism is simple enough (`max-width` + `overflow-wrap`) that a
+dedicated regression test would mostly test the browser's own CSS engine.
+
+**2026-09-16, same day — asked to check for more issues; found the label
+problem was systemic, not one flow.** Queried every `flow_nodes` row across
+the whole system (only 9 flows total) rather than assuming the gunner
+tenant was unique — found the identical 11 verbose labels on **two more**
+flows: `e5e5e5e5-…` ("Email L0/L1 — inbound to Salesforce", tenant
+`00000000-…`, a **separate tenant's real published flow**, 14 versions
+deep) and the already-known demoted `27b0a1c7-…` draft. Fixed both with
+the exact same replacement labels (draft only, `published_version`
+confirmed unchanged at 14 for the live one — re-checked live, not
+assumed). Also checked the 4 shipped flow templates
+(`interpreter/flows/templates/*.json`, what a brand-new tenant's flow
+starts from) and the remaining 5 flows down to a 25-char threshold — clean;
+the only other hit (`"Write triage to Salesforce"`, 26 chars, on two
+tenants' flows) is genuinely fine as a length, left alone.
+
+**A separate, real, already-diagnosed issue surfaced earlier this session
+and still open, flagged again rather than silently fixed:** `h_clarify`'s
+auto-send always calls the connector's `send_case_reply` directly,
+regardless of `case.channel` — so on an email-originated case, the *main*
+auto-reply correctly goes out over SMTP (`_email_post_run`), but a
+`clarify` follow-up question could still land as an internal note instead
+of reaching the customer by email. Not fixed here since it's flow-
+execution behavior on live tenants' real case handling, not a UI/label
+gap — the same "flag it, propose one option, wait" rule this file already
+asks for on a substantive behavioral change, not something to fix silently
+under a general "check for issues" pass.
+
+---
+
+**2026-09-16 (FR-51 step 4i — gap review of step 4h, one real gap found and
+fixed.)** User: "can you check any gaps are there and fix them too." A
+systematic audit — `grep`-ing every `case["channel"] = ...` / `"channel":
+...` assignment across `interpreter/`, `ingestion/`, `api/` rather than
+trusting memory — found step 4h's two new channel pickers (`KNOWN_CHANNELS`
+in `ConnectionsView.tsx`, `EDGE_CHANNELS` in `Inspector.tsx`) were missing
+`"salesforce"` as an option, even though it's a real, live `case.channel`
+value: `interpreter/sf_ingest.py` sets it on every CDC/webhook-triggered
+Case (the gunner tenant's actual real production trigger), and
+`interpreter/slack_socket.py` sets it too for a Slack-resumed case that
+predates the field. Practical impact: a user could type
+`case.channel == 'salesforce'` by hand in an edge's raw expression (the
+mechanism always supported it), but couldn't pick it from either new
+friendly-UI dropdown — the one channel a real, live tenant's cases actually
+arrive on most wasn't selectable. Fixed: added to both lists.
+
+**Also cleaned up while auditing** (not a functional bug, a documentation
+accuracy issue): `scripts/seed_gunner_hubspot_flow.py` — step 4f's now-
+superseded seed script — got a prominent "SUPERSEDED" note at the top of
+its own docstring, so a future session reading it cold doesn't mistake its
+described approach (a duplicated per-connector flow) for the current
+design (step 4g's `channel_connector_map`, one flow). The flow it produced
+was already demoted to draft in 4g; this is purely about not misleading a
+later reader of the script file itself.
+
+**Verify:** re-ran the exact same e2e tests step 4h added/fixed (4/4
+green, including the two that specifically exercise these two lists) plus
+the full offline suite (1306, unchanged — this was a frontend-only fix) and
+the full e2e suite (same 5 pre-existing unrelated failures, confirmed
+unchanged again). `scripts/verify_migrations.py` also re-run clean (no
+drift from migration 110). `npm run build` clean.
+
+---
+
+**2026-09-16 (FR-51 step 4h — a user-friendly UI for step 4g's channel
+routing, browser-verified.)** User: "Once this is done lets move to make UI
+friendly editor for the user" — the follow-up to 4g, which shipped the
+backend (`channel_connector_map` + the new API) with no UI beyond raw JSON.
+
+**`ConnectionsView.tsx` gained a "Route by channel" panel**, right below
+the existing `CaseConnectorPicker`: one dropdown per known channel (Email/
+HubSpot/Freshchat/Zendesk), each picking "(use case system above)" or a
+specific connector — no raw JSON. **`EdgeInspector` (the flow editor's edge
+condition form) gained a `case.channel` quick-insert dropdown**, alongside
+the existing Case Type / routed_team ones (which used to hide together
+behind an unrelated `sfMeta.case_types.length > 0` guard — fixed as a
+byproduct, so a non-Salesforce tenant doesn't lose the routed_team/`&&`/`||`
+controls just for lacking Salesforce picklist data), plus `case.channel`
+added to the hint text. This closes the actual "activate in the middle of
+the workflow based on the integration" ask with a real UI path: a user can
+now visibly branch a flow on which platform a case arrived from, without
+knowing the expression syntax.
+
+**Real browser verification, not just a clean `tsc` build** — and it
+found genuine issues along the way, not just confirmed success:
+- Adding the new panel's selects broke the two pre-existing Zendesk/
+  HubSpot picker tests: `page.locator("select").filter({hasText:
+  "Zendesk"})` started matching 5 selects instead of 1, since every
+  connector dropdown (including the two new ones) lists "Zendesk" as an
+  option. A same-day-earlier fix (`.col` → `.int-card`) had the identical
+  root cause; this time fixed properly with a `data-testid` on the
+  `CaseConnectorPicker` select instead of another fragile text filter —
+  the right fix, not another patch of the same fragility.
+- `.filter({ hasText: "Case system" })` (an intermediate attempt) also
+  over-matched: other panels' own prose mentions "case system" in lowercase
+  body text (Playwright's `hasText` is a case-insensitive substring match),
+  not just the one heading. Confirms `data-testid` was the correct call,
+  not a fluke.
+- A stale `vite` dev server left running from an earlier session (this
+  keeps happening — third time this session) was serving the app in plain
+  dev mode instead of `--mode e2e`, so `seedFakeSession`'s fixture auth
+  never matched and every test timed out waiting for a login-gated button.
+  Killed it; Playwright's own `webServer` started a correctly-configured
+  one.
+- New `web/e2e/edge-channel-condition.spec.ts`: clicking an edge, checking
+  "conditional" seeds a default expression (`tier == 'enterprise'`) — the
+  channel quick-insert correctly *appends* onto it with `&&` (matching
+  every other quick-insert in that panel), not replaces it; the test's
+  first draft assumed replace and had to be corrected to match the real
+  (correct) behaviour, not the other way around.
+
+**Verify:** 4 e2e tests exercising this directly (2 pre-existing + fixed, 2
+new), all green in a real headless Chromium. The same 5 pre-existing,
+already-diagnosed-as-unrelated e2e failures from earlier today
+(`channels.spec.ts`, `flow-editor.spec.ts`, 3× `ui-walk.spec.ts`) are
+unchanged — confirmed by re-running the full suite, not assumed. No backend
+touched this chunk, so the offline pytest count is unchanged (1306). `cd
+web && npm run build` clean.
+
+---
+
+**2026-09-16 (FR-51 step 4g — ONE flow serving multiple connectors, no
+graph duplication — supersedes step 4f's approach, reverted.)** A design
+discussion surfaced a real flaw in step 4f (the "hubspot-flavored twin"
+flow, built the same day): the case-touching node types
+(`sf_case`/`sf_writeback`/`identify`/`clarify`/`notify`/`ask_human`/
+`handover`/`notify_human`) are scattered across a flow from its very start
+to its very end, not clustered at one branch point — so "fork the graph on
+channel" would have meant re-duplicating almost the entire flow per
+connector, the exact problem being solved. User: "let's complete the multi
+connector workflow even in [the] middle of the workflow and can use any
+workflow any time" — reframed as: **connector resolution itself should be
+channel-aware, so one flow definition serves every channel with zero
+duplication.**
+
+**Migration `110_tenant_channel_connector_map.sql`** (applied via the
+Supabase MCP, per this file's own migration rule): `tenants.
+channel_connector_map jsonb not null default '{}'` — maps `case.channel`
+("email"/"hubspot"/"freshchat"/"zendesk"/...) to a connector slug. Same
+"data, not an enum" philosophy as `case_connector` (084) — no CHECK
+constraint, since both channels and connectors are open sets.
+
+**`connectors.resolve_case_connector()`'s precedence extended** (one more
+tier, fully backward compatible): per-node `config["connector"]` override
+(unchanged) > `channel_connector_map[channel]` (new) > tenant's
+`case_connector` default (unchanged) > `"salesforce"` (unchanged). A
+tenant with the map at its default `{}` — every existing tenant — resolves
+byte-for-byte as before this migration; verified by a dedicated test
+(`test_resolve_case_connector_empty_channel_map_is_a_pure_noop`).
+`registry.py::_case_conn` now reads `state.case.channel` and passes it
+through — the one place every case-touching handler already goes through,
+so no handler itself changed.
+
+**Consolidated back to one flow, live, verified against the real DB:**
+demoted step 4f's "UrbanPiper email -> HubSpot" flow to draft (non-
+destructive — the graph isn't lost, just no longer published) and set the
+gunner tenant's `channel_connector_map = {"hubspot": "hubspot"}`.
+`hubspot.resolve_entry_flow()`'s `team="hubspot"` special-casing (step 4f)
+was reverted — no longer needed, since the SAME flow (`117989a7-…`, still
+`sf_entry=True`, untouched) now correctly serves both channels. Confirmed
+live: `resolve_entry_flow(gunner)` → the one salesforce flow;
+`resolve_case_connector(gunner, channel="hubspot")` → `"hubspot"`;
+`resolve_case_connector(gunner, channel="email")` → `"salesforce"` (the
+tenant default, for any unmapped channel).
+
+**New API**: `GET/PUT /api/tenants/channel-connector-map` (mirrors
+`case-connector`'s exact shape, including the same P7d "tenant row might
+not exist yet" upsert-fallback). No UI panel yet — explicitly deferred;
+the user's next ask is a friendlier flow-editor UI, and this raw map
+editing (or a proper per-channel dropdown UI) is part of that follow-up,
+not this chunk.
+
+**Verify:** 12 new offline tests (5 in `test_connectors.py` for the new
+precedence tier + noop guarantee, 2 in `test_sf_handlers_use_connectors.py`
+for `_case_conn`'s channel extraction, 2 API auth tests, 2 removed —
+step 4f's now-obsolete `team="hubspot"`-preference tests replaced with
+nothing, since that behavior no longer exists — plus the 2 live
+integration round-trip tests). 1306 offline pytest green. `docker compose
+up -d --build api worker hubspot_watch` picked up the change; all
+containers healthy.
+
+**Still open — the user's own next stated step:** make the flow editor UI
+itself easy for a non-technical user to set up per-channel routing (a
+`case.channel` quick-insert in `EdgeInspector`, and/or a friendly
+channel→connector mapping panel instead of raw JSON) — deferred by the
+user's own sequencing ("once this is done let's move to make UI friendly
+editor"), not started in this chunk.
+
+---
+
+**2026-09-16 (FR-51 step 4f — a HubSpot-flavored twin of the gunner
+tenant's real flow, resolvable independently of the Salesforce one.)** User
+asked to "build another editor similar to gunner workflow with hubspot" —
+"gunner" is this project's own name for the UrbanPiper demo tenant
+(`ee4102db-…`), and "gunner workflow"/"the gunner 'salesforce flow'" is its
+real, live, `sf_entry`-marked production flow (`117989a7-…`, currently
+`published_version: 3`, 14 nodes / 15 edges).
+
+**Built `scripts/seed_gunner_hubspot_flow.py`** (mirrors the existing,
+never-run `seed_gunner_flow_v2.py`'s clone-with-deterministic-`uuid5`-ids
+pattern, but — critically — does NOT swap the published flow the way v2
+does): clones the source flow's graph **structurally unchanged** (same 14
+nodes, same 15 edges, same routing) into a new flow, adding an explicit
+`config.connector = "hubspot"` override to exactly the 8 case-touching node
+types `connectors.py`'s own module docstring documents (`sf_case`,
+`sf_writeback`, `notify`, `ask_human`, `handover`, `identify`, `clarify`,
+`notify_human`) — verified via `--print` before writing anything, showing
+exactly those 8 tagged and the other 6 (`retrieve`/`classify`/`draft`/
+`team_route`/`confidence_gate`/`case_lookup`) untouched. Run for real:
+new flow `27b0a1c7-…003` ("UrbanPiper email -> HubSpot", `team="hubspot"`,
+published v1). **Confirmed live, not assumed:** the source flow's row is
+byte-for-byte unchanged (`published_version` still 3, `sf_entry` still
+true) — queried directly after the write, not inferred.
+
+**A real design gap this surfaced and fixed:** the new flow existed but
+`hubspot.resolve_entry_flow()` (shared by the poller and the webhook) only
+ever looked at the tenant-wide `sf_entry` flag, so a new HubSpot ticket
+would still have triggered the *Salesforce*-flavored flow. Fixed by having
+`resolve_entry_flow` prefer a tenant's `team="hubspot"` published flow
+first (the same convention the new seed script uses), falling back to the
+existing `sf_entry`/sole-published-flow logic when no such flow exists —
+so a tenant running parallel connector-specific flows gets the right one
+per connector, without a schema change or touching the shared
+`case_connector`/`sf_entry` settings at all. **Verified this doesn't touch
+Salesforce's own trigger path**: `interpreter/sf_ingest.py` (real CDC/
+webhook Case resolution) has its own, completely separate `sf_entry`
+query — confirmed by reading it, not assumed. Live-confirmed against the
+real DB: `resolve_entry_flow(gunner_tenant)` now returns the new HubSpot
+flow's id, not the Salesforce one. 3 new offline tests
+(`test_resolve_flow_prefers_a_dedicated_hubspot_team_flow_over_sf_entry`,
+a fallback test, plus the seed script's own `--print` dry-run check). 1300
+offline pytest green. `docker compose up -d --build api worker
+hubspot_watch` picked up the change; all containers healthy.
+
+**Still open:** the "hubspot flow" has never actually run end-to-end (only
+its graph was validated with `build_graph(...)`, matching the seed script's
+own pre-write check) — the next real HubSpot ticket (webhook or poll) will
+be its first live run, on this tenant's real HubSpot data, per the earlier
+"plumbing-only" boundary the user chose for the webhook test.
+
+---
+
+**2026-09-16 (FR-51 step 4e — a real-time HubSpot trigger, live-verified
+end-to-end.)** User's own Salesforce setup forwards email into Salesforce's
+native Email-to-Case, then this platform's `sf_cdc_watch` picks up the new
+Case via push (Change Data Capture) — no polling. Asked whether the same
+push-not-poll shape exists for HubSpot, and pushed all the way through
+building and live-verifying it, including finding along the way that the
+classic Private App (no Webhooks tab) genuinely can't do this — confirmed
+via the actual `@hubspot/cli`, not assumed.
+
+**What's real and confirmed, not guessed, at every step:**
+- HubSpot's Webhooks Subscriptions API (`/webhooks/v3/{appId}/subscriptions`,
+  `/settings`) is real, confirmed from the `@hubspot/api-client` SDK bundled
+  inside `@hubspot/cli` (found the actual generated API client code, not
+  documentation). It requires an **App ID**, which the classic Private App
+  doesn't have — confirmed by actually scaffolding one (`hs project create
+  --project-base app --auth static --distribution private --features
+  webhooks`) and inspecting the real `webhooks-hsmeta.json` schema HubSpot's
+  own tooling generates (`targetUrl`, `crmObjects: [{subscriptionType:
+  "object.creation", objectType: "ticket"}]`).
+- The v3 webhook signature algorithm (`base64(HMAC-SHA256(clientSecret,
+  method+url+body+timestamp))`, 5-minute replay window) was read directly
+  out of `@hubspot/api-client`'s own `Signature.getSignature`/`isValid`
+  source (`node_modules/@hubspot/cli/node_modules/@hubspot/api-client/lib/
+  src/utils/signature.js`) — not HubSpot's docs, not an assumption. Ported
+  to Python as `hubspot.verify_webhook_signature()`, unit-tested against a
+  from-scratch reference re-implementation (not calling the code under
+  test) in `test_hubspot.py`.
+
+**Built:**
+- `interpreter/hubspot.py`: `HubSpotConfig` gained `webhook_client_secret`
+  (Vault-backed, independently mergeable from `access_token` — same
+  "changed-kwarg merge" pattern as `freshchat.save_channel`, guards against
+  `vault_secrets.put()`'s replace-not-merge semantics clobbering one secret
+  when saving the other); `verify_webhook_signature()`; `resolve_entry_flow()`
+  (factored out of `ingestion.hubspot_ticket_watch._resolve_flow`, now
+  shared by both the poller and the new push receiver so they resolve the
+  same flow the same way).
+- `api/main.py`: `POST /webhooks/hubspot/{tenant_id}` — public, no bearer
+  auth (the HMAC signature is the credential, verified before anything else
+  is trusted, same "verify before parse" convention as the Freshchat
+  webhook). Deliberately backed by a **separate, webhook-only HubSpot app**
+  from the tenant's Private App — the classic Private App has no Webhooks
+  tab, confirmed above. Enqueues the exact same case shape + dedupe key
+  (`hs:{tenant}:{ticket_id}`) the poller uses, so running both is safe:
+  whichever fires first wins, the other dedupes. Plus
+  `PUT /api/integrations/hubspot/webhook-secret` and
+  `GET /api/integrations/hubspot/webhook-url`.
+- `web/src/channels/ConnectionsView.tsx`'s `HubSpotPanel` gained a
+  "Real-time trigger (webhooks)" section: shows the target URL, a field to
+  paste the webhook app's Client Secret (kept separate from the Private App
+  token field on purpose — different app, different credential).
+- `hubspot-webhook-app/` — the actual deployed HubSpot project (app +
+  webhooks components). **Gitignored, not committed** — it bakes in one
+  real tenant's tenant_id and an ephemeral tunnel `targetUrl`, so it's a
+  per-tenant deployment artifact, not reusable source (the reusable code is
+  the receiver endpoint + `hubspot.py`, both committed).
+- `docker-compose.yml`'s `hubspot_watch` service unaffected — polling stays
+  as the fallback/redundant path, not replaced.
+
+**Live-verified for real, with cleanup, not just theoretically wired:**
+deployed the app (`hs project upload --forceCreate` → auto-deployed build
+#1 → `hs project install-app`) into the user's real portal (App ID
+`53416910`, project `support-automation-webhooks`), pointed its
+`targetUrl` at a `cloudflared` quick tunnel to the already-running
+`docker-compose` `api` service, saved the real Client Secret through the
+new UI panel (not pasted into chat — same secret-handling care applied to
+the CLI's own Personal Access Key earlier in this session), then created
+one real test ticket via the tenant's actual Private App token. The push
+fired within seconds (`POST /webhooks/hubspot/{tenant}` → `202`), the
+signature verified, the real ticket was fetched and normalised, and a
+`run_flow` job landed in the real `jobs` table with the correct dedupe key
+— confirmed by querying the row directly, not inferred from a 202. To keep
+this a **plumbing-only** test (case_connector is still `salesforce` for
+this tenant's real traffic — switching it was explicitly out of scope for
+this test per the user's choice), the `worker` container was paused before
+creating the ticket, the resulting job row was deleted, and the test
+ticket was archived via the API afterward — zero side effects on the
+tenant's real Salesforce data. `docker compose up -d --build api worker
+hubspot_watch` picked up all the code changes; `PUBLIC_API_BASE` was set
+to the tunnel URL for both the webhook-url display endpoint and signature
+verification's URL component.
+
+**Still open / known caveats, said plainly:**
+- The tunnel is ephemeral — restarting it gets a new URL, which means
+  re-baking `webhooks-hsmeta.json`'s `targetUrl` and re-running `hs project
+  upload`/`deploy`. Not a problem for proving this works; a real blocker
+  for calling it production-ready without the already-tracked "no
+  always-on host" gap being closed first.
+- `case_connector` for this tenant is still `salesforce` — the webhook
+  trigger is proven, but a real HubSpot-routed run through this exact path
+  wasn't exercised (deliberately, per the user's "plumbing-only" choice).
+- Offline: 24 new tests across `test_hubspot.py` (signature + secret-merge)
+  and `test_api.py` (webhook endpoint) — 1298 total, all green;
+  `npm run build` clean.
+
+---
+
+**2026-09-16 (FR-51 step 4d — first real live verification against a real
+HubSpot account, and a real bug it found.)** User connected a real HubSpot
+Private App token (portal `247408655`) via the Connections tab and asked to
+check for missing scopes. Confirmed via the running `docker-compose` stack's
+own logs (`support-automation-api-1`) that the first attempt only ever hit
+`POST /api/integrations/hubspot/test`, never `PUT /api/integrations/hubspot`
+— the user had tested but not saved. After saving, queried the real
+Supabase project directly (`tenant_integrations` row: `kind=hubspot,
+status=active`) to confirm, then loaded the real token through
+`hubspot.load_channel()` (never displayed) and probed every endpoint the
+connector actually calls.
+
+**Findings:** HubSpot's classic `GET /oauth/v1/access-tokens/{token}`
+introspection endpoint rejects Private App tokens outright ("access token
+must have the correct format") — that endpoint is OAuth-app-only, so scope
+verification has to be empirical (call each real endpoint), not a single
+introspection call. Doing that against the real account: `account-info`,
+tickets (read/search/schema/pipelines), contacts (read/search), companies
+(read/search), notes (read), and v4 associations all work. **Two scopes
+genuinely missing:** `crm.objects.owners.read` and `crm.objects.emails.read`
+(+ presumably `.write`) — both 403 "hasn't been granted all required
+scopes."
+
+**A real bug this surfaced, fixed here:** `hubspot.org_metadata()` fetched
+owners and ticket properties inside one `try` block, so the *unrelated*
+missing-owners-scope 403 was blanking out the ticket-properties picker too
+(a completely different scope, `crm.schemas.tickets.read`-ish, that this
+token already has) — confirmed live: before the fix, `available: False`
+with 0 fields; after, `available: True` with all 223 real ticket properties
+and an empty (not crashed) owners/queues list + an `error` field naming
+which sub-call failed. Split into two independent try/excepts, matching
+this module's own "degrade per-call, not all-or-nothing" convention
+everywhere else. New test
+`test_org_metadata_degrades_per_call_not_all_or_nothing`. 1286 offline
+pytest green (was 1285); `npm run build` clean.
+
+**Still open:** the user needs to add `crm.objects.owners.read` and
+`crm.objects.emails.read`/`.write` to the Private App's scopes in HubSpot's
+own settings (no way to do this via API — confirmed no HubSpot MCP tool or
+API creates/edits a Private App or its scopes; it's UI-only by HubSpot's own
+design). Re-run the same probe once added. Write-scope paths (creating a
+ticket/note/email/contact/company) still untested — would need a real
+create (+ cleanup), not attempted without the user's go-ahead.
+
+---
+
+**2026-09-16 (FR-51 step 4c — deploy the HubSpot ticket watcher.)** The
+previous entry below built `ingestion/hubspot_ticket_watch.py` but left it
+un-deployed (a standalone CLI tool, same as Zendesk's own watcher) — the
+user asked "can I create the HubSpot connection and use it like Salesforce"
+and, on hearing nothing actually triggers a run yet, asked to wire it in
+now rather than leave it a manual step (this project's own
+[[no-manual-pipeline-runs]] rule). Added a `hubspot_watch` service to
+`docker-compose.yml` (`python -m ingestion.hubspot_ticket_watch --interval
+300`, sharing the `&svc` anchor every other service uses — no-op without a
+tenant's HubSpot connection, same as `cdc`'s no-op-without-SF-creds
+pattern). Verified with `docker compose config` (parses clean, resolves to
+the right command + `restart: unless-stopped`) — not run end-to-end against
+a real HubSpot account yet (no credentials). **Zendesk's own equivalent
+watcher is still NOT wired into `docker-compose.yml`** — deliberately not
+done here, out of scope per the user's "ignore zendesk for now."
+
+**Still open:** run `docker compose up -d --build` once the user has a real
+HubSpot Private App token connected, to confirm the watcher actually picks
+up a live ticket end-to-end. Freshdesk is still the next connector to build.
+
+---
+
+**2026-09-16 (FR-51 step 4b — HubSpot auto-trigger + making the flow
+editor's Inspector connector-generic, not Salesforce-only. User's question:
+"does HubSpot also have the nodes & edges now... is this possible with the
+current setup or do we need a whole redesign." Answer, confirmed by this
+session's work: no redesign needed — the flow graph/nodes were already
+connector-agnostic on the backend (that's what FR-51 built); what was
+missing was purely a UI layer, closed in this chunk.)**
+
+**Backend — the HubSpot auto-trigger (the "Phase 31"-equivalent Zendesk got
+the day after its own connector, deliberately deferred from the previous
+HubSpot chunk):**
+- `interpreter/hubspot.py` gained `list_new_tickets`/`ticket_as_case`
+  (mirrors `zendesk.py`'s ticket-watcher support exactly) and `org_metadata`
+  (Owners-as-queues/users + real ticket properties from
+  `/crm/v3/properties/tickets`, for the flow editor's live pickers — see
+  below).
+- New `ingestion/hubspot_ticket_watch.py`, a straight mirror of
+  `zendesk_ticket_watch.py`: polls each `case_connector=hubspot` tenant's
+  tickets in the "New" pipeline stage and enqueues one `run_flow` job per
+  ticket, deduped. Not wired into `docker-compose.yml` — neither is
+  Zendesk's own equivalent; both are standalone CLI tools pending this
+  project's "no always-on host" gap.
+- `api/worker.py::_hubspot_post_run` (mirrors `_zendesk_post_run`) delivers
+  a `channel=hubspot` run's outcome via `hubspot.send_case_reply` — honest
+  that this usually lands as an internal note, not a real customer email
+  (see the connector's own documented gap from the previous chunk).
+- 15 new offline tests (`test_hubspot_ticket_watch.py`, 5;
+  `test_hubspot_worker.py`, 8; 2 more in `test_hubspot.py` for
+  `org_metadata`/`list_new_tickets`/`ticket_as_case`).
+
+**Backend — a connector-generic metadata seam:** new `GET /api/hubspot/meta`
+(same `SfMeta`-compatible shape as `/api/salesforce/meta`, cached 5 min per
+tenant) and `GET /api/case-connector/meta` — the endpoint the editor now
+actually calls, which resolves `tenants.case_connector` and dispatches to
+whichever connector's own meta function, tagging the response with
+`connector` so the frontend can hide Salesforce-only UI (its multi-org `org`
+field) without a second round-trip. Zendesk is deliberately NOT wired into
+this dispatch yet (falls to the generic empty/`available:false` shape) —
+matches the user's "ignore zendesk & freshworks for now."
+
+**Frontend — Inspector.tsx generalized, not redesigned:** `useSfMeta` (only
+ever called `/api/salesforce/meta`) renamed `useCaseMeta` and repointed at
+`/api/case-connector/meta` — every existing picker built on it
+(`QueuePicker`, `SfMentionPicker`/@mention, `SfWritebackForm`'s live
+field-map) became connector-aware for free, no picker rewritten. For a
+`case_connector=hubspot` tenant these now show real HubSpot Owners (as both
+"users" and, since HubSpot has no queue/group object, as "queues" too —
+matching `hubspot.assign_case`'s own owner-substring-match semantics) and
+real ticket properties, not a plain text fallback. Salesforce's multi-org
+`org` field now hides itself (`meta.connector !== "hubspot"`) on
+`sf_writeback`/`sf_case`/`ask_human`/`handover`/`clarify`/`identify`/
+`notify_human`'s forms — showing it for HubSpot would have been actively
+wrong (HubSpot isn't multi-org). Wording swept for the same reason: "Salesforce
+Chatter only" → "Case system note only", "picklist from Salesforce" → "live
+from your connected case system", NODE_HELP text for `identify`/`sf_case`/
+`sf_writeback`/`notify`/`ask_human`/`handover`/`notify_human`/
+`connector_action` no longer says "Salesforce" where the node is actually
+generic. **One genuine, not-cosmetic gap flagged rather than hidden:**
+`sf_context` really is Salesforce-only (it's registry.py's own documented
+exception to the connector contract — a bespoke multi-object SOQL read, not
+a `CASE_ACTIONS` verb) — its NODE_HELP and Inspector description now say so
+explicitly ("Salesforce-only... on a non-Salesforce tenant this is a silent
+no-op") instead of implying parity it doesn't have. `graph.ts` gained a
+small `NODE_LABELS`/`nodeLabel()` map so the node palette shows "Case lookup
+/ create" instead of the raw `sf_case` slug (the stored `flow_nodes.type`
+string is unchanged — display only); "Salesforce entry" toggle/toast
+renamed "Case system entry" (the underlying `flows.sf_entry` flag was
+already connector-agnostic, only the label wasn't).
+
+**A real, pre-existing bug found and fixed while browser-verifying, not
+caused by this chunk:** `web/e2e/connections.spec.ts`'s Zendesk test scoped
+its Save-button click with `page.locator(".col").filter({hasText: "..."})`
+— `.col` turned out to be a *layout* class on the page's outermost wrapper,
+not a per-panel one (each panel's own root is `.int-card`), so the filter
+matched the single top-level `.col` containing every panel's Save button.
+It happened to still resolve to exactly one match before this chunk (by
+coincidence of which panels rendered a "Save"-labelled button under this
+test's specific mocks) — adding `HubSpotPanel` right next to `ZendeskPanel`
+tipped it to a `strict mode violation: resolved to 6 elements`, which is
+what actually surfaced this. Fixed by scoping to `.int-card` instead, for
+both the (pre-existing) Zendesk test and the new HubSpot one.
+
+**Verify:** 1285 offline pytest, all green (was 1264 at the end of the
+previous HubSpot chunk). `cd web && npm run build` clean. Browser-verified
+for real (not just type-checked) — the sandbox's missing Chromium shared
+libs ([[playwright-sandbox-fix]]) were re-extracted this session, plus a
+genuinely separate blocker found and cleared: a **stale, `SIGTSTP`-stopped
+`vite` process from an earlier interrupted session was still squatting port
+5174**, so Playwright's `reuseExistingServer` health check hung indefinitely
+against a port that would never respond — not a Playwright/sandbox issue,
+a leftover suspended process. `web/e2e/connections.spec.ts` (both the
+Zendesk and new HubSpot tests) passes 2/2 in a real headless Chromium.
+**Also found while running the full e2e suite, confirmed NOT caused by this
+chunk** (reproduces identically against the pre-chunk code via `git
+stash`): `channels.spec.ts`'s Freshchat test, `flow-editor.spec.ts`'s
+add-node-save-draft test, and 3 `ui-walk.spec.ts` tests all fail
+(`.sidebar` not found / a `.ui-scrim` intercepting a click) — pre-existing
+flakiness or a real bug in this sandbox, not diagnosed further here since
+it predates this session; worth a dedicated look later.
+
+**Still open:**
+- Freshdesk — the other connector the user asked for, not started yet.
+- HubSpot/Zendesk/Freshchat — none live-verified against a real account yet.
+- The 5 pre-existing e2e failures above.
+
+---
+
+**2026-09-16 (FR-51 step 4 — HubSpot, a third real case-system connector.
+User asked to drop Zendesk from further work for now and complete HubSpot +
+Freshdesk instead; this session closes HubSpot, Freshdesk is next.)**
+
+New `interpreter/hubspot.py` implements the full `connectors.CASE_ACTIONS`
+8-action contract against HubSpot's CRM v3 API (Bearer auth, a Private App
+access token — no OAuth-install flow, matching Zendesk's "the token is the
+whole credential" simplicity). Same "honest about the data-model gaps"
+convention as `zendesk.py`'s docstring: no Contact/Account/Lead split as
+distinct object *types* (Contacts + Companies; "Lead" = a Contact with
+`lifecyclestage: "lead"`); `ensure_case`'s thread-reuse resolves the
+contact's most recently modified still-open ticket via the v4 associations
+API (not an exact Message-ID match); `update_fields`'s `Status` resolves to
+a ticket-pipeline stage **by label** (HubSpot's stage ids are opaque and
+per-portal, so this looks up the tenant's own default pipeline rather than
+hardcoding an id) — an unmapped status goes to `skipped`, not silently
+dropped; `post_note`/`add_comment` both create the same internal-only Note
+(HubSpot has no public/private ticket-comment object); `assign_owner`'s
+`queue` resolves to a matching Owner by name/email substring (no queue/
+group object exists for HubSpot tickets). Two places this is genuinely
+*more* capable than Zendesk's connector: `log_email_message` is a REAL
+feature (HubSpot's first-class `/crm/v3/objects/emails` engagement logs it
+to the record's timeline, vs. Zendesk's documented no-op), and every
+association goes through HubSpot's v4 **default-association** endpoint
+(`PUT .../associations/default/...`) so this never has to hardcode
+HubSpot's opaque numeric association-type ids. **A real, honestly-flagged
+gap:** `send_case_reply` can't actually email the customer — HubSpot's
+Tickets API has no native send-reply endpoint without a connected
+Conversations inbox (not set up here); it accepts an optional `thread_id`
+as a forward-looking hook (unused today) and otherwise logs the reply as an
+internal Note, returning `sent: False` with the reason rather than
+pretending a delivery that didn't happen.
+
+Registered as a `hubspot` builtin in `connectors.py` (no `_ORG_PARAM` — not
+multi-org, like Zendesk). Proven as a genuinely independent third
+implementation, not a copy-paste stub:
+`tests/test_sf_handlers_use_connectors.py::
+test_a_tenant_on_hubspot_routes_ask_human_to_hubspot_not_salesforce` drives
+the real (unmocked) `h_ask_human` through a tenant configured for
+`case_connector="hubspot"` and confirms real (mocked-HTTP) HubSpot calls
+land while `salesforce.py` is never touched. Connect-account API
+(`GET/PUT/DELETE /api/integrations/hubspot` + `.../test`, same Vault-backed
+shape as Zendesk/Freshchat) + a `HubSpotPanel` on the Connections tab + a
+third `<option>` on the `CaseConnectorPicker`. New Playwright test in
+`web/e2e/connections.spec.ts`. 23 new offline tests (`test_hubspot.py`) + 1
+more in `test_sf_handlers_use_connectors.py` + 2 in `test_connectors.py` +
+offline/live API tests in `test_api.py`. **1264 offline pytest total, all
+green** (was 1238 before this chunk); `cd web && npm run build` clean.
+
+**Deliberately not built in this chunk, matching how Zendesk itself was
+sequenced** (its ticket watcher / auto-reply delivery / case-graph sync
+landed as separate "Phase 31" commits the day *after* its initial connector
+build, not bundled into day one): an inbound-ticket watcher, worker-side
+auto-reply delivery wiring, and a case-lifecycle graph sync for HubSpot. A
+`case_connector=hubspot` tenant's flow can act on tickets today, but
+nothing yet *triggers* a run from a new HubSpot ticket automatically — the
+same gap Zendesk had for one day before its own Phase-31 follow-up closed
+it. Flagging this rather than building it now, per this file's "don't build
+ahead" rule.
+
+**Still open, blocked on the user or on more chunks, not on scope:**
+- HubSpot (this session) — not yet live-verified against a real account;
+  needs a HubSpot Private App token. Same "flag it, don't spend it" pattern
+  as Zendesk/Freshchat below.
+- Freshdesk — the other connector the user asked for, not started yet.
+  Freshdesk's ticketing model is much closer to Zendesk's (native public-
+  reply-emails-the-customer semantics) than HubSpot's, so `send_case_reply`
+  should NOT need HubSpot's "logged as a note, not actually sent" gap.
+- Freshchat/Zendesk connectors (FR-51 steps 2-3, built 2026-09-05) — never
+  live-verified against a real account; needs real credentials from the
+  user.
+- "No always-on host" (infra — the dev box needs to stay up for the
+  poller/worker/webhooks to run) — out of scope unless the user raises it.
+
+---
+
 **2026-09-16 (Post-redesign gap-analysis pass — the shadcn redesign below
 was merged to `main` the same day it shipped; this entry is the session
 after, spent closing gaps a UI/UX + spec-vs-implementation audit found.

@@ -3,12 +3,17 @@ import type { ReactNode } from "react";
 import { api } from "../api";
 import type { Connection, Connector, KbCollection, ModelInfo, SfMeta, SlackMeta } from "../types";
 import type { RFEdge, RFNode } from "./graph";
+import { EDGE_CHANNELS, parseCondition, ROUTED_TEAMS, serializeCondition, type Clause } from "./conditionBuilder";
+import { ConditionBuilder } from "./ConditionBuilder";
+import { ConfigField, ConfigRow } from "./ConfigControls";
 
-// Salesforce routing metadata (queues + real Case fields/picklists,
-// including custom ones) — fetched per (tenant, org) and cached for the
-// editor session; a node's own `config.org` picks which connected org
-// (empty -> 'default'), so switching a node's org refetches that org's
-// real schema instead of showing another org's fields.
+// Case-connector routing metadata (queues/fields/users, including custom
+// fields) — fetched per (tenant, org) and cached for the editor session.
+// `useCaseMeta` calls the connector-generic `/api/case-connector/meta`
+// (resolves whichever connector the tenant is actually on — Salesforce or
+// HubSpot today); a node's own `config.org` only matters for Salesforce's
+// multi-org connector (empty -> 'default'), so switching it refetches that
+// org's real schema instead of showing another org's fields.
 const _EMPTY_META: SfMeta = { available: false, queues: [], case_types: [], modules: [], case_fields: [], users: [] };
 const _metaCache = new Map<string, SfMeta>();
 
@@ -21,9 +26,9 @@ const _metaCache = new Map<string, SfMeta>();
  *  from their names alone. */
 const NODE_HELP: Record<string, string> = {
   trigger: "Entry point for a non-Case flow (a webhook or schedule). Renames/defaults the incoming payload's fields before anything else runs.",
-  identify: "Resolves who's contacting you — an exact CRM contact/lead by email, else the sender's email domain against an Account — before anything Salesforce-specific runs.",
-  sf_case: "Resolves the inbound message to a real Salesforce Case: creates one (or reuses an open thread) so every downstream Salesforce node has an sf_id to act on.",
-  sf_context: "Pulls the surrounding Salesforce picture — Account, Contact, case history, account team — into state for the classifier and gate to use. Put it after identify.",
+  identify: "Resolves who's contacting you — an exact CRM contact/lead by email, else the sender's email domain against an Account/Company — before anything connector-specific runs. Works against whichever case system this tenant is connected to (Connections tab).",
+  sf_case: "Resolves the inbound message to a case/ticket in your connected case system: creates one (or reuses an open thread) so every downstream case-touching node has an id to act on. Works against whichever connector this tenant is on (Salesforce, HubSpot, ...).",
+  sf_context: "Salesforce-only (no HubSpot/other-connector equivalent yet) — pulls the surrounding Salesforce picture (Account, Contact, case history, account team) into state for the classifier and gate to use. Put it after identify. On a non-Salesforce tenant this is a silent no-op.",
   product_signal: "Enriches state.product_signal with what the filer actually did in your product (events, usage trend, recent notable events, account rollup), pulled from the analytics graph. draft folds it in as context; edges can branch on product_signal.available / .usage_trend. Does nothing unless PostHog is connected and the sender matches a known contact — never blocks a run. Put it after identify, before draft.",
   attachments: "Pulls image/video attachments off the Case or inbound email and OCRs/transcribes them so classify and draft can reference what's actually attached.",
   classify: "AI triage: topic, type, urgency, and answer mode (informational / diagnostic / action / status). Everything downstream branches on this.",
@@ -37,22 +42,22 @@ const NODE_HELP: Record<string, string> = {
   agent: "A bounded retrieve+draft loop: if the first draft isn't well grounded, reformulates the search query and retries. Drop-in replacement for a plain retrieve+draft pair.",
   ai_prompt: "A free-form AI call for anything the built-in nodes don't cover — write your own prompt (with attachments as vision input, optionally); the structured output feeds an edge condition.",
   http_request: "Calls an external HTTP API through a saved Connection (Admin tab) — for integrations this platform has no dedicated node for.",
-  connector_action: "Calls a declared action on any connector — Salesforce/Slack, or one of your own saved Connections + its actions (Admin tab). Adding a new connector never needs code, just a Connection + its actions.",
+  connector_action: "Calls a declared action on any connector — Salesforce/HubSpot/Slack, or one of your own saved Connections + its actions (Admin tab). Adding a new connector never needs code, just a Connection + its actions.",
   transform: "Reshapes state between nodes with no LLM — copy a value by dotted path, render a template, or drop a scratch key.",
   confidence_gate: "Blends retrieval/draft/groundedness scores against a tier-specific threshold to decide: auto-reply, ask a human, or hand over.",
   policy_gate: "Evaluates this team's structured rules (Rules tab) against the run so far; route on policy.action == 'ask_human', etc.",
   task_dispatch: "Raises the matched policy rule's task (e.g. a GitHub issue) for Slack approval. Wire it after policy_gate, on policy.task != None.",
-  sf_writeback: "Writes the triage result — priority, module, case type, routed team — back onto the real Salesforce Case fields.",
+  sf_writeback: "Writes the triage result — priority, module, case type, routed team — back onto the connected case system's case/ticket fields (Salesforce, HubSpot, ...).",
   auto_reply: "Sends the drafted reply automatically. Reachable only once the confidence gate has already cleared it — no human touches this case.",
-  notify: "Pings an internal rep about this Case WITHOUT reassigning it — a heads-up via Chatter, Case stays wherever it already is.",
-  ask_human: "Escalates to a human queue and posts the draft for review — pauses; the flow resumes once someone replies (Chatter/Case Comment).",
-  handover: "Full handoff to a human queue/owner. Terminal — the AI is done with this Case, no resume path.",
-  notify_human: "Sends the actual Slack and/or Chatter alert for an escalation — place it after ask_human/handover (or on any escalation edge) to pick who gets pinged and where.",
+  notify: "Pings an internal rep about this case WITHOUT reassigning it — a heads-up note on the case, which stays wherever it already is.",
+  ask_human: "Escalates to a human queue and posts the draft for review — pauses; the flow resumes once someone replies (a note/comment on the case).",
+  handover: "Full handoff to a human queue/owner. Terminal — the AI is done with this case, no resume path.",
+  notify_human: "Sends the actual Slack and/or case-system alert for an escalation — place it after ask_human/handover (or on any escalation edge) to pick who gets pinged and where.",
   clarify: "Low-confidence recovery: instead of a blind handoff, produces the specific follow-up questions that would let the bot resolve this on the next round.",
 };
 const _metaPromise = new Map<string, Promise<SfMeta>>();
 
-function useSfMeta(tenantId: string, orgLabel = "default"): SfMeta {
+export function useCaseMeta(tenantId: string, orgLabel = "default"): SfMeta {
   const key = `${tenantId}:${orgLabel || "default"}`;
   const [meta, setMeta] = useState<SfMeta>(_metaCache.get(key) ?? _EMPTY_META);
   useEffect(() => {
@@ -62,7 +67,7 @@ function useSfMeta(tenantId: string, orgLabel = "default"): SfMeta {
       return;
     }
     const p = _metaPromise.get(key) ||
-      api.salesforce.meta(tenantId, orgLabel).catch(() => _EMPTY_META);
+      api.caseConnectorMeta(tenantId, orgLabel).catch(() => _EMPTY_META);
     _metaPromise.set(key, p);
     p.then((m) => {
       _metaCache.set(key, m);
@@ -72,9 +77,11 @@ function useSfMeta(tenantId: string, orgLabel = "default"): SfMeta {
   return meta;
 }
 
-/** A Salesforce-Queue picker: a <select> of the org's queues when the API
- *  could reach Salesforce, otherwise a plain text box. Keeps the current
- *  value even if it is not (yet) in the list. */
+/** A queue picker: a <select> of the connected case system's real queues
+ *  (Salesforce) or owners resolved as a queue match (HubSpot — it has no
+ *  queue/group object; see interpreter/hubspot.py's assign_case) when the
+ *  API could reach it, otherwise a plain text box. Keeps the current value
+ *  even if it is not (yet) in the list. */
 function QueuePicker({
   value,
   onChange,
@@ -88,12 +95,12 @@ function QueuePicker({
   tenantId: string;
   orgLabel?: string;
 }) {
-  const meta = useSfMeta(tenantId, orgLabel);
+  const meta = useCaseMeta(tenantId, orgLabel);
   if (!meta.available || meta.queues.length === 0) {
     return (
       <input
         value={value}
-        placeholder={placeholder || "queue DeveloperName"}
+        placeholder={placeholder || "queue name"}
         onChange={(e) => onChange(e.target.value)}
       />
     );
@@ -113,11 +120,12 @@ function QueuePicker({
   );
 }
 
-/** A real Salesforce User OR Queue/Group id — for an @mention / assignment
- *  target (`notify.target_by_type`/`fallback_target`,
+/** A real User OR Queue id from the connected case system — for an
+ *  @mention / assignment target (`notify.target_by_type`/`fallback_target`,
  *  `notify_human.mention.mention_id`). Grouped `<optgroup>`s since either
- *  kind is valid for a Chatter mention. Plain text when the org can't be
- *  reached / has neither. */
+ *  kind is valid as a mention (a real @mention on Salesforce Chatter; text
+ *  in the note on connectors without a native mention, e.g. HubSpot). Plain
+ *  text when the connector can't be reached / has neither. */
 function SfMentionPicker({
   value,
   onChange,
@@ -131,13 +139,13 @@ function SfMentionPicker({
   orgLabel?: string;
   placeholder?: string;
 }) {
-  const meta = useSfMeta(tenantId, orgLabel);
+  const meta = useCaseMeta(tenantId, orgLabel);
   const users = meta.users || [];
   if (!meta.available || (users.length === 0 && meta.queues.length === 0)) {
     return (
       <input
         value={value}
-        placeholder={placeholder || "005xxxxxxxxxxxx or 00Gxxxxxxxxxxxx"}
+        placeholder={placeholder || "user or queue id"}
         onChange={(e) => onChange(e.target.value.trim())}
       />
     );
@@ -293,7 +301,7 @@ function OrgPicker({
 
 // Slack workspace metadata — fetched once per tenant, shared by every
 // channel/@mention picker in this editor session (same cache-per-key
-// shape as useSfMeta).
+// shape as useCaseMeta).
 const _EMPTY_SLACK: SlackMeta = { available: false, channels: [], users: [], usergroups: [] };
 const _slackCache = new Map<string, SlackMeta>();
 const _slackPromise = new Map<string, Promise<SlackMeta>>();
@@ -426,7 +434,7 @@ function SfWritebackForm({
   tenantId: string;
 }) {
   const org = typeof config.org === "string" ? config.org : "";
-  const meta = useSfMeta(tenantId, org || undefined);
+  const meta = useCaseMeta(tenantId, org || undefined);
   const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
   // undefined (never configured) shows -- and edits from -- the
   // interpreter's own default map, so the form reflects what's actually
@@ -452,16 +460,17 @@ function SfWritebackForm({
   };
 
   return (
-    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+    <ConfigField bordered>
       <div className="muted" style={{ fontSize: 11 }}>
-        writes triage output onto the Salesforce Case. Left = a platform
-        concept, right = a REAL field on the connected org — fetched live,
-        {meta.available ? ` ${fields.length} mappable fields found.` : " connect an org (Connections tab) to see them."}
+        writes triage output onto the connected case system's case/ticket. Left = a platform
+        concept, right = a REAL field on the connected system — fetched live,
+        {meta.available ? ` ${fields.length} mappable fields found.` : " connect your case system (Connections tab) to see them."}
       </div>
-      <div className="row" style={{ marginTop: 6 }}>
-        <span className="muted" style={{ width: 90 }}>org</span>
-        <OrgPicker value={org} onChange={(v) => set({ org: v || undefined })} tenantId={tenantId} />
-      </div>
+      {meta.connector !== "hubspot" && (
+        <ConfigRow label="org" style={{ marginTop: 6 }}>
+          <OrgPicker value={org} onChange={(v) => set({ org: v || undefined })} tenantId={tenantId} />
+        </ConfigRow>
+      )}
       <label style={{ marginTop: 6, display: "block" }}>
         field_map{" "}
         {usingDefaults && (
@@ -511,7 +520,7 @@ function SfWritebackForm({
         value_maps / append are edited in the raw config below — this form
         covers field_map only for now.
       </div>
-    </div>
+    </ConfigField>
   );
 }
 
@@ -534,6 +543,11 @@ export function NodeInspector({
    *  heading, the JSON tab and the delete action, so skip them here. */
   embedded?: boolean;
 }) {
+  // only used to decide whether to show Salesforce's multi-org `org` field
+  // on the ask_human/handover queue form below — every other node's own
+  // form fetches its own `useCaseMeta` with the org label that's actually
+  // relevant to it.
+  const connectorMeta = useCaseMeta(tenantId, typeof config.org === "string" ? config.org : undefined);
   return (
     <div>
       {!embedded && (
@@ -576,27 +590,27 @@ export function NodeInspector({
       )}
 
       {(node.data.nodeType === "ask_human" || node.data.nodeType === "handover") && (
-        <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
-          <label>queue</label>
+        <ConfigField
+          bordered
+          label="queue"
+          hint="queue_by_team / enterprise_queue overrides are edited in the raw config below."
+        >
           <QueuePicker
             value={typeof config.queue === "string" ? config.queue : ""}
             onChange={(v) => onConfig({ ...config, queue: v || undefined })}
             tenantId={tenantId}
             orgLabel={typeof config.org === "string" ? config.org : undefined}
           />
-          <div className="row" style={{ marginTop: 6 }}>
-            <span className="muted" style={{ width: 90 }}>org</span>
-            <OrgPicker
-              value={typeof config.org === "string" ? config.org : ""}
-              onChange={(v) => onConfig({ ...config, org: v || undefined })}
-              tenantId={tenantId}
-            />
-          </div>
-          <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
-            queue_by_team / enterprise_queue overrides are edited in the raw
-            config below.
-          </div>
-        </div>
+          {connectorMeta.connector !== "hubspot" && (
+            <ConfigRow label="org" style={{ marginTop: 6 }}>
+              <OrgPicker
+                value={typeof config.org === "string" ? config.org : ""}
+                onChange={(v) => onConfig({ ...config, org: v || undefined })}
+                tenantId={tenantId}
+              />
+            </ConfigRow>
+          )}
+        </ConfigField>
       )}
 
       {node.data.nodeType === "notify_human" && (
@@ -661,35 +675,31 @@ function GateForm({
   const num = (v: unknown, d = 0) => (typeof v === "number" ? v : d);
 
   return (
-    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
-      <label>thresholds</label>
-      <div className="row">
-        <span className="muted" style={{ width: 90 }}>default</span>
+    <ConfigField bordered label="thresholds">
+      <ConfigRow label="default">
         <input
           type="number" step="0.05" min="0" max="1"
           value={num(config.default_threshold, 0.35)}
           onChange={(e) => set({ default_threshold: parseFloat(e.target.value) })}
         />
-      </div>
+      </ConfigRow>
       {["basic", "premium", "enterprise"].map((t) => (
-        <div className="row" key={t}>
-          <span className="muted" style={{ width: 90 }}>{t}</span>
+        <ConfigRow label={t} key={t}>
           <input
             type="number" step="0.05" min="0" max="1"
             value={num(to[t], 0.35)}
             onChange={(e) => setTier(t, parseFloat(e.target.value))}
           />
-        </div>
+        </ConfigRow>
       ))}
-      <div className="row">
-        <span className="muted" style={{ width: 90 }}>retr. weight</span>
+      <ConfigRow label="retr. weight">
         <input
           type="number" step="0.1" min="0" max="1"
           value={num(config.retrieval_weight, 0.5)}
           onChange={(e) => set({ retrieval_weight: parseFloat(e.target.value) })}
         />
-      </div>
-    </div>
+      </ConfigRow>
+    </ConfigField>
   );
 }
 
@@ -705,8 +715,7 @@ function ExtractForm({
   const setFields = (f: Record<string, string>) => onConfig({ ...config, fields: f });
 
   return (
-    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
-      <label>fields to extract into state.entities</label>
+    <ConfigField bordered label="fields to extract into state.entities">
       {rows.map(([k, v], i) => (
         <div className="row" key={i} style={{ gap: 4 }}>
           <input
@@ -737,7 +746,7 @@ function ExtractForm({
         </div>
       ))}
       <button onClick={() => setFields({ ...fields, "": "" })}>＋ field</button>
-    </div>
+    </ConfigField>
   );
 }
 
@@ -757,38 +766,35 @@ function ClarifyForm({
   const useChecklists = config.use_checklists === true;
   const handoverQueue =
     typeof config.handover_queue === "string" ? config.handover_queue : "";
+  const meta = useCaseMeta(tenantId, typeof config.org === "string" ? config.org : undefined);
 
   return (
-    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+    <ConfigField bordered>
       <div className="muted" style={{ fontSize: 11 }}>
         low-confidence recovery: asks the customer for the missing details
         (their reply comes back as a new case). Terminal.
       </div>
-      <div className="row" style={{ marginTop: 6 }}>
-        <span className="muted" style={{ width: 110 }}>max questions</span>
+      <ConfigRow label="max questions" width={110} style={{ marginTop: 6 }}>
         <input
           type="number" min="1" max="5"
           value={maxQ}
           onChange={(e) => set({ max_questions: parseInt(e.target.value, 10) || 1 })}
         />
-      </div>
-      <div className="row">
-        <span className="muted" style={{ width: 110 }}>max rounds</span>
+      </ConfigRow>
+      <ConfigRow label="max rounds" width={110}>
         <input
           type="number" min="1" max="5"
           value={maxRounds}
           onChange={(e) => set({ max_rounds: parseInt(e.target.value, 10) || 1 })}
         />
-      </div>
-      <div className="row">
-        <span className="muted" style={{ width: 110 }}>channel</span>
+      </ConfigRow>
+      <ConfigRow label="channel" width={110}>
         <input
           value={typeof config.channel === "string" ? config.channel : "email"}
           onChange={(e) => set({ channel: e.target.value })}
         />
-      </div>
-      <div className="row">
-        <span className="muted" style={{ width: 110 }}>handover queue</span>
+      </ConfigRow>
+      <ConfigRow label="handover queue" width={110}>
         <QueuePicker
           value={handoverQueue}
           placeholder="Team_Support"
@@ -796,19 +802,20 @@ function ClarifyForm({
           tenantId={tenantId}
           orgLabel={typeof config.org === "string" ? config.org : undefined}
         />
-      </div>
+      </ConfigRow>
       <div className="muted" style={{ fontSize: 11 }}>
-        after <code>max rounds</code> of asking the customer, the Case is
+        after <code>max rounds</code> of asking the customer, the case is
         reassigned to this queue (blank = stay put, note only).
       </div>
-      <div className="row" style={{ marginTop: 4 }}>
-        <span className="muted" style={{ width: 110 }}>org</span>
-        <OrgPicker
-          value={typeof config.org === "string" ? config.org : ""}
-          onChange={(v) => set({ org: v || undefined })}
-          tenantId={tenantId}
-        />
-      </div>
+      {meta.connector !== "hubspot" && (
+        <ConfigRow label="org" width={110} style={{ marginTop: 4 }}>
+          <OrgPicker
+            value={typeof config.org === "string" ? config.org : ""}
+            onChange={(v) => set({ org: v || undefined })}
+            tenantId={tenantId}
+          />
+        </ConfigRow>
+      )}
       <label className="row" style={{ gap: 6, marginTop: 4 }}>
         <input
           type="checkbox"
@@ -820,8 +827,8 @@ function ClarifyForm({
       </label>
       <div className="muted" style={{ fontSize: 11 }}>
         {autoSend
-          ? "emails the questions to the customer (falls back to a public case comment); run is marked awaiting_customer. Also needs the channel's auto-send on (Connections → the channel)."
-          : "off: posts the questions to Chatter for an agent to send."}
+          ? "sends the questions to the customer where the connected case system supports it (falls back to an internal note otherwise); run is marked awaiting_customer. Also needs the channel's auto-send on (Connections → the channel)."
+          : "off: posts the questions as a note for an agent to send."}
       </div>
       <label className="row" style={{ gap: 6, marginTop: 4 }}>
         <input
@@ -834,10 +841,10 @@ function ClarifyForm({
       </label>
       <div className="muted" style={{ fontSize: 11 }}>
         {useChecklists
-          ? "asks the specific questions from the matching checklist (Knowledge → Intake), skips anything the case already answers, and writes answers to their mapped Salesforce fields. Falls back to the generic path when no checklist matches."
+          ? "asks the specific questions from the matching checklist (Knowledge → Intake), skips anything the case already answers, and writes answers to their mapped case fields. Falls back to the generic path when no checklist matches."
           : "off: the questions are free-written by the LLM from the case + KB."}
       </div>
-    </div>
+    </ConfigField>
   );
 }
 
@@ -860,7 +867,7 @@ function NotifyForm({
   onConfig: (v: Record<string, unknown>) => void;
   tenantId: string;
 }) {
-  const meta = useSfMeta(tenantId, typeof config.org === "string" ? config.org : undefined);
+  const meta = useCaseMeta(tenantId, typeof config.org === "string" ? config.org : undefined);
   const caseTypes = meta.case_types.length ? meta.case_types : CASE_TYPES_FALLBACK;
   const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
   const byType = (config.target_by_type as Record<string, string>) || {};
@@ -879,29 +886,28 @@ function NotifyForm({
   };
 
   return (
-    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+    <ConfigField bordered>
       <div className="muted" style={{ fontSize: 11 }}>
-        pings an internal rep on the Case <strong>without changing the owner</strong> —
-        the Case stays in its current queue. Terminal; the resume poller
-        re-engages the bot on the rep's CaseComment.
+        pings an internal rep on the case <strong>without changing the owner</strong> —
+        the case stays in its current queue. Terminal; the resume poller
+        re-engages the bot on the rep's reply.
       </div>
       <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
         Targets normally come from the tenant <strong>notify_targets</strong> table
-        (resolved from <code>Case.Type</code>, then <code>Module__c</code>, with a
-        live Salesforce lookup for team / queue rows). Leave the rows below blank
-        unless this flow needs an <em>override</em> for a specific Type.
+        (resolved from case type, then module, with a live lookup for team/queue
+        rows against your connected case system). Leave the rows below blank
+        unless this flow needs an <em>override</em> for a specific type.
       </div>
       <label style={{ marginTop: 6, display: "block" }}>
-        override target by Case.Type{" "}
-        {meta.available && <span className="muted">(picklist from Salesforce)</span>}
+        override target by case type{" "}
+        {meta.available && <span className="muted">(live from your connected case system)</span>}
       </label>
       <div className="muted" style={{ fontSize: 11 }}>
-        a Salesforce User / Group id (15–18 chars) → real @mention; any other
-        text just names them in the note.
+        a user/queue id from your connected case system → a real @mention where
+        supported; any other text just names them in the note.
       </div>
       {caseTypes.map((t) => (
-        <div className="row" key={t} style={{ gap: 4 }}>
-          <span className="muted" style={{ width: 110 }}>{t}</span>
+        <ConfigRow label={t} width={110} key={t} style={{ gap: 4 }}>
           <SfMentionPicker
             value={byType[t] ?? ""}
             onChange={(v) => setTarget(t, v)}
@@ -909,18 +915,17 @@ function NotifyForm({
             orgLabel={typeof config.org === "string" ? config.org : undefined}
             placeholder="User/Group id or name"
           />
-        </div>
+        </ConfigRow>
       ))}
 
       {meta.modules.length > 0 && (
         <>
           <label style={{ marginTop: 10, display: "block" }}>
-            override target by Module__c{" "}
-            <span className="muted">(picklist from Salesforce)</span>
+            override target by module{" "}
+            <span className="muted">(live from your connected case system)</span>
           </label>
           {meta.modules.map((m) => (
-            <div className="row" key={m} style={{ gap: 4 }}>
-              <span className="muted" style={{ width: 110 }}>{m}</span>
+            <ConfigRow label={m} width={110} key={m} style={{ gap: 4 }}>
               <SfMentionPicker
                 value={byModule[m] ?? ""}
                 onChange={(v) => setModuleTarget(m, v)}
@@ -928,16 +933,15 @@ function NotifyForm({
                 orgLabel={typeof config.org === "string" ? config.org : undefined}
                 placeholder="User/Group id or name"
               />
-            </div>
+            </ConfigRow>
           ))}
           <div className="muted" style={{ fontSize: 11 }}>
-            only consulted when the Case.Type override above doesn't match.
+            only consulted when the case-type override above doesn't match.
           </div>
         </>
       )}
 
-      <div className="row" style={{ marginTop: 6 }}>
-        <span className="muted" style={{ width: 110 }}>fallback target</span>
+      <ConfigRow label="fallback target" width={110} style={{ marginTop: 6 }}>
         <SfMentionPicker
           value={typeof config.fallback_target === "string" ? config.fallback_target : ""}
           onChange={(v) => set({ fallback_target: v || null })}
@@ -945,30 +949,30 @@ function NotifyForm({
           orgLabel={typeof config.org === "string" ? config.org : undefined}
           placeholder="(optional)"
         />
-      </div>
-      <div className="row" style={{ marginTop: 6 }}>
-        <span className="muted" style={{ width: 110 }}>Chatter @mention</span>
+      </ConfigRow>
+      <ConfigRow label="fallback mention" width={110} style={{ marginTop: 6 }}>
         <SfMentionPicker
           value={typeof config.mention_id === "string" ? config.mention_id : ""}
           onChange={(v) => set({ mention_id: v || undefined })}
           tenantId={tenantId}
           orgLabel={typeof config.org === "string" ? config.org : undefined}
-          placeholder="005xxxxxxxxxxxx (last-resort mention)"
+          placeholder="user/queue id (last-resort mention)"
         />
-      </div>
+      </ConfigRow>
       <div className="muted" style={{ fontSize: 11 }}>
         used to @mention someone when the resolved target is a Queue (not
         directly mentionable) and none of its members can be found.
       </div>
-      <div className="row" style={{ marginTop: 6 }}>
-        <span className="muted" style={{ width: 110 }}>org</span>
-        <OrgPicker
-          value={typeof config.org === "string" ? config.org : ""}
-          onChange={(v) => set({ org: v || undefined })}
-          tenantId={tenantId}
-        />
-      </div>
-    </div>
+      {meta.connector !== "hubspot" && (
+        <ConfigRow label="org" width={110} style={{ marginTop: 6 }}>
+          <OrgPicker
+            value={typeof config.org === "string" ? config.org : ""}
+            onChange={(v) => set({ org: v || undefined })}
+            tenantId={tenantId}
+          />
+        </ConfigRow>
+      )}
+    </ConfigField>
   );
 }
 
@@ -987,7 +991,7 @@ function AiPromptForm({
   const images = str("images", "none");
 
   return (
-    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+    <ConfigField bordered>
       <div className="muted" style={{ fontSize: 11 }}>
         Runs one LLM call and writes the result to <code>state.{str("output_key", "ai_output")}</code>.
         Templates interpolate <code>{"{case.subject}"}</code>,{" "}
@@ -1002,11 +1006,10 @@ function AiPromptForm({
       <label style={{ marginTop: 4, display: "block" }}>user prompt (template)</label>
       <textarea rows={4} value={str("user")} onChange={(e) => set({ user: e.target.value })} />
 
-      <div className="row" style={{ marginTop: 4 }}>
-        <span className="muted" style={{ width: 90 }}>output key</span>
+      <ConfigRow label="output key" style={{ marginTop: 4 }}>
         <input value={str("output_key", "ai_output")}
                onChange={(e) => set({ output_key: e.target.value.trim() || "ai_output" })} />
-      </div>
+      </ConfigRow>
       <div className="row" style={{ marginTop: 4, alignItems: "flex-start" }}>
         <span className="muted" style={{ width: 90, marginTop: 4 }}>model</span>
         <ModelPicker
@@ -1041,15 +1044,14 @@ function AiPromptForm({
                onChange={(e) => set({ json_schema: e.target.checked ? { type: "object", properties: {} } : null })} />
         parse the reply as JSON (edit the schema in the raw config below)
       </label>
-      <div className="row" style={{ marginTop: 4 }}>
-        <span className="muted" style={{ width: 90 }}>on error</span>
+      <ConfigRow label="on error" style={{ marginTop: 4 }}>
         <select value={str("on_error", "passthrough")}
                 onChange={(e) => set({ on_error: e.target.value })}>
           <option value="passthrough">passthrough (output = null)</option>
           <option value="fail">fail the run</option>
         </select>
-      </div>
-    </div>
+      </ConfigRow>
+    </ConfigField>
   );
 }
 
@@ -1078,7 +1080,7 @@ function SfContextForm({
     ["team", "Account team / owner (Users)"],
   ];
   return (
-    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+    <ConfigField bordered>
       <div className="muted" style={{ fontSize: 11 }}>
         Loads the Salesforce picture around the Case into{" "}
         <code>state.sf_context</code>. Put it right after <code>identify</code>.
@@ -1090,15 +1092,14 @@ function SfContextForm({
           {label}
         </label>
       ))}
-      <div className="row" style={{ marginTop: 6 }}>
-        <span className="muted" style={{ width: 90 }}>org</span>
+      <ConfigRow label="org" style={{ marginTop: 6 }}>
         <OrgPicker
           value={typeof config.org === "string" ? config.org : ""}
           onChange={(v) => onConfig({ ...config, org: v || undefined })}
           tenantId={tenantId}
         />
-      </div>
-    </div>
+      </ConfigRow>
+    </ConfigField>
   );
 }
 
@@ -1144,37 +1145,35 @@ function SfCaseForm({
   tenantId: string;
 }) {
   const org = typeof config.org === "string" ? config.org : "";
-  const meta = useSfMeta(tenantId, org || undefined);
+  const meta = useCaseMeta(tenantId, org || undefined);
   const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
   return (
-    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+    <ConfigField bordered>
       <div className="muted" style={{ fontSize: 11 }}>
-        Resolves the inbound message to a real Salesforce Case — creating
-        the Contact/Account/Case as needed, or reusing an open Case for a
-        thread reply.
+        Resolves the inbound message to a case/ticket in your connected case
+        system — creating the Contact/Account/case as needed, or reusing an
+        open one for a thread reply.
       </div>
-      <div className="row" style={{ marginTop: 6 }}>
-        <span className="muted" style={{ width: 90 }}>org</span>
-        <OrgPicker value={org} onChange={(v) => set({ org: v || undefined })} tenantId={tenantId} />
-      </div>
-      <div className="row" style={{ marginTop: 4 }}>
-        <span className="muted" style={{ width: 90 }}>origin</span>
+      {meta.connector !== "hubspot" && (
+        <ConfigRow label="org" style={{ marginTop: 6 }}>
+          <OrgPicker value={org} onChange={(v) => set({ org: v || undefined })} tenantId={tenantId} />
+        </ConfigRow>
+      )}
+      <ConfigRow label="origin" style={{ marginTop: 4 }}>
         <PicklistPicker fieldName="Origin" value={typeof config.origin === "string" ? config.origin : "Email"}
                         onChange={(v) => set({ origin: v || undefined })} meta={meta} placeholder="Email" />
-      </div>
-      <div className="row" style={{ marginTop: 4 }}>
-        <span className="muted" style={{ width: 90 }}>status</span>
+      </ConfigRow>
+      <ConfigRow label="status" style={{ marginTop: 4 }}>
         <PicklistPicker fieldName="Status" value={typeof config.status === "string" ? config.status : "New"}
                         onChange={(v) => set({ status: v || undefined })} meta={meta} placeholder="New" />
-      </div>
-      <div className="row" style={{ marginTop: 4 }}>
-        <span className="muted" style={{ width: 90 }}>reuse</span>
+      </ConfigRow>
+      <ConfigRow label="reuse" style={{ marginTop: 4 }}>
         <select value={typeof config.reuse === "string" ? config.reuse : "thread"}
                 onChange={(e) => set({ reuse: e.target.value })}>
           <option value="thread">reuse an open Case for a thread reply</option>
           <option value="never">always create a new Case</option>
         </select>
-      </div>
+      </ConfigRow>
       <label className="row" style={{ gap: 6, marginTop: 6 }}>
         <input type="checkbox" style={{ width: "auto" }}
                checked={config.create_contact !== false}
@@ -1187,7 +1186,7 @@ function SfCaseForm({
                onChange={(e) => set({ create_account: e.target.checked })} />
         create the Account if missing (business-domain senders)
       </label>
-    </div>
+    </ConfigField>
   );
 }
 
@@ -1216,8 +1215,7 @@ function RetrieveForm({
     });
 
   return (
-    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
-      <label>kb_sources (blank = every collection this tenant can reach)</label>
+    <ConfigField bordered label="kb_sources (blank = every collection this tenant can reach)">
       {cols.length === 0 && (
         <div className="muted" style={{ fontSize: 11 }}>
           no collections yet — add some in the Knowledge tab
@@ -1234,15 +1232,14 @@ function RetrieveForm({
           {c.name} <span className="muted">({c.entry_count})</span>
         </label>
       ))}
-      <div className="row" style={{ marginTop: 6 }}>
-        <span className="muted" style={{ width: 90 }}>top_k</span>
+      <ConfigRow label="top_k" style={{ marginTop: 6 }}>
         <input
           type="number" min="1" max="10"
           value={typeof config.top_k === "number" ? config.top_k : 5}
           onChange={(e) => set({ top_k: parseInt(e.target.value, 10) })}
         />
-      </div>
-    </div>
+      </ConfigRow>
+    </ConfigField>
   );
 }
 
@@ -1270,8 +1267,7 @@ function HttpRequestForm({
   const method = typeof config.method === "string" ? config.method : "GET";
 
   return (
-    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
-      <label>connection</label>
+    <ConfigField bordered label="connection">
       {conns.length === 0 ? (
         <input value={value} placeholder="connection slug (Data tab)"
                onChange={(e) => set({ connection: e.target.value.trim() })} />
@@ -1284,22 +1280,20 @@ function HttpRequestForm({
           ))}
         </select>
       )}
-      <div className="row" style={{ marginTop: 6 }}>
-        <span className="muted" style={{ width: 90 }}>method</span>
+      <ConfigRow label="method" style={{ marginTop: 6 }}>
         <select value={method} onChange={(e) => set({ method: e.target.value })}>
           {["GET", "POST", "PUT", "PATCH", "DELETE"].map((m) => <option key={m} value={m}>{m}</option>)}
         </select>
-      </div>
-      <div className="field">
-        <label>path ({"{{ dotted.path }}"} templated)</label>
+      </ConfigRow>
+      <ConfigField label="path ({{ dotted.path }} templated)">
         <input value={typeof config.path === "string" ? config.path : ""}
                placeholder="/v1/things/{{context.id}}"
                onChange={(e) => set({ path: e.target.value })} />
-      </div>
+      </ConfigField>
       <div className="muted" style={{ fontSize: 11 }}>
         query / headers / body / out_key are edited in the raw config below.
       </div>
-    </div>
+    </ConfigField>
   );
 }
 
@@ -1334,8 +1328,7 @@ function ConnectorActionForm({
   const setParam = (key: string, v: unknown) => set({ params: { ...params, [key]: v } });
 
   return (
-    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
-      <label>connector</label>
+    <ConfigField bordered label="connector">
       <select value={connectorSlug}
               onChange={(e) => set({ connector: e.target.value, action: "", params: {} })}>
         <option value="">— pick a connector —</option>
@@ -1348,15 +1341,14 @@ function ConnectorActionForm({
       </select>
 
       {connector && (
-        <div className="row" style={{ marginTop: 6 }}>
-          <span className="muted" style={{ width: 90 }}>action</span>
+        <ConfigRow label="action" style={{ marginTop: 6 }}>
           <select value={actionName} onChange={(e) => set({ action: e.target.value, params: {} })}>
             <option value="">— pick an action —</option>
             {connector.actions.map((a) => (
               <option key={a.name} value={a.name}>{a.name}</option>
             ))}
           </select>
-        </div>
+        </ConfigRow>
       )}
 
       {action?.description && (
@@ -1394,7 +1386,7 @@ function ConnectorActionForm({
       <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
         out_key / on_error are edited in the raw config below.
       </div>
-    </div>
+    </ConfigField>
   );
 }
 
@@ -1409,27 +1401,25 @@ function AttachmentsForm({
 }) {
   const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
   return (
-    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+    <ConfigField bordered>
       <div className="muted" style={{ fontSize: 11 }}>
         Fetches image (and, opt-in, video) attachments on the Case → local OCR
         / transcription → folded into <code>classify</code> / <code>draft</code>{" "}
         automatically, and available to <code>ai_prompt</code>’s vision mode.
       </div>
-      <div className="row" style={{ marginTop: 6 }}>
-        <span className="muted" style={{ width: 90 }}>source</span>
+      <ConfigRow label="source" style={{ marginTop: 6 }}>
         <select value={typeof config.source === "string" ? config.source : "salesforce"}
                 onChange={(e) => set({ source: e.target.value })}>
           <option value="salesforce">Salesforce (ContentDocument)</option>
           <option value="email">inbound email</option>
           <option value="auto">both</option>
         </select>
-      </div>
-      <div className="row" style={{ marginTop: 4 }}>
-        <span className="muted" style={{ width: 90 }}>max images</span>
+      </ConfigRow>
+      <ConfigRow label="max images" style={{ marginTop: 4 }}>
         <input type="number" min={1} max={10}
                value={typeof config.max_images === "number" ? config.max_images : 5}
                onChange={(e) => set({ max_images: Math.max(1, Math.min(10, Number(e.target.value) || 5)) })} />
-      </div>
+      </ConfigRow>
       <label className="row" style={{ gap: 6, marginTop: 4 }}>
         <input type="checkbox" style={{ width: "auto" }}
                checked={config.ocr !== false} onChange={(e) => set({ ocr: e.target.checked })} />
@@ -1467,16 +1457,15 @@ function AttachmentsForm({
         </div>
       )}
       {config.source !== "email" && (
-        <div className="row" style={{ marginTop: 6 }}>
-          <span className="muted" style={{ width: 90 }}>org</span>
+        <ConfigRow label="org" style={{ marginTop: 6 }}>
           <OrgPicker
             value={typeof config.org === "string" ? config.org : ""}
             onChange={(v) => set({ org: v || undefined })}
             tenantId={tenantId}
           />
-        </div>
+        </ConfigRow>
       )}
-    </div>
+    </ConfigField>
   );
 }
 
@@ -1490,13 +1479,14 @@ function NotifyHumanForm({
   tenantId: string;
 }) {
   const meta = useSlackMeta(tenantId);
+  const caseMeta = useCaseMeta(tenantId, typeof config.org === "string" ? config.org : undefined);
   const set = (patch: Record<string, unknown>) => onConfig({ ...config, ...patch });
   const mention = (config.mention as Record<string, unknown>) || {};
   const channel = typeof config.channel === "string" ? config.channel : "both";
   const rounds = typeof config.max_rounds === "number" ? config.max_rounds : 3;
 
   return (
-    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+    <ConfigField bordered>
       <div className="muted" style={{ fontSize: 11 }}>
         Tags the responsible agent and <strong>opens the Slack reasoning
         dialogue</strong>: the bot picks the questions that matter for this case,
@@ -1508,24 +1498,24 @@ function NotifyHumanForm({
 
       <label style={{ marginTop: 6, display: "block" }}>channel</label>
       <select value={channel} onChange={(e) => set({ channel: e.target.value })}>
-        <option value="both">Slack + Salesforce Chatter</option>
+        <option value="both">Slack + case system note</option>
         <option value="slack">Slack only</option>
-        <option value="salesforce_chatter">Salesforce Chatter only</option>
+        <option value="salesforce_chatter">Case system note only</option>
       </select>
 
-      <div className="row" style={{ marginTop: 6 }}>
-        <span className="muted" style={{ width: 130 }}>
-          slack channel {meta.available && <span className="muted">(live)</span>}
-        </span>
+      <ConfigRow
+        label={<>slack channel {meta.available && <span className="muted">(live)</span>}</>}
+        width={130}
+        style={{ marginTop: 6 }}
+      >
         <ChannelPicker
           value={typeof config.slack_channel === "string" ? config.slack_channel : ""}
           onChange={(v) => set({ slack_channel: v })}
           tenantId={tenantId}
         />
-      </div>
+      </ConfigRow>
 
-      <div className="row" style={{ marginTop: 4 }}>
-        <span className="muted" style={{ width: 130 }}>max clarify rounds</span>
+      <ConfigRow label="max clarify rounds" width={130} style={{ marginTop: 4 }}>
         <input
           type="number"
           min={0}
@@ -1533,38 +1523,39 @@ function NotifyHumanForm({
           value={rounds}
           onChange={(e) => set({ max_rounds: Math.max(0, Math.min(6, Number(e.target.value) || 0)) })}
         />
-      </div>
+      </ConfigRow>
       <div className="muted" style={{ fontSize: 11 }}>
         short follow-ups the bot may send when a <em>critical</em> point is still
         open, before it drafts anyway (default 3).
       </div>
 
-      <div className="row" style={{ marginTop: 6 }}>
-        <span className="muted" style={{ width: 130 }}>@mention (Slack id)</span>
+      <ConfigRow label="@mention (Slack id)" width={130} style={{ marginTop: 6 }}>
         <SlackUserPicker
           value={typeof mention.slack_user_id === "string" ? mention.slack_user_id : ""}
           onChange={(v) => set({ mention: { ...mention, slack_user_id: v } })}
           tenantId={tenantId}
         />
-      </div>
-      <div className="row" style={{ marginTop: 4 }}>
-        <span className="muted" style={{ width: 130 }}>@mention (SF id)</span>
-        <SfMentionPicker
-          value={typeof mention.mention_id === "string" ? mention.mention_id : ""}
-          onChange={(v) => set({ mention: { ...mention, mention_id: v } })}
-          tenantId={tenantId}
-          orgLabel={typeof config.org === "string" ? config.org : undefined}
-          placeholder="005xxxxxxxxxxxx (Chatter @mention)"
-        />
-      </div>
-      <div className="row" style={{ marginTop: 4 }}>
-        <span className="muted" style={{ width: 130 }}>SF org (for the mention lookup)</span>
-        <OrgPicker
-          value={typeof config.org === "string" ? config.org : ""}
-          onChange={(v) => set({ org: v || undefined })}
-          tenantId={tenantId}
-        />
-      </div>
+      </ConfigRow>
+      {caseMeta.connector !== "hubspot" && (
+        <>
+          <ConfigRow label="@mention (SF id)" width={130} style={{ marginTop: 4 }}>
+            <SfMentionPicker
+              value={typeof mention.mention_id === "string" ? mention.mention_id : ""}
+              onChange={(v) => set({ mention: { ...mention, mention_id: v } })}
+              tenantId={tenantId}
+              orgLabel={typeof config.org === "string" ? config.org : undefined}
+              placeholder="005xxxxxxxxxxxx (Chatter @mention)"
+            />
+          </ConfigRow>
+          <ConfigRow label="SF org (for the mention lookup)" width={130} style={{ marginTop: 4 }}>
+            <OrgPicker
+              value={typeof config.org === "string" ? config.org : ""}
+              onChange={(v) => set({ org: v || undefined })}
+              tenantId={tenantId}
+            />
+          </ConfigRow>
+        </>
+      )}
 
       <ByTeamOverride
         label="channel override by routed_team"
@@ -1578,11 +1569,9 @@ function NotifyHumanForm({
         onChange={(v) => set({ mention: { ...mention, slack_user_by_team: v } })}
         renderPicker={(v, onV) => <SlackUserPicker value={v} onChange={onV} tenantId={tenantId} />}
       />
-    </div>
+    </ConfigField>
   );
 }
-
-const ROUTED_TEAMS = ["support", "csm", "sales", "offboarding"];
 
 /** A team -> (something with a real picker) map, e.g. `slack_channel_by_team`.
  *  Rows for the known `team_route` teams plus any custom key already in the
@@ -1604,15 +1593,14 @@ function ByTeamOverride({
     <div style={{ marginTop: 8 }}>
       <label style={{ display: "block" }}>{label}</label>
       {shown.map((team) => (
-        <div className="row" key={team} style={{ gap: 4 }}>
-          <span className="muted" style={{ width: 90 }}>{team}</span>
+        <ConfigRow label={team} key={team} style={{ gap: 4 }}>
           {renderPicker(value[team] ?? "", (v) => {
             const next = { ...value };
             if (v) next[team] = v; else delete next[team];
             onChange(next);
           })}
           <button onClick={() => { const next = { ...value }; delete next[team]; onChange(next); }}>✕</button>
-        </div>
+        </ConfigRow>
       ))}
       {addable.length > 0 && (
         <select value="" onChange={(e) => {
@@ -1640,21 +1628,21 @@ function IdentifyForm({
   const freeList = Array.isArray(config.free_email_domains)
     ? (config.free_email_domains as string[]).join("\n")
     : "";
+  const meta = useCaseMeta(tenantId, typeof config.org === "string" ? config.org : undefined);
 
   return (
-    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
+    <ConfigField bordered>
       <div className="muted" style={{ fontSize: 11 }}>
-        resolves the sender against Salesforce → <code>state.sender</code>{" "}
+        resolves the sender against your connected case system → <code>state.sender</code>{" "}
         (exact contact / email-domain → account / unknown). Pass-through.
       </div>
-      <div className="row" style={{ marginTop: 6 }}>
-        <span className="muted" style={{ width: 110 }}>email field</span>
+      <ConfigRow label="email field" width={110} style={{ marginTop: 6 }}>
         <input
           value={typeof config.email_field === "string" ? config.email_field : "contact.email"}
           placeholder="contact.email"
           onChange={(e) => set({ email_field: e.target.value })}
         />
-      </div>
+      </ConfigRow>
       <label className="row" style={{ gap: 6, marginTop: 4 }}>
         <input
           type="checkbox"
@@ -1673,8 +1661,7 @@ function IdentifyForm({
         />
         create a Lead when nothing matched
       </label>
-      <div className="field" style={{ marginTop: 6 }}>
-        <label>free-mail domains to skip (one per line — blank = built-in list)</label>
+      <ConfigField label="free-mail domains to skip (one per line — blank = built-in list)" style={{ marginTop: 6 }}>
         <textarea
           rows={3}
           value={freeList}
@@ -1684,16 +1671,17 @@ function IdentifyForm({
             set({ free_email_domains: arr.length ? arr : undefined });
           }}
         />
-      </div>
-      <div className="row" style={{ marginTop: 6 }}>
-        <span className="muted" style={{ width: 90 }}>org</span>
-        <OrgPicker
-          value={typeof config.org === "string" ? config.org : ""}
-          onChange={(v) => set({ org: v || undefined })}
-          tenantId={tenantId}
-        />
-      </div>
-    </div>
+      </ConfigField>
+      {meta.connector !== "hubspot" && (
+        <ConfigRow label="org" style={{ marginTop: 6 }}>
+          <OrgPicker
+            value={typeof config.org === "string" ? config.org : ""}
+            onChange={(v) => set({ org: v || undefined })}
+            tenantId={tenantId}
+          />
+        </ConfigRow>
+      )}
+    </ConfigField>
   );
 }
 
@@ -1726,8 +1714,7 @@ function KbLookupForm({
     });
 
   return (
-    <div className="field" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
-      <label>collections to consult</label>
+    <ConfigField bordered label="collections to consult">
       {err && <div className="err" style={{ fontSize: 11 }}>{err}</div>}
       {cols.length === 0 && !err && (
         <div className="muted" style={{ fontSize: 11 }}>
@@ -1745,23 +1732,21 @@ function KbLookupForm({
           {c.name} <span className="muted">({c.entry_count})</span>
         </label>
       ))}
-      <div className="row" style={{ marginTop: 6 }}>
-        <span className="muted" style={{ width: 90 }}>top_k</span>
+      <ConfigRow label="top_k" style={{ marginTop: 6 }}>
         <input
           type="number" min="1" max="10"
           value={typeof config.top_k === "number" ? config.top_k : 4}
           onChange={(e) => set({ top_k: parseInt(e.target.value, 10) })}
         />
-      </div>
-      <div className="field">
-        <label>query (optional — {"{{case.subject}}"} etc.; default = case text)</label>
+      </ConfigRow>
+      <ConfigField label="query (optional — {{case.subject}} etc.; default = case text)">
         <input
           value={typeof config.query === "string" ? config.query : ""}
           placeholder="{{case.subject}} {{case.body}}"
           onChange={(e) => set({ query: e.target.value || undefined })}
         />
-      </div>
-    </div>
+      </ConfigField>
+    </ConfigField>
   );
 }
 
@@ -1788,8 +1773,23 @@ export function EdgeInspector({
   // conditions only ever see `_context()`'s state fields, which don't
   // include anything from Slack, so there's nothing genuine to pick from
   // there.)
-  const sfMeta = useSfMeta(tenantId);
+  const sfMeta = useCaseMeta(tenantId);
   const taRef = useRef<HTMLTextAreaElement>(null);
+
+  // `parseCondition` only succeeds for a flat AND-chain of comparisons —
+  // `or`/`not`/nested parens return null, meaning "too complex for the row
+  // builder, use the raw box." `advanced` lets someone deliberately drop
+  // into the raw box even for a simple expression (e.g. to type `or`).
+  const parsed = parseCondition(ifExpr);
+  const [advanced, setAdvanced] = useState(false);
+  // EdgeInspector isn't remounted (no `key`) when the selected edge changes
+  // (InspectorPanel/FlowEditor just pass a new `edge` prop) — without this,
+  // choosing "Advanced" on one edge would still show the raw box after
+  // clicking over to an unrelated, perfectly simple edge.
+  useEffect(() => setAdvanced(false), [edge.id]);
+  const showBuilder = conditional && parsed !== null && !advanced;
+
+  const setClauses = (clauses: Clause[]) => onCondition({ if: serializeCondition(clauses) });
 
   const insert = (snippet: string) => {
     const ta = taRef.current;
@@ -1798,14 +1798,14 @@ export function EdgeInspector({
     // box first (the whole point of the feature) would otherwise splice
     // the snippet in at position 0 with no separator, mashing it directly
     // onto existing text (e.g. "classification.case_type == 'Question'tier
-    // == 'enterprise'", no space, no &&). Only trust selectionStart/End
+    // == 'enterprise'", no space, no "and"). Only trust selectionStart/End
     // when the textarea is actually the focused element; otherwise treat
-    // this as "append", joined with " && " when there's already content.
+    // this as "append", joined with " and " when there's already content.
     const focused = !!ta && document.activeElement === ta;
     const start = focused ? ta!.selectionStart ?? ifExpr.length : ifExpr.length;
     const end = focused ? ta!.selectionEnd ?? ifExpr.length : ifExpr.length;
     const needsJoin = !focused && ifExpr.slice(0, start).trim() !== "" && !/[\s(]$/.test(ifExpr.slice(0, start));
-    const joined = (needsJoin ? " && " : "") + snippet;
+    const joined = (needsJoin ? " and " : "") + snippet;
     const next = ifExpr.slice(0, start) + joined + ifExpr.slice(end);
     onCondition({ if: next });
     if (ta) {
@@ -1830,7 +1830,15 @@ export function EdgeInspector({
           conditional
         </label>
       </div>
-      {conditional && (
+      {conditional && showBuilder && (
+        <div className="field">
+          <ConditionBuilder clauses={parsed!} onChange={setClauses} sfMeta={sfMeta} />
+          <button type="button" className="link" style={{ fontSize: 11, marginTop: 4 }} onClick={() => setAdvanced(true)}>
+            Advanced (type an expression) »
+          </button>
+        </div>
+      )}
+      {conditional && !showBuilder && (
         <div className="field">
           <label>if (expression)</label>
           <textarea
@@ -1842,26 +1850,41 @@ export function EdgeInspector({
           <div className="muted" style={{ fontSize: 11 }}>
             names: tier, region, confidence, retrieval_score, draft_confidence,
             confidence_gate.pass, classification.urgency, classification.case_type,
-            routed_team, sf_context.*
+            routed_team, case.channel, sf_context.* — join multiple with{" "}
+            <code>and</code> / <code>or</code> (not <code>&&</code> / <code>||</code> — conditions
+            run through a Python expression evaluator, not JavaScript)
           </div>
-          {sfMeta.case_types.length > 0 && (
-            <div className="row" style={{ marginTop: 6, gap: 4, flexWrap: "wrap" }}>
-              {sfMeta.case_types.length > 0 && (
-                <select value="" onChange={(e) => {
-                  if (e.target.value) insert(`classification.case_type == '${e.target.value}'`);
-                }}>
-                  <option value="">+ Case Type…</option>
-                  {sfMeta.case_types.map((t) => <option key={t} value={t}>{t}</option>)}
-                </select>
-              )}
+          <div className="row" style={{ marginTop: 6, gap: 4, flexWrap: "wrap" }}>
+            {sfMeta.case_types.length > 0 && (
               <select value="" onChange={(e) => {
-                if (e.target.value) insert(`routed_team == '${e.target.value}'`);
+                if (e.target.value) insert(`classification.case_type == '${e.target.value}'`);
               }}>
-                <option value="">+ routed_team…</option>
-                {ROUTED_TEAMS.map((t) => <option key={t} value={t}>{t}</option>)}
+                <option value="">+ Case Type…</option>
+                {sfMeta.case_types.map((t) => <option key={t} value={t}>{t}</option>)}
               </select>
-              <button type="button" onClick={() => insert(" && ")}>&&</button>
-              <button type="button" onClick={() => insert(" || ")}>||</button>
+            )}
+            <select value="" onChange={(e) => {
+              if (e.target.value) insert(`routed_team == '${e.target.value}'`);
+            }}>
+              <option value="">+ routed_team…</option>
+              {ROUTED_TEAMS.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+            <select value="" title="branch on which channel this case arrived on — e.g. a HubSpot ticket vs. an email" onChange={(e) => {
+              if (e.target.value) insert(`case.channel == '${e.target.value}'`);
+            }}>
+              <option value="">+ channel…</option>
+              {EDGE_CHANNELS.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+            </select>
+            <button type="button" onClick={() => insert(" and ")}>and</button>
+            <button type="button" onClick={() => insert(" or ")}>or</button>
+          </div>
+          {parsed !== null ? (
+            <button type="button" className="link" style={{ fontSize: 11, marginTop: 4 }} onClick={() => setAdvanced(false)}>
+              « Back to the simple builder
+            </button>
+          ) : ifExpr.trim() !== "" && (
+            <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
+              uses "or"/"not" or nested logic — too complex for the row builder above
             </div>
           )}
         </div>

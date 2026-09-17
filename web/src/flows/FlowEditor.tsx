@@ -15,6 +15,8 @@ import type { Flow, FlowCandidate, NodeTypesResp } from "../types";
 import {
   candidateToCanvas,
   layout,
+  neighborhood,
+  nodeLabel,
   TERMINAL,
   toFlowPayload,
   toReactFlow,
@@ -22,11 +24,15 @@ import {
   type RFEdge,
   type RFNode,
 } from "./graph";
-import { summarize } from "./nodeSummary";
+import { nodeKind, summarize } from "./nodeSummary";
 import { NodeCard } from "./NodeCard";
 import { EdgeLabel } from "./EdgeLabel";
 import { ZoomControl } from "./ZoomControl";
+import { CanvasLegend } from "./CanvasLegend";
 import { InspectorPanel } from "./InspectorPanel";
+import { RunPanel } from "./RunPanel";
+import { ConditionsOverview } from "./ConditionsOverview";
+import { ChatEditView, type ChatLogEntry } from "./ChatEditView";
 import { TriggersPanel } from "./TriggersPanel";
 import { Popover, Toolbar, Button, Banner, Dialog, SlideOver, Field, Input, Textarea, Toggle, useToast, useColorMode } from "../ui";
 
@@ -44,6 +50,16 @@ export function FlowEditor(props: {
 }
 
 type EditorBanner = { kind: "ok" | "err"; text: string; list?: string[] };
+
+// Mirrors .nodecard--{kind}'s border colors (ui.css) so the zoomed-out
+// minimap reads as the same map, not a flat blob of one color per node.
+const MINIMAP_KIND_COLOR: Record<ReturnType<typeof nodeKind>, string> = {
+  trigger: "var(--accent)",
+  terminal: "var(--warn)",
+  invalid: "var(--exception)",
+  broken: "var(--exception)",
+  work: "var(--text-faint)",
+};
 
 function Inner({ flowId, canEdit, onSaved, onDeleted }: {
   flowId: string;
@@ -63,10 +79,48 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [versions, setVersions] = useState<{ version: number; created_at: string }[]>([]);
-  const [assist, setAssist] = useState<null | "mermaid" | "ai-edit">(null);
+  const [assist, setAssist] = useState<null | "mermaid">(null);
   const [assistText, setAssistText] = useState("");
   const [assistErr, setAssistErr] = useState<string | null>(null);
   const [assistBusy, setAssistBusy] = useState(false);
+  // separate from the Mermaid-import overlay's assist* state above — chat
+  // and Mermaid import are two independent actions now (chat is inline,
+  // not an overlay), and sharing one busy/error pair would show a stale
+  // Mermaid error inside the chat view or vice versa.
+  const [chatBusy, setChatBusy] = useState(false);
+  const [chatErr, setChatErr] = useState<string | null>(null);
+  const [testRunOpen, setTestRunOpen] = useState(false);
+  const [conditionsOpen, setConditionsOpen] = useState(false);
+
+  // Which main panel occupies the canvas-wrap slot. Defaults to "chat" (the
+  // "AI-edit as the front door" ask — describing changes in plain English,
+  // not the node graph, is the first thing anyone sees) but remembers a
+  // manual switch per flow, and a view-only caller never gets it at all —
+  // there's nothing to generate without edit rights, so it'd just be an
+  // empty room. `Inner` remounts per flowId (see App), so this doesn't leak
+  // between flows without going through localStorage.
+  const [mainView, setMainView] = useState<"chat" | "canvas">(() => {
+    if (!canEdit) return "canvas";
+    try {
+      return localStorage.getItem(`flow-mainview:${flowId}`) === "canvas" ? "canvas" : "chat";
+    } catch {
+      return "chat";
+    }
+  });
+  const [chatLog, setChatLog] = useState<ChatLogEntry[]>([]);
+
+  function switchView(v: "chat" | "canvas") {
+    setMainView(v);
+    if (v === "chat") {
+      setSelNode(null);
+      setSelEdge(null);
+    }
+    try {
+      localStorage.setItem(`flow-mainview:${flowId}`, v);
+    } catch {
+      /* private mode — best-effort */
+    }
+  }
 
   const nodeTypes = useMemo(() => ({ flowNode: NodeCard }), []);
   const edgeTypes = useMemo(() => ({ default: EdgeLabel }), []);
@@ -81,6 +135,10 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
   const moreBtnRef = useRef<HTMLButtonElement>(null);
   const [rollbackOpen, setRollbackOpen] = useState(false);
   const rollbackBtnRef = useRef<HTMLButtonElement>(null);
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const findBtnRef = useRef<HTMLButtonElement>(null);
+  const findInputRef = useRef<HTMLInputElement>(null);
   const [dialog, setDialog] = useState<null | "publish" | "delete" | "template" | { rollback: number }>(null);
   const [tplName, setTplName] = useState("");
   const [tplDesc, setTplDesc] = useState("");
@@ -228,7 +286,14 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
     };
   }, [flowId, setNodes, setEdges, putCandidate]);
 
-  // once the type registry has loaded, flag any node whose type isn't in it
+  // Once the type registry has loaded, flag any node whose type isn't in
+  // it. Also re-runs on `nodes.length` (not just `types`) — the type
+  // registry and the flow's own nodes load via two independent fetches,
+  // and when node-types happens to resolve before the flow does, this ran
+  // once against the still-empty node list and never fired again once the
+  // flow's real nodes showed up, silently leaving a genuinely invalid node
+  // type unflagged. Cheap to re-run: the inner setNodes bails out to the
+  // same array reference when nothing actually changed.
   useEffect(() => {
     if (!types) return;
     setNodes((ns) => {
@@ -241,31 +306,119 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
       });
       return changed ? next : ns;
     });
-  }, [types, setNodes]);
+  }, [types, nodes.length, setNodes]);
 
-  async function runAssist() {
+  // Live version of one of builder.py's build_graph checks: a node with >1
+  // unconditional (no condition.if) outgoing edge is a FlowBuildError at
+  // publish time — router precedence for two "always take this" edges is
+  // undefined. Flagging it on the node itself, live, catches it while
+  // wiring edges instead of only at Validate/Publish. (The other build_graph
+  // checks — referential integrity, cycles, exactly-one-entry-point — stay
+  // server-side in validate_flow.py/Validate; this is the one cheap to
+  // recompute on every edge edit without forking that heavier logic.)
+  useEffect(() => {
+    const defaultOutCount = new Map<string, number>();
+    for (const e of edges) {
+      if (!(e.data?.condition as { if?: string } | undefined)?.if) {
+        defaultOutCount.set(e.source, (defaultOutCount.get(e.source) ?? 0) + 1);
+      }
+    }
+    setNodes((ns) => {
+      let changed = false;
+      const next = ns.map((n) => {
+        const tooManyDefaults = (defaultOutCount.get(n.id) ?? 0) > 1;
+        if (tooManyDefaults === !!n.data.tooManyDefaults) return n;
+        changed = true;
+        return { ...n, data: { ...n.data, tooManyDefaults } };
+      });
+      return changed ? next : ns;
+    });
+  }, [edges, setNodes]);
+
+  // Another live build_graph check: build_graph requires exactly one root
+  // (a node with no incoming edge). Zero is impossible once there's at
+  // least one node with edges into it; >1 usually means a node got dropped
+  // onto the canvas without ever being wired in from anywhere — plausible
+  // to do by accident, and otherwise invisible until Publish fails.
+  const disconnectedRoots = useMemo(() => {
+    if (nodes.length < 2) return [];
+    const hasIncoming = new Set(edges.map((e) => e.target));
+    const roots = nodes.filter((n) => !hasIncoming.has(n.id));
+    return roots.length > 1 ? roots : [];
+  }, [nodes, edges]);
+
+  // Selecting a node dims everything outside its focus neighborhood
+  // (shared upstream + its own downstream, see graph.ts's `neighborhood`) —
+  // on a flow with real branches (a confidence_gate fanning 6 ways), this
+  // is what actually declutters the canvas: the sibling branches you're
+  // not looking at fade, the shared setup stays visible. Deriving this into
+  // `displayNodes`/`displayEdges` (never through `setNodes`/`setEdges`) so
+  // it's purely a render-time overlay — it can't mark the flow dirty or
+  // pollute undo/redo history. Only for a node selection; an edge selection
+  // leaves everything at full opacity.
+  const focus = useMemo(
+    () => (selNode ? neighborhood(selNode, edges) : null),
+    [selNode, edges],
+  );
+  const displayNodes = useMemo(
+    () => (focus ? nodes.map((n) => ({ ...n, data: { ...n.data, dimmed: !focus.nodeIds.has(n.id) } })) : nodes),
+    [nodes, focus],
+  );
+  const displayEdges = useMemo(
+    () =>
+      focus
+        ? edges.map((e) => ({
+            ...e,
+            style: { ...e.style, opacity: focus.edgeIds.has(e.id) ? 1 : 0.15 },
+          }))
+        : edges,
+    [edges, focus],
+  );
+
+  async function runMermaidImport() {
     if (!flow) return;
     setAssistBusy(true);
     setAssistErr(null);
     try {
-      if (assist === "mermaid") {
-        const res = await api.importMermaid(assistText);
-        putCandidate(flow, res, `imported ${res.nodes.length} node(s) from Mermaid`);
-      } else {
-        const res = await api.assistEditFlow(flowId, assistText);
-        const d = res.diff;
-        const tail = res.summary ? ` — ${res.summary}` : "";
-        const note = d
-          ? `AI edit · +${d.added_nodes.length}/−${d.removed_nodes.length}/~${d.changed_nodes.length} nodes${tail}`
-          : `AI edit applied${tail}`;
-        putCandidate(flow, res, note);
-      }
+      const res = await api.importMermaid(assistText);
+      putCandidate(flow, res, `imported ${res.nodes.length} node(s) from Mermaid`);
       setAssist(null);
       setAssistText("");
     } catch (e) {
       setAssistErr((e as ApiError).message);
     }
     setAssistBusy(false);
+  }
+
+  // The chat view's own generate action — used to live inside runAssist's
+  // "ai-edit" branch when AI-edit was a buried SlideOver overlay; now it's
+  // the default landing view, driven by its own function (not the
+  // mermaid-only `assist` state machine) plus a running, session-only
+  // `chatLog` (never persisted — a page reload starts a fresh log, same as
+  // this app has never had a real multi-turn chat memory on the backend;
+  // pretending otherwise would be worse than just saying so in the UI).
+  async function runChatEdit(promptText: string) {
+    if (!flow || !promptText.trim()) return;
+    setChatBusy(true);
+    setChatErr(null);
+    try {
+      const res = await api.assistEditFlow(flowId, promptText.trim());
+      const d = res.diff;
+      const tail = res.summary ? ` — ${res.summary}` : "";
+      const note = d
+        ? `+${d.added_nodes.length} / −${d.removed_nodes.length} / ~${d.changed_nodes.length} nodes${tail}`
+        : `applied${tail}`;
+      putCandidate(flow, res, `AI edit · ${note}`);
+      setChatLog((log) => [
+        ...log,
+        { id: uuid(), prompt: promptText.trim(), ok: res.errors.length === 0, note, list: [...res.errors, ...res.warnings] },
+      ]);
+    } catch (e) {
+      const msg = (e as ApiError).message;
+      setChatErr(msg);
+      setChatLog((log) => [...log, { id: uuid(), prompt: promptText.trim(), ok: false, note: msg }]);
+    }
+    setChatBusy(false);
   }
 
   const onConnect = useCallback(
@@ -444,7 +597,8 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
     try {
       await api.setSfEntry(flowId, on);
       await reload();
-      toast(on ? "This flow now runs on new Salesforce Cases" : "Disconnected from Salesforce");
+      toast(on ? "This flow now runs on new cases/tickets from your connected case system"
+               : "Disconnected as the case-system entry flow");
       onSaved();
     } catch (e) {
       setBanner({ kind: "err", text: (e as ApiError).message });
@@ -507,6 +661,19 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
               </span>
               <span title="draft revision (optimistic-concurrency token)">draft rev {flow.version}</span>
               {dirty && <span title="unsaved changes" style={{ color: "var(--accent)" }}>● unsaved</span>}
+              {disconnectedRoots.length > 1 && (
+                <span
+                  className="pill"
+                  style={{ color: "var(--exception-text)", borderColor: "var(--exception)" }}
+                  title={
+                    "won't publish: " + disconnectedRoots.length + " nodes have no incoming edge from " +
+                    "anywhere in this flow (" + disconnectedRoots.map((n) => n.data.label).join(", ") +
+                    ") — a flow needs exactly one entry point"
+                  }
+                >
+                  ⚠ {disconnectedRoots.length} disconnected entry points
+                </span>
+              )}
               {!canEdit && (
                 <span className="pill" title="your access is view-only">view-only</span>
               )}
@@ -514,23 +681,57 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
                 <Toggle checked={!!flow.sf_entry} disabled={busy} onChange={(on) => doSetSfEntry(on)}>
                   <span
                     className="muted"
-                    title="when on, POST /api/hooks/salesforce/case runs this flow for every new Case (one flow per workspace)"
+                    title="when on, this flow runs for every new case/ticket from your connected case system (Salesforce, HubSpot, ...) — one entry flow per workspace"
                   >
-                    Salesforce entry
+                    Case system entry
                   </span>
                 </Toggle>
               ) : (
                 flow.sf_entry && (
-                  <span className="pill published" title="the Salesforce Case hook runs this flow">
-                    Salesforce entry
+                  <span className="pill published" title="your connected case system's inbound hook/watcher runs this flow">
+                    Case system entry
                   </span>
                 )
               )}
             </>
           }
         >
+          {canEdit && (
+            <div className="view-toggle" role="group" aria-label="Main view">
+              <button
+                type="button"
+                className={mainView === "chat" ? "is-active" : ""}
+                aria-pressed={mainView === "chat"}
+                onClick={() => switchView("chat")}
+              >
+                💬 Chat
+              </button>
+              <button
+                type="button"
+                className={mainView === "canvas" ? "is-active" : ""}
+                aria-pressed={mainView === "canvas"}
+                onClick={() => switchView("canvas")}
+              >
+                🗺️ Graph
+              </button>
+            </div>
+          )}
           <Button variant="ghost" onClick={doValidate} disabled={busy}>
             Validate
+          </Button>
+          <Button
+            variant="ghost"
+            onClick={() => setTestRunOpen(true)}
+            title="Run a sample case through this flow and see the full trace — doesn't require selecting a node"
+          >
+            Test run
+          </Button>
+          <Button
+            variant="ghost"
+            onClick={() => setConditionsOpen(true)}
+            title="See every conditional edge in this flow in one place, instead of clicking each one"
+          >
+            Conditions
           </Button>
           {canEdit && (
             <>
@@ -556,9 +757,6 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
                   </button>
                   <button className="palette__item" onClick={() => { setMoreOpen(false); setAssist("mermaid"); setAssistText(""); setAssistErr(null); }}>
                     Import Mermaid
-                  </button>
-                  <button className="palette__item" onClick={() => { setMoreOpen(false); setAssist("ai-edit"); setAssistText(""); setAssistErr(null); }}>
-                    ✨ AI edit
                   </button>
                   <button
                     className="palette__item"
@@ -616,9 +814,21 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
 
       <div className="workarea">
         <div className="canvas-wrap">
+          {mainView === "chat" ? (
+            <ChatEditView
+              canEdit={canEdit}
+              busy={chatBusy}
+              err={chatErr}
+              log={chatLog}
+              hasNodes={nodes.length > 0}
+              onGenerate={runChatEdit}
+              onViewGraph={() => switchView("canvas")}
+            />
+          ) : (
+          <>
           <ReactFlow
-            nodes={nodes}
-            edges={edges}
+            nodes={displayNodes}
+            edges={displayEdges}
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
             onNodesChange={onNodesChange}
@@ -670,66 +880,133 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
               pannable
               zoomable
               maskColor="rgba(0, 0, 0, 0.4)"
-              nodeColor="var(--accent)"
+              nodeColor={(n) => MINIMAP_KIND_COLOR[nodeKind(n.data as RFNode["data"])]}
               nodeStrokeColor="transparent"
             />
           </ReactFlow>
 
           <ZoomControl />
+          <CanvasLegend />
 
-          {canEdit && (
-            <>
-              <button
-                type="button"
-                ref={paletteBtnRef}
-                className="canvas-fab"
-                aria-haspopup="menu"
-                aria-expanded={paletteOpen}
-                onClick={() => setPaletteOpen((o) => !o)}
-              >
-                ＋ Add node ▾
-              </button>
-              <Popover
-                anchorRef={paletteBtnRef}
-                open={paletteOpen}
-                onClose={() => setPaletteOpen(false)}
-                width={240}
-              >
-                <div className="palette__kicker">Node types</div>
-                <input
-                  autoFocus
-                  className="ui-input"
-                  value={nodeFilter}
-                  placeholder="filter…"
-                  onChange={(e) => setNodeFilter(e.target.value)}
-                  style={{ margin: "0 2px 4px" }}
-                />
-                <div className="palette__list">
-                  {(types?.types ?? [])
-                    .filter((t) => t.includes(nodeFilter.trim().toLowerCase()))
-                    .map((t) => (
-                      <button
-                        key={t}
-                        type="button"
-                        className="palette__item"
-                        onClick={() => addNode(t)}
-                        title={`add a ${t} node`}
-                      >
-                        {t}
-                        <span className="muted" style={{ fontSize: 10.5 }}>
-                          {TERMINAL.has(t) ? "terminal" : "node"}
-                        </span>
-                      </button>
-                    ))}
-                  {(types?.types ?? []).filter((t) => t.includes(nodeFilter.trim().toLowerCase())).length === 0 && (
-                    <div className="muted" style={{ padding: "8px 10px", fontSize: 12 }}>
-                      no match
-                    </div>
-                  )}
-                </div>
-              </Popover>
-            </>
-          )}
+          <div className="canvas-toolbar-tl">
+            <button
+              type="button"
+              ref={findBtnRef}
+              className="canvas-fab"
+              aria-haspopup="menu"
+              aria-expanded={findOpen}
+              title="Jump to a node by name or type — useful once a flow has more nodes than fit on screen"
+              onClick={() => {
+                setFindOpen((o) => !o);
+                setFindQuery("");
+                requestAnimationFrame(() => findInputRef.current?.focus());
+              }}
+            >
+              🔎 Find
+            </button>
+            <Popover anchorRef={findBtnRef} open={findOpen} onClose={() => setFindOpen(false)} width={240}>
+              <input
+                ref={findInputRef}
+                autoFocus
+                className="ui-input"
+                value={findQuery}
+                placeholder="node name or type…"
+                onChange={(e) => setFindQuery(e.target.value)}
+                style={{ margin: "0 2px 4px" }}
+              />
+              <div className="palette__list">
+                {(() => {
+                  const q = findQuery.trim().toLowerCase();
+                  const hits = q
+                    ? nodes.filter(
+                        (n) => n.data.label.toLowerCase().includes(q) || n.data.nodeType.toLowerCase().includes(q),
+                      )
+                    : nodes;
+                  if (hits.length === 0) {
+                    return (
+                      <div className="muted" style={{ padding: "8px 10px", fontSize: 12 }}>
+                        no match
+                      </div>
+                    );
+                  }
+                  return hits.map((n) => (
+                    <button
+                      key={n.id}
+                      type="button"
+                      className="palette__item"
+                      onClick={() => {
+                        setSelNode(n.id);
+                        setSelEdge(null);
+                        setFindOpen(false);
+                      }}
+                    >
+                      {n.data.label}
+                      <span className="muted" style={{ fontSize: 10.5 }}>{n.data.nodeType}</span>
+                    </button>
+                  ));
+                })()}
+              </div>
+            </Popover>
+
+            {canEdit && (
+              <>
+                <button
+                  type="button"
+                  ref={paletteBtnRef}
+                  className="canvas-fab"
+                  aria-haspopup="menu"
+                  aria-expanded={paletteOpen}
+                  onClick={() => setPaletteOpen((o) => !o)}
+                >
+                  ＋ Add node ▾
+                </button>
+                <Popover
+                  anchorRef={paletteBtnRef}
+                  open={paletteOpen}
+                  onClose={() => setPaletteOpen(false)}
+                  width={240}
+                >
+                  <div className="palette__kicker">Node types</div>
+                  <input
+                    autoFocus
+                    className="ui-input"
+                    value={nodeFilter}
+                    placeholder="filter…"
+                    onChange={(e) => setNodeFilter(e.target.value)}
+                    style={{ margin: "0 2px 4px" }}
+                  />
+                  <div className="palette__list">
+                    {(() => {
+                      const q = nodeFilter.trim().toLowerCase();
+                      const filtered = (types?.types ?? [])
+                        .filter((t) => t.includes(q) || nodeLabel(t).toLowerCase().includes(q));
+                      if (filtered.length === 0) {
+                        return (
+                          <div className="muted" style={{ padding: "8px 10px", fontSize: 12 }}>
+                            no match
+                          </div>
+                        );
+                      }
+                      return filtered.map((t) => (
+                        <button
+                          key={t}
+                          type="button"
+                          className="palette__item"
+                          onClick={() => addNode(t)}
+                          title={`add a ${t} node`}
+                        >
+                          {nodeLabel(t)}
+                          <span className="muted" style={{ fontSize: 10.5 }}>
+                            {TERMINAL.has(t) ? "terminal" : "node"}
+                          </span>
+                        </button>
+                      ));
+                    })()}
+                  </div>
+                </Popover>
+              </>
+            )}
+          </div>
 
           {canEdit && (past.current.length > 0 || future.current.length > 0) && (
             <div
@@ -742,6 +1019,8 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
                 redo
               </button>
             </div>
+          )}
+          </>
           )}
 
           {banner && (
@@ -795,7 +1074,6 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
         edge={selectedNode ? null : selectedEdge}
         config={selectedNode ? configById[selectedNode.id] ?? {} : {}}
         tenantId={flow?.tenant_id || ""}
-        flowId={flowId}
         dirty={dirty}
         inCount={selectedNode ? edges.filter((e) => e.target === selectedNode.id).length : 0}
         outCount={selectedNode ? edges.filter((e) => e.source === selectedNode.id).length : 0}
@@ -833,17 +1111,17 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
       <SlideOver
         open={!!assist}
         onClose={() => !assistBusy && setAssist(null)}
-        title={assist === "mermaid" ? "Import a Mermaid flowchart" : "Edit this flow with AI"}
-        width={assist === "mermaid" ? 520 : 380}
+        title="Import a Mermaid flowchart"
+        width={520}
         footer={
           <>
             <Button
               variant="primary"
-              onClick={runAssist}
+              onClick={runMermaidImport}
               loading={assistBusy}
               disabled={!assistText.trim()}
             >
-              {assist === "mermaid" ? "Import" : "Generate"}
+              Import
             </Button>
             <Button variant="ghost" onClick={() => setAssist(null)} disabled={assistBusy}>
               Cancel
@@ -852,22 +1130,56 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
         }
       >
         <p className="muted" style={{ margin: "0 0 12px", fontSize: 12.5, lineHeight: 1.6 }}>
-          {assist === "mermaid"
-            ? "Paste a flowchart. It replaces the canvas as an unsaved draft — node types are matched by label, edge labels become warnings to wire up, nothing saves until you hit Save draft."
-            : "Describe the change in plain English (e.g. “add a clarify step when the gate fails for non-billing topics”). The AI rewrites the graph for you to review on the canvas; nothing saves until you hit Save draft."}
+          Paste a flowchart. It replaces the canvas as an unsaved draft — node types are
+          matched by label, edge labels become warnings to wire up, nothing saves until you
+          hit Save draft.
         </p>
         <Textarea
-          rows={assist === "mermaid" ? 14 : 5}
+          rows={14}
           value={assistText}
           autoFocus
-          placeholder={
-            assist === "mermaid"
-              ? "flowchart TD\n  R[retrieve] --> C[classify] --> D[draft]\n  D --> G{confidence gate}\n  G -->|pass| A[auto reply]\n  G -->|fail| H[ask human]"
-              : "add an identify step before classify, and route unknown senders to a clarify node"
-          }
+          placeholder={"flowchart TD\n  R[retrieve] --> C[classify] --> D[draft]\n  D --> G{confidence gate}\n  G -->|pass| A[auto reply]\n  G -->|fail| H[ask human]"}
           onChange={(e) => setAssistText(e.target.value)}
         />
         {assistErr && <div className="err" style={{ fontSize: 12, marginTop: 8 }}>{assistErr}</div>}
+      </SlideOver>
+
+      <SlideOver
+        open={testRunOpen}
+        onClose={() => setTestRunOpen(false)}
+        title="Test run"
+        width={520}
+        footer={
+          <Button variant="secondary" onClick={() => setTestRunOpen(false)}>
+            Close
+          </Button>
+        }
+      >
+        <RunPanel flowId={flowId} tenantId={flow?.tenant_id || ""} />
+      </SlideOver>
+
+      <SlideOver
+        open={conditionsOpen}
+        onClose={() => setConditionsOpen(false)}
+        title="Conditions"
+        width={520}
+        footer={
+          <Button variant="secondary" onClick={() => setConditionsOpen(false)}>
+            Close
+          </Button>
+        }
+      >
+        <ConditionsOverview
+          nodes={nodes}
+          edges={edges}
+          tenantId={flow?.tenant_id || ""}
+          onCondition={setEdgeCond}
+          onJumpTo={(edgeId) => {
+            setConditionsOpen(false);
+            setSelEdge(edgeId);
+            setSelNode(null);
+          }}
+        />
       </SlideOver>
 
       <Dialog

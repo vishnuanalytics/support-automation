@@ -48,6 +48,7 @@ import type {
   TenantHealth,
   LlmKeyStatus,
   ModelsResp,
+  RecentCase,
   SfMeta,
   SlackMeta,
   TraceResult,
@@ -60,7 +61,10 @@ import type {
   TemplateMeta,
   ZendeskConnection,
   ZendeskConnectionSave,
+  HubSpotConnection,
+  HubSpotConnectionSave,
   CaseConnector,
+  ChannelConnectorMap,
   CaseTaxonomy,
   CaseTaxonomyConfig,
   NotifyTarget,
@@ -239,12 +243,44 @@ export const api = {
       ),
   },
 
+  hubspot: {
+    status: (tenantId?: string) =>
+      req<HubSpotConnection>(`/integrations/hubspot${tenantId ? `?tenant_id=${tenantId}` : ""}`),
+    save: (b: HubSpotConnectionSave) =>
+      req<HubSpotConnection>("/integrations/hubspot", { method: "PUT", body: JSON.stringify(b) }),
+    remove: (tenantId?: string) =>
+      req<void>(`/integrations/hubspot${tenantId ? `?tenant_id=${tenantId}` : ""}`, { method: "DELETE" }),
+    test: (b: HubSpotConnectionSave) =>
+      req<{ ok: boolean; error: string | null; portal_id?: string | null }>(
+        "/integrations/hubspot/test", { method: "POST", body: JSON.stringify(b) },
+      ),
+    /** The webhook-only companion app's Client Secret (a SEPARATE HubSpot
+     * app from the Private App above — see /webhooks/hubspot/{tenant_id}'s
+     * own docstring for why). */
+    saveWebhookSecret: (webhook_client_secret: string, tenantId?: string) =>
+      req<HubSpotConnection>("/integrations/hubspot/webhook-secret", {
+        method: "PUT", body: JSON.stringify({ webhook_client_secret, tenant_id: tenantId }),
+      }),
+    webhookUrl: (tenantId?: string) =>
+      req<{ tenant_id: string; url: string }>(
+        `/integrations/hubspot/webhook-url${tenantId ? `?tenant_id=${tenantId}` : ""}`),
+  },
+
   caseConnector: {
     get: (tenantId?: string) =>
       req<CaseConnector>(`/tenants/case-connector${tenantId ? `?tenant_id=${tenantId}` : ""}`),
     set: (caseConnector: string, tenantId?: string) =>
       req<CaseConnector>("/tenants/case-connector", {
         method: "PUT", body: JSON.stringify({ case_connector: caseConnector, tenant_id: tenantId }),
+      }),
+  },
+
+  channelConnectorMap: {
+    get: (tenantId?: string) =>
+      req<ChannelConnectorMap>(`/tenants/channel-connector-map${tenantId ? `?tenant_id=${tenantId}` : ""}`),
+    set: (map: Record<string, string>, tenantId?: string) =>
+      req<ChannelConnectorMap>("/tenants/channel-connector-map", {
+        method: "PUT", body: JSON.stringify({ channel_connector_map: map, tenant_id: tenantId }),
       }),
   },
 
@@ -463,6 +499,23 @@ export const api = {
     meta: (tenantId: string, orgLabel = "default") =>
       req<SfMeta>(`/salesforce/meta?tenant_id=${tenantId}&org=${encodeURIComponent(orgLabel)}`),
   },
+
+  /** The flow editor's Inspector calls this one endpoint for its live
+   * pickers (queue/field/user) regardless of which case connector the
+   * tenant is on — the backend resolves `tenants.case_connector` and
+   * returns that connector's own `SfMeta`-shaped metadata, tagged with
+   * which `connector` it came from. */
+  caseConnectorMeta: (tenantId: string, orgLabel = "default") =>
+    req<SfMeta>(`/case-connector/meta?tenant_id=${tenantId}&org=${encodeURIComponent(orgLabel)}`),
+
+  /** The tenant's most recent real Cases/tickets from whichever case
+   * system they're connected to, already shaped as flow `case` dicts —
+   * powers the Test Run panel's "try a real recent case" picker so
+   * testing a flow doesn't mean hand-writing sample JSON. */
+  caseConnectorRecentCases: (tenantId: string, orgLabel = "default", limit = 8) =>
+    req<{ cases: RecentCase[]; connector: string }>(
+      `/case-connector/recent-cases?tenant_id=${tenantId}&org=${encodeURIComponent(orgLabel)}&limit=${limit}`,
+    ),
 
   trace: {
     get: (key: string) => req<TraceResult>(`/trace/${encodeURIComponent(key.trim())}`),
