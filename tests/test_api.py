@@ -275,6 +275,64 @@ def test_freshchat_webhook_skips_a_non_customer_message(monkeypatch):
     assert r.status_code == 202 and r.json()["skipped"]
 
 
+# ── HubSpot push webhook — a real separate app from the Private App,
+# see /webhooks/hubspot/{tenant_id}'s own docstring ─────────────────────
+def test_hubspot_webhook_404s_for_an_unconnected_tenant():
+    r = client.post("/webhooks/hubspot/no-such-tenant", json=[{"objectId": "1"}])
+    assert r.status_code == 404
+
+
+def test_hubspot_webhook_404s_without_a_webhook_secret_configured(monkeypatch):
+    from interpreter import hubspot
+
+    monkeypatch.setattr(hubspot, "load_channel", lambda *a, **k: hubspot.HubSpotConfig(
+        tenant_id="t", access_token="tok"))   # no webhook_client_secret set
+    r = client.post("/webhooks/hubspot/t", json=[{"objectId": "1"}])
+    assert r.status_code == 404
+
+
+def test_hubspot_webhook_401s_on_a_bad_signature(monkeypatch):
+    from interpreter import hubspot
+
+    monkeypatch.setattr(hubspot, "load_channel", lambda *a, **k: hubspot.HubSpotConfig(
+        tenant_id="t", access_token="tok", webhook_client_secret="whs"))
+    monkeypatch.setattr(hubspot, "verify_webhook_signature", lambda *a, **k: False)
+    r = client.post("/webhooks/hubspot/t", json=[{"objectId": "1"}])
+    assert r.status_code == 401
+
+
+def test_hubspot_webhook_happy_path_enqueues_a_run_flow_job(monkeypatch):
+    from interpreter import hubspot, jobs
+
+    monkeypatch.setattr(hubspot, "load_channel", lambda *a, **k: hubspot.HubSpotConfig(
+        tenant_id="t", access_token="tok", webhook_client_secret="whs"))
+    monkeypatch.setattr(hubspot, "verify_webhook_signature", lambda *a, **k: True)
+    monkeypatch.setattr(hubspot, "resolve_entry_flow", lambda tid, sb: "f1")
+    monkeypatch.setattr(hubspot, "_client", lambda tid, sb: type("C", (), {
+        "request": lambda self, *a, **k: {"id": "42", "properties": {"subject": "help", "content": "x"}},
+    })())
+    monkeypatch.setattr(hubspot, "ticket_as_case", lambda ticket, tid, sb: {
+        "sf_id": "42", "id": "42", "subject": "help", "body": "x", "channel": "hubspot"})
+
+    enqueued = []
+    monkeypatch.setattr(jobs, "enqueue", lambda kind, payload, **k: enqueued.append(
+        (kind, payload, k)) or "job1")
+
+    r = client.post("/webhooks/hubspot/t", json=[{"objectId": "42", "subscriptionType": "ticket.creation"}])
+    assert r.status_code == 202, r.text
+    assert r.json() == {"received": 1, "enqueued": 1}
+    kind, payload, kw = enqueued[0]
+    assert kind == "run_flow" and payload["flow_id"] == "f1"
+    assert payload["case"]["sf_id"] == "42"
+    assert kw["dedupe_key"] == "hs:t:42" and kw["tenant_id"] == "t"
+
+
+def test_hubspot_webhook_secret_endpoints_need_a_token():
+    assert client.put("/api/integrations/hubspot/webhook-secret",
+                      json={"webhook_client_secret": "x"}).status_code == 401
+    assert client.get("/api/integrations/hubspot/webhook-url").status_code == 401
+
+
 def test_connections_need_a_token_and_http_request_is_a_node_type():
     assert client.get("/api/connections").status_code == 401
     assert client.post("/api/connections", json={"slug": "x", "base_url": "https://y"}).status_code == 401
@@ -320,6 +378,85 @@ def test_salesforce_meta_is_tenant_scoped_not_globally_cached(auth_headers):
     r2 = client.get(f"/api/salesforce/meta?org=nonexistent-org-label&tenant_id={GLOBEX_TENANT}",
                     headers=auth_headers)
     assert r2.status_code == 200
+
+
+def test_hubspot_meta_needs_a_token():
+    assert client.get("/api/hubspot/meta").status_code == 401
+
+
+def test_case_connector_meta_needs_a_token():
+    assert client.get("/api/case-connector/meta").status_code == 401
+
+
+@pytest.mark.integration
+def test_case_connector_meta_dispatches_by_the_tenants_connector(auth_headers):
+    """The flow editor's Inspector calls this one endpoint regardless of
+    which connector a tenant is on; it must resolve `tenants.case_connector`
+    and return that connector's own metadata shape, tagged with `connector`."""
+    try:
+        client.put("/api/tenants/case-connector", headers=auth_headers,
+                  json={"case_connector": "hubspot", "tenant_id": GLOBEX_TENANT})
+        r = client.get(f"/api/case-connector/meta?tenant_id={GLOBEX_TENANT}", headers=auth_headers)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["connector"] == "hubspot"
+        assert set(body) >= {"available", "queues", "case_types", "modules", "case_fields", "users"}
+    finally:
+        client.put("/api/tenants/case-connector", headers=auth_headers,
+                  json={"case_connector": "salesforce", "tenant_id": GLOBEX_TENANT})
+
+
+def test_case_connector_recent_cases_needs_a_token():
+    assert client.get("/api/case-connector/recent-cases").status_code == 401
+
+
+def test_case_connector_recent_cases_dispatches_by_connector(monkeypatch):
+    """The flow editor's Test Run "try a real recent case" picker calls this
+    one endpoint regardless of connector; it must resolve `tenants.
+    case_connector` (same lookup as case_connector_meta) and route to that
+    connector's own recent-cases fetch, tagged with `connector`. Offline +
+    deterministic: fakes the tenant lookup and `hubspot.list_recent_tickets`/
+    `ticket_as_case`, same pattern as the slack_meta RLS-leak regression
+    test above."""
+    import api.main as main
+    from interpreter import hubspot as _hs
+
+    class _FakeSb:
+        _table = None
+
+        def table(self, name):
+            self._table = name
+            return self
+
+        def select(self, *a, **k):
+            return self
+
+        def eq(self, *a, **k):
+            return self
+
+        def execute(self):
+            if self._table == "tenant_members":
+                return type("R", (), {"data": [{"tenant_id": "fake-tenant"}]})()
+            return type("R", (), {"data": [{"case_connector": "hubspot"}]})()
+
+    class _FakeCaller:
+        user_id = "u1"
+        email = "u1@example.test"
+        sb = _FakeSb()
+
+    monkeypatch.setattr(main, "_service", _FakeSb())
+    monkeypatch.setattr(_hs, "list_recent_tickets", lambda tid, sb=None, limit=10: [{"id": "42"}])
+    monkeypatch.setattr(_hs, "ticket_as_case", lambda t, tid=None, sb=None: {"sf_id": "42", "subject": "Help"})
+    main.app.dependency_overrides[main.caller] = lambda: _FakeCaller()
+    try:
+        r = client.get("/api/case-connector/recent-cases?tenant_id=fake-tenant")
+    finally:
+        main.app.dependency_overrides.pop(main.caller, None)
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["connector"] == "hubspot"
+    assert body["cases"] == [{"sf_id": "42", "subject": "Help"}]
 
 
 def test_slack_meta_needs_a_token():
@@ -599,9 +736,22 @@ def test_zendesk_connection_endpoints_need_a_token():
     assert client.delete("/api/integrations/zendesk").status_code == 401
 
 
+def test_hubspot_connection_endpoints_need_a_token():
+    assert client.get("/api/integrations/hubspot").status_code == 401
+    assert client.put("/api/integrations/hubspot", json={"access_token": "x"}).status_code == 401
+    assert client.post("/api/integrations/hubspot/test", json={"access_token": "x"}).status_code == 401
+    assert client.delete("/api/integrations/hubspot").status_code == 401
+
+
 def test_case_connector_endpoints_need_a_token():
     assert client.get("/api/tenants/case-connector").status_code == 401
     assert client.put("/api/tenants/case-connector", json={"case_connector": "zendesk"}).status_code == 401
+
+
+def test_channel_connector_map_endpoints_need_a_token():
+    assert client.get("/api/tenants/channel-connector-map").status_code == 401
+    assert client.put("/api/tenants/channel-connector-map",
+                      json={"channel_connector_map": {"hubspot": "hubspot"}}).status_code == 401
 
 
 def test_case_taxonomy_endpoints_need_a_token():
@@ -1114,6 +1264,50 @@ def test_zendesk_connection_write_is_owner_only(globex_as_viewer, auth_headers):
 
 
 @pytest.mark.integration
+def test_hubspot_connection_configure_status_and_disconnect(auth_headers):
+    body = {"access_token": "fake-token-secret", "tenant_id": GLOBEX_TENANT}
+    try:
+        r = client.put("/api/integrations/hubspot", headers=auth_headers, json=body)
+        assert r.status_code == 200, r.text
+        got = client.get("/api/integrations/hubspot", headers=auth_headers,
+                         params={"tenant_id": GLOBEX_TENANT}).json()
+        assert got["configured"] is True and got["status"] == "active"
+        assert "fake-token-secret" not in str(got) and "access_token" not in got
+    finally:
+        client.delete("/api/integrations/hubspot", headers=auth_headers,
+                      params={"tenant_id": GLOBEX_TENANT})
+    gone = client.get("/api/integrations/hubspot", headers=auth_headers,
+                      params={"tenant_id": GLOBEX_TENANT}).json()
+    assert gone["configured"] is False and gone["status"] == "none"
+
+
+@pytest.mark.integration
+def test_hubspot_connection_test_connection_reports_failure_cleanly(auth_headers):
+    r = client.post("/api/integrations/hubspot/test", headers=auth_headers, json={
+        "access_token": "definitely-bad-token", "tenant_id": GLOBEX_TENANT,
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False and body["error"]
+
+
+@pytest.mark.integration
+def test_hubspot_connection_write_is_owner_only(globex_as_viewer, auth_headers):
+    assert client.get("/api/integrations/hubspot", headers=auth_headers,
+                      params={"tenant_id": GLOBEX_TENANT}).status_code == 200
+    for call in (
+        lambda: client.put("/api/integrations/hubspot", headers=auth_headers,
+                           json={"access_token": "t", "tenant_id": GLOBEX_TENANT}),
+        lambda: client.post("/api/integrations/hubspot/test", headers=auth_headers,
+                            json={"access_token": "t", "tenant_id": GLOBEX_TENANT}),
+        lambda: client.delete("/api/integrations/hubspot", headers=auth_headers,
+                              params={"tenant_id": GLOBEX_TENANT}),
+    ):
+        r = call()
+        assert r.status_code == 403, r.text
+
+
+@pytest.mark.integration
 def test_case_connector_get_defaults_and_set_round_trip(auth_headers):
     got = client.get("/api/tenants/case-connector", headers=auth_headers,
                      params={"tenant_id": GLOBEX_TENANT}).json()
@@ -1136,6 +1330,34 @@ def test_case_connector_write_is_owner_only(globex_as_viewer, auth_headers):
                       params={"tenant_id": GLOBEX_TENANT}).status_code == 200
     r = client.put("/api/tenants/case-connector", headers=auth_headers,
                   json={"case_connector": "zendesk", "tenant_id": GLOBEX_TENANT})
+    assert r.status_code == 403
+
+
+@pytest.mark.integration
+def test_channel_connector_map_get_defaults_and_set_round_trip(auth_headers):
+    got = client.get("/api/tenants/channel-connector-map", headers=auth_headers,
+                     params={"tenant_id": GLOBEX_TENANT}).json()
+    original = got["channel_connector_map"]
+    try:
+        r = client.put("/api/tenants/channel-connector-map", headers=auth_headers,
+                       json={"channel_connector_map": {"hubspot": "hubspot", "email": "salesforce"},
+                             "tenant_id": GLOBEX_TENANT})
+        assert r.status_code == 200
+        assert r.json()["channel_connector_map"] == {"hubspot": "hubspot", "email": "salesforce"}
+        got2 = client.get("/api/tenants/channel-connector-map", headers=auth_headers,
+                          params={"tenant_id": GLOBEX_TENANT}).json()
+        assert got2["channel_connector_map"] == {"hubspot": "hubspot", "email": "salesforce"}
+    finally:
+        client.put("/api/tenants/channel-connector-map", headers=auth_headers,
+                  json={"channel_connector_map": original, "tenant_id": GLOBEX_TENANT})
+
+
+@pytest.mark.integration
+def test_channel_connector_map_write_is_owner_only(globex_as_viewer, auth_headers):
+    assert client.get("/api/tenants/channel-connector-map", headers=auth_headers,
+                      params={"tenant_id": GLOBEX_TENANT}).status_code == 200
+    r = client.put("/api/tenants/channel-connector-map", headers=auth_headers,
+                  json={"channel_connector_map": {"hubspot": "hubspot"}, "tenant_id": GLOBEX_TENANT})
     assert r.status_code == 403
 
 

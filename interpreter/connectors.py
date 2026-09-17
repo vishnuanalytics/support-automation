@@ -89,15 +89,25 @@ def _sb():
 
 
 def resolve_case_connector(tenant_id: str | None, config: dict[str, Any] | None,
-                          *, sb=None) -> str:
+                          *, sb=None, channel: str | None = None) -> str:
     """Which connector slug a case-touching node handler should invoke this
     call — resolved fresh each time (no caching), matching this module's
     existing per-call-read style (`connections.resolve`, `vault_secrets.get`).
 
     Precedence: an explicit per-node `config["connector"]` override (the
     same field the generic `connector_action` node already uses) >
-    `tenants.case_connector` (this tenant's default) > `"salesforce"` — so
-    a flow/tenant with neither set behaves exactly as before this existed.
+    `tenants.channel_connector_map[channel]` (migration 110 — lets ONE flow
+    route different case-touching nodes to different connectors depending on
+    which channel the case actually arrived on, e.g. `{"hubspot": "hubspot"}`
+    while everything else still defaults to Salesforce) > `tenants.
+    case_connector` (this tenant's default) > `"salesforce"` — so a flow/
+    tenant with none of these set behaves exactly as before this existed.
+
+    Deliberately per-node-call resolution, not a graph-level branch: this
+    project's case-touching nodes (sf_case/sf_writeback/identify/clarify/
+    notify/ask_human/handover/notify_human) are scattered across a flow, not
+    clustered at one point, so a channel map beats duplicating the graph
+    into per-channel copies (tried once, reverted — see PROJECT_SCOPE.md).
     """
     override = (config or {}).get("connector")
     if override:
@@ -107,9 +117,16 @@ def resolve_case_connector(tenant_id: str | None, config: dict[str, Any] | None,
     if sb is None and "PYTEST_CURRENT_TEST" in os.environ:
         return "salesforce"           # offline tests monkeypatch this or pass sb (matches routing.py)
     try:
-        rows = ((sb or _sb()).table("tenants").select("case_connector")
+        rows = ((sb or _sb()).table("tenants").select("case_connector,channel_connector_map")
                 .eq("tenant_id", tenant_id).execute().data or [])
-        return (rows[0].get("case_connector") if rows else None) or "salesforce"
+        if not rows:
+            return "salesforce"
+        row = rows[0]
+        if channel:
+            mapped = (row.get("channel_connector_map") or {}).get(channel)
+            if mapped:
+                return str(mapped)
+        return row.get("case_connector") or "salesforce"
     except Exception as e:  # noqa: BLE001
         log.warning("resolve_case_connector(%s): %s", tenant_id, e)
         return "salesforce"
@@ -424,6 +441,149 @@ register_builtin(ConnectorSpec(
             impl=_zd_send_case_reply),
     },
 ))
+
+# --------------------------------------------------------------------------
+# Multi-provider connectors step 3 (2026-09-16) — HubSpot, a third real
+# `CASE_ACTIONS` implementation (see interpreter/hubspot.py for the mapping
+# notes / honest gaps vs. Salesforce's data model). No `_ORG_PARAM` here —
+# HubSpot isn't multi-org like Salesforce either.
+# --------------------------------------------------------------------------
+def _hs_update_fields(tenant_id: str | None, org_label: str | None, params: dict) -> dict:
+    from . import hubspot
+    return hubspot.update_case_fields(
+        params["case_id"], dict(params.get("fields") or {}),
+        append=dict(params.get("append") or {}), tenant_id=tenant_id,
+    )
+
+
+def _hs_post_note(tenant_id: str | None, org_label: str | None, params: dict) -> dict:
+    from . import hubspot
+    return hubspot.post_note(params["case_id"], params.get("body", ""),
+                             mention_id=params.get("mention_id"), tenant_id=tenant_id)
+
+
+def _hs_add_comment(tenant_id: str | None, org_label: str | None, params: dict) -> dict:
+    from . import hubspot
+    return hubspot.add_case_comment(params["case_id"], params.get("body", ""),
+                                    published=bool(params.get("published", False)), tenant_id=tenant_id)
+
+
+def _hs_assign_owner(tenant_id: str | None, org_label: str | None, params: dict) -> dict:
+    from . import hubspot
+    return hubspot.assign_case(params["case_id"], queue=params.get("queue"),
+                               user_id=params.get("user_id"), tenant_id=tenant_id)
+
+
+def _hs_ensure_case(tenant_id: str | None, org_label: str | None, params: dict) -> dict:
+    from . import hubspot
+    return hubspot.ensure_case(
+        dict(params.get("case") or {}), dict(params.get("sender") or {}),
+        origin=params.get("origin", "Email"), status=params.get("status", "New"),
+        create_contact=_as_bool(params.get("create_contact"), True),
+        create_account=_as_bool(params.get("create_account"), True),
+        reuse=str(params.get("reuse", "thread")), tenant_id=tenant_id,
+    )
+
+
+def _hs_log_email_message(tenant_id: str | None, org_label: str | None, params: dict) -> dict:
+    from . import hubspot
+    return hubspot.log_email_message(
+        params["case_id"], incoming=_as_bool(params.get("incoming"), True),
+        from_addr=params.get("from_addr", ""), to_addrs=params.get("to_addrs", ""),
+        subject=params.get("subject", ""), body=params.get("body", ""),
+        message_id=params.get("message_id", ""), tenant_id=tenant_id,
+    )
+
+
+def _hs_identify_sender(tenant_id: str | None, org_label: str | None, params: dict) -> dict:
+    from . import hubspot
+    return hubspot.identify_sender(
+        params["email"], free_domains=params.get("free_domains"),
+        domain_match=_as_bool(params.get("domain_match"), True),
+        create_lead=_as_bool(params.get("create_lead"), False), tenant_id=tenant_id,
+    )
+
+
+def _hs_send_case_reply(tenant_id: str | None, org_label: str | None, params: dict) -> dict:
+    from . import hubspot
+    return hubspot.send_case_reply(
+        params["case_id"], params.get("body", ""),
+        to_email=params.get("to_email"), subject=params.get("subject"),
+        thread_id=params.get("thread_id"), tenant_id=tenant_id,
+    )
+
+
+register_builtin(ConnectorSpec(
+    slug="hubspot", label="HubSpot", auth="apikey",
+    actions={
+        "update_fields": ActionSpec(
+            "update_fields", "Update fields on a ticket (Status only, mapped by pipeline-stage "
+                             "label; everything else is skipped)",
+            params=[{"key": "case_id", "label": "Ticket Id", "type": "template", "required": True},
+                    {"key": "fields", "label": "Fields (JSON)", "type": "json", "required": True},
+                    {"key": "append", "label": "Append (JSON: field -> text) -> an internal note",
+                     "type": "json", "required": False}],
+            impl=_hs_update_fields),
+        "post_note": ActionSpec(
+            "post_note", "Add an internal Note (HubSpot has no public/private distinction)",
+            params=[{"key": "case_id", "label": "Ticket Id", "type": "template", "required": True},
+                    {"key": "body", "label": "Note", "type": "template", "required": True},
+                    {"key": "mention_id", "label": "cc (owner id/name)", "type": "template", "required": False}],
+            impl=_hs_post_note),
+        "add_comment": ActionSpec(
+            "add_comment", "Add a Note (same as post_note — HubSpot has no separate comment object)",
+            params=[{"key": "case_id", "label": "Ticket Id", "type": "template", "required": True},
+                    {"key": "body", "label": "Comment", "type": "template", "required": True}],
+            impl=_hs_add_comment),
+        "assign_owner": ActionSpec(
+            "assign_owner", "Set the ticket owner directly, or resolve a queue to a matching Owner",
+            params=[{"key": "case_id", "label": "Ticket Id", "type": "template", "required": True},
+                    {"key": "queue", "label": "Owner name/email match (no real queue object)",
+                     "type": "string", "required": False},
+                    {"key": "user_id", "label": "Owner Id", "type": "string", "required": False}],
+            impl=_hs_assign_owner),
+        "ensure_case": ActionSpec(
+            "ensure_case", "Resolve/create a ticket (+ Contact/Company) for an inbound message",
+            params=[{"key": "case", "label": "Case (JSON)", "type": "json", "required": True},
+                    {"key": "sender", "label": "Sender (JSON)", "type": "json", "required": False},
+                    {"key": "origin", "label": "Origin", "type": "string", "required": False},
+                    {"key": "status", "label": "Status", "type": "string", "required": False},
+                    {"key": "reuse", "label": "Reuse", "type": "select", "required": False,
+                     "options": ["thread", "never"]}],
+            impl=_hs_ensure_case),
+        "log_email_message": ActionSpec(
+            "log_email_message", "Log a real Email engagement on the ticket's timeline",
+            params=[{"key": "case_id", "label": "Ticket Id", "type": "template", "required": True},
+                    {"key": "incoming", "label": "Incoming", "type": "select", "required": False,
+                     "options": ["true", "false"]},
+                    {"key": "from_addr", "label": "From", "type": "template", "required": False},
+                    {"key": "to_addrs", "label": "To", "type": "template", "required": False},
+                    {"key": "subject", "label": "Subject", "type": "template", "required": False},
+                    {"key": "body", "label": "Body", "type": "template", "required": False},
+                    {"key": "message_id", "label": "Message-Id", "type": "template", "required": False}],
+            impl=_hs_log_email_message),
+        "identify_sender": ActionSpec(
+            "identify_sender", "Resolve a sender email to a Contact/Company",
+            params=[{"key": "email", "label": "Email", "type": "template", "required": True},
+                    {"key": "domain_match", "label": "Domain match", "type": "select", "required": False,
+                     "options": ["true", "false"]},
+                    {"key": "create_lead", "label": "Create a contact if missing", "type": "select",
+                     "required": False, "options": ["true", "false"]}],
+            impl=_hs_identify_sender),
+        "send_case_reply": ActionSpec(
+            "send_case_reply", "Send via a connected Conversations thread if known, else log an "
+                               "internal note (HubSpot Tickets has no native customer-email-send "
+                               "endpoint)",
+            params=[{"key": "case_id", "label": "Ticket Id", "type": "template", "required": True},
+                    {"key": "body", "label": "Body", "type": "template", "required": True},
+                    {"key": "to_email", "label": "To", "type": "template", "required": False},
+                    {"key": "subject", "label": "Subject", "type": "template", "required": False},
+                    {"key": "thread_id", "label": "Conversations thread Id (optional)",
+                     "type": "template", "required": False}],
+            impl=_hs_send_case_reply),
+    },
+))
+
 
 register_builtin(ConnectorSpec(
     slug="slack", label="Slack", auth="builtin",

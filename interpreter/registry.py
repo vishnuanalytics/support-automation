@@ -189,10 +189,14 @@ def _case_conn(state: CaseState, config: dict) -> str:
     `connectors.CASE_ACTIONS`). Was a hardcoded `"salesforce"` literal at
     every call site; now resolved once per call via
     `connectors.resolve_case_connector` (config's own `connector` override >
-    the tenant's `tenants.case_connector` default, migration 084 >
-    `"salesforce"`) — every existing flow/tenant with neither set is
-    unaffected."""
-    return connectors.resolve_case_connector(state.get("tenant_id"), config, sb=config.get("_sb"))
+    `tenants.channel_connector_map[state.case.channel]`, migration 110 — one
+    flow routing different channels to different connectors with no graph
+    duplication > the tenant's `tenants.case_connector` default, migration
+    084 > `"salesforce"`) — every existing flow/tenant with none of these
+    set is unaffected."""
+    channel = (state.get("case") or {}).get("channel")
+    return connectors.resolve_case_connector(state.get("tenant_id"), config,
+                                             sb=config.get("_sb"), channel=channel)
 
 
 def _cp_write(state: CaseState, config: dict, *, action: str, actor: str = "ai",

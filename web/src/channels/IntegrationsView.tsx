@@ -5,8 +5,8 @@ import { ChannelsView } from "./ChannelsView";
 
 /**
  * One shell for the two admin surfaces (Screen 05): a segmented switch
- * between Integrations (HTTP connections, Salesforce, Zendesk, AI models,
- * case taxonomy) and Channels (inbound email / chat adapters). The body is
+ * between Integrations (HTTP connections, Salesforce, Zendesk, HubSpot, AI
+ * models, case taxonomy) and Channels (inbound email / chat adapters). The body is
  * the single scroll container.
  */
 export function IntegrationsView({ tenantId }: { tenantId: string }) {

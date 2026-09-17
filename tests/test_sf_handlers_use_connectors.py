@@ -26,8 +26,36 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from interpreter import alert, connectors, salesforce
 from interpreter.registry import (
-    _cp_write, h_ask_human, h_clarify, h_handover, h_identify, h_notify, h_sf_case, h_sf_writeback,
+    _case_conn, _cp_write, h_ask_human, h_clarify, h_handover, h_identify, h_notify, h_sf_case,
+    h_sf_writeback,
 )
+
+
+# ── migration 110: _case_conn extracts state.case.channel and passes it
+# through to resolve_case_connector, so a channel_connector_map entry can
+# route a node's connector without a per-node config override ────────────
+def test_case_conn_passes_the_case_channel_to_resolve_case_connector(monkeypatch):
+    seen = {}
+
+    def fake_resolve(tenant_id, config, *, sb=None, channel=None):
+        seen["channel"] = channel
+        return "whatever"
+
+    monkeypatch.setattr(connectors, "resolve_case_connector", fake_resolve)
+    _case_conn({"tenant_id": "t", "case": {"channel": "hubspot"}}, {})
+    assert seen["channel"] == "hubspot"
+
+
+def test_case_conn_passes_none_when_the_case_has_no_channel(monkeypatch):
+    seen = {}
+
+    def fake_resolve(tenant_id, config, *, sb=None, channel=None):
+        seen["channel"] = channel
+        return "whatever"
+
+    monkeypatch.setattr(connectors, "resolve_case_connector", fake_resolve)
+    _case_conn({"tenant_id": "t", "case": {"sf_id": "500"}}, {})
+    assert seen["channel"] is None
 
 
 @pytest.fixture
@@ -288,3 +316,54 @@ def test_a_tenant_on_zendesk_routes_ask_human_to_zendesk_not_salesforce(monkeypa
     paths_hit = {url for _m, url, _j in http_calls}
     assert any("/tickets/1.json" in u for u in paths_hit)   # post_note landed
     assert any("/groups.json" in u for u in paths_hit)       # assign_owner resolved the queue
+
+
+# ── 2026-09-16: HubSpot (step 3) is a third real implementation — same
+# tenant-connector swap, landing on real (mocked-HTTP) HubSpot API calls.
+def test_a_tenant_on_hubspot_routes_ask_human_to_hubspot_not_salesforce(monkeypatch):
+    class _TenantSB:
+        def table(self, name):
+            assert name == "tenants"
+            return self
+
+        def select(self, *_a):
+            return self
+
+        def eq(self, *_a):
+            return self
+
+        def execute(self):
+            return type("R", (), {"data": [{"case_connector": "hubspot"}]})()
+
+    def boom(*_a, **_k):
+        raise AssertionError("salesforce.py must not be called — this tenant is on hubspot")
+    monkeypatch.setattr(salesforce, "post_chatter", boom)
+    monkeypatch.setattr(salesforce, "assign_case", boom)
+
+    import requests
+
+    from interpreter import hubspot
+    monkeypatch.setattr(hubspot, "_creds", lambda tenant_id, sb=None: {
+        "access_token": "tok", "portal_id": "999"})
+
+    http_calls = []
+
+    def fake_request(method, url, *, headers=None, json=None, params=None, timeout=None):
+        http_calls.append((method, url, json))
+        if method == "GET" and "/crm/v3/owners" in url:
+            return type("R", (), {"status_code": 200, "content": b"1",
+                                  "raise_for_status": lambda self: None,
+                                  "json": lambda self: {"results": [
+                                      {"id": "9", "email": "team_support@acme.com"}]}})()
+        return type("R", (), {"status_code": 200, "content": b"1",
+                              "raise_for_status": lambda self: None,
+                              "json": lambda self: {"id": "n1"}})()
+    monkeypatch.setattr(requests, "request", fake_request)
+
+    h_ask_human(
+        {"case": {"sf_id": "1"}, "draft": "hi", "confidence": 0.2, "tenant_id": "t"},
+        {"_node_id": "n", "queue": "Team_Support", "_sb": _TenantSB()},
+    )
+    paths_hit = {url for _m, url, _j in http_calls}
+    assert any("/crm/v3/objects/notes" in u for u in paths_hit)   # post_note landed
+    assert any("/crm/v3/owners" in u for u in paths_hit)          # assign_owner resolved the queue

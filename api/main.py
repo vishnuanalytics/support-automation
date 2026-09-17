@@ -461,6 +461,81 @@ def delete_template_ep(template_id: str, tenant_id: str | None = None,
 _SF_META_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
 
 
+_HS_META_CACHE: dict[str, tuple[float, dict]] = {}
+
+
+@app.get("/api/hubspot/meta")
+def hubspot_meta(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    """HubSpot routing metadata (Owners-as-queues/users + real ticket
+    properties, incl. custom ones), for the flow editor's dropdowns — same
+    `SfMeta`-compatible shape as `/api/salesforce/meta` so the editor's
+    existing pickers work unmodified. Not multi-org (no `org` param).
+    Cached 5 min per tenant, same pattern as `_SF_META_CACHE`."""
+    import time
+
+    from interpreter import hubspot as _hs
+
+    tid = _caller_tenant(c, tenant_id)
+    now = time.time()
+    hit = _HS_META_CACHE.get(tid)
+    if hit is None or now - hit[0] > 300:
+        data = _hs.org_metadata(tid, sb=_service)
+        _HS_META_CACHE[tid] = (now, data)
+    return _HS_META_CACHE[tid][1]
+
+
+@app.get("/api/case-connector/meta")
+def case_connector_meta(tenant_id: str | None = None, org: str = "default",
+                        c: Caller = Depends(caller)) -> dict:
+    """The generic seam the flow editor's Inspector pickers (queue/field/
+    user) call: resolve which case connector this tenant is on and return
+    that connector's `SfMeta`-shaped metadata (plus which `connector` it
+    came from, so the editor can hide connector-specific fields like
+    Salesforce's `org` picker for a non-multi-org connector). Zendesk isn't
+    wired in here yet (out of scope for now, same as this endpoint's own
+    empty fallback for any other/unknown connector)."""
+    tid = _caller_tenant(c, tenant_id)
+    rows = (_service.table("tenants").select("case_connector")
+            .eq("tenant_id", tid).execute().data or [{}])
+    connector = rows[0].get("case_connector") or "salesforce"
+    if connector == "salesforce":
+        data = salesforce_meta(tenant_id=tid, org=org, c=c)
+    elif connector == "hubspot":
+        data = hubspot_meta(tenant_id=tid, c=c)
+    else:
+        data = {"available": False, "queues": [], "case_types": [], "modules": [],
+               "case_fields": [], "users": []}
+    return {**data, "connector": connector}
+
+
+@app.get("/api/case-connector/recent-cases")
+def case_connector_recent_cases(tenant_id: str | None = None, org: str = "default",
+                                limit: int = 8, c: Caller = Depends(caller)) -> dict:
+    """Real, recent Cases/tickets from the tenant's connected case system,
+    already shaped as flow `case` dicts — powers the flow editor's Test Run
+    panel "try a real recent case" picker (RunPanel.tsx), so testing a flow
+    means picking a real case instead of hand-writing sample JSON. Same
+    connector-dispatch seam as `case_connector_meta`; Zendesk not wired in
+    yet, same as that endpoint."""
+    tid = _caller_tenant(c, tenant_id)
+    rows = (_service.table("tenants").select("case_connector")
+            .eq("tenant_id", tid).execute().data or [{}])
+    connector = rows[0].get("case_connector") or "salesforce"
+    limit = max(1, min(limit, 25))
+    if connector == "salesforce":
+        from interpreter import salesforce as _sf
+
+        cases = _sf.list_recent_cases(tid, org, limit=limit)
+    elif connector == "hubspot":
+        from interpreter import hubspot as _hs
+
+        tickets = _hs.list_recent_tickets(tid, sb=_service, limit=limit)
+        cases = [_hs.ticket_as_case(t, tid, sb=_service) for t in tickets]
+    else:
+        cases = []
+    return {"cases": cases, "connector": connector}
+
+
 @app.get("/api/salesforce/meta")
 def salesforce_meta(tenant_id: str | None = None, org: str = "default",
                     c: Caller = Depends(caller)) -> dict:
@@ -1196,6 +1271,79 @@ async def freshchat_webhook(tenant_id: str, request: Request) -> dict:
         dedupe_key=idem, sb=_service,
     )
     return {"job_id": job_id, "deduped": job_id is None}
+
+
+@app.post("/webhooks/hubspot/{tenant_id}", status_code=202)
+async def hubspot_webhook(tenant_id: str, request: Request) -> dict:
+    """Push trigger for a `case_connector=hubspot` tenant — the real-time
+    alternative to `ingestion.hubspot_ticket_watch`'s polling. Backed by a
+    SEPARATE HubSpot app from the tenant's Private App (the classic Private
+    App UI has no Webhooks tab — confirmed via the HubSpot CLI's bundled
+    developer-projects framework, which does support webhook subscriptions
+    for a portal-scoped "static" app). That webhook app's own Client Secret
+    HMAC-verifies every delivery (`hubspot.verify_webhook_signature`,
+    algorithm confirmed against `@hubspot/api-client`'s own SDK source, not
+    guessed) — public, no bearer auth, the signature is the credential.
+    Enqueues the exact same case shape + dedupe key
+    (`hs:{tenant_id}:{ticket_id}`) `hubspot_ticket_watch.tick()` uses, so
+    running both triggers is safe — whichever fires first wins, the other
+    dedupes."""
+    from interpreter import hubspot
+
+    raw = await request.body()
+    rate_limit(tenant_id, "hubspot_webhook", 300)
+
+    try:
+        cfg = hubspot.load_channel(tenant_id, _service)
+    except Exception:  # noqa: BLE001 — can't verify the tenant -> reject
+        cfg = None
+    if not cfg or not cfg.webhook_client_secret:
+        raise HTTPException(404, "hubspot webhooks not configured for this tenant")
+
+    target_url = f"{_public_base()}/webhooks/hubspot/{tenant_id}"
+    if not hubspot.verify_webhook_signature(
+        cfg.webhook_client_secret, method="POST", url=target_url, body=raw,
+        signature_b64=request.headers.get("X-HubSpot-Signature-v3"),
+        timestamp_ms=request.headers.get("X-HubSpot-Request-Timestamp"),
+    ):
+        raise HTTPException(401, "bad hubspot signature")
+
+    import json as _json
+    try:
+        events = _json.loads(raw.decode())
+    except Exception:  # noqa: BLE001
+        raise HTTPException(400, "invalid JSON")
+    if isinstance(events, dict):
+        events = [events]
+
+    fid = hubspot.resolve_entry_flow(tenant_id, _service)
+    if not fid:
+        raise HTTPException(404, "no unambiguous published flow for this tenant")
+
+    enqueued = 0
+    for ev in events:
+        ticket_id = ev.get("objectId")
+        if not ticket_id:
+            continue
+        try:
+            hc = hubspot._client(tenant_id, _service)
+            ticket = hc.request("GET", f"/crm/v3/objects/tickets/{ticket_id}",
+                                params={"properties": "subject,content,hs_pipeline_stage"})
+        except Exception as e:  # noqa: BLE001
+            log.warning("hubspot_webhook: fetch ticket %s failed: %s", ticket_id, e)
+            continue
+        case = hubspot.ticket_as_case(ticket, tenant_id, _service)
+        if not case.get("sf_id"):
+            continue
+        key = f"hs:{tenant_id}:{case['sf_id']}"
+        job_id = jobs.enqueue(
+            "run_flow", {"flow_id": fid, "case": case, "idempotency_key": key,
+                        "trigger": "hubspot_webhook"},
+            dedupe_key=key, tenant_id=tenant_id, sb=_service,
+        )
+        if job_id:
+            enqueued += 1
+    return {"received": len(events), "enqueued": enqueued}
 
 
 # ── P6c: per-tenant HTTP connections for the `http_request` node ─────
@@ -3909,6 +4057,133 @@ def zendesk_test(body: ZendeskConnectionIn, c: Caller = Depends(caller)) -> dict
     return test_connection(cfg)
 
 
+# ── Multi-provider connectors step 3: connect a HubSpot account ──────────
+class HubSpotConnectionIn(BaseModel):
+    access_token: str | None = None    # write-only, never returned; Vault-backed
+    auto_send_enabled: bool | None = None
+    tenant_id: str | None = None
+
+
+def _hubspot_cfg_from_body(tenant_id: str, body: "HubSpotConnectionIn", existing):
+    from interpreter.hubspot import HubSpotConfig
+
+    return HubSpotConfig(
+        tenant_id=tenant_id,
+        portal_id=(existing.portal_id if existing else ""),
+        status=(existing.status if existing else "inactive"),
+        auto_send_enabled=(body.auto_send_enabled if body.auto_send_enabled is not None
+                           else (existing.auto_send_enabled if existing else False)),
+    )
+
+
+@app.get("/api/integrations/hubspot")
+def hubspot_status(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    """Connection status for the caller's tenant. Never returns the token."""
+    tid = _caller_tenant(c, tenant_id)
+    from interpreter.hubspot import load_channel
+
+    ch = load_channel(tid, _service)
+    if not ch:
+        return {"tenant_id": tid, "configured": False, "status": "none"}
+    return {"tenant_id": tid, **ch.public_status()}
+
+
+@app.put("/api/integrations/hubspot")
+def hubspot_configure(body: HubSpotConnectionIn, c: Caller = Depends(caller)) -> dict:
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    rate_limit(c.user_id, "integration", 30)
+    from interpreter.hubspot import HubSpotConfig, load_channel, save_channel, test_connection
+
+    existing = load_channel(tid, _service)
+    has_token = bool(body.access_token) or bool(existing and existing.access_token)
+    if not has_token:
+        raise HTTPException(422, "access_token is required")
+
+    cfg = _hubspot_cfg_from_body(tid, body, existing)
+    cfg.status = "active"
+    if body.access_token:
+        probe = test_connection(HubSpotConfig(tenant_id=tid, access_token=body.access_token))
+        if probe.get("portal_id"):
+            cfg.portal_id = probe["portal_id"]
+    save_channel(cfg, _service, access_token=body.access_token)
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid,
+                 action="hubspot_connection.configured" if existing else "hubspot_connection.connected",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="hubspot_connection", target_id=tid,
+                 summary=f"{'updated' if existing else 'connected'} the HubSpot account")
+    return hubspot_status(tenant_id=tid, c=c)
+
+
+@app.delete("/api/integrations/hubspot", status_code=204)
+def hubspot_disconnect(tenant_id: str | None = None, c: Caller = Depends(caller)) -> None:
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    from interpreter import audit
+    from interpreter.hubspot import delete_channel
+
+    delete_channel(tid, _service)
+    audit.record(_service, tenant_id=tid, action="hubspot_connection.disconnected",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="hubspot_connection", target_id=tid,
+                 summary="disconnected the HubSpot account")
+
+
+@app.post("/api/integrations/hubspot/test")
+def hubspot_test(body: HubSpotConnectionIn, c: Caller = Depends(caller)) -> dict:
+    """A lightweight authenticated read (`GET /account-info/v3/details`) —
+    saves nothing. Uses the posted token, falling back to the stored one
+    when the field is left blank."""
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    rate_limit(c.user_id, "integration", 20)
+    from interpreter.hubspot import load_channel, test_connection
+
+    existing = load_channel(tid, _service)
+    cfg = _hubspot_cfg_from_body(tid, body, existing)
+    cfg.access_token = body.access_token or (existing.access_token if existing else "")
+    return test_connection(cfg)
+
+
+class HubSpotWebhookSecretIn(BaseModel):
+    webhook_client_secret: str
+    tenant_id: str | None = None
+
+
+@app.put("/api/integrations/hubspot/webhook-secret")
+def hubspot_set_webhook_secret(body: HubSpotWebhookSecretIn, c: Caller = Depends(caller)) -> dict:
+    """The Client Secret for the SEPARATE webhook-only HubSpot app (see
+    `/webhooks/hubspot/{tenant_id}`'s own docstring for why this can't be
+    the same Private App used for CRM calls). Set once after deploying that
+    app; never returned."""
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    rate_limit(c.user_id, "integration", 30)
+    from interpreter.hubspot import load_channel, save_channel
+
+    existing = load_channel(tid, _service)
+    if not existing:
+        raise HTTPException(422, "connect a HubSpot Private App first")
+    if not body.webhook_client_secret.strip():
+        raise HTTPException(422, "webhook_client_secret is required")
+    save_channel(existing, _service, webhook_client_secret=body.webhook_client_secret.strip())
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="hubspot_connection.webhook_configured",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="hubspot_connection", target_id=tid,
+                 summary="configured the HubSpot webhook client secret")
+    return hubspot_status(tenant_id=tid, c=c)
+
+
+@app.get("/api/integrations/hubspot/webhook-url")
+def hubspot_webhook_url(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    tid = _caller_tenant(c, tenant_id)
+    return {"tenant_id": tid, "url": f"{_public_base()}/webhooks/hubspot/{tid}"}
+
+
 # ── Multi-provider connectors step 1: which connector is "the case
 # system" for this tenant (tenants.case_connector, migration 084) ────────
 class CaseConnectorIn(BaseModel):
@@ -3950,6 +4225,45 @@ def set_case_connector(body: CaseConnectorIn, c: Caller = Depends(caller)) -> di
                  actor_id=c.user_id, actor_email=c.email, target_type="tenant", target_id=tid,
                  summary=f"case system set to {value!r}")
     return {"tenant_id": tid, "case_connector": value}
+
+
+# ── Per-tenant channel -> connector map (migration 110) — lets ONE flow
+# route different case-touching nodes to different connectors depending on
+# which channel a case arrived on, with no flow duplication. See
+# connectors.resolve_case_connector's own docstring for the precedence
+# (per-node override > this map, keyed by case.channel > case_connector). ──
+class ChannelConnectorMapIn(BaseModel):
+    channel_connector_map: dict[str, str]
+    tenant_id: str | None = None
+
+
+@app.get("/api/tenants/channel-connector-map")
+def get_channel_connector_map(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    tid = _caller_tenant(c, tenant_id)
+    rows = (_service.table("tenants").select("channel_connector_map")
+            .eq("tenant_id", tid).execute().data or [{}])
+    return {"tenant_id": tid, "channel_connector_map": rows[0].get("channel_connector_map") or {}}
+
+
+@app.put("/api/tenants/channel-connector-map")
+def set_channel_connector_map(body: ChannelConnectorMapIn, c: Caller = Depends(caller)) -> dict:
+    tid = _caller_tenant(c, body.tenant_id)
+    _require_owner(c, tid)
+    value = {k.strip(): v.strip() for k, v in body.channel_connector_map.items() if k.strip() and v.strip()}
+    # same "predates the tenants table" upsert-fallback fix as case-connector
+    # above (a P7d self-serve workspace can have no `tenants` row at all).
+    updated = (_service.table("tenants").update({"channel_connector_map": value})
+              .eq("tenant_id", tid).execute().data)
+    if not updated:
+        _service.table("tenants").upsert(
+            {"tenant_id": tid, "name": f"workspace {tid[:8]}", "channel_connector_map": value},
+        ).execute()
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="tenant.channel_connector_map_changed",
+                 actor_id=c.user_id, actor_email=c.email, target_type="tenant", target_id=tid,
+                 summary=f"channel->connector map set to {value!r}")
+    return {"tenant_id": tid, "channel_connector_map": value}
 
 
 # ── Per-tenant case-taxonomy config (migration 086) — overrides for the

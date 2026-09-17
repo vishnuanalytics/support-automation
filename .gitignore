@@ -23,3 +23,11 @@ web/.playwright/
 
 # local case exports — never commit (large, contains customer PII)
 gunner urbanpiper old cases/
+
+# HubSpot config file
+hubspot.config.yml
+
+# HubSpot webhook companion app — a per-tenant deployment artifact (bakes
+# in one tenant's real tenant_id + an ephemeral tunnel targetUrl), not
+# reusable project source; the generic receiver code lives in api/main.py.
+hubspot-webhook-app/

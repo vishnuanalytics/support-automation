@@ -3,6 +3,7 @@ import { api, ApiError } from "../api";
 import type {
   CaseTaxonomy, Connection, ConnectionAction, NotifyMatchKind, NotifyResolver, NotifyTarget,
   NotifyTargetIn, SalesforceOrg, SalesforceOrgSchema, ZendeskConnection, ZendeskConnectionSave,
+  HubSpotConnection, HubSpotConnectionSave,
 } from "../types";
 import { Banner, Button, ConfirmButton, DataTable, Dialog, Field, Input, Select, Tag, Toggle, type Column } from "../ui";
 
@@ -182,10 +183,12 @@ export function ConnectionsView({ tenantId }: { tenantId: string }) {
       </div>
 
       <CaseConnectorPicker tenantId={tenantId} />
+      <ChannelConnectorMapPanel tenantId={tenantId} />
       <CaseTaxonomyPanel tenantId={tenantId} />
       <NotifyTargetsPanel tenantId={tenantId} />
       <SalesforceOrgsPanel tenantId={tenantId} />
       <ZendeskPanel tenantId={tenantId} />
+      <HubSpotPanel tenantId={tenantId} />
       <AiModelsPanel tenantId={tenantId} />
     </div>
   );
@@ -232,10 +235,105 @@ function CaseConnectorPicker({ tenantId }: { tenantId: string }) {
         replies) write to by default. Connect it below before switching to it.
       </p>
       <div className="row" style={{ gap: 8, alignItems: "center" }}>
-        <select value={value} disabled={busy} onChange={(e) => save(e.target.value)}>
+        <select data-testid="case-connector-select" value={value} disabled={busy}
+          onChange={(e) => save(e.target.value)}>
           <option value="salesforce">Salesforce</option>
           <option value="zendesk">Zendesk</option>
+          <option value="hubspot">HubSpot</option>
         </select>
+        {msg && <span className="muted" style={{ fontSize: 12 }}>{msg}</span>}
+      </div>
+    </div>
+  );
+}
+
+const CONNECTOR_OPTIONS = ["salesforce", "zendesk", "hubspot"] as const;
+const CONNECTOR_LABELS: Record<string, string> = {
+  salesforce: "Salesforce", zendesk: "Zendesk", hubspot: "HubSpot",
+};
+// the channel values `case.channel` actually carries — see each ingestion
+// module's own case-shaping (sf_ingest.py / mailbox.py / hubspot.
+// ticket_as_case / freshchat.parse_webhook_message / zendesk.ticket_as_case).
+// "salesforce" is a real, live value here too (every CDC/webhook-triggered
+// Case, and a Slack-resumed one that predates this field) — found missing
+// from this list during a later gap review.
+const KNOWN_CHANNELS: { value: string; label: string }[] = [
+  { value: "salesforce", label: "Salesforce (Cases)" },
+  { value: "email", label: "Email" },
+  { value: "hubspot", label: "HubSpot (tickets)" },
+  { value: "freshchat", label: "Freshchat" },
+  { value: "zendesk", label: "Zendesk (tickets)" },
+];
+
+/** migration 110 — one flow serves every channel by routing each case-
+ * touching node to a connector chosen HERE, per the case's own
+ * `case.channel`, rather than by duplicating the flow graph per connector
+ * (tried once, reverted — see PROJECT_SCOPE.md's "ONE flow serving
+ * multiple connectors" entry). A channel left at "(use case system above)"
+ * falls through to the `CaseConnectorPicker` default above. */
+function ChannelConnectorMapPanel({ tenantId }: { tenantId: string }) {
+  const [map, setMap] = useState<Record<string, string> | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const load = () => {
+    api.channelConnectorMap.get(tenantId)
+      .then((r) => setMap(r.channel_connector_map))
+      .catch(() => setMap({}));
+  };
+  useEffect(load, [tenantId]);
+
+  const setChannel = (channel: string, connector: string) => {
+    setMap((m) => {
+      const next = { ...(m || {}) };
+      if (connector) next[channel] = connector;
+      else delete next[channel];
+      return next;
+    });
+  };
+
+  async function save() {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await api.channelConnectorMap.set(map || {}, tenantId);
+      setMsg("saved");
+    } catch (e) {
+      setMsg(`✗ ${(e as ApiError).message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (map === null) return null;
+  return (
+    <div className="int-card">
+      <h3>Route by channel</h3>
+      <p style={{ margin: 0, color: "var(--text-muted)" }}>
+        Send different channels to different case systems from the same flow — e.g. a chat/
+        ticket that arrives via HubSpot writes to HubSpot, while everything else still goes to
+        your case system above. No flow changes needed; this applies to every case-touching node
+        automatically, wherever it sits in the flow.
+      </p>
+      <div className="col" style={{ gap: 6, marginTop: 4 }}>
+        {KNOWN_CHANNELS.map(({ value: channel, label }) => (
+          <div className="row" key={channel} style={{ gap: 8, alignItems: "center" }}>
+            <span style={{ width: 150 }}>{label}</span>
+            <select
+              data-testid={`channel-connector-${channel}`}
+              value={map[channel] || ""}
+              onChange={(e) => setChannel(channel, e.target.value)}
+            >
+              <option value="">(use case system above)</option>
+              {CONNECTOR_OPTIONS.map((c) => (
+                <option key={c} value={c}>{CONNECTOR_LABELS[c]}</option>
+              ))}
+            </select>
+          </div>
+        ))}
+      </div>
+      <div className="row" style={{ gap: 8, marginTop: 8, alignItems: "center" }}>
+        <button className="primary" disabled={busy} onClick={save}>Save</button>
         {msg && <span className="muted" style={{ fontSize: 12 }}>{msg}</span>}
       </div>
     </div>
@@ -748,6 +846,172 @@ function ZendeskPanel({ tenantId }: { tenantId: string }) {
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+/** Multi-provider connectors step 3 — HubSpot as a third real case system
+ * (see interpreter/hubspot.py for the mapping notes / honest gaps vs.
+ * Salesforce's data model). A single Private App access token (no
+ * subdomain/email pair like Zendesk — HubSpot's API is one fixed base
+ * URL); same connect/test/disconnect shape as the other panels. */
+function HubSpotPanel({ tenantId }: { tenantId: string }) {
+  const [ch, setCh] = useState<HubSpotConnection | null>(null);
+  const [f, setF] = useState({ access_token: "", auto_send_enabled: false });
+  const [webhookSecret, setWebhookSecret] = useState("");
+  const [webhookUrl, setWebhookUrl] = useState<string | null>(null);
+  const [webhookBusy, setWebhookBusy] = useState(false);
+  const [webhookMsg, setWebhookMsg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = () => {
+    api.hubspot
+      .status(tenantId)
+      .then((s) => {
+        setCh(s);
+        if (s.configured) setF((p) => ({ ...p, auto_send_enabled: s.auto_send_enabled ?? false }));
+      })
+      .catch((e: ApiError) => setErr(e.message));
+    api.hubspot.webhookUrl(tenantId).then((r) => setWebhookUrl(r.url)).catch(() => {});
+  };
+  useEffect(load, [tenantId]);
+
+  async function saveWebhookSecret() {
+    setWebhookBusy(true); setWebhookMsg(null);
+    try {
+      await api.hubspot.saveWebhookSecret(webhookSecret, tenantId);
+      setWebhookMsg("saved");
+      setWebhookSecret("");
+      load();
+    } catch (e) {
+      setWebhookMsg(`✗ ${(e as ApiError).message}`);
+    }
+    setWebhookBusy(false);
+  }
+
+  const payload = useMemo<HubSpotConnectionSave>(() => ({
+    tenant_id: tenantId, access_token: f.access_token || undefined,
+    auto_send_enabled: f.auto_send_enabled,
+  }), [f, tenantId]);
+
+  async function run<T>(fn: () => Promise<T>, ok: string) {
+    setBusy(true); setErr(null); setMsg(null);
+    try {
+      await fn();
+      setMsg(ok);
+      load();
+      setF((p) => ({ ...p, access_token: "" }));
+    } catch (e) {
+      setErr((e as ApiError).message);
+    }
+    setBusy(false);
+  }
+
+  const testConn = () =>
+    run(async () => {
+      const r = await api.hubspot.test(payload);
+      if (!r.ok) throw new ApiError(0, r.error || "connection failed");
+    }, "connection ok");
+
+  const [askDisconnect, setAskDisconnect] = useState(false);
+
+  return (
+    <div className="int-card">
+      <h3>HubSpot</h3>
+      <Dialog
+        open={askDisconnect}
+        onClose={() => setAskDisconnect(false)}
+        title="Disconnect HubSpot?"
+        actions={[
+          { label: "Cancel", variant: "ghost", onClick: () => setAskDisconnect(false) },
+          {
+            label: "Disconnect",
+            variant: "danger",
+            onClick: () => {
+              setAskDisconnect(false);
+              void run(() => api.hubspot.remove(tenantId), "disconnected");
+            },
+          },
+        ]}
+      >
+        This tenant stops using HubSpot as its case system.
+      </Dialog>
+      <p style={{ margin: 0, color: "var(--text-muted)" }}>
+        Connect a HubSpot Private App to use it as this tenant's case system (pick it above once
+        connected). Ticket status/notes/owner map onto HubSpot's own model — see the HubSpot
+        connector's own notes for where that mapping is intentionally partial (no native
+        customer-email send without a connected Conversations inbox).
+      </p>
+      {ch?.configured && (
+        <div className={`banner ${ch.status === "error" ? "err" : "ok"}`}>
+          status: <strong>{ch.status}</strong>{ch.portal_id ? ` · portal ${ch.portal_id}` : ""}
+        </div>
+      )}
+      <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+        <input type="password" style={{ minWidth: 260 }}
+          placeholder={ch?.configured ? "Private App access token (leave blank to keep)" : "Private App access token"}
+          value={f.access_token} onChange={(e) => setF({ ...f, access_token: e.target.value })} />
+      </div>
+      <span className="muted" style={{ fontSize: 12 }}>
+        HubSpot settings → Integrations → Private Apps → create one with CRM (tickets/contacts/
+        companies/notes/emails/owners) scopes.
+      </span>
+
+      <label className="row" style={{ gap: 6, fontSize: 13, alignItems: "center" }}>
+        <input type="checkbox" checked={f.auto_send_enabled}
+          onChange={(e) => setF({ ...f, auto_send_enabled: e.target.checked })} />
+        Auto-send confident replies (off = every reply is flagged for a human first)
+      </label>
+
+      {err && <Banner tone="exception" title={err} />}
+      {msg && <Banner tone="success" title={msg} />}
+
+      <div className="row" style={{ gap: 6 }}>
+        <button onClick={testConn} disabled={busy || (!f.access_token && !ch?.configured)}>
+          Test connection
+        </button>
+        <button className="primary" disabled={busy || (!f.access_token && !ch?.configured)}
+          onClick={() => run(() => api.hubspot.save(payload), "saved")}>
+          Save
+        </button>
+        {ch?.configured && (
+          <button className="err" disabled={busy} onClick={() => setAskDisconnect(true)}>
+            Disconnect
+          </button>
+        )}
+      </div>
+
+      {ch?.configured && (
+        <div style={{ marginTop: 4, paddingTop: 10, borderTop: "1px solid var(--line)" }}>
+          <h4 style={{ margin: "0 0 4px" }}>Real-time trigger (webhooks)</h4>
+          <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>
+            Optional — without this, new tickets are still picked up by a 5-minute poll. A
+            webhook needs a <strong>separate, webhook-only HubSpot app</strong> (the classic
+            Private App above has no Webhooks tab) pointed at the URL below, with its own
+            Client Secret pasted here to verify deliveries are genuinely from HubSpot.
+          </p>
+          {webhookUrl && (
+            <div className="row" style={{ gap: 6, marginTop: 6, alignItems: "center" }}>
+              <span className="muted" style={{ fontSize: 12, width: 90 }}>target URL</span>
+              <code style={{ fontSize: 12, wordBreak: "break-all" }}>{webhookUrl}</code>
+            </div>
+          )}
+          {ch.webhooks_configured && (
+            <div className="banner ok" style={{ marginTop: 6 }}>webhook secret configured</div>
+          )}
+          <div className="row" style={{ gap: 8, marginTop: 6, flexWrap: "wrap" }}>
+            <input type="password" style={{ minWidth: 260 }}
+              placeholder={ch.webhooks_configured ? "Client Secret (leave blank to keep)" : "Client Secret"}
+              value={webhookSecret} onChange={(e) => setWebhookSecret(e.target.value)} />
+            <button className="primary" disabled={webhookBusy || !webhookSecret} onClick={saveWebhookSecret}>
+              Save
+            </button>
+          </div>
+          {webhookMsg && <span className="muted" style={{ fontSize: 12 }}>{webhookMsg}</span>}
+        </div>
+      )}
     </div>
   );
 }

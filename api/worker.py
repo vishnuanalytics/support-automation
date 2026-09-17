@@ -89,6 +89,8 @@ def _run_flow(payload: dict, sb) -> dict:
         out["freshchat"] = _freshchat_post_run(final, run_case, flow, sb)
     elif run_case.get("channel") == "zendesk":
         out["zendesk"] = _zendesk_post_run(final, run_case, flow, sb)
+    elif run_case.get("channel") == "hubspot":
+        out["hubspot"] = _hubspot_post_run(final, run_case, flow, sb)
     return out
 
 
@@ -96,7 +98,7 @@ def _email_post_run(final: dict, case: dict, flow: dict, sb) -> dict:
     """Phase 20c — the hard guard. Decide from the flow's outcome whether a
     customer-facing email goes out; otherwise flag the message for a human.
     Never raises (a delivery failure must not fail/retry the flow run)."""
-    from interpreter import emailer, mailbox
+    from interpreter import connectors, emailer, mailbox
 
     try:
         cfg = mailbox.load_channel(flow["tenant_id"], sb)
@@ -109,34 +111,42 @@ def _email_post_run(final: dict, case: dict, flow: dict, sb) -> dict:
         mid = case.get("message_id") or ""
         refs = case.get("references") or []
         sf_id = case.get("sf_id") or case.get("id")
+        # the reply always leaves over SMTP regardless of case connector (see
+        # the note below); this is only which connected system's case/ticket
+        # timeline the sent copy gets mirrored onto.
+        case_conn = connectors.resolve_case_connector(flow["tenant_id"], None, sb=sb)
 
         def _deliver(body: str) -> dict:
             # FR-12: the reply goes out over SMTP from the support mailbox —
-            # that is what actually lands in the customer's inbox. A
-            # Salesforce API send (`emailSimple`) needs org-wide
-            # deliverability = "All email" + an Org-Wide Email Address and
-            # silently drops the message otherwise (it returned sent=True
-            # while nothing was delivered). Salesforce stays the source of
-            # truth for the Case; Gmail just carries the message.
+            # that is what actually lands in the customer's inbox, regardless
+            # of case_connector. A Salesforce API send (`emailSimple`) needs
+            # org-wide deliverability = "All email" + an Org-Wide Email
+            # Address and silently drops the message otherwise (it returned
+            # sent=True while nothing was delivered) — and HubSpot's Tickets
+            # API has no native send-to-customer endpoint at all (see
+            # hubspot.send_case_reply's own docstring). The connected case
+            # system stays the source of truth for the case; the mailbox
+            # just carries the message.
             r = emailer.send_reply(cfg, to=to, subject=subject, body=body,
                                    in_reply_to=mid, references=refs)
-            # Best-effort: mirror the sent reply onto the Case as an outbound
-            # EmailMessage so agents see the full thread in Salesforce.
-            # Never let this fail (or retry) the delivery.
-            # log_email_message() resolves this tenant's own creds itself
-            # (client_for, not the env-only available()) -- gating on
-            # available() here used to skip it for a self-serve tenant with
-            # no env creds even though the call underneath would work.
+            # Best-effort: mirror the sent reply onto the case's own timeline
+            # (an EmailMessage on Salesforce, a real Email engagement on
+            # HubSpot, a documented no-op on Zendesk) so agents see it there
+            # too. Never let this fail (or retry) the delivery. A bug fixed
+            # 2026-09-16: this used to call salesforce.log_email_message(...)
+            # unconditionally regardless of case_connector — for a non-
+            # Salesforce tenant that silently no-op'd (no SF creds -> dry-
+            # run), so the real email still reached the customer but never
+            # showed up on their actual case system's timeline.
             if r.get("sent") and sf_id:
                 try:
-                    em = salesforce.log_email_message(
-                        sf_id, incoming=False, status=salesforce._EM_SENT,
-                        from_addr=cfg.send_from, from_name=cfg.from_name or "",
-                        to_addrs=to, subject=emailer._subject_reply(subject),
-                        body=body, message_id=r.get("message_id") or "",
-                        tenant_id=flow["tenant_id"],
-                    )
-                    r["case_email"] = em.get("id") or em.get("error") or "logged"
+                    em = connectors.invoke(flow["tenant_id"], case_conn, "log_email_message", {
+                        "case_id": sf_id, "incoming": False, "status": salesforce._EM_SENT,
+                        "from_addr": cfg.send_from, "from_name": cfg.from_name or "",
+                        "to_addrs": to, "subject": emailer._subject_reply(subject),
+                        "body": body, "message_id": r.get("message_id") or "",
+                    })
+                    r["case_email"] = em.get("id") or em.get("error") or em.get("reason") or "logged"
                 except Exception as e:  # noqa: BLE001
                     r["case_email"] = f"log failed: {e}"
             return r
@@ -229,6 +239,43 @@ def _zendesk_post_run(final: dict, case: dict, flow: dict, sb) -> dict:
         return {"decision": kind, "reason": meta.get("reason")}
     except Exception as e:  # noqa: BLE001
         log.warning("zendesk post-run failed: %s", e)
+        return {"error": str(e)}
+
+
+def _hubspot_post_run(final: dict, case: dict, flow: dict, sb) -> dict:
+    """Deliver a `channel=hubspot` run's outcome, mirroring `_zendesk_post_run`.
+    `emailer.decide` is channel-agnostic (reads only `outcome`/
+    `cfg.auto_send_enabled`/`clarification`), so an `auto_reply` only "sends"
+    when the tenant has turned auto-send on for the HubSpot connection —
+    and even then, `hubspot.send_case_reply` is honest that it usually can't
+    actually email the customer (see that function's own docstring); the
+    reply lands as an internal Note either way. Never raises."""
+    from interpreter import emailer, hubspot
+
+    try:
+        cfg = hubspot.load_channel(flow["tenant_id"], sb)
+        if not cfg:
+            return {"skipped": "no hubspot connection"}
+        ticket_id = case.get("sf_id") or case.get("id")
+        if not ticket_id:
+            return {"decision": "noop", "reason": "no ticket id on case"}
+
+        outcome = final.get("outcome") or {}
+        kind, meta = emailer.decide(outcome, cfg, final.get("clarification"))
+        recipient = case.get("from")
+        if kind == "send_reply":
+            return {"decision": kind, "delivery": hubspot.send_case_reply(
+                ticket_id, meta["body"], to_email=recipient,
+                tenant_id=flow["tenant_id"], sb=sb)}
+        if kind == "send_questions":
+            numbered = "\n".join(f"{i + 1}. {q}" for i, q in enumerate(meta["questions"]))
+            body = (f"To help you with this, could you share:\n\n{numbered}\n\n"
+                    "Once we have that we'll follow up.")
+            return {"decision": kind, "delivery": hubspot.send_case_reply(
+                ticket_id, body, to_email=recipient, tenant_id=flow["tenant_id"], sb=sb)}
+        return {"decision": kind, "reason": meta.get("reason")}
+    except Exception as e:  # noqa: BLE001
+        log.warning("hubspot post-run failed: %s", e)
         return {"error": str(e)}
 
 

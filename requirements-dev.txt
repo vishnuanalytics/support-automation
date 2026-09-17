@@ -1,6 +1,10 @@
 # Test + CI only — not in the runtime image.
 pytest
 
+# eval/deepeval/ — LLM-judge draft-quality eval (run by hand, not in CI).
+# Judge is routed to Groq via interpreter/llm.py, not deepeval's OpenAI default.
+deepeval>=4.2
+
 # The Neo4j MCP server (.mcp.json) — installed into venv/ so it works without
 # a global `uv`/`uvx` on PATH. `venv/bin/mcp-neo4j-cypher` is the console script.
 mcp-neo4j-cypher>=0.6.0

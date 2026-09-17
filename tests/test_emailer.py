@@ -194,6 +194,37 @@ def test_post_run_smtp_send_failure_skips_the_case_mirror(monkeypatch):
     assert res["delivery"]["sent"] is False and called["mirror"] is False
 
 
+def test_post_run_mirrors_onto_whichever_connector_the_tenant_is_on(monkeypatch):
+    """A real bug, fixed 2026-09-16: the case-timeline mirror used to call
+    salesforce.log_email_message(...) unconditionally, so a non-Salesforce
+    tenant's real (SMTP-delivered) reply silently never showed up on their
+    actual case system. Confirm a hubspot-connector tenant now mirrors onto
+    hubspot.log_email_message instead, without touching salesforce.py."""
+    from interpreter import connectors, hubspot
+
+    monkeypatch.setattr(connectors, "resolve_case_connector", lambda tid, cfg, sb=None: "hubspot")
+    monkeypatch.setattr(mailbox, "load_channel",
+                        lambda tid, sb: _cfg(auto_send=True, secret={"password": "pw"}))
+    monkeypatch.setattr(emailer, "send_reply",
+                        lambda cfg, **kw: {"sent": True, "dry_run": False, "to": kw["to"],
+                                           "message_id": "<reply@acme.com>"})
+
+    def boom(*a, **k):
+        raise AssertionError("salesforce.py must not be called -- this tenant is on hubspot")
+    monkeypatch.setattr(worker.salesforce, "log_email_message", boom)
+
+    mirrored = {}
+    monkeypatch.setattr(hubspot, "log_email_message",
+                        lambda cid, **k: (mirrored.update(case=cid, **k) or
+                                          {"created": True, "id": "hs-email-1"}))
+
+    final = {"outcome": {"action": "auto_reply", "reply": "Here's the fix."}}
+    res = worker._email_post_run(final, {**_CASE, "sf_id": "500HS"}, _FLOW, sb=object())
+    assert res["delivery"]["sent"] is True
+    assert res["delivery"]["case_email"] == "hs-email-1"
+    assert mirrored["case"] == "500HS" and mirrored["incoming"] is False
+
+
 def test_run_flow_records_and_posts_the_case_mutated_in_flight(monkeypatch):
     # finding #3: sf_case adds sf_id / refreshes tier during the run;
     # _run_flow must persist and act on that, not the pre-run input.

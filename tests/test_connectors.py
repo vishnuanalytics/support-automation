@@ -27,7 +27,12 @@ from interpreter.registry import h_connector_action
 # ── registry ─────────────────────────────────────────────────────────
 def test_builtins_are_registered():
     slugs = {s.slug for s in connectors.list_connectors(None)}
-    assert {"salesforce", "slack"} <= slugs
+    assert {"salesforce", "slack", "zendesk", "hubspot"} <= slugs
+
+
+def test_hubspot_implements_the_full_case_actions_contract():
+    spec = next(s for s in connectors.list_connectors(None) if s.slug == "hubspot")
+    assert set(spec.actions) == set(connectors.CASE_ACTIONS)
 
 
 # ── multi-provider connectors step 1: resolve_case_connector (migration 084) ──
@@ -91,6 +96,40 @@ def test_resolve_case_connector_never_hits_network_offline_with_no_sb():
         assert connectors.resolve_case_connector("t", {}) == "salesforce"
     finally:
         _c._sb = orig
+
+
+# ── migration 110: tenants.channel_connector_map — ONE flow routes
+# different channels to different connectors, no graph duplication ────────
+def test_resolve_case_connector_uses_the_channel_map_when_channel_matches():
+    sb = _TenantSB({"case_connector": "salesforce",
+                    "channel_connector_map": {"hubspot": "hubspot"}})
+    assert connectors.resolve_case_connector("t", {}, sb=sb, channel="hubspot") == "hubspot"
+
+
+def test_resolve_case_connector_channel_map_falls_back_to_tenant_default_when_unmapped():
+    sb = _TenantSB({"case_connector": "salesforce",
+                    "channel_connector_map": {"hubspot": "hubspot"}})
+    assert connectors.resolve_case_connector("t", {}, sb=sb, channel="email") == "salesforce"
+
+
+def test_resolve_case_connector_no_channel_passed_uses_tenant_default():
+    sb = _TenantSB({"case_connector": "salesforce",
+                    "channel_connector_map": {"hubspot": "hubspot"}})
+    assert connectors.resolve_case_connector("t", {}, sb=sb) == "salesforce"
+
+
+def test_resolve_case_connector_node_override_still_wins_over_the_channel_map():
+    sb = _TenantSB({"case_connector": "salesforce",
+                    "channel_connector_map": {"hubspot": "hubspot"}})
+    assert connectors.resolve_case_connector(
+        "t", {"connector": "zendesk"}, sb=sb, channel="hubspot") == "zendesk"
+
+
+def test_resolve_case_connector_empty_channel_map_is_a_pure_noop():
+    # a tenant with the migration 110 column at its default ({}) behaves
+    # byte-for-byte like before the column existed, for every channel.
+    sb = _TenantSB({"case_connector": "salesforce", "channel_connector_map": {}})
+    assert connectors.resolve_case_connector("t", {}, sb=sb, channel="hubspot") == "salesforce"
 
 
 def test_get_action_unknown_connector_raises_keyerror(monkeypatch):
