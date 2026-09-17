@@ -707,6 +707,104 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-17 (Node & edge reference — what problem each one solves, with
+an example setup, added to the written guide.)** User: "can you add what
+each node and edge can help you solve the problems with an example to
+setup?" — a direct follow-on to the guidance chunk below.
+
+**What changed:** a new `docs/DASHBOARD_GUIDE.md` section covering every
+registered node type (all 29: `trigger` through `clarify`, grouped by
+pipeline stage — entry/identity, gathering context, understanding the
+case, routing, answering, talking to other systems, deciding the outcome,
+sending the outcome) and every edge pattern (unconditional, conditional
+row-builder, conditional Advanced, branching a node into several
+outcomes, naming an edge) — each with a one-line "problem it solves" and
+a concrete example using real config keys and real values.
+
+**Every example is grounded in the actual handler code, not paraphrased
+from memory** — checked `interpreter/registry.py`'s `h_*` functions
+(config keys + docstrings) for the ~13 node types with no dedicated
+Inspector form (`trigger`, `team_route`, `case_lookup`, `policy_gate`,
+`task_dispatch`, `correction_exemplars`, `draft`, `agent`, `classify`,
+`product_signal`, `transform`, and cross-checked `confidence_gate` /
+`sf_writeback` against their existing Inspector forms) rather than
+inventing plausible-looking config. Caught and fixed two inaccuracies
+before publishing: (1) the `trigger` node's `map` config is
+`{in_key: out_key}` (source → destination), the reverse of `transform`'s
+`map` (`{out_key: source_path}`) — an early draft had `trigger`'s example
+backwards; (2) an early draft implied `confidence_gate` ships an
+enterprise-tier default of 0.6 — the real default (`h_confidence_gate`,
+`interpreter/registry.py:1431`) is 0.35 for every tier unless
+`tier_overrides` is explicitly set, so the example was reworded to show
+setting that override deliberately rather than describing a built-in
+preset that doesn't exist. Edge condition field options (Tier, Case
+channel, routed team, …) were taken verbatim from
+`web/src/flows/conditionBuilder.ts`'s `FIELD_OPTIONS`, not guessed.
+
+**In-app:** `EditorHelp.tsx`'s intro line now mentions the new reference
+section exists in the full guide, so someone using the quick-panel knows
+where to find it.
+
+**Verify:** `npm run build` clean, `vitest run` 20/20 unchanged, full e2e
+suite unchanged (same 5 pre-existing failures, all 8 previously-passing
+tests including `editor-help.spec.ts` still pass — no new UI beyond the
+one-line pointer text, so no new test needed). Not committed yet.
+
+---
+
+**2026-09-17 (In-app + written guidance for using the dashboard, scoped
+first to the flow editor.)** User: "we need to give good guidance and
+knowledge on the support automation dashboard. How to use this product
+very good." Clarified via AskUserQuestion before writing anything: format
+= **both** in-app contextual help and a standalone guide; scope = **the
+flow editor** first (where this session's simplification work has focused
+and where users report the most confusion), not a full pass over every
+tab yet.
+
+**Surveyed what already existed before adding anything, to avoid
+duplicating it:** `guide/FlowGuideView.tsx` (the existing "Guide" nav
+item) is an editorial case-study walkthrough of one specific example flow
+(inbound email → Salesforce Case) — not generic product how-to content,
+so left untouched rather than overloaded. `docs/FLOW_AUTHORING.md` exists
+but is developer-facing (Mermaid-import mechanics, AI-assist internals),
+not an end-user guide. Confirmed exact toolbar/nav label text against the
+actual components (`FlowEditor.tsx`, `FlowList.tsx`, `App.tsx`'s
+`NAV_GROUPS`, `onboarding/OnboardingWizard.tsx`'s 5 setup steps) before
+writing either piece of new content, so the guidance names real buttons
+rather than paraphrasing them — a "how to use this" doc that's already
+stale on day one is worse than none.
+
+**In-app:** new `web/src/flows/EditorHelp.tsx`, a static quick-reference
+component (same approach as `FlowGuideView.tsx` — plain prose following
+the app's own tokens, no backend endpoint to keep in sync) covering: the
+three ways to build a flow (Chat / Graph / the flow-list fast-start
+entries), reading the canvas's color signals, conditions without code
+(including the edge-naming feature from the previous chunk), testing
+before publishing, save/publish/rollback, and where to check on things
+after publishing. Wired into `FlowEditor.tsx` as a new **❓ Help** toolbar
+button (next to Conditions) opening it in a `SlideOver`, closed by default
+so it never gets in the way of someone who already knows the editor.
+
+**Standalone:** new `docs/DASHBOARD_GUIDE.md` — the full walkthrough:
+what the product does, the first-10-minutes setup wizard (with each of its
+5 real steps), the flow editor in the same depth as the in-app panel, a
+table of every other dashboard tab and what it's for, a "common tasks"
+section (make the bot more cautious, always route a case type to a human,
+find out why a run did what it did, undo a bad publish), and a
+troubleshooting section tied to real UI signals (the red-border
+invalid/won't-build state, the disconnected-entry-points warning pill).
+
+**Verify:** `npm run build` clean, `vitest run` 20/20 unchanged.
+Browser-verified the Help panel renders and reads correctly (screenshot),
+then added it as a permanent regression test (`web/e2e/editor-help.spec.ts`
+— closed by default, opens on click, every section heading present,
+points to the written guide, closes on Escape) rather than a throwaway
+check, since this is a real, reachable feature. Full e2e suite: same 5
+pre-existing failures as the established baseline, no new regressions (8
+passed, up from 7 — the new test now runs too).
+
+---
+
 **2026-09-17 (Bug fix — typing into an edge's name field lost focus after
 every keystroke, root cause was in the shared overlay hook, not the field
 itself.)** User: "In the edge section if i am adding the name for every

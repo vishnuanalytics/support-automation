@@ -32,6 +32,7 @@ import { CanvasLegend } from "./CanvasLegend";
 import { InspectorPanel } from "./InspectorPanel";
 import { RunPanel } from "./RunPanel";
 import { ConditionsOverview } from "./ConditionsOverview";
+import { EditorHelp } from "./EditorHelp";
 import { ChatEditView, type ChatLogEntry } from "./ChatEditView";
 import { TriggersPanel } from "./TriggersPanel";
 import { Popover, Toolbar, Button, Banner, Dialog, SlideOver, Field, Input, Textarea, Toggle, useToast, useColorMode } from "../ui";
@@ -91,6 +92,7 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
   const [chatErr, setChatErr] = useState<string | null>(null);
   const [testRunOpen, setTestRunOpen] = useState(false);
   const [conditionsOpen, setConditionsOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
 
   // Which main panel occupies the canvas-wrap slot. Defaults to "chat" (the
   // "AI-edit as the front door" ask — describing changes in plain English,
@@ -744,6 +746,13 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
           >
             Conditions
           </Button>
+          <Button
+            variant="ghost"
+            onClick={() => setHelpOpen(true)}
+            title="A quick reference for building, testing and publishing a flow on this screen"
+          >
+            ❓ Help
+          </Button>
           {canEdit && (
             <>
               <Button variant="primary" onClick={doSave} disabled={busy || !dirty}>
@@ -1192,6 +1201,20 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
             setSelNode(null);
           }}
         />
+      </SlideOver>
+
+      <SlideOver
+        open={helpOpen}
+        onClose={() => setHelpOpen(false)}
+        title="How to use this editor"
+        width={380}
+        footer={
+          <Button variant="secondary" onClick={() => setHelpOpen(false)}>
+            Close
+          </Button>
+        }
+      >
+        <EditorHelp />
       </SlideOver>
 
       <Dialog
