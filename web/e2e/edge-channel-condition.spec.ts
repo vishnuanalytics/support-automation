@@ -219,3 +219,54 @@ test("naming an edge shows the name on the canvas instead of the raw condition, 
   const savedEdge = savedBody!.edges!.find((e) => e.edge_id === "e1")!;
   expect(savedEdge.label).toBe("VIP customers");
 });
+
+test("typing an edge name doesn't lose focus per keystroke", async ({ page }) => {
+  // Regression test (2026-09-17). User: "for every letter input the option
+  // is going outside and if i need to type vip then i need to put back the
+  // mouse to the entry field." Root cause was in the SHARED overlay hook
+  // (web/src/ui/overlay.ts's useOverlay, used by every SlideOver/Popover/
+  // Dialog, not just this field): its effect depended on the `onClose`
+  // callback identity, and every caller passes an inline arrow function
+  // (InspectorPanel's onClose in FlowEditor.tsx, e.g.) that's a brand-new
+  // reference on every render. Typing a letter -> onChange -> state update
+  // -> FlowEditor re-renders -> new `onClose` -> the whole effect re-runs,
+  // including "move focus to the first focusable element in the overlay"
+  // (the ✕ close button) -- yanking focus away from whatever field the
+  // user was actually typing into, on every single keystroke. Fixed by
+  // keeping the latest `onClose` in a ref instead of the effect's deps, so
+  // the initial-focus step only runs when the overlay actually opens.
+  await installApiMocks(page);
+
+  const flow = {
+    flow_id: FAKE_FLOW_ID, tenant_id: FAKE_TENANT_ID, team: "support",
+    name: "E2E Test Flow", status: "draft", version: 1, published_version: null,
+    sf_entry: false,
+    nodes: [
+      { node_id: "n1", type: "confidence_gate", label: "Gate", position_x: 100, position_y: 100, config: {} },
+      { node_id: "n2", type: "auto_reply", label: "Auto reply", position_x: 400, position_y: 100, config: {} },
+    ],
+    edges: [{ edge_id: "e1", source_node_id: "n1", target_node_id: "n2", condition: { if: "tier == 'enterprise'" }, label: null }],
+  };
+  await page.route(`**/api/flows/${FAKE_FLOW_ID}`, (route) => {
+    if (route.request().method() === "GET") return route.fulfill({ json: flow });
+    return route.fulfill({ json: flow });
+  });
+  await page.route("**/api/case-connector/meta*", (route) =>
+    route.fulfill({ json: { available: false, queues: [], case_types: [], modules: [], case_fields: [] } }));
+
+  await page.goto("/");
+  await page.locator(".flow-item", { hasText: "E2E Test Flow" }).click();
+  await page.getByRole("button", { name: "🗺️ Graph" }).click();
+  await page.getByText("Gate", { exact: true }).waitFor();
+  await page.locator(".react-flow__edge").first().click({ force: true });
+
+  const nameInput = page.getByPlaceholder("e.g. VIP escalation");
+  await expect(nameInput).toBeVisible();
+  await nameInput.click();
+
+  for (const ch of "VIP customers") {
+    await nameInput.press(ch === " " ? "Space" : ch);
+    await expect(nameInput).toBeFocused();
+  }
+  await expect(nameInput).toHaveValue("VIP customers");
+});

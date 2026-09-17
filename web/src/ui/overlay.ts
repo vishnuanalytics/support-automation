@@ -1,4 +1,4 @@
-import { useEffect, type RefObject } from "react";
+import { useEffect, useRef, type RefObject } from "react";
 
 const FOCUSABLE =
   'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
@@ -13,6 +13,17 @@ export function useOverlay(
   onClose: () => void,
   ref: RefObject<HTMLElement | null>,
 ) {
+  // Callers almost always pass an inline `onClose={() => ...}`, a new
+  // function identity on every render of the parent. Keeping it out of the
+  // effect's deps (via a ref instead) matters: typing into any field inside
+  // the overlay re-renders the parent, and if `onClose` were a dep the
+  // whole effect below would re-run on every keystroke -- including the
+  // "move focus into the overlay" step, which would yank focus to the
+  // first focusable element (typically a close button) away from whatever
+  // field the user was actually typing into.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
   useEffect(() => {
     if (!open) return;
     const trigger = document.activeElement as HTMLElement | null;
@@ -25,7 +36,7 @@ export function useOverlay(
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") {
         e.stopPropagation();
-        onClose();
+        onCloseRef.current();
         return;
       }
       if (e.key !== "Tab" || !node) return;
@@ -49,7 +60,7 @@ export function useOverlay(
       // restore focus to the trigger if it's still in the document
       if (trigger && document.contains(trigger)) trigger.focus();
     };
-  }, [open, onClose, ref]);
+  }, [open, ref]);
 }
 
 /**

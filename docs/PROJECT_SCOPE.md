@@ -707,6 +707,42 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-17 (Bug fix — typing into an edge's name field lost focus after
+every keystroke, root cause was in the shared overlay hook, not the field
+itself.)** User: "In the edge section if i am adding the name for every
+letter input the option is going outside and if i need to type vip then i
+need to put back the mouse to the entry field." Real, reproducible bug —
+not scoped to the edge name field.
+
+**Root cause:** `web/src/ui/overlay.ts`'s `useOverlay` (shared by every
+`SlideOver`/`Popover`/`Dialog` in the app) ran its whole effect — including
+"move focus to the first focusable element inside the overlay" — whenever
+its `onClose` callback's *identity* changed, and every caller passes an
+inline `onClose={() => ...}`. `InspectorPanel`'s `onClose` in
+`FlowEditor.tsx` (`() => { setSelNode(null); setSelEdge(null); }`) is a
+fresh function on every render, so typing a letter into the name field →
+`onChange` → state update → `FlowEditor` re-renders → new `onClose` →
+the whole effect re-ran → focus got yanked to the slide-over's first
+focusable element (the ✕ close button), away from the input the user was
+mid-keystroke in. Fixed by keeping the latest `onClose` in a `ref` instead
+of the effect's dependency array, so the initial-focus step only runs when
+the overlay actually transitions open, not on every unrelated re-render —
+this fixes every text field in every overlay in the app, not just this one.
+
+**Verify:** built a throwaway Playwright spec that types "VIP customers"
+into the edge name field character-by-character, asserting focus after
+each keystroke; confirmed it failed after the very first character
+(`toBeFocused()` → "inactive") on the pre-fix code via `git stash`, then
+passed cleanly with the fix restored — proof the test actually catches the
+bug, not just a plausible-looking assertion. Promoted to a permanent
+regression test in `edge-channel-condition.spec.ts` (same technique, same
+file as the edge-naming feature's own permanent test). `npm run build`
+clean, `vitest run` 20/20 unchanged, full e2e suite: same 5 pre-existing
+failures as the established baseline (7 passed, up from 6 — the new test
+now runs too), no new regressions.
+
+---
+
 **2026-09-17 (Edges get a user-given display name, shown on the canvas
 instead of the raw condition expression.)** User: "In the edge condition
 the user should enter the edge names rather than taking the if expression
@@ -764,8 +800,7 @@ from expression to name, keeps the expression in the hover tooltip,
 updates the inspector's own title, and round-trips `label` through a
 mocked `PUT /api/flows/:id`). Full e2e suite: same 5 pre-existing failures
 as the established baseline, no new regressions, this new test passing.
-Not yet committed — awaiting explicit go-ahead to commit, per this
-session's convention of committing only when asked.
+Committed (`b55331a`) and pushed to `main` after an explicit "push it".
 
 ---
 
