@@ -94,3 +94,63 @@ test("branch on case.channel via the row builder's field/value pickers", async (
   await routedTeamInsert.selectOption("support");
   await expect(exprBox).toHaveValue("case.channel == 'hubspot' and routed_team == 'support'");
 });
+
+test("repeat-picking a quick-insert option doesn't duplicate it, and back-to-back picks still join with 'and'", async ({ page }) => {
+  // Regression test (2026-09-17): the quick-insert selects always reset to
+  // their placeholder after a pick, so re-selecting the *same* option still
+  // fires onChange (value goes "" -> that option again) — `insert()` used
+  // to blindly append on every call, so clicking "email" three times built
+  // "case.channel == 'email' and case.channel == 'email' and case.channel
+  // == 'email'". Fixed by `insertClause` skipping an insert whose exact
+  // snippet already appears in the expression.
+  //
+  // Verifying that surfaced a second, related bug in the same function:
+  // `insert()` re-focuses the textarea at the end (so the user can keep
+  // typing) — but that means a *second* quick-insert click right after the
+  // first one sees the textarea as "focused" and wrongly skipped the
+  // "and"-joiner logic (which was gated on `!focused`), concatenating two
+  // real clauses with no separator at all: "...'email'case.channel ==
+  // 'hubspot'" — not even valid syntax. Fixed by making the join check
+  // purely textual (does the text before the cursor need a joiner),
+  // independent of focus state.
+  await installApiMocks(page);
+  const flow = {
+    flow_id: FAKE_FLOW_ID, tenant_id: FAKE_TENANT_ID, team: "support",
+    name: "E2E Test Flow", status: "draft", version: 1, published_version: null,
+    sf_entry: false,
+    nodes: [
+      { node_id: "n1", type: "policy_gate", label: "Evaluate rules", position_x: 100, position_y: 100, config: {} },
+      { node_id: "n2", type: "task_dispatch", label: "Raise the task", position_x: 450, position_y: 100, config: {} },
+    ],
+    // an "or" condition lands directly in Advanced mode (too complex for
+    // the row builder), exactly where the quick-insert dropdowns live
+    edges: [{ edge_id: "e1", source_node_id: "n1", target_node_id: "n2", condition: { if: "tier == 'enterprise' or region == 'us'" } }],
+  };
+  await page.route(`**/api/flows/${FAKE_FLOW_ID}`, (route) => {
+    if (route.request().method() === "GET") return route.fulfill({ json: flow });
+    return route.fulfill({ json: flow });
+  });
+  await page.route("**/api/case-connector/meta*", (route) =>
+    route.fulfill({ json: { available: false, queues: [], case_types: [], modules: [], case_fields: [] } }));
+
+  await page.goto("/");
+  await page.locator(".flow-item", { hasText: "E2E Test Flow" }).click();
+  await page.getByRole("button", { name: "🗺️ Graph" }).click();
+  await page.getByText("Evaluate rules", { exact: true }).waitFor();
+  await page.locator(".react-flow__edge").first().click({ force: true });
+
+  const exprBox = page.locator("textarea");
+  await expect(exprBox).toHaveValue("tier == 'enterprise' or region == 'us'");
+
+  const channelSelect = page.locator("select").filter({ hasText: "channel" });
+  await channelSelect.selectOption("email");
+  await channelSelect.selectOption("email");
+  await channelSelect.selectOption("email");
+  await expect(exprBox).toHaveValue("tier == 'enterprise' or region == 'us' and case.channel == 'email'");
+
+  // a genuinely different value right after still inserts, correctly joined
+  await channelSelect.selectOption("hubspot");
+  await expect(exprBox).toHaveValue(
+    "tier == 'enterprise' or region == 'us' and case.channel == 'email' and case.channel == 'hubspot'",
+  );
+});

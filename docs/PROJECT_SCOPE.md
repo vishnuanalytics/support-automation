@@ -707,6 +707,45 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-17 (Bug fix — the Advanced condition box's quick-insert
+dropdowns duplicated clauses on a repeat pick, and a related join bug.)**
+User: "if I click multiple times the option it was creating multiple
+times same option in condition." Real, reproducible bug in `EdgeInspector`
+(`Inspector.tsx`): the Case Type / routed_team / channel quick-insert
+`<select>`s always reset to their placeholder after a pick, so choosing
+the *same* option again still fires `onChange` (value goes `"" ->` that
+option, same as the first pick) — `insert()` blindly appended on every
+call, so clicking "email" three times built `case.channel == 'email' and
+case.channel == 'email' and case.channel == 'email'`. Fixed with a new
+`insertClause()` wrapper (used only by the three dropdowns, not the
+manual "and"/"or" buttons — repeating a bare joiner isn't a meaningful
+duplicate the way a whole clause is) that skips the insert when the exact
+snippet already appears in the expression.
+
+**Browser-verifying that surfaced a second, related bug in the same
+function, fixed in the same chunk rather than left for later:** `insert()`
+re-focuses the textarea at the end of every call (so the user can keep
+typing) — but that means a *second* quick-insert click right after the
+first one sees the textarea as "focused," and the join-logic (whether to
+prepend `" and "`) was gated on `!focused`, so it got skipped entirely.
+Two real clauses landed concatenated with **no separator at all** —
+`"...'email'case.channel == 'hubspot'"`, not even syntactically valid.
+Fixed by making the join check purely textual (does the text immediately
+before the insertion point already end in whitespace/an open paren),
+independent of focus state — `focused` still decides *where* to insert
+(cursor vs. append), it just no longer decides *whether* a joiner is
+needed.
+
+**Verify:** `npm run build` clean, `vitest run` 20/20 unchanged, full e2e
+suite unchanged (same 5 pre-existing failures, one more test *passing*
+than before) — added a permanent regression test to the already-committed
+`edge-channel-condition.spec.ts` (repeat-picking "email" three times stays
+at one clause; picking "hubspot" right after still inserts, correctly
+`and`-joined), not just a throwaway check, since this is a real bug a real
+user hit. Browser-verified both fixes together before writing the test.
+
+---
+
 **2026-09-17 (AI-edit as the default front door — the last of the "make
 this simple" asks.)** User: "Go for it" — the one remaining item from the
 entry below (the guided wizard shipped first; this was explicitly deferred

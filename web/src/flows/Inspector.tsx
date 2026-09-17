@@ -1804,7 +1804,15 @@ export function EdgeInspector({
     const focused = !!ta && document.activeElement === ta;
     const start = focused ? ta!.selectionStart ?? ifExpr.length : ifExpr.length;
     const end = focused ? ta!.selectionEnd ?? ifExpr.length : ifExpr.length;
-    const needsJoin = !focused && ifExpr.slice(0, start).trim() !== "" && !/[\s(]$/.test(ifExpr.slice(0, start));
+    // Textual check, not gated on `focused` -- this function itself
+    // refocuses the textarea at the end (below), so a second quick-insert
+    // click right after the first one sees `focused === true` even though
+    // nothing about "does the text before the cursor need a joiner" has
+    // changed. Gating needsJoin on `!focused` used to skip it in exactly
+    // that case, concatenating two clauses with no separator at all
+    // ("...'email'case.channel == 'hubspot'" — not even valid syntax).
+    const before = ifExpr.slice(0, start);
+    const needsJoin = before.trim() !== "" && !/[\s(]$/.test(before);
     const joined = (needsJoin ? " and " : "") + snippet;
     const next = ifExpr.slice(0, start) + joined + ifExpr.slice(end);
     onCondition({ if: next });
@@ -1812,6 +1820,19 @@ export function EdgeInspector({
       const pos = start + joined.length;
       requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(pos, pos); });
     }
+  };
+
+  // The three quick-insert dropdowns below (Case Type / routed_team /
+  // channel) always reset to their placeholder after a pick, so choosing
+  // the *same* option again still fires onChange (its value goes "" ->
+  // that option, same as the first time) — plain `insert` would append the
+  // exact same clause again on every repeat click. Only these one-clause
+  // pickers get this guard; the manual "and"/"or" buttons still call
+  // `insert` directly, since repeating a bare joiner isn't a meaningful
+  // duplicate the way `field == 'value'` twice is.
+  const insertClause = (snippet: string) => {
+    if (ifExpr.includes(snippet)) return;
+    insert(snippet);
   };
 
   return (
@@ -1857,20 +1878,20 @@ export function EdgeInspector({
           <div className="row" style={{ marginTop: 6, gap: 4, flexWrap: "wrap" }}>
             {sfMeta.case_types.length > 0 && (
               <select value="" onChange={(e) => {
-                if (e.target.value) insert(`classification.case_type == '${e.target.value}'`);
+                if (e.target.value) insertClause(`classification.case_type == '${e.target.value}'`);
               }}>
                 <option value="">+ Case Type…</option>
                 {sfMeta.case_types.map((t) => <option key={t} value={t}>{t}</option>)}
               </select>
             )}
             <select value="" onChange={(e) => {
-              if (e.target.value) insert(`routed_team == '${e.target.value}'`);
+              if (e.target.value) insertClause(`routed_team == '${e.target.value}'`);
             }}>
               <option value="">+ routed_team…</option>
               {ROUTED_TEAMS.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
             <select value="" title="branch on which channel this case arrived on — e.g. a HubSpot ticket vs. an email" onChange={(e) => {
-              if (e.target.value) insert(`case.channel == '${e.target.value}'`);
+              if (e.target.value) insertClause(`case.channel == '${e.target.value}'`);
             }}>
               <option value="">+ channel…</option>
               {EDGE_CHANNELS.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
