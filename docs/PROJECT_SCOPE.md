@@ -707,6 +707,64 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-20 (Applied migrations 112 + 113 live, and root-caused the
+"unrelated" test failures noted throughout this session — they were
+never flaky, and had nothing to do with any migration in this session.)**
+User: "Make thme live and find any issues." Checked live data *before*
+applying anything, not just the SQL: `112` requires every `active`-status
+tenant to have a BYOK key with zero grace window, and the live `tenants`
+table had 5 `active` rows predating the trial concept entirely (the
+`102_billing_foundation.sql` grandfather backfill). Cross-referenced
+against `tenant_integrations` (`kind='llm'`) and found **"sales data"**
+(a real tenant — `vishnu.r@urbanpiper.com`'s own workspace, per this
+file's earlier invite-email entries) and **"Acme (demo)"** had no key at
+all, contradicting `112`'s own "harmless today" assumption when it was
+written. Surfaced this via `AskUserQuestion` rather than silently
+applying; user chose to proceed as-is (fine for what are, today, still
+test/demo-weight tenants).
+
+**What changed:** `113` applied first (purely additive, zero behavior
+risk — verified `-k invit` 19/19 immediately after). `112` applied
+second, then verified against live data (not just "migration succeeded"):
+every `plans` row matches the intended Basic/Pro/Advanced/Free/Enterprise
+shape exactly (features, seats, flows, nulled provider IDs on the
+renamed rows); every `tenants.plan_id` resolves to a real `plans` row,
+no orphans from the old placeholder `'pro'` row's deletion.
+
+**The real find:** directly exercised `interpreter.billing.
+assert_not_locked` against all 6 live tenants (not just trusted the
+schema) and hit a genuine surprise — **Globex** (`22222222-...`, this
+project's primary demo/test tenant, `GLOBEX_TENANT` in the test suite)
+came back BLOCKED despite a `tenant_integrations` row that looked
+correctly configured. Traced it: `vault_secrets.get()` (the app's own
+real read path, not a raw decrypt) returned `{}` for it — the Vault
+secret exists but resolves empty. Its `updated_at` was
+`2026-09-20T12:07:08Z`, matching real browser activity already captured
+in this session's earlier `auth_logs` query (the same ~11:36–12:08
+window as the rate-limit incident) — and `DELETE /api/integrations/llm/
+{provider}` (api/main.py) does exactly this: pops one provider's key and
+re-saves, leaving `{}` if that was the tenant's only key. **Conclusion:
+someone disconnected Globex's LLM key via Connections around noon
+today, mid-session, and the billing gate — already-deployed Python code,
+`interpreter/billing.py`, wholly independent of the `plans`-table changes
+in migration 112 — correctly blocked it from then on.** This fully
+explains `test_run_returns_a_run_id` / `test_publish_snapshots_and_run_
+records_the_version`, both failing with 402 since a much earlier point in
+this session and noted then as "pre-existing, unrelated, not investigated
+further" — they were never flakiness, and neither migration in this
+entry caused or changed them (confirmed: identical 402, identical full-
+suite pass count of 127/129 offline, both before and after `112`/`113`).
+
+**Not a code bug — nothing fixed, because nothing's broken.** The gate is
+working exactly as designed. If Globex should stay runnable (it's the
+main demo/test tenant), the fix is adding a real key back via Connections
+for that tenant, not a code change — a real key is a decision for a
+human to make, not something to paste a placeholder value for (which
+would trade a clear billing-lock error for a confusing one that fails
+much later, at the actual LLM call).
+
+---
+
 **2026-09-20 (Invite history: "created" + "last updated" columns, plus a
 real gap they exposed — revoked invites had no timestamp at all.)** User:
 "In invite history add created and last updated status too." The
