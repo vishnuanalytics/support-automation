@@ -176,6 +176,14 @@ export function App() {
 
   const load = () => {
     setTenants(null);
+    // Reset synchronously, same as tenants above -- the render gates on
+    // `tenants === null` while it's in flight, but pendingInvites has no
+    // such gate of its own. Without this, a same-tab user switch (sign out,
+    // a different user signs in) can flash the PREVIOUS user's pending
+    // invite (their workspace name + role) if listTenants() happens to
+    // resolve before this fetch does -- a real stale-data leak between
+    // two different signed-in identities in the same tab, not just UI churn.
+    setPendingInvites(null);
     setInvitesDismissed(false);
     setInviteAcceptErr(null);
     // Invites used to be claimed silently here on every sign-in -- an

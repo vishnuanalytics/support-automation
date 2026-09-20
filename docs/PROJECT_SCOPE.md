@@ -707,6 +707,69 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-20 (Security/bug audit of the whole invite + login + multi-
+tenant path, on request — one real bug found and fixed, rest checked and
+found sound.)** User: "See any bugs in the user invites and login page.
+This multi tenant + workspace. Find if there is any bugs and leaks and
+fix them." Systematic pass, not a spot-check:
+
+**Backend authorization chain (`api/main.py`) — checked, sound.**
+`_verify_token` gets `user_id`/`email` from Supabase's own `/auth/v1/user`
+(never client-supplied, so `accept_invitations`'s `.eq("email", c.email)`
+against the service-role client can't be spoofed to steal someone else's
+pending invite). `_caller_tenant` validates real membership before
+trusting any client-supplied `tenant_id`. `resend_invitation`/
+`archive_invitation`/`revoke_invitation` all re-derive `_require_owner`
+from the **invite's own** `tenant_id` (never caller-supplied), so an
+owner of tenant A can't act on tenant B's invite by guessing an
+`invite_id` — RLS blocks the initial `SELECT` first anyway (404, not a
+403 that would confirm existence). `create_invitation` hard-blocks
+`role="owner"` via invite. `remove_member` blocks self-removal and
+last-owner removal. No role-change endpoint exists at all — a role is
+only ever set at invite time and confirmed at accept time.
+
+**RLS (`002`, `006`, `033`, `073`, `096`) — checked, sound.**
+`tenant_members` writes are service-role-only (RLS has no INSERT/UPDATE/
+DELETE policy for `authenticated` at all) — meaning the *Python-level*
+`_require_owner` checks above are the **only** gate on membership writes,
+not a defense-in-depth backstop; re-verified those checks are airtight
+for exactly this reason. `tenant_invitations`'s two policies
+(`_owner_all` / `_invitee_read`, `pending`-only for the latter) correctly
+mean a plain editor/viewer calling `GET /api/invitations` gets back
+nothing about other members' invites — no `_require_owner` gate needed
+on that endpoint since RLS already scopes it per-row. `096` is a pure
+`auth.uid()` initplan-caching rewrite, same semantics.
+
+**The one real bug — `web/src/App.tsx`'s `load()`.** It reset `tenants`
+to `null` synchronously before refetching (blocking render on a loading
+state) but never did the same for `pendingInvites`. On a same-tab user
+switch (sign out, a different user signs in — realistic on a shared/dev
+machine, and this app already cares about exactly this class of bug, see
+the existing `workspace:${session.user.id}`-scoped localStorage key), if
+`listTenants()` happened to resolve before `team.invitations()` did, the
+**previous** user's pending-invite data (their workspace name + role)
+could flash to the new user before the fresh fetch overwrote it. Fixed:
+`load()` now resets `pendingInvites` to `null` too, mirroring `tenants`
+exactly. Verified via `npm run build` + `npx vitest run` (20/20) — did
+not build an elaborate same-tab-user-switch repro (would need to drive
+real Supabase auth-state transitions past the fixture-session mocking
+this suite uses), reasoning stands on its own: it's the exact same
+one-line synchronous-reset pattern already proven correct for `tenants`
+two lines above it.
+
+**Checked and found not to be bugs:** `flowId`/`tenantId` also aren't
+reset on a user switch, but RLS on `flows` (`tenant_isolation_flows`,
+002) backstops that completely — a stale `flowId` from the old user
+would just 404 under the new user's RLS'd session, no real leak.
+`revoke_invitation`'s `.update()` runs even when `cur` (the pre-check
+select) comes back empty, but the same-client `c.sb` update is itself
+RLS-gated by `tenant_invitations_owner_all`'s `with check`, so it's
+inconsistent-looking control flow, not an authorization gap. The
+in-process `_rate` rate-limiter (this session's own earlier addition)
+is a known, already-documented single-process limitation, not new.
+
+---
+
 **2026-09-20 (Handle Supabase's `reauthentication_needed` error --
 follow-up to the dashboard settings pointed at in the entry directly
 below.)** User enabled Auth → Providers → Email's "Require
