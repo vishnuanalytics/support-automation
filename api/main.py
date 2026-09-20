@@ -718,6 +718,24 @@ def create_invitation(body: InviteIn, c: Caller = Depends(caller)) -> dict:
     except Exception as e:  # noqa: BLE001  — dup pending invite, etc.
         raise HTTPException(409, f"could not invite {email}: {e}")
 
+    # An invitation row alone never notified anyone -- nothing sent an
+    # email. Supabase Auth's own admin invite (same service-role client
+    # already used everywhere else here) actually delivers one, and its
+    # accept flow signs the invitee in, landing them exactly where
+    # accept_invitations (called on every sign-in) claims this row. Best-
+    # effort: an existing account 400s here ("already registered") -- that
+    # invitee still gets in via their own normal sign-in, so this must
+    # never fail the invitation itself.
+    trows = _service.table("tenants").select("name").eq("tenant_id", tid).execute().data or []
+    tenant_name = trows[0]["name"] if trows else None
+    try:
+        _service.auth.admin.invite_user_by_email(email, {
+            "redirect_to": WEB_ORIGINS[0],
+            "data": {"tenant_name": tenant_name, "role": role, "invited_by_email": c.email},
+        })
+    except Exception as e:  # noqa: BLE001
+        log.warning("invite email to %s failed (invitation row still created): %s", email, e)
+
     from interpreter import audit
     audit.record(_service, tenant_id=tid, action="invitation.created",
                  actor_id=c.user_id, actor_email=c.email,

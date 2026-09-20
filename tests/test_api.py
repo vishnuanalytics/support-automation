@@ -188,6 +188,101 @@ def test_get_job_with_no_attributable_tenant_falls_back_to_permissive(monkeypatc
     assert job["result"] == {"ok": True}
 
 
+# ── invite email (2026-09-20: a created invitation never sent one) ──────
+class _FakeInviteAdmin:
+    def __init__(self):
+        self.calls = []
+        self.raise_error = False
+
+    def invite_user_by_email(self, email, options=None):
+        if self.raise_error:
+            raise Exception("User already registered")
+        self.calls.append((email, options))
+
+
+class _FakeInviteServiceSb:
+    def __init__(self, admin):
+        self.auth = type("A", (), {"admin": admin})()
+
+    def table(self, name):
+        return self
+
+    def select(self, *a, **k):
+        return self
+
+    def eq(self, *a, **k):
+        return self
+
+    def execute(self):
+        return type("R", (), {"data": [{"name": "Acme"}]})()
+
+
+class _FakeInviteCallerSb:
+    def table(self, name):
+        return self
+
+    def insert(self, row):
+        self._row = {"invite_id": "i1", **row}
+        return self
+
+    def execute(self):
+        return type("R", (), {"data": [self._row]})()
+
+
+def _setup_invite_test(monkeypatch, admin):
+    from api import main
+    from interpreter import audit, billing
+
+    monkeypatch.setattr(main, "_caller_tenant", lambda c, explicit: "t1")
+    monkeypatch.setattr(main, "_require_owner", lambda c, tid: None)
+    monkeypatch.setattr(billing, "assert_seat_available", lambda tid, sb: None)
+    monkeypatch.setattr(audit, "record", lambda *a, **k: None)
+    monkeypatch.setattr(main, "_service", _FakeInviteServiceSb(admin))
+    return main
+
+
+def test_create_invitation_sends_a_real_invite_email(monkeypatch):
+    """A created invitation must actually notify the invitee -- previously
+    it only ever inserted a tenant_invitations row."""
+    from api.main import Caller, InviteIn
+
+    admin = _FakeInviteAdmin()
+    main = _setup_invite_test(monkeypatch, admin)
+
+    c = Caller.__new__(Caller)
+    c.sb = _FakeInviteCallerSb()
+    c.user_id, c.email = "u1", "owner@acme.test"
+
+    body = InviteIn(email="New@Person.test", role="viewer", tenant_id="t1")
+    result = main.create_invitation(body, c=c)
+
+    assert result["invite_id"] == "i1"
+    assert len(admin.calls) == 1
+    sent_email, options = admin.calls[0]
+    assert sent_email == "new@person.test"
+    assert options["data"]["tenant_name"] == "Acme"
+    assert options["data"]["invited_by_email"] == "owner@acme.test"
+
+
+def test_create_invitation_still_succeeds_if_the_invite_email_fails(monkeypatch):
+    """An existing-account 400 (or any provider hiccup) from Supabase's
+    admin invite must never fail the invitation itself -- the invitee
+    still gets in via their own normal sign-in (accept_invitations)."""
+    from api.main import Caller, InviteIn
+
+    admin = _FakeInviteAdmin()
+    admin.raise_error = True
+    main = _setup_invite_test(monkeypatch, admin)
+
+    c = Caller.__new__(Caller)
+    c.sb = _FakeInviteCallerSb()
+    c.user_id, c.email = "u1", "owner@acme.test"
+
+    body = InviteIn(email="already@registered.test", role="viewer", tenant_id="t1")
+    result = main.create_invitation(body, c=c)
+    assert result["invite_id"] == "i1"
+
+
 # ── billing follow-up fixes (2026-09-20, found by /code-review) ─────────
 def test_list_plans_orders_self_serve_tiers_before_talk_to_us_ones(monkeypatch):
     """A $0 base_price_usd (Enterprise, or a never-priced placeholder) must

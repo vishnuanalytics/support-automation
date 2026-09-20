@@ -707,6 +707,50 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-20 (Invitations never sent an email — a real gap the user hit
+directly, unrelated to the billing work above but found in the same
+session.)** User: "In the invites, if i invite anyone the invitation
+won't send any mail at all." Confirmed by reading the code: `POST
+/api/invitations` (`create_invitation`, api/main.py) only ever inserted a
+`tenant_invitations` row — nothing notified the invitee, ever, since this
+endpoint existed (Phase 18c). The only way an invite ever "worked" was if
+the invitee happened to independently sign up/sign in with that exact
+email, at which point `accept_invitations` (already built, called on
+every sign-in) picked up the pending row.
+
+**What changed:** `create_invitation` now also calls Supabase Auth's own
+admin invite (`_service.auth.admin.invite_user_by_email` — the
+service-role client already used everywhere else in this file), which
+actually sends an email with a sign-in link, landing the invitee right
+where `accept_invitations` claims the pending row. Picked over building a
+parallel transactional-email system because: (1) this app already proves
+Supabase's email delivery works — magic-link sign-in (`web/src/auth/
+Login.tsx`'s "Email me a link") depends on the exact same underlying
+mechanism; (2) `interpreter/emailer.py`'s SMTP/Gmail sending is scoped to
+a *tenant's own connected support channel* (customer-facing case
+replies), not platform transactional mail — reusing it would need a
+platform-owned mailbox that doesn't exist. `redirect_to` points at
+`WEB_ORIGINS[0]` (same env var already used for CORS — needs to already
+be in Supabase's allowed redirect URLs, which it must be for magic-link/
+Google OAuth to work today, so no new config expected). `data`
+(`tenant_name`/`role`/`invited_by_email`) rides along for a custom
+Supabase email template to reference, if one is ever set up — the stock
+"Invite user" template works as-is without it. An existing account
+(already registered) 400s from Supabase's side — caught and logged, never
+fails the invitation itself, since that invitee still gets in via their
+own normal sign-in either way. 2 new offline tests
+(`tests/test_api.py`) — happy path asserts the email call + its `data`
+payload, and a second confirms a raising `invite_user_by_email` still
+returns a successful invitation. **Not verified live** — actually
+receiving a real email needs the app running with real Supabase creds,
+which wasn't exercised from here (see the note below about accidentally
+running the *live* integration suite once while testing this — caught
+immediately, no confirmed side effect, but worth being aware the
+`test_invitation_create_list_revoke` integration test creates a real
+invite record against the dev tenant using an `@example.test` address).
+
+---
+
 **2026-09-20 (Billing simplification: BYOK becomes the one ongoing
 billing method, replacing the three-mechanism metered/discount stack —
 Basic/Pro/Advanced flat tiers.)** User: "In the billing section currently
