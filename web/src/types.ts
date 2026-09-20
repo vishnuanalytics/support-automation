@@ -507,6 +507,7 @@ export interface Invitation {
   invited_by: string | null;
   created_at: string;
   accepted_at: string | null;
+  revoked_at: string | null;
   archived_at: string | null;
   /** The inviting workspace's name — an invitee isn't a member yet so can't
    * read the tenants row themselves; the API attaches it via service role

@@ -9,6 +9,18 @@ const STATUS_TONE: Record<Invitation["status"], "success" | "accent" | "neutral"
   revoked: "neutral",
 };
 
+/** The most recent status-changing event for an invite -- accepted_at or
+ * revoked_at for the "Invite history" table, archived_at for the archived
+ * one (a row only ever has at most one of these set at a time). null for
+ * a still-pending invite, which hasn't been updated since it was created. */
+function lastUpdatedAt(i: Invitation): string | null {
+  return i.archived_at || i.accepted_at || i.revoked_at || null;
+}
+
+function fmtDate(iso: string | null): string {
+  return iso ? new Date(iso).toLocaleDateString() : "—";
+}
+
 export function TeamView({ tenantId }: { tenantId: string }) {
   const [members, setMembers] = useState<Member[]>([]);
   const [invites, setInvites] = useState<Invitation[]>([]);
@@ -212,7 +224,7 @@ export function TeamView({ tenantId }: { tenantId: string }) {
                   <td>
                     <Tag tone="neutral">{i.role}</Tag>
                   </td>
-                  <td className="muted">{new Date(i.created_at).toLocaleDateString()}</td>
+                  <td className="muted">{fmtDate(i.created_at)}</td>
                   <td style={{ textAlign: "right" }}>
                     <div className="row" style={{ gap: 6, justifyContent: "flex-end" }}>
                       <Button
@@ -250,7 +262,8 @@ export function TeamView({ tenantId }: { tenantId: string }) {
                 <th>email</th>
                 <th>role</th>
                 <th>status</th>
-                <th>sent</th>
+                <th>created</th>
+                <th>last updated</th>
                 <th />
               </tr>
             </thead>
@@ -264,7 +277,8 @@ export function TeamView({ tenantId }: { tenantId: string }) {
                   <td>
                     <Tag tone={STATUS_TONE[i.status]}>{i.status}</Tag>
                   </td>
-                  <td className="muted">{new Date(i.created_at).toLocaleDateString()}</td>
+                  <td className="muted">{fmtDate(i.created_at)}</td>
+                  <td className="muted">{fmtDate(lastUpdatedAt(i))}</td>
                   <td style={{ textAlign: "right" }}>
                     <Button
                       variant="ghost"
@@ -294,7 +308,8 @@ export function TeamView({ tenantId }: { tenantId: string }) {
                   <th>email</th>
                   <th>role</th>
                   <th>status</th>
-                  <th>sent</th>
+                  <th>created</th>
+                  <th>last updated</th>
                 </tr>
               </thead>
               <tbody>
@@ -307,7 +322,8 @@ export function TeamView({ tenantId }: { tenantId: string }) {
                     <td>
                       <Tag tone={STATUS_TONE[i.status]}>{i.status}</Tag>
                     </td>
-                    <td className="muted">{new Date(i.created_at).toLocaleDateString()}</td>
+                    <td className="muted">{fmtDate(i.created_at)}</td>
+                    <td className="muted">{fmtDate(lastUpdatedAt(i))}</td>
                   </tr>
                 ))}
               </tbody>

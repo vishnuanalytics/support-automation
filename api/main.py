@@ -833,7 +833,7 @@ def revoke_invitation(invite_id: str, c: Caller = Depends(caller)) -> None:
            .eq("invite_id", invite_id).execute().data)
     if cur:
         _require_owner(c, cur[0]["tenant_id"])
-    c.sb.table("tenant_invitations").update({"status": "revoked"}) \
+    c.sb.table("tenant_invitations").update({"status": "revoked", "revoked_at": _now_iso()}) \
         .eq("invite_id", invite_id).execute()
 
     if cur:

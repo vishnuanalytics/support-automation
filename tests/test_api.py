@@ -639,6 +639,27 @@ def test_archive_invitation_404s_for_an_unknown_invite(monkeypatch):
     assert ei.value.status_code == 404
 
 
+def test_revoke_invitation_sets_revoked_at(monkeypatch):
+    """The Invite history table's "last updated" column needs a real
+    timestamp for a revoked invite -- revoke_invitation used to only ever
+    flip `status`, so there was no way to know when that happened
+    (migration 114)."""
+    from api.main import Caller
+
+    admin = _FakeInviteAdmin()
+    main = _setup_invite_test(monkeypatch, admin)
+
+    sb = _FakeArchiveSb({"invite_id": "i1", "tenant_id": "t1", "email": "x@y.test", "status": "pending"})
+    c = Caller.__new__(Caller)
+    c.sb = sb
+    c.user_id, c.email = "u1", "owner@acme.test"
+
+    main.revoke_invitation("i1", c=c)
+    assert len(sb.updates) == 1
+    assert sb.updates[0]["status"] == "revoked"
+    assert sb.updates[0]["revoked_at"] is not None
+
+
 # ── billing follow-up fixes (2026-09-20, found by /code-review) ─────────
 def test_list_plans_orders_self_serve_tiers_before_talk_to_us_ones(monkeypatch):
     """A $0 base_price_usd (Enterprise, or a never-priced placeholder) must

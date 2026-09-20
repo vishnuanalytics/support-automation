@@ -707,6 +707,49 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-20 (Invite history: "created" + "last updated" columns, plus a
+real gap they exposed — revoked invites had no timestamp at all.)** User:
+"In invite history add created and last updated status too." The
+"Invite history" table (`TeamView.tsx`) only ever showed one date
+("sent" = `created_at`); an owner had no way to see *when* an invite was
+accepted or revoked, just that it currently was. Checking what data was
+even available surfaced a real gap: `accepted_at` and `archived_at`
+(migration 113, live now — see below) both exist, but `revoke_invitation`
+only ever flipped `status` to `'revoked'`, never recording when. So
+"last updated" couldn't be made honest for a revoked invite without
+first fixing that.
+
+**What changed:** migration **`114_invitation_revoked_at.sql`** adds
+`tenant_invitations.revoked_at` — **applied live** via the Supabase MCP
+`apply_migration` tool (this repo's documented migration-application
+method) since the new column is required for the live integration test
+(`test_invitation_create_list_revoke`, which calls the real `DELETE
+/api/invitations/{id}`) to keep passing, not left as a manual TODO like
+`112`/`113` below. `revoke_invitation` now sets `revoked_at` alongside
+`status`. Web: `TeamView.tsx` gets a `lastUpdatedAt(i)` helper
+(`archived_at || accepted_at || revoked_at || null` — a row only ever has
+one of these set) and a shared `fmtDate` helper; the Invite history table
+splits "sent" into **created** + **last updated** columns, the archived
+table gets the same two (was just "sent"), and the Pending-invites table's
+existing "sent" column now reuses `fmtDate` for consistency (still just
+one date — nothing to update yet on a still-open invite). New offline
+test `test_revoke_invitation_sets_revoked_at`. `cd web && npm run build`
+clean; backend `-k invit` 19/19; browser-verified with Playwright
+(throwaway spec) — screenshot confirms an accepted row and a revoked row
+each show distinct, correct created/last-updated dates.
+
+**Housekeeping noticed while touching this table, not fixed:** the live
+schema check this chunk did (`list_tables` via Supabase MCP) confirmed
+`112_billing_byok_tiers` and `113_invitation_archive` are **still not
+applied live** — `113` in particular means the already-shipped Archive
+button in the Team tab has been silently 4xx'ing in production this
+whole time (`archived_at` doesn't exist yet). Out of scope for this
+chunk (unrelated to what was asked, and `112` especially is a real
+billing-behavior change, not something to bundle in silently) — flagged
+here so it doesn't get lost again; worth applying both by hand soon.
+
+---
+
 **2026-09-20 (Security/bug audit of the whole invite + login + multi-
 tenant path, on request — one real bug found and fixed, rest checked and
 found sound.)** User: "See any bugs in the user invites and login page.
