@@ -3,23 +3,63 @@ import { api, ApiError } from "../api";
 import type { AuditEvent } from "../types";
 import { Button, Tag, Banner, DataTable, EmptyState, DateRangeFilter, type Column, type DateRange } from "../ui";
 
+// No server-side rate limit on GET /api/audit (a cheap, indexed,
+// RLS-scoped read) -- 10s keeps the log feeling live without hammering it.
+const POLL_MS = 10_000;
+
+function secondsAgo(d: Date): string {
+  const s = Math.max(0, Math.round((Date.now() - d.getTime()) / 1000));
+  if (s < 1) return "just now";
+  if (s < 60) return `${s}s ago`;
+  return `${Math.round(s / 60)}m ago`;
+}
+
 export function ActivityView({ tenantId }: { tenantId: string }) {
   const [rows, setRows] = useState<AuditEvent[]>([]);
   const [filter, setFilter] = useState("");
   const [range, setRange] = useState<DateRange>({ since: null, until: null });
   const [err, setErr] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  // Ticks once a second purely to re-render the "updated Xs ago" label --
+  // the value itself is never read, just used to force a re-render.
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => tick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
 
   useEffect(() => {
-    api
-      .listAudit({
-        action: filter || undefined,
-        since: range.since ?? undefined,
-        until: range.until ?? undefined,
-        limit: 200,
-        tenantId,
-      })
-      .then(setRows)
-      .catch((e: ApiError) => setErr(e.message));
+    let alive = true;
+
+    function load() {
+      api
+        .listAudit({
+          action: filter || undefined,
+          since: range.since ?? undefined,
+          until: range.until ?? undefined,
+          limit: 200,
+          tenantId,
+        })
+        .then((data) => {
+          if (!alive) return;
+          setRows(data);
+          setErr(null);
+          setLastUpdated(new Date());
+        })
+        .catch((e: ApiError) => alive && setErr(e.message));
+    }
+
+    load();
+    // Pause polling while the tab isn't visible -- no point refetching a
+    // log nobody's looking at, and it avoids piling up requests across
+    // several idle background tabs.
+    const id = setInterval(() => {
+      if (document.visibilityState === "visible") load();
+    }, POLL_MS);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
   }, [filter, range, tenantId]);
 
   const actions = useMemo(() => Array.from(new Set(rows.map((r) => r.action))).sort(), [rows]);
@@ -90,6 +130,12 @@ export function ActivityView({ tenantId }: { tenantId: string }) {
           </Button>
         )}
         <DateRangeFilter value={range} onChange={setRange} />
+        {lastUpdated && (
+          <span className="muted" style={{ fontSize: 11, marginLeft: "auto" }} title={lastUpdated.toLocaleString()}>
+            <span style={{ color: "var(--success)" }} aria-hidden>●</span> live · updated{" "}
+            {secondsAgo(lastUpdated)}
+          </span>
+        )}
       </div>
 
       {err && <Banner tone="exception" title={err} />}

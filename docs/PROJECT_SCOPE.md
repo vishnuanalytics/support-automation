@@ -707,6 +707,52 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-20 (Audit-log viewer, made live — with a real correction to
+this session's own earlier claim that it "hadn't been started.")** User:
+"Let's do the audit-log viewer next, currently I don't have domain."
+Before writing anything, checked the codebase properly this time — and
+found `web/src/activity/ActivityView.tsx` (filter-by-action grouped by
+namespace, a date-range filter, a real `DataTable`) **already existed**,
+already wired into Admin → Activity, backed by an already-complete `GET
+/api/audit` (`api/main.py`, Phase 28 / migration `076`, member-readable,
+tenant-scoped, since/until/action filters). Said so plainly rather than
+silently building a duplicate. The actual, narrower gap, matching what
+was originally asked for ("real-time logs"): the view fetched once and
+never updated again — no live/auto-refresh.
+
+**What changed:** `ActivityView.tsx` now polls `GET /api/audit` every
+10s (no server-side rate limit on that endpoint — confirmed before
+picking a number) using the *current* filter/date-range state each
+tick, paused while the browser tab isn't visible (`document.
+visibilityState`) so idle background tabs don't pile up requests. A
+small green "● live · updated Xs ago" indicator (ticks every second,
+`--success` token — a real status signal, not decoration, matching this
+repo's own color-use rule) sits in the filter row. Considered Supabase
+Realtime (websocket push on `audit_log` inserts) as the more
+"instant" alternative and deliberately didn't use it — this codebase
+already has an established polling idiom (the email `--interval 15`
+poller, `health_check`), an audit log isn't latency-critical to the
+second, and Realtime would add a new websocket-lifecycle dependency
+(reconnect, tenant-switch resubscribe) for a bar admins aren't staring
+at continuously. Revisit if true sub-second push ever actually matters.
+
+**Verify:** `cd web && npm run build` clean. Browser-verified with a
+mocked `/api/audit` returning a new row each call (throwaway Playwright
+spec, not committed): confirmed a poll actually fired automatically
+past the 10s interval with zero user interaction and the displayed row
+count advanced without any click — not just that the code *should*
+work. Also incidentally confirmed React StrictMode's dev-only double-
+effect-invocation is why 2 calls happened right at mount (harmless,
+production-only-build behavior, not a real double-fetch bug — checked
+`main.tsx` to be sure before writing this off). Full `vitest` (20/20) +
+full Playwright suite (15/15) still green.
+
+**Not done — CDN/deploy stays parked**, per the user ("currently I
+don't have domain") — nothing attempted this entry, matches
+`DEPLOY_WEB_AND_API.md`'s own "parked" note.
+
+---
+
 **2026-09-20 (Consent-gated GTM + GA4, plus the Cookie Policy page this
 made genuinely necessary — first chunk of a new, separate "government
 compliance + marketing tooling" thread, kicked off by an explicit legal
