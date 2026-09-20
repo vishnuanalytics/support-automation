@@ -421,6 +421,18 @@ def test_assert_not_locked_grace_tenant_without_byok_raises(monkeypatch):
         pass
 
 
+def test_assert_not_locked_canceled_tenant_raises_even_with_byok(monkeypatch):
+    from interpreter import llm
+
+    monkeypatch.setattr(llm, "tenant_has_byok", lambda tid: True)
+    sb = _SB({"tenants": [{"billing_status": "canceled", "plan_id": "p-pro"}], "plans": [_PRO_PLAN]})
+    try:
+        billing.assert_not_locked("t1", sb)
+        assert False, "expected BillingLockedError"
+    except billing.BillingLockedError:
+        pass
+
+
 def test_assert_not_locked_locked_status_always_raises_even_with_byok(monkeypatch):
     from interpreter import llm
 

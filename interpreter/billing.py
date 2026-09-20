@@ -117,20 +117,26 @@ def assert_not_locked(tenant_id: "str | None", sb) -> None:
     through — this is a billing gate, not a tenant-existence check; other
     code already handles that.
 
-    Three independent ways a run can be blocked here:
+    Four independent ways a run can be blocked here:
       - `billing_status == "locked"` (the 7-day trial clock + grace period
         both lapsed with no payment) -> always blocked, BYOK or not. The
         trial window itself is not extendable by BYOK.
+      - `"canceled"` (the subscription itself ended, via a provider
+        webhook) -> also always blocked, BYOK or not — same reasoning as
+        `locked`: the platform fee is what pays for the seats/flows/
+        features a run actually uses, and BYOK only ever covered the LLM
+        call, never that. A canceled tenant keeping an LLM key on file
+        must not be enough to keep running for free.
       - still `"trialing"`, and the free plan's flat run cap is used up
         (see `_trial_cap_status`) with no BYOK key covering the provider(s)
         actually used -> blocked, UNLESS a real BYOK run doesn't spend the
         platform's credits (excluded from `billable_*`), so there's
         nothing to protect by blocking it — it just lets them keep testing
         until the trial clock itself ends.
-      - anything past the trial (`active` / `grace` / `canceled`) -> BYOK
-        is the only ongoing billing method now (see the module docstring),
-        so a tenant with no LLM key on file at all has nothing for the
-        platform to run their flows on."""
+      - `"active"` / `"grace"` (paying, or in the post-trial-lapse warning
+        window) -> BYOK is the only ongoing billing method now (see the
+        module docstring), so a tenant with no LLM key on file at all has
+        nothing for the platform to run their flows on."""
     if not tenant_id:
         return
     rows = (sb.table("tenants").select("billing_status").eq("tenant_id", tenant_id)
@@ -142,6 +148,12 @@ def assert_not_locked(tenant_id: "str | None", sb) -> None:
         raise BillingLockedError(
             "This workspace's trial has ended and no payment method is on file — "
             "flows are paused until billing is reactivated.")
+    if status == "canceled":
+        raise BillingLockedError(
+            "This workspace's subscription was canceled — flows are paused until "
+            "a plan is chosen again, even with an LLM key on file (the "
+            "subscription pays for the platform; your key only ever paid for "
+            "the LLM calls).")
     if status == "trialing":
         exceeded, byok_covered = _trial_cap_status(tenant_id, sb)
         if exceeded and not byok_covered:

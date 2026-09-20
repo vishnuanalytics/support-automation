@@ -47,15 +47,21 @@ update plans set included_runs = 75, included_tokens = null where slug = 'free';
 
 -- ---- rename the real tiers to Basic / Pro / Advanced, flat + unmetered -
 -- Renaming in place (not delete+insert) keeps existing subscriptions/
--- tenants.plan_id foreign keys intact -- a real Razorpay/Stripe plan
--- object still needs re-pointing by hand (plans.razorpay_plan_id /
--- stripe_price_id) once the new prices are created provider-side.
+-- tenants.plan_id foreign keys intact -- but the OLD razorpay_plan_id/
+-- stripe_price_id on these rows priced the OLD tier ($49 Starter / $199
+-- Growth), not the new one -- left in place, checkout would bill a
+-- subscriber the old amount for the new, differently-priced tier. Cleared
+-- here (-> checkout_available=false, the picker's existing "Talk to us"
+-- fallback) until a real Product/Price/Plan object for the NEW price is
+-- created provider-side and plans.razorpay_plan_id/stripe_price_id is
+-- set by hand to point at it.
 update plans set
   slug = 'basic', name = 'Basic',
   included_runs = null, included_tokens = null,   -- unmetered -- BYOK covers the LLM cost
   base_price_usd = 2900, base_price_inr = 240000,  -- $29/mo, ~INR 2,400/mo
   seats_included = 3, included_flows = 5,
-  features = '["core"]'::jsonb
+  features = '["core"]'::jsonb,
+  razorpay_plan_id = null, stripe_price_id = null
 where slug = 'starter';
 
 update plans set
@@ -63,7 +69,8 @@ update plans set
   included_runs = null, included_tokens = null,
   base_price_usd = 7900, base_price_inr = 660000,  -- $79/mo, ~INR 6,600/mo
   seats_included = 10, included_flows = 25,
-  features = '["core", "policy_rules", "kb_writeback"]'::jsonb
+  features = '["core", "policy_rules", "kb_writeback"]'::jsonb,
+  razorpay_plan_id = null, stripe_price_id = null
 where slug = 'growth';
 
 insert into plans (slug, name, included_runs, included_tokens, base_price_usd, base_price_inr,
@@ -75,5 +82,11 @@ values (
 )
 on conflict (slug) do nothing;
 
--- 'enterprise' (sales-assisted, unlimited, no self-serve checkout) is
--- untouched -- a separate mechanism from these three, not one of them.
+-- 'enterprise' (sales-assisted, unlimited, no self-serve checkout) keeps
+-- its price/limit columns untouched -- a separate mechanism from these
+-- three, not one of them -- but still needs a `features` value: the
+-- column's own default ('[]') would otherwise leave the priciest tier
+-- showing no feature list at all in the plan picker.
+update plans set
+  features = '["core", "policy_rules", "kb_writeback", "agentic_actions", "priority_support"]'::jsonb
+where slug = 'enterprise';

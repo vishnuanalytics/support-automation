@@ -785,6 +785,38 @@ test_verify_migrations.py::test_the_live_repo_schema_has_no_drift` will
 correctly report `plans.features`/`plans.included_flows` as missing until
 then.
 
+**Follow-up (same day, after a `/code-review`):** three real bugs the
+review caught before `112` was ever applied, all fixed in the same
+migration/module (no separate migration number needed — nothing had run
+yet): (1) the `starter`→`basic`/`growth`→`pro` rename changed the
+*displayed* price but left `razorpay_plan_id`/`stripe_price_id` pointing
+at the OLD tier's provider-side price object — a live subscriber would've
+seen "Pro $79/mo" and been charged the old $199 Growth price at checkout;
+`112` now nulls both columns on the renamed rows (`checkout_available`
+correctly falls back to "Talk to us" until a real Price is created for
+the new number). (2) `assert_not_locked`'s new BYOK branch treated
+`billing_status == "canceled"` the same as `active`/`grace` — a canceled
+subscriber keeping their LLM key in Connections would run flows forever
+for free, since BYOK only ever paid for the LLM call, never the platform
+fee; `canceled` now blocks unconditionally, same as `locked`. (3) the new
+`features` column's `'[]'` default was never overwritten for `enterprise`
+— the priciest tier showed no feature badges in the picker while
+Basic/Pro/Advanced all did; `112` now sets it explicitly. **Still flagged,
+deliberately not auto-fixed:** (a) no grandfather window — the instant
+`112` is applied, any tenant already `active`/`grace` with no BYOK key
+gets every run blocked with no warning period; harmless today (no real
+paying tenants yet, only the Acme/Globex demo + the
+`gundamvishnu7@gmail.com` bootstrap account) but a real product decision
+(how long a transition window, whether it's retroactive) before this ever
+has real subscribers — not something to silently invent a number for.
+(b) `assert_seat_available`/`assert_flow_slot_available` are check-then-
+insert with no locking — two simultaneous invites/flow-creates on a plan
+at its cap can both pass and jointly exceed it by one. Same class of
+approximate-check the project already accepts elsewhere (the per-process
+rate limiter's own documented residual) — left as a known limitation, not
+worth a DB-level constraint for a race this narrow (human-paced UI
+actions) unless it actually bites.
+
 ---
 
 **2026-09-17 (Real landing page + Privacy Policy / Terms of Service in

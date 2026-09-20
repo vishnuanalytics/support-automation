@@ -562,13 +562,25 @@ def test_assert_not_locked_raises_for_a_locked_tenant():
         billing.assert_not_locked("t1", sb)
 
 
+def test_assert_not_locked_raises_for_a_canceled_tenant_even_with_byok(monkeypatch):
+    """2026-09-20: a canceled subscription is blocked unconditionally, same
+    as locked -- BYOK only ever covered the LLM call, never the platform
+    fee a canceled tenant has stopped paying."""
+    from interpreter import billing, llm
+
+    monkeypatch.setattr(llm, "tenant_has_byok", lambda tid: True)
+    sb = _BillingSB(tenants=[{"tenant_id": "t1", "billing_status": "canceled"}])
+    with pytest.raises(billing.BillingLockedError):
+        billing.assert_not_locked("t1", sb)
+
+
 def test_assert_not_locked_allows_every_other_status(monkeypatch):
     from interpreter import billing, llm
 
     # past-trial statuses now also require a BYOK key (2026-09-20) -- mocked
     # True here since this test is about the status transitions, not BYOK.
     monkeypatch.setattr(llm, "tenant_has_byok", lambda tid: True)
-    for status in ("trialing", "active", "grace", "canceled"):
+    for status in ("trialing", "active", "grace"):
         sb = _BillingSB(tenants=[{"tenant_id": "t1", "billing_status": status}])
         billing.assert_not_locked("t1", sb)   # must not raise
 
