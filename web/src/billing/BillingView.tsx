@@ -346,9 +346,9 @@ function PlansSection({
                 {p.included_flows != null ? `${p.included_flows} flows` : "unlimited flows"}
                 {p.seats_included != null ? ` · ${p.seats_included} seats` : " · unlimited seats"}
               </div>
-              {p.features.length > 0 && (
+              {(p.features ?? []).length > 0 && (
                 <div className="muted" style={{ fontSize: 11 }}>
-                  {p.features.filter((f) => f !== "core").join(" · ") || "core features"}
+                  {(p.features ?? []).filter((f) => f !== "core").join(" · ") || "core features"}
                 </div>
               )}
               {p.checkout_available && !isCurrent && (
