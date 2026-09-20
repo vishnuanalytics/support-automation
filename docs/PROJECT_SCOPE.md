@@ -707,6 +707,53 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-20 (Root cause of the whole invite-email thread found — not a
+bug. Distinguished "already has an account" from a real send failure.)**
+After the redeploy, Resend surfaced a clean error: "A user with this
+email address has already been registered." User: "check whether this
+email is registered to which workspace." Looked it up directly (real
+`.env` creds in this sandbox, via `sb.auth.admin.list_users()` +
+`tenant_members` + `tenant_invitations` — read-only, ad-hoc script, never
+added to the repo): `vishnu.r@urbanpiper.com` already has a Google-linked
+Supabase Auth account (created 2026-09-03), and is `owner` of a different
+workspace ("sales data"). The `gunner` workspace's invite was pending and
+already valid.
+
+**This was never actually broken.** Supabase's admin `invite_user_by_email`
+refuses on purpose to send a *new-user* invite to an email that already
+has an account — there's nothing to invite them into, they already have
+credentials. `_send_invite_email`'s own docstring already said this case
+"still gets in via their own normal sign-in," but the UI showed it as a
+generic "email failed to send" warning indistinguishable from an actual
+delivery problem, which is what made this look like a bug worth chasing
+across three commits.
+
+**What changed:** `_send_invite_email` now returns a third value,
+`already_registered` — detected off `supabase_auth`'s stable
+`email_exists` error code (not an English message substring, so it
+doesn't depend on Supabase's exact wording), with a message-substring
+fallback for older client versions/wrapped exceptions.
+`create_invitation`/`resend_invitation` include it in their response.
+Web: `TeamView.tsx`'s `emailFailureNotice` helper (shared by invite +
+resend) now shows a reassuring `accent`-toned "already has an account —
+no email needed, they'll get access automatically" instead of the `warn`-
+toned failure banner for this specific case; a real send failure still
+gets the warning. New `EmailSendResult` type shared between
+`InvitationCreateResult` and the resend response. 3 new offline tests
+(code-based detection independent of message wording, the
+already-registered flag on both fixture types, resend's response-shape
+assertion updated for the new field). `cd web && npm run build` clean;
+1324 offline pytest green.
+
+**Resolution for this specific case:** no code action needed — the
+`gunner` invite is valid and pending; `vishnu.r@urbanpiper.com` gets
+viewer access automatically the next time they sign in with that Google
+account (`accept_invitations` runs on every sign-in). Told the user this
+directly rather than continuing to chase a delivery problem that doesn't
+exist for an already-registered email.
+
+---
+
 **2026-09-20 (Resend invite + fixed a blank error message, closing the
 loop on the invite-email work above.)** Retrying the invite to
 `vishnu.r@urbanpiper.com` surfaced two more real things: (1) the exact

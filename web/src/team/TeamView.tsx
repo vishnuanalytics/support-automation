@@ -9,11 +9,34 @@ export function TeamView({ tenantId }: { tenantId: string }) {
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<"editor" | "viewer">("viewer");
   const [err, setErr] = useState<string | null>(null);
-  const [notice, setNotice] = useState<{ tone: "success" | "warn"; text: string } | null>(null);
+  const [notice, setNotice] = useState<{ tone: "success" | "accent" | "warn"; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [resendingId, setResendingId] = useState<string | null>(null);
+
+  /** already_registered means Supabase declined to send a *new-user*
+   * invite because this email already has an account -- not a failure:
+   * that person already has credentials and gets access automatically
+   * the moment they sign in (accept_invitations runs on every sign-in). */
+  function emailFailureNotice(
+    inviteEmail: string,
+    res: { email_error: string | null; already_registered: boolean },
+  ): { tone: "accent" | "warn"; text: string } {
+    if (res.already_registered) {
+      return {
+        tone: "accent",
+        text: `${inviteEmail} already has an account — no email needed. They'll get access to this workspace automatically the next time they sign in.`,
+      };
+    }
+    return {
+      tone: "warn",
+      text:
+        `The invite for ${inviteEmail} was created, but the email failed to send` +
+        (res.email_error ? `: ${res.email_error}` : "") +
+        ". They can still get in by signing up directly with that email address.",
+    };
+  }
 
   function load() {
     api.team.members(tenantId).then(setMembers).catch((e: ApiError) => setErr(e.message)).finally(() => setLoading(false));
@@ -31,15 +54,7 @@ export function TeamView({ tenantId }: { tenantId: string }) {
     setNotice(null);
     try {
       const res = await api.team.invite({ email: email.trim().toLowerCase(), role, tenant_id: tenantId });
-      if (!res.email_sent) {
-        setNotice({
-          tone: "warn",
-          text:
-            `Invite created for ${res.email}, but the email failed to send` +
-            (res.email_error ? `: ${res.email_error}` : "") +
-            ". They can still get in by signing up directly with that email address.",
-        });
-      }
+      if (!res.email_sent) setNotice(emailFailureNotice(res.email, res));
       setEmail("");
       setInviteOpen(false);
       load();
@@ -58,10 +73,7 @@ export function TeamView({ tenantId }: { tenantId: string }) {
       setNotice(
         res.email_sent
           ? { tone: "success", text: `Resent the invite to ${inviteEmail}.` }
-          : {
-              tone: "warn",
-              text: `Resend to ${inviteEmail} failed` + (res.email_error ? `: ${res.email_error}` : "") + ".",
-            },
+          : emailFailureNotice(inviteEmail, res),
       );
     } catch (e) {
       setErr((e as ApiError).message);

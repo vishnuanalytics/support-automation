@@ -695,15 +695,24 @@ def list_invitations(c: Caller = Depends(caller)) -> list[dict]:
             .order("created_at", desc=True).execute().data or [])
 
 
-def _send_invite_email(*, tenant_id: str, email: str, role: str, invited_by_email: "str | None") -> tuple[bool, "str | None"]:
+def _send_invite_email(*, tenant_id: str, email: str, role: str,
+                       invited_by_email: "str | None") -> tuple[bool, "str | None", bool]:
     """Supabase Auth's own admin invite (same service-role client already
     used everywhere else here) — actually delivers an email, whose accept
     flow signs the invitee in, landing them exactly where
     accept_invitations (called on every sign-in) claims the pending row.
-    Best-effort: an existing account 400s here ("already registered") --
-    that invitee still gets in via their own normal sign-in, so a caller
-    must never let this fail the invitation/resend itself. Returns
-    (sent, error) -- error is never an empty string when sent is False."""
+
+    An email that already has an account (Supabase's own `email_exists`
+    error code, checked over a message substring — stable across
+    supabase-auth versions, not tied to English wording) is NOT a failure:
+    Supabase refuses to send a *new-user* invite to an existing account on
+    purpose, but the `tenant_invitations` row is already valid — that
+    person gets in with their existing credentials the moment they sign
+    in, invite email or not (accept_invitations runs on every sign-in). A
+    caller must never let either case fail the invitation/resend itself.
+
+    Returns (sent, error, already_registered) — error is never an empty
+    string when sent is False."""
     trows = _service.table("tenants").select("name").eq("tenant_id", tenant_id).execute().data or []
     tenant_name = trows[0]["name"] if trows else None
     try:
@@ -711,8 +720,10 @@ def _send_invite_email(*, tenant_id: str, email: str, role: str, invited_by_emai
             "redirect_to": WEB_ORIGINS[0],
             "data": {"tenant_name": tenant_name, "role": role, "invited_by_email": invited_by_email},
         })
-        return True, None
+        return True, None, False
     except Exception as e:  # noqa: BLE001
+        already_registered = getattr(e, "code", None) == "email_exists" or \
+            "already been registered" in str(e).lower() or "already registered" in str(e).lower()
         # str(e) can come back empty (some supabase-auth error paths build
         # their message from a server response field that's itself blank)
         # -- fall back to the exception's class name (+ HTTP status, for a
@@ -721,7 +732,7 @@ def _send_invite_email(*, tenant_id: str, email: str, role: str, invited_by_emai
         status = getattr(e, "status", None)
         detail = str(e).strip() or f"{type(e).__name__}" + (f" (HTTP {status})" if status else "")
         log.warning("invite email to %s failed: %s", email, e)
-        return False, detail
+        return False, detail, already_registered
 
 
 @app.post("/api/invitations", status_code=201)
@@ -751,7 +762,7 @@ def create_invitation(body: InviteIn, c: Caller = Depends(caller)) -> dict:
                      "resend it instead of creating a new one.")
         raise HTTPException(409, f"could not invite {email}: {e}")
 
-    email_sent, email_error = _send_invite_email(
+    email_sent, email_error, already_registered = _send_invite_email(
         tenant_id=tid, email=email, role=role, invited_by_email=c.email)
 
     from interpreter import audit
@@ -760,11 +771,13 @@ def create_invitation(body: InviteIn, c: Caller = Depends(caller)) -> dict:
                  target_type="invitation", target_id=row["invite_id"],
                  summary=f"invited {email} as {role}"
                          + ("" if email_sent else f" (email send failed: {email_error})"))
-    # email_sent/email_error are transient response-only fields, not
-    # persisted on the tenant_invitations row -- the invitation itself
-    # always succeeds even if the email didn't, per _send_invite_email's
-    # docstring; the owner just needs to see whether to follow up another way.
-    return {**row, "email_sent": email_sent, "email_error": email_error}
+    # email_sent/email_error/already_registered are transient response-only
+    # fields, not persisted on the tenant_invitations row -- the invitation
+    # itself always succeeds even if the email didn't, per
+    # _send_invite_email's docstring; the owner just needs to see whether
+    # (and how) to follow up.
+    return {**row, "email_sent": email_sent, "email_error": email_error,
+            "already_registered": already_registered}
 
 
 @app.post("/api/invitations/{invite_id}/resend")
@@ -784,7 +797,7 @@ def resend_invitation(invite_id: str, c: Caller = Depends(caller)) -> dict:
     if inv["status"] != "pending":
         raise HTTPException(409, f"this invitation is {inv['status']}, not pending")
 
-    email_sent, email_error = _send_invite_email(
+    email_sent, email_error, already_registered = _send_invite_email(
         tenant_id=inv["tenant_id"], email=inv["email"], role=inv["role"], invited_by_email=c.email)
 
     from interpreter import audit
@@ -793,7 +806,7 @@ def resend_invitation(invite_id: str, c: Caller = Depends(caller)) -> dict:
                  target_type="invitation", target_id=invite_id,
                  summary=f"resent invite to {inv['email']}"
                          + ("" if email_sent else f" (email send failed: {email_error})"))
-    return {"email_sent": email_sent, "email_error": email_error}
+    return {"email_sent": email_sent, "email_error": email_error, "already_registered": already_registered}
 
 
 @app.delete("/api/invitations/{invite_id}", status_code=204)

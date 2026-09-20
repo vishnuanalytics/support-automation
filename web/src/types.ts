@@ -509,12 +509,20 @@ export interface Invitation {
   accepted_at: string | null;
 }
 
-/** Only present on the POST /api/invitations response, not persisted or
- * returned by GET /api/invitations -- transient feedback for the inviter. */
-export interface InvitationCreateResult extends Invitation {
+/** Shared by the POST /api/invitations and .../resend responses --
+ * transient feedback for the inviter, never persisted on the invitation
+ * row. already_registered means the invitee already has an account:
+ * Supabase declines to send a new-user email for one on purpose, not a
+ * failure -- they get access automatically on their next sign-in. */
+export interface EmailSendResult {
   email_sent: boolean;
   email_error: string | null;
+  already_registered: boolean;
 }
+
+/** Only present on the POST /api/invitations response, not persisted or
+ * returned by GET /api/invitations -- transient feedback for the inviter. */
+export interface InvitationCreateResult extends Invitation, EmailSendResult {}
 
 // ── KIL-f: Knowledge Integrity Loop review queue + metrics ─────────────
 export interface IntegrityVerdict {

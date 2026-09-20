@@ -189,17 +189,31 @@ def test_get_job_with_no_attributable_tenant_falls_back_to_permissive(monkeypatc
 
 
 # ── invite email (2026-09-20: a created invitation never sent one) ──────
+class _FakeAuthApiError(Exception):
+    def __init__(self, message, code=None, status=None):
+        super().__init__(message)
+        self.code = code
+        self.status = status
+
+
 class _FakeInviteAdmin:
     def __init__(self):
         self.calls = []
         self.raise_error = False
         self.raise_empty_message_error = False
+        self.raise_email_exists_code = False
 
     def invite_user_by_email(self, email, options=None):
         if self.raise_empty_message_error:
             raise Exception("")   # some supabase-auth error paths build an empty message
         if self.raise_error:
             raise Exception("User already registered")
+        if self.raise_email_exists_code:
+            # a real supabase_auth.AuthApiError carries a stable `.code`,
+            # independent of the English message wording -- deliberately no
+            # "already registered" substring here, to prove detection
+            # doesn't depend on the message text.
+            raise _FakeAuthApiError("conflict", code="email_exists", status=422)
         self.calls.append((email, options))
 
 
@@ -261,6 +275,7 @@ def test_create_invitation_sends_a_real_invite_email(monkeypatch):
 
     assert result["invite_id"] == "i1"
     assert result["email_sent"] is True and result["email_error"] is None
+    assert result["already_registered"] is False
     assert len(admin.calls) == 1
     sent_email, options = admin.calls[0]
     assert sent_email == "new@person.test"
@@ -269,9 +284,10 @@ def test_create_invitation_sends_a_real_invite_email(monkeypatch):
 
 
 def test_create_invitation_still_succeeds_if_the_invite_email_fails(monkeypatch):
-    """An existing-account 400 (or any provider hiccup) from Supabase's
-    admin invite must never fail the invitation itself -- the invitee
-    still gets in via their own normal sign-in (accept_invitations)."""
+    """An existing-account 400 from Supabase's admin invite must never fail
+    the invitation itself -- the invitee still gets in via their own
+    normal sign-in (accept_invitations), and this specific case is flagged
+    already_registered=True so the UI doesn't read it as a real problem."""
     from api.main import Caller, InviteIn
 
     admin = _FakeInviteAdmin()
@@ -287,6 +303,7 @@ def test_create_invitation_still_succeeds_if_the_invite_email_fails(monkeypatch)
     assert result["invite_id"] == "i1"
     assert result["email_sent"] is False
     assert "already registered" in result["email_error"]
+    assert result["already_registered"] is True
 
 
 def test_create_invitation_email_error_is_never_blank(monkeypatch):
@@ -308,6 +325,26 @@ def test_create_invitation_email_error_is_never_blank(monkeypatch):
     result = main.create_invitation(body, c=c)
     assert result["email_sent"] is False
     assert result["email_error"]   # non-empty -- must not be "" or None
+
+
+def test_create_invitation_detects_already_registered_by_error_code(monkeypatch):
+    """Detection must key off supabase_auth's stable `email_exists` code,
+    not an English message substring -- this message deliberately doesn't
+    say "already registered" anywhere."""
+    from api.main import Caller, InviteIn
+
+    admin = _FakeInviteAdmin()
+    admin.raise_email_exists_code = True
+    main = _setup_invite_test(monkeypatch, admin)
+
+    c = Caller.__new__(Caller)
+    c.sb = _FakeInviteCallerSb()
+    c.user_id, c.email = "u1", "owner@acme.test"
+
+    body = InviteIn(email="vishnu.r@urbanpiper.com", role="viewer", tenant_id="t1")
+    result = main.create_invitation(body, c=c)
+    assert result["email_sent"] is False
+    assert result["already_registered"] is True
 
 
 def test_create_invitation_pending_duplicate_points_at_resend(monkeypatch):
@@ -376,7 +413,7 @@ def test_resend_invitation_resends_to_the_existing_pending_invite(monkeypatch):
     c.user_id, c.email = "u1", "owner@acme.test"
 
     result = main.resend_invitation("i1", c=c)
-    assert result == {"email_sent": True, "email_error": None}
+    assert result == {"email_sent": True, "email_error": None, "already_registered": False}
     assert admin.calls[0][0] == "vishnu.r@urbanpiper.com"
 
 
