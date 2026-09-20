@@ -707,6 +707,55 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-20 (Invite-email follow-up: surfaced send failures instead of
+swallowing them, and verified/documented that invites are already
+tenant-scoped.)** User reported a real invite (from the `gundamvishnu7@
+gmail.com` account's tenant to `vishnu.r@urbanpiper.com`) never arrived,
+and separately asked for "proper multitenant invitation... one person
+invite should not give access to all workspaces." Investigated the second
+part first since it changes how urgent the first part is: read
+`create_invitation` (scoped insert on one `tenant_id`),
+`accept_invitations` (claims each pending invite into a `tenant_members`
+row for *that invite's own* `tenant_id`, one at a time — never touches
+another tenant), `GET /api/tenants` (RLS-scoped to the caller's own
+`tenant_members` rows), and `App.tsx`'s `applyTenants`/`load()` (a
+brand-new user with zero memberships and zero pending invites lands on
+"Set up your workspace", never auto-joined to an existing one). **No
+cross-tenant leak found** — an invite to one workspace has never granted
+access to any other; this was already correct multi-tenancy, just never
+confirmed against the code out loud. `TeamView.tsx`'s copy said "no email
+is sent" (true before the earlier fix in this session, stale after it) —
+reworded to state the per-workspace scoping explicitly plus that an email
+now goes out.
+
+The actual bug: the earlier email-sending fix (same day, above) swallowed
+every send failure into a server log line with **zero UI signal** — an
+owner had no way to know their invite's email never went out, which is
+exactly what happened here. `create_invitation` now returns
+`email_sent`/`email_error` (response-only, not persisted on the
+`tenant_invitations` row) and `TeamView.tsx` shows a warning banner
+("Invite created ... but the email failed to send: ...") when it's false,
+instead of silently reporting success either way. 2 existing offline
+tests extended to assert the new fields; `cd web && npm run build` clean.
+
+**Not diagnosable from here — needs the user to check their own Supabase
+project:** *why* the `vishnu.r@urbanpiper.com` email specifically didn't
+land is still open. Likely candidates, in rough order of likelihood: (1)
+Supabase's default built-in email sender has a low per-hour rate limit
+and known spam-folder issues for external/corporate domains — check
+Authentication → Logs in the Supabase dashboard for the actual send
+attempt and its result; a custom SMTP provider (Authentication → Emails →
+SMTP Settings) is the fix if so. (2) `WEB_ORIGINS`'s first entry isn't in
+Supabase's allowed redirect URL list, which would make the call itself
+error (should now surface as the new `email_error` in the UI — worth
+retrying the invite now that that's visible). (3) the recipient's mail
+server silently dropped/quarantined it (check their spam folder). Cheapest
+diagnostic: try "Email me a link" on the login screen for an address you
+control — if that doesn't arrive either, it's a Supabase project-level
+email config issue, not this endpoint.
+
+---
+
 **2026-09-20 (Invitations never sent an email — a real gap the user hit
 directly, unrelated to the billing work above but found in the same
 session.)** User: "In the invites, if i invite anyone the invitation

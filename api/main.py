@@ -728,20 +728,27 @@ def create_invitation(body: InviteIn, c: Caller = Depends(caller)) -> dict:
     # never fail the invitation itself.
     trows = _service.table("tenants").select("name").eq("tenant_id", tid).execute().data or []
     tenant_name = trows[0]["name"] if trows else None
+    email_sent, email_error = True, None
     try:
         _service.auth.admin.invite_user_by_email(email, {
             "redirect_to": WEB_ORIGINS[0],
             "data": {"tenant_name": tenant_name, "role": role, "invited_by_email": c.email},
         })
     except Exception as e:  # noqa: BLE001
+        email_sent, email_error = False, str(e)
         log.warning("invite email to %s failed (invitation row still created): %s", email, e)
 
     from interpreter import audit
     audit.record(_service, tenant_id=tid, action="invitation.created",
                  actor_id=c.user_id, actor_email=c.email,
                  target_type="invitation", target_id=row["invite_id"],
-                 summary=f"invited {email} as {role}")
-    return row
+                 summary=f"invited {email} as {role}"
+                         + ("" if email_sent else f" (email send failed: {email_error})"))
+    # email_sent/email_error are transient response-only fields, not
+    # persisted on the tenant_invitations row -- the invitation itself
+    # always succeeds even if the email didn't, per the comment above; the
+    # owner just needs to see whether they should follow up another way.
+    return {**row, "email_sent": email_sent, "email_error": email_error}
 
 
 @app.delete("/api/invitations/{invite_id}", status_code=204)

@@ -9,6 +9,7 @@ export function TeamView({ tenantId }: { tenantId: string }) {
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<"editor" | "viewer">("viewer");
   const [err, setErr] = useState<string | null>(null);
+  const [warn, setWarn] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -26,8 +27,16 @@ export function TeamView({ tenantId }: { tenantId: string }) {
     if (!email.trim()) return;
     setBusy(true);
     setErr(null);
+    setWarn(null);
     try {
-      await api.team.invite({ email: email.trim().toLowerCase(), role, tenant_id: tenantId });
+      const res = await api.team.invite({ email: email.trim().toLowerCase(), role, tenant_id: tenantId });
+      if (!res.email_sent) {
+        setWarn(
+          `Invite created for ${res.email}, but the email failed to send` +
+            (res.email_error ? `: ${res.email_error}` : "") +
+            ". They can still get in by signing up directly with that email address.",
+        );
+      }
       setEmail("");
       setInviteOpen(false);
       load();
@@ -43,8 +52,9 @@ export function TeamView({ tenantId }: { tenantId: string }) {
     <div style={{ display: "grid", gap: 16 }}>
       <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
         <p className="muted" style={{ fontSize: 12, margin: 0, maxWidth: "60ch" }}>
-          An invite pre-authorises an email + role. The person gets access the next time they sign
-          in — no email is sent.
+          An invite pre-authorises an email + role for <strong>this workspace only</strong> — it
+          doesn't grant access to any other workspace, even one you also belong to. We email them a
+          sign-in link; they also get access automatically if they sign in with that email another way.
         </p>
         <Button variant="primary" size="sm" onClick={() => setInviteOpen(true)}>
           Invite
@@ -56,6 +66,13 @@ export function TeamView({ tenantId }: { tenantId: string }) {
           tone="exception"
           title={err}
           actions={<Button variant="ghost" size="sm" onClick={() => setErr(null)}>Dismiss</Button>}
+        />
+      )}
+      {warn && (
+        <Banner
+          tone="warn"
+          title={warn}
+          actions={<Button variant="ghost" size="sm" onClick={() => setWarn(null)}>Dismiss</Button>}
         />
       )}
 

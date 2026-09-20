@@ -509,6 +509,13 @@ export interface Invitation {
   accepted_at: string | null;
 }
 
+/** Only present on the POST /api/invitations response, not persisted or
+ * returned by GET /api/invitations -- transient feedback for the inviter. */
+export interface InvitationCreateResult extends Invitation {
+  email_sent: boolean;
+  email_error: string | null;
+}
+
 // ── KIL-f: Knowledge Integrity Loop review queue + metrics ─────────────
 export interface IntegrityVerdict {
   relation: "entails" | "neutral" | "contradicts";

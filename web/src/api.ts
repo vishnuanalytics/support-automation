@@ -25,6 +25,7 @@ import type {
   ActionRequest,
   GoogleStatus,
   Invitation,
+  InvitationCreateResult,
   KbCollection,
   KbConnection,
   KbConnector,
@@ -534,7 +535,7 @@ export const api = {
       req<void>(`/members/${userId}${tenantId ? `?tenant_id=${tenantId}` : ""}`, { method: "DELETE" }),
     invitations: () => req<Invitation[]>("/invitations"),
     invite: (b: { email: string; role: "editor" | "viewer"; tenant_id?: string }) =>
-      req<Invitation>("/invitations", { method: "POST", body: JSON.stringify(b) }),
+      req<InvitationCreateResult>("/invitations", { method: "POST", body: JSON.stringify(b) }),
     revoke: (id: string) => req<void>(`/invitations/${id}`, { method: "DELETE" }),
   },
 

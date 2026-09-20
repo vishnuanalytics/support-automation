@@ -257,6 +257,7 @@ def test_create_invitation_sends_a_real_invite_email(monkeypatch):
     result = main.create_invitation(body, c=c)
 
     assert result["invite_id"] == "i1"
+    assert result["email_sent"] is True and result["email_error"] is None
     assert len(admin.calls) == 1
     sent_email, options = admin.calls[0]
     assert sent_email == "new@person.test"
@@ -281,6 +282,8 @@ def test_create_invitation_still_succeeds_if_the_invite_email_fails(monkeypatch)
     body = InviteIn(email="already@registered.test", role="viewer", tenant_id="t1")
     result = main.create_invitation(body, c=c)
     assert result["invite_id"] == "i1"
+    assert result["email_sent"] is False
+    assert "already registered" in result["email_error"]
 
 
 # ── billing follow-up fixes (2026-09-20, found by /code-review) ─────────
