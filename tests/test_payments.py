@@ -100,6 +100,28 @@ def test_razorpay_create_customer_without_email_omits_it(monkeypatch):
     assert "email" not in captured["json"]
 
 
+def test_razorpay_create_plan_posts_monthly_item(monkeypatch):
+    captured = {}
+
+    def fake_request(method, url, auth, timeout, json):
+        captured.update(method=method, url=url, json=json)
+        return _Resp(200, {"id": "plan_TeJjLIl7hWJ2re"})
+
+    monkeypatch.setattr("requests.request", fake_request)
+    monkeypatch.setenv("RAZORPAY_KEY_ID", "x")
+    monkeypatch.setenv("RAZORPAY_KEY_SECRET", "y")
+
+    plan_id = payments.razorpay_create_plan("Basic", 240000)
+    assert plan_id == "plan_TeJjLIl7hWJ2re"
+    assert captured["method"] == "POST"
+    assert captured["url"].endswith("/plans")
+    assert captured["json"]["period"] == "monthly"
+    assert captured["json"]["interval"] == 1
+    assert captured["json"]["item"]["amount"] == 240000
+    assert captured["json"]["item"]["currency"] == "INR"
+    assert captured["json"]["item"]["name"] == "Basic"
+
+
 def test_razorpay_create_subscription_needs_a_provider_plan_id(monkeypatch):
     monkeypatch.setenv("RAZORPAY_KEY_ID", "x")
     monkeypatch.setenv("RAZORPAY_KEY_SECRET", "y")
@@ -272,6 +294,25 @@ def test_stripe_create_customer_posts_form_encoded_name_and_metadata(monkeypatch
     assert captured["url"].endswith("/customers")
     assert captured["data"] == {
         "name": "Acme Support", "email": "owner@acme.test", "metadata[tenant_id]": "t1",
+    }
+
+
+def test_stripe_create_price_posts_flattened_recurring_and_product_data(monkeypatch):
+    captured = {}
+
+    def fake_request(method, url, auth, timeout, data):
+        captured.update(method=method, url=url, data=dict(data))
+        return _Resp(200, {"id": "price_1UHlKsQgoNUDQOamj4OiWhYd"})
+
+    monkeypatch.setattr("requests.request", fake_request)
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_x")
+
+    price_id = payments.stripe_create_price("Basic — Support Automation", 2900)
+    assert price_id == "price_1UHlKsQgoNUDQOamj4OiWhYd"
+    assert captured["url"].endswith("/prices")
+    assert captured["data"] == {
+        "unit_amount": 2900, "currency": "usd", "recurring[interval]": "month",
+        "product_data[name]": "Basic — Support Automation",
     }
 
 

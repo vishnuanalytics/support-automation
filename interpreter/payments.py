@@ -160,6 +160,23 @@ def razorpay_create_customer(name: str, email: "str | None", tenant_id: str) -> 
     return _razorpay_call("POST", "/customers", json=body)["id"]
 
 
+def razorpay_create_plan(name: str, amount_inr_paise: int, description: str = "") -> str:
+    """One-time setup, not part of any tenant-facing flow: creates the Plan
+    object `razorpay_create_subscription` above needs `plans.razorpay_plan_id`
+    to point at. `amount_inr_paise` is the same unit already stored in
+    `plans.base_price_inr` (paise, Razorpay's smallest INR unit — INR 2,400
+    == 240000), so a plan row's own column can be passed straight through.
+    Used by scripts/billing_setup.py; safe to call again for a differently-
+    priced plan (Razorpay has no update-price API — a price change always
+    means a new Plan object, the old one left orphaned but harmless)."""
+    r = _razorpay_call("POST", "/plans", json={
+        "period": "monthly", "interval": 1,
+        "item": {"name": name, "amount": amount_inr_paise, "currency": "INR",
+                 "description": description or f"{name} — support automation"},
+    })
+    return r["id"]
+
+
 def razorpay_create_subscription(customer_id: str, plan_row: dict[str, Any],
                                  tenant_id: str) -> CheckoutResult:
     razorpay_plan_id = plan_row.get("razorpay_plan_id")
@@ -290,6 +307,25 @@ def stripe_create_customer(name: str, email: "str | None", tenant_id: str) -> st
     if email:
         body["email"] = email
     return _stripe_call("POST", "/customers", body)["id"]
+
+
+def stripe_create_price(name: str, amount_usd_cents: int) -> str:
+    """One-time setup, not part of any tenant-facing flow: creates the Price
+    object `stripe_create_subscription` below needs `plans.stripe_price_id`
+    to point at — `product_data` inline creates the backing Product in the
+    same call rather than needing a separate one. `amount_usd_cents` is the
+    same unit already stored in `plans.base_price_usd` (cents — $29 == 2900),
+    so a plan row's own column can be passed straight through. Used by
+    scripts/billing_setup.py; safe to call again for a differently-priced
+    plan (Stripe Prices are immutable — a price change always means a new
+    Price object, the old one left inactive-but-not-deleted, same as
+    Stripe's own dashboard flow)."""
+    r = _stripe_call("POST", "/prices", {
+        "unit_amount": amount_usd_cents, "currency": "usd",
+        "recurring": {"interval": "month"},
+        "product_data": {"name": name},
+    })
+    return r["id"]
 
 
 def stripe_create_subscription(customer_id: str, plan_row: dict[str, Any],

@@ -707,6 +707,62 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-20 (Billing go-live plumbing: the missing `docs/BILLING_SETUP.md`
+plus the actual price/plan wiring, both raised in the entry directly
+below.)** User asked for full billing details (checkout_available was
+`false` for every plan — no Stripe Price or Razorpay Plan object existed
+yet for any tier, confirmed live), then "Do both" — write the doc, and
+wire up the price-ID plumbing. No real Stripe/Razorpay account exists yet
+(test-mode keys only, per the user), so "wire up" here means: build the
+tooling and prove the whole loop works in test mode now, in a form that
+is the *exact same mechanism* for going live later — not something to
+redo from scratch once a real account exists.
+
+**What changed:** `interpreter/payments.py` gains `stripe_create_price` /
+`razorpay_create_plan` (create the priced object each provider's
+`create_subscription` needs `plans.stripe_price_id`/`razorpay_plan_id` to
+point at — `amount_usd_cents`/`amount_inr_paise` take the plan row's own
+`base_price_usd`/`base_price_inr` columns directly, same units already
+stored there). New `scripts/billing_setup.py` — idempotent, reads the
+live `plans` table, creates whatever's missing for Basic/Pro/Advanced via
+those two functions, writes the IDs back; detects and prints test vs live
+mode from the key prefix so a run is never ambiguous about whether it
+just created real, billable objects. **Run live against this project's
+test-mode keys** (not just written and left untested): created a real
+Stripe Price + Razorpay Plan for all three self-serve tiers, verified
+`checkout_available` flipped `true -> ... -> true` for all three
+(previously `false` for literally every plan including Enterprise/Free,
+which stay `false` on purpose — no self-serve checkout for either). Went
+one step further than "the DB flag looks right" — called
+`create_customer` + `create_subscription` directly against both
+providers' live test-mode APIs (Basic plan, throwaway customer, not
+touching any real tenant's `subscriptions` row) and got back real,
+working `checkout.stripe.com` / `rzp.io` URLs, proving the actual
+provider integration works end-to-end with the newly-created IDs, not
+just that a column got populated. New `docs/BILLING_SETUP.md` — the file
+`interpreter/payments.py`'s own module docstring and two error messages
+already pointed at but which never existed; covers the BYOK pricing
+model, what `checkout_available` means, how to run the setup script, the
+webhook-driven (not manual/polling) activation flow, and the concrete
+test-mode -> live-mode checklist (swap keys, re-run the same script,
+fix the still-`localhost` checkout redirect URLs, re-register webhooks
+with live-mode secrets).
+
+**Verify:** 2 new offline tests (`test_stripe_create_price_...`,
+`test_razorpay_create_plan_...`, same stubbed-`requests` pattern as this
+file's existing provider tests) — `tests/test_payments.py` 37/37,
+`test_billing.py` 45/45, combined `-k "billing or plan or invit"` across
+the full suite 69/69. Re-ran `scripts/billing_setup.py` a second time
+to confirm idempotency (correctly skipped every already-wired plan, no
+duplicate Price/Plan objects created).
+
+**Not done:** no code touches the actual "swap test keys for live keys"
+step — that's real business verification with each provider, a human
+step this can't automate, fully spelled out in the new doc's checklist
+instead.
+
+---
+
 **2026-09-20 (Applied migrations 112 + 113 live, and root-caused the
 "unrelated" test failures noted throughout this session — they were
 never flaky, and had nothing to do with any migration in this session.)**
