@@ -748,6 +748,12 @@ def _send_invite_email(*, tenant_id: str, email: str, role: str,
 
 @app.post("/api/invitations", status_code=201)
 def create_invitation(body: InviteIn, c: Caller = Depends(caller)) -> dict:
+    # create + resend share one budget (see resend_invitation below) --
+    # both ultimately fire a real Supabase Auth email against the same
+    # project-wide quota, and a careless retry loop or deliberate spam on
+    # either one is exactly what exhausted that shared quota and starved a
+    # real invite earlier (see PROJECT_SCOPE.md's invite-email thread).
+    rate_limit(c.user_id, "invite_email", 15, window=3600.0)
     tid = _caller_tenant(c, body.tenant_id)
     _require_owner(c, tid)
     role = body.role.strip().lower()
@@ -799,6 +805,7 @@ def resend_invitation(invite_id: str, c: Caller = Depends(caller)) -> dict:
     retry short of revoking and re-inviting, which throws away the
     original invited_by/created_at. Re-sends against the existing row
     instead; does not touch tenant_invitations at all."""
+    rate_limit(c.user_id, "invite_email", 15, window=3600.0)
     rows = (c.sb.table("tenant_invitations").select("*")
             .eq("invite_id", invite_id).execute().data or [])
     if not rows:

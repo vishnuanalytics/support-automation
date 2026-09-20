@@ -707,6 +707,71 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-20 (Password strength rules + abuse-rate-limiting hardening on
+top of the password/invite work above.)** User: "Improve the password
+rules to max security and improve the rate limit to avoid misusing
+naything." Two separate mechanisms, both touched:
+
+**Password rules (`web/src/auth/SetNewPassword.tsx`):** was an 8-char
+minimum with no complexity requirement. Now a live checklist (not just a
+submit-time error) requiring ≥12 characters, upper+lowercase, a digit, a
+symbol, not on a small hardcoded common-weak-password list, and not
+containing the account's own email local-part — all six gate the submit
+button and render red/green (`--exception`/`--success` tokens) as the
+user types. **Explicitly documented as UX, not the security boundary** —
+this is client-side JS, bypassable by anyone calling the Supabase API
+directly. The real enforcement has to be **Supabase's own Auth →
+Policies** dashboard setting (minimum length + character requirements +
+"leaked password protection," HaveIBeenPwned-backed) — this session has
+no MCP tool that reads or writes Supabase Auth config (checked; only
+`query_logs`/`execute_sql`/schema-management tools exist, nothing for
+project-level Auth settings), so this is a **flagged manual step**: set
+Auth → Policies' minimum length to 12 with all four character classes
+required, and turn on leaked-password protection. The client rules above
+are deliberately at least as strict, so nothing accepted here should ever
+be rejected server-side once that's set.
+
+**Rate limiting, two layers:**
+1. **App-level, in our control:** `create_invitation` and
+   `resend_invitation` (`api/main.py`) had *no* rate limit at all despite
+   both firing a real Supabase Auth email — exactly the mechanism that
+   starved a real invite earlier this session (a test loop + repeated
+   resends exhausting the shared Supabase quota, see the entry below).
+   Both now share one `rate_limit(c.user_id, "invite_email", 15,
+   window=3600.0)` budget (reusing this file's existing per-process
+   token-bucket helper, same pattern as `run`/`kb_write`/etc.) — 15
+   invite-emails per user per hour, combined across create+resend, is
+   generous for real bulk onboarding but stops a runaway loop or
+   deliberate spam from being the thing that exhausts the project's
+   shared quota again. New test:
+   `test_create_and_resend_invitation_share_one_rate_limit_budget`
+   (asserts the 429 trips at the shared boundary, not 15 each).
+2. **Client-side courtesy, `Login.tsx`:** "Email me a link" and "Forgot
+   password?" both send a real email through that same shared quota with
+   no cooldown before this — a user double-clicking (or a bug) could
+   burn through it in seconds. Both now share a 30s cooldown after
+   either fires, with the button showing "Wait Ns…" — explicitly
+   documented as a courtesy on top of, not instead of, Supabase's own
+   Auth → Rate Limits (also dashboard-only, also unreachable from here).
+
+**Not done — flagged, needs the user in the Supabase dashboard, not
+code:** (1) Auth → Policies password strength + leaked-password
+protection (above). (2) Auth → Rate Limits — the authoritative per-
+project caps on sign-in attempts, sign-ups, OTP/magic-link sends, and
+password-recovery sends; this session still can't read or raise them
+(same gap noted in the invite-email root-cause entry below). (3) no
+CAPTCHA (hCaptcha/Turnstile) wired up for sign-in/sign-up, which Supabase
+supports as another dashboard-configured anti-abuse layer — not asked
+for, flagged as a further option if abuse continues.
+
+**Verify:** `cd web && npm run build` clean; `npx vitest run` 20/20;
+backend `-k invit` 18/18 (17 previous + the new rate-limit test).
+Browser-verified with Playwright (throwaway specs, not committed):
+screenshots confirm the checklist goes from all-red to all-green as a
+weak → strong password is typed, styled correctly in both states.
+
+---
+
 **2026-09-20 (Self-serve password: set-a-password for a magic-link/Google
 account, plus a forgot-password flow — closes the loop on the invite-
 email thread above by cutting the auth path's dependency on email even

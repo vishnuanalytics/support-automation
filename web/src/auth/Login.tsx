@@ -1,12 +1,32 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { supabase } from "../supabase";
 import { Button, Field, Input } from "../ui";
+
+// Magic-link and password-reset both send a real email through the same
+// project-wide Supabase Auth quota that a rapid-click loop can exhaust in
+// minutes (this is exactly what happened to real invite emails elsewhere
+// in this app) -- a short client-side cooldown after either one stops that
+// class of accidental misuse. It's a courtesy, not the real rate limit:
+// Supabase's own Auth -> Rate Limits enforces the authoritative cap
+// server-side regardless of what this does.
+const EMAIL_COOLDOWN_SECONDS = 30;
 
 export function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [emailCooldownUntil, setEmailCooldownUntil] = useState(0);
+  const [, tick] = useState(0);
+
+  useEffect(() => {
+    if (!emailCooldownUntil) return;
+    const id = setInterval(() => tick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [emailCooldownUntil]);
+
+  const cooldownSecondsLeft = Math.max(0, Math.ceil((emailCooldownUntil - Date.now()) / 1000));
+  const emailOnCooldown = cooldownSecondsLeft > 0;
 
   async function withPassword(e: React.FormEvent) {
     e.preventDefault();
@@ -24,6 +44,7 @@ export function Login() {
     }
     setBusy(true);
     setMsg(null);
+    setEmailCooldownUntil(Date.now() + EMAIL_COOLDOWN_SECONDS * 1000);
     const { error } = await supabase.auth.resetPasswordForEmail(email, {
       redirectTo: window.location.origin,
     });
@@ -34,6 +55,7 @@ export function Login() {
   async function magicLink() {
     setBusy(true);
     setMsg(null);
+    setEmailCooldownUntil(Date.now() + EMAIL_COOLDOWN_SECONDS * 1000);
     const { error } = await supabase.auth.signInWithOtp({
       email,
       options: { emailRedirectTo: window.location.origin },
@@ -101,8 +123,8 @@ export function Login() {
             <Button variant="primary" type="submit" disabled={busy || !email}>
               Continue
             </Button>
-            <Button variant="ghost" type="button" onClick={magicLink} disabled={busy || !email}>
-              Email me a link
+            <Button variant="ghost" type="button" onClick={magicLink} disabled={busy || !email || emailOnCooldown}>
+              {emailOnCooldown ? `Wait ${cooldownSecondsLeft}s…` : "Email me a link"}
             </Button>
           </div>
           <Button
@@ -110,10 +132,10 @@ export function Login() {
             size="sm"
             type="button"
             onClick={forgotPassword}
-            disabled={busy || !email}
+            disabled={busy || !email || emailOnCooldown}
             style={{ justifySelf: "start" }}
           >
-            Forgot password?
+            {emailOnCooldown ? `Forgot password? (wait ${cooldownSecondsLeft}s)` : "Forgot password?"}
           </Button>
         </form>
 

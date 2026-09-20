@@ -385,6 +385,59 @@ def test_create_invitation_pending_duplicate_points_at_resend(monkeypatch):
     assert "resend" in ei.value.detail
 
 
+def test_create_and_resend_invitation_share_one_rate_limit_budget(monkeypatch):
+    """create_invitation and resend_invitation both fire a real Supabase
+    Auth email against the same project-wide quota -- a careless retry
+    loop or deliberate spam on either one is what actually starved a real
+    invite earlier (see PROJECT_SCOPE.md). They must share one budget, not
+    get 15 each."""
+    from fastapi import HTTPException
+
+    from api import main
+    from api.main import Caller, InviteIn
+
+    main._rate.clear()
+    admin = _FakeInviteAdmin()
+    _setup_invite_test(monkeypatch, admin)
+
+    def fresh_caller():
+        c = Caller.__new__(Caller)
+        c.sb = _FakeInviteCallerSb()
+        c.user_id, c.email = "rate-limit-test-user", "owner@acme.test"
+        return c
+
+    body = InviteIn(email="someone@example.test", role="viewer", tenant_id="t1")
+    for _ in range(10):
+        main.create_invitation(body, c=fresh_caller())
+
+    class _FakeResendSb:
+        def table(self, name):
+            return self
+
+        def select(self, *a, **k):
+            return self
+
+        def eq(self, *a, **k):
+            return self
+
+        def execute(self):
+            return type("R", (), {"data": [
+                {"invite_id": "i1", "tenant_id": "t1", "email": "someone@example.test",
+                 "role": "viewer", "status": "pending"}]})()
+
+    for _ in range(5):
+        c = fresh_caller()
+        c.sb = _FakeResendSb()
+        main.resend_invitation("i1", c=c)
+
+    with pytest.raises(HTTPException) as ei:
+        c = fresh_caller()
+        c.sb = _FakeResendSb()
+        main.resend_invitation("i1", c=c)
+    assert ei.value.status_code == 429
+    main._rate.clear()
+
+
 # ── resend (2026-09-20: a pending invite had no way to retry a failed email) ──
 def test_resend_invitation_resends_to_the_existing_pending_invite(monkeypatch):
     from api.main import Caller
