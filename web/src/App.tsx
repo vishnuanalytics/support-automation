@@ -63,6 +63,15 @@ function viewFromUrl(): View {
   return VIEWS.includes(v as View) ? (v as View) : "editor";
 }
 
+// `flow` only means anything on the editor view (mirrors the render guard
+// below, `view === "editor" && flowId`) -- ignored otherwise so a stale
+// `flow` param left over from an old URL can't leak a flow open under an
+// unrelated view.
+function flowIdFromUrl(): string | null {
+  if (viewFromUrl() !== "editor") return null;
+  return new URLSearchParams(window.location.search).get("flow") || null;
+}
+
 type TenantMembership = { tenant_id: string; role: string; name?: string | null };
 
 const NAV_GROUPS: { key: string; label: string; items: { view: View; label: string; icon: LucideIcon; ownerOnly?: boolean }[] }[] = [
@@ -113,7 +122,7 @@ export function App() {
   const [acceptingInvites, setAcceptingInvites] = useState(false);
   const [inviteAcceptErr, setInviteAcceptErr] = useState<string | null>(null);
   const [tenantId, setTenantId] = useState<string | null>(null);
-  const [flowId, setFlowId] = useState<string | null>(null);
+  const [flowId, setFlowId] = useState<string | null>(() => flowIdFromUrl());
   const [reloadKey, setReloadKey] = useState(0);
   const [view, setView] = useState<View>(() => viewFromUrl());
   const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
@@ -141,17 +150,20 @@ export function App() {
     if (owning) setOpenGroups((prev) => (prev[owning.key] ? prev : { ...prev, [owning.key]: true }));
   }, [view]);
 
-  // Mirror the current view into the URL (replaceState, not pushState --
-  // clicking around the nav shouldn't spam the browser's back button) so
-  // a refresh lands back where you were, not on the default Editor view.
+  // Mirror the current view (and, on the editor, which flow) into the URL
+  // (replaceState, not pushState -- clicking around the nav shouldn't spam
+  // the browser's back button) so a refresh lands back where you were,
+  // not on the default Editor view with no flow open.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (view === "editor") params.delete("view");
     else params.set("view", view);
+    if (view === "editor" && flowId) params.set("flow", flowId);
+    else params.delete("flow");
     const qs = params.toString();
     const url = window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash;
     window.history.replaceState(null, "", url);
-  }, [view]);
+  }, [view, flowId]);
 
   // land a brand-new (or not-yet-dismissed) tenant on the setup wizard once,
   // the first time we know which tenant is active — never fights later nav.

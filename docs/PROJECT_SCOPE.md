@@ -747,12 +747,27 @@ fix or any other code change. Not fixed here (out of scope — a pre-
 existing test-suite bug, not part of what was asked), but now root-
 caused rather than just "known flaky."
 
-**Not done:** `flowId` (which specific flow is open in the editor) still
-isn't persisted across a refresh — reloading while `view=editor` and a
-flow open lands on the flow list's empty state, not the exact flow you
-had open. Related to, but a narrower miss than, what was actually
-reported (which was about *other* pages, not mid-edit state) — flagged,
-not built preemptively.
+**Follow-up, same day — "Fix that too":** `flowId` is now persisted the
+same way, via a new `flow=<id>` query param, added only alongside
+`view=editor` (the render guard this mirrors is `view === "editor" &&
+flowId` — `flowIdFromUrl()` returns `null` outright if the URL's `view`
+isn't `"editor"`, so a stale `flow` param left over from an old URL can
+never leak a flow open under some unrelated view). The URL-sync effect
+now depends on `[view, flowId]` instead of just `[view]`, setting/
+clearing `flow` alongside `view` in the same `replaceState` call.
+`chooseTenant` already cleared `flowId` on a tenant switch (pre-existing,
+untouched) — combined with the effect's new dependency, switching
+workspaces correctly drops `flow` from the URL too, so a flow open in
+tenant A can never end up referenced from a URL now showing tenant B. A
+`flowId` that doesn't resolve (wrong tenant, deleted, or a hand-edited
+garbage id) was already handled by `FlowEditor`'s existing fetch-error
+path — a clean in-shell error banner, not a crash — so no new guarding
+was needed there. Browser-verified: opening a flow adds `?flow=<id>` (no
+redundant `view=editor` alongside it); reloading reopens that exact flow,
+not the flow list's empty state; navigating to any other view drops
+`flow` from the URL. Full existing Playwright suite re-run once more:
+identical 5 pre-existing failures, no new regression. `cd web && npm run
+build` clean, `npx vitest run` 20/20.
 
 ---
 
