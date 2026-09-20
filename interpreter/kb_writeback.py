@@ -420,17 +420,32 @@ def _has_fresh_contradiction(sb, entry: dict) -> bool:
 
 def promote_provisional(sb, *, dry_run: bool = False) -> int:
     """Flip `provisional` entries whose `provisional_until` has passed to
-    `active` — unless an open contradiction still references the entry."""
+    `active` — unless an open contradiction still references the entry, or
+    the entry's tenant plan doesn't include the `kb_writeback` feature
+    (migration 112, 2026-09-20) — fully-automatic promotion (no human in
+    the loop) is a Pro-tier-and-up perk; a Basic tenant's provisional
+    entries just stay provisional indefinitely rather than being
+    auto-promoted for free. (This does NOT gate the human-approved write-
+    back path in `interpreter/approvals.py`'s `resolve_review_task` — a
+    manager explicitly approving a change is a different thing from this
+    sweep's unattended auto-promotion.)"""
+    from interpreter import billing
+
     now = datetime.now(timezone.utc).isoformat()
     rows = (sb.table("kb_entries")
             .select("entry_id, source_id, tenant_id, title, created_at")
             .eq("status", "provisional").lt("provisional_until", now)
             .execute().data or [])
     ready = [r for r in rows if not _has_fresh_contradiction(sb, r)]
+    entitled_tenants = {
+        tid for tid in {r.get("tenant_id") for r in ready}
+        if "kb_writeback" in (billing.get_plan_for_tenant(tid, sb).get("features") or [])
+    }
+    ready = [r for r in ready if r.get("tenant_id") in entitled_tenants]
     held = len(rows) - len(ready)
     if dry_run or not ready:
         if held:
-            log.info("promote_provisional: %d held (disputed)", held)
+            log.info("promote_provisional: %d held (disputed or plan-gated)", held)
         return len(ready)
     for r in ready:
         sb.table("kb_entries").update({"status": "active", "updated_at": "now()"}) \

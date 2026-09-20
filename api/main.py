@@ -1066,6 +1066,13 @@ def publish_flow(flow_id: str, c: Caller = Depends(caller)) -> dict:
     if errs:
         raise HTTPException(422, {"errors": errs})
 
+    from interpreter import billing
+    try:
+        billing.assert_flow_features_available(
+            meta["tenant_id"], c.sb, {n["type"] for n in draft["nodes"]})
+    except billing.PlanLimitError as e:
+        raise HTTPException(402, str(e))
+
     prev = (
         c.sb.table("flow_versions").select("version")
         .eq("flow_id", flow_id).order("version", desc=True).limit(1).execute().data

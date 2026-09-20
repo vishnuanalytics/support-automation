@@ -169,18 +169,42 @@ def test_apply_supersede_marks_old_and_pulls_its_chunks(monkeypatch):
 
 # ── promotion ───────────────────────────────────────────────────────────
 def test_promote_provisional_flips_aged_entries():
-    sb = _SB({"kb_entries": [
-        {"entry_id": "e1", "source_id": "s1", "status": "provisional",
-         "provisional_until": "2000-01-01T00:00:00Z"},
-        {"entry_id": "e2", "source_id": "s1", "status": "provisional",
-         "provisional_until": "2999-01-01T00:00:00Z"},
-    ]})
+    sb = _SB({
+        "kb_entries": [
+            {"entry_id": "e1", "source_id": "s1", "tenant_id": "T", "status": "provisional",
+             "provisional_until": "2000-01-01T00:00:00Z"},
+            {"entry_id": "e2", "source_id": "s1", "tenant_id": "T", "status": "provisional",
+             "provisional_until": "2999-01-01T00:00:00Z"},
+        ],
+        # kb_writeback (2026-09-20) is a paid-tier feature -- auto-promotion
+        # needs the tenant's plan to actually include it, or promote_provisional
+        # holds everything as not-entitled regardless of age/contradiction.
+        "tenants": [{"tenant_id": "T", "plan_id": "p1"}],
+        "plans": [{"plan_id": "p1", "slug": "pro", "features": ["core", "kb_writeback"]}],
+    })
     # the fake's lt() isn't a real comparison — filter manually for the assertion
     n = kb_writeback.promote_provisional(sb)
     # both rows match status='provisional'; the fake can't evaluate lt(), so this
     # asserts the call path runs and updates. Real Postgres does the date filter.
     assert n >= 1
     assert any(r["status"] == "active" for r in sb.rows("kb_entries"))
+
+
+def test_promote_provisional_holds_entries_for_a_tenant_without_the_feature():
+    """A Basic-tier tenant (no kb_writeback in plan.features) gets nothing
+    auto-promoted, even an aged, undisputed entry -- it just stays
+    provisional until a human resolves it some other way."""
+    sb = _SB({
+        "kb_entries": [
+            {"entry_id": "e1", "source_id": "s1", "tenant_id": "T", "status": "provisional",
+             "provisional_until": "2000-01-01T00:00:00Z"},
+        ],
+        "tenants": [{"tenant_id": "T", "plan_id": "p1"}],
+        "plans": [{"plan_id": "p1", "slug": "basic", "features": ["core"]}],
+    })
+    n = kb_writeback.promote_provisional(sb)
+    assert n == 0
+    assert sb.rows("kb_entries")[0]["status"] == "provisional"
 
 
 def test_promote_holds_an_entry_with_a_fresh_contradiction():

@@ -1509,6 +1509,35 @@ def test_tenants_lists_the_callers_membership(auth_headers):
     assert all("role" in r for r in rows)
 
 
+def test_publish_flow_blocks_a_gated_node_without_the_plan_feature(monkeypatch):
+    """POST /api/flows/{id}/publish is the enforcement point for
+    interpreter.billing.assert_flow_features_available (2026-09-20 -- a
+    draft can freely use a policy_gate/agent node while just being
+    drafted; publishing it is what's actually gated by plan)."""
+    from fastapi import HTTPException
+
+    from api import main
+    from api.main import Caller
+    from interpreter import billing
+
+    monkeypatch.setattr(main, "_require_visible", lambda c, fid: {"tenant_id": "t1", "version": 1, "name": "f"})
+    monkeypatch.setattr(main, "_require_editor", lambda c, tid: None)
+    monkeypatch.setattr(main, "load_flow", lambda **kw: {
+        "nodes": [{"node_id": "n1", "type": "policy_gate", "config": {}}], "edges": [], "name": "f",
+    })
+    monkeypatch.setattr(main, "_structural_errors", lambda draft: [])
+    monkeypatch.setattr(billing, "get_plan_for_tenant", lambda tid, sb: {"features": ["core"]})
+
+    c = Caller.__new__(Caller)
+    c.sb = None  # never touched -- the PlanLimitError fires before any c.sb.table(...) call
+    c.user_id, c.email = "u1", "owner@acme.test"
+
+    with pytest.raises(HTTPException) as ei:
+        main.publish_flow("f1", c=c)
+    assert ei.value.status_code == 402
+    assert "policy_rules" in str(ei.value.detail) and "policy_gate" in str(ei.value.detail)
+
+
 @pytest.mark.integration
 def test_create_flow_infers_the_tenant_when_omitted(auth_headers):
     """The inference this name refers to (`_caller_tenant`: omit tenant_id,

@@ -551,3 +551,59 @@ def test_assert_flow_slot_available_unlimited_plan_never_blocks():
     sb = _SB({"tenants": [{"plan_id": "p-adv"}], "plans": [_UNLIMITED_PLAN],
               "flows": [{"flow_id": f"f{i}"} for i in range(200)]})
     billing.assert_flow_slot_available("t1", sb)
+
+
+# ── flow-node feature gate, publish-time only (2026-09-20) ─────────────
+_CORE_ONLY_PLAN = {"plan_id": "p-core", "slug": "basic", "features": ["core"]}
+_POLICY_PLAN = {"plan_id": "p-policy", "slug": "pro", "features": ["core", "policy_rules", "kb_writeback"]}
+_ALL_FEATURES_PLAN = {
+    "plan_id": "p-all", "slug": "advanced",
+    "features": ["core", "policy_rules", "kb_writeback", "agentic_actions", "priority_support"],
+}
+
+
+def test_assert_flow_features_available_plain_nodes_never_blocked():
+    """A flow with no gated node type at all is fine on every plan,
+    including one with an empty/missing features list."""
+    sb = _SB({"tenants": [{"plan_id": "p-core"}], "plans": [_CORE_ONLY_PLAN]})
+    billing.assert_flow_features_available("t1", sb, {"retrieve", "classify", "draft"})
+
+
+def test_assert_flow_features_available_core_plan_blocks_policy_gate():
+    sb = _SB({"tenants": [{"plan_id": "p-core"}], "plans": [_CORE_ONLY_PLAN]})
+    try:
+        billing.assert_flow_features_available("t1", sb, {"draft", "policy_gate"})
+        assert False, "expected PlanLimitError"
+    except billing.PlanLimitError as e:
+        assert "policy_rules" in str(e) and "policy_gate" in str(e)
+
+
+def test_assert_flow_features_available_core_plan_blocks_agent():
+    sb = _SB({"tenants": [{"plan_id": "p-core"}], "plans": [_CORE_ONLY_PLAN]})
+    try:
+        billing.assert_flow_features_available("t1", sb, {"agent"})
+        assert False, "expected PlanLimitError"
+    except billing.PlanLimitError as e:
+        assert "agentic_actions" in str(e) and "agent" in str(e)
+
+
+def test_assert_flow_features_available_plan_with_the_feature_allows_it():
+    sb = _SB({"tenants": [{"plan_id": "p-policy"}], "plans": [_POLICY_PLAN]})
+    billing.assert_flow_features_available("t1", sb, {"draft", "policy_gate"})
+
+
+def test_assert_flow_features_available_partial_features_still_blocks_the_missing_one():
+    """A plan with policy_rules but not agentic_actions must still block
+    an agent node -- the check is per-feature, not "has any feature"."""
+    sb = _SB({"tenants": [{"plan_id": "p-policy"}], "plans": [_POLICY_PLAN]})
+    try:
+        billing.assert_flow_features_available("t1", sb, {"policy_gate", "agent"})
+        assert False, "expected PlanLimitError"
+    except billing.PlanLimitError as e:
+        assert "agentic_actions" in str(e)
+        assert "policy_rules" not in str(e)  # already covered, not part of what's missing
+
+
+def test_assert_flow_features_available_all_features_plan_never_blocks():
+    sb = _SB({"tenants": [{"plan_id": "p-all"}], "plans": [_ALL_FEATURES_PLAN]})
+    billing.assert_flow_features_available("t1", sb, {"policy_gate", "agent"})

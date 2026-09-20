@@ -707,6 +707,64 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-20 (Chunk 2/4 of the "any better improvements" list — plan
+`features` are now actually enforced, not just stored/displayed. This
+closes a gap flagged in the original migration-112 entry, later in this
+same file: "a Basic tenant can still use every node type today.")** Two
+real, open design decisions here, both resolved via `AskUserQuestion`
+before writing anything (mapping node types to features, and where to
+enforce, were genuinely ambiguous — not something to silently pick):
+`policy_gate` node → `policy_rules` feature, `agent` node →
+`agentic_actions`; `kb_writeback` isn't a node at all, it's the
+background KIL auto-promotion sweep; `priority_support` is a support SLA
+perk, nothing to enforce in code. Enforcement point: **publish time**,
+not save time or run time — a draft can freely use a gated node type
+while just being drafted (nothing executes off a draft), publishing it
+live is what's actually blocked; and it's a one-time gate, not
+re-checked on every run afterward, so a plan downgrade after a flow is
+already published doesn't retroactively break it (deliberately not
+repeating the BYOK gate's "no grandfather window" shape here).
+
+**What changed:** `interpreter/billing.py` gains
+`assert_flow_features_available(tenant_id, sb, node_types)` — a
+`_NODE_TYPE_FEATURE` dict is the only place a node type maps to a
+feature flag (add a new gated node type there, nowhere else), raises the
+existing `PlanLimitError` (→ 402, same as `assert_seat_available`/
+`assert_flow_slot_available`) naming both the missing feature(s) and the
+offending node type(s). Wired into `POST /api/flows/{id}/publish`
+(api/main.py) right after structural validation, before the version
+snapshot is written. Separately, `interpreter/kb_writeback.py`'s
+`promote_provisional` (the KIL auto-promotion sweep, cron-driven via
+`interpreter/sweeps.py`) now excludes any tenant whose plan doesn't
+include `kb_writeback` from the "ready" set entirely — their provisional
+entries just stay provisional, held the same way a disputed/contradicted
+entry already was, not silently promoted for free. Explicitly does
+**not** gate the human-approved write-back path (`interpreter/
+approvals.py`'s `resolve_review_task` calling `kb_writeback.
+raise_kb_change`) — a manager explicitly approving a change is a
+different thing from this sweep's unattended auto-promotion, and
+blocking an already-approved human decision on a feature flag would be
+a confusing, late-stage failure.
+
+**Verify:** 6 new `test_billing.py` unit tests for
+`assert_flow_features_available` (blocks/allows per feature, partial-
+feature plans block only the actually-missing one, unrelated node types
+never blocked). 1 new offline `test_api.py` test confirming
+`publish_flow` wires the gate to a real 402. 1 new + 1 updated
+`test_kb_writeback.py` test for the sweep gate — the existing
+`test_promote_provisional_flips_aged_entries` had never seeded
+tenant/plan data at all (irrelevant before this chunk), so it needed a
+`kb_writeback`-entitled fixture added to keep testing what it originally
+intended, now that a real gate exists to fall afoul of; also switched
+`r["tenant_id"]` to `r.get("tenant_id")` while touching this code so a
+legacy/malformed row without one doesn't `KeyError` instead of just
+being excluded. Full offline suite (`test_billing.py`,
+`test_kb_writeback.py`, `test_payments.py`, `test_api.py -m "not
+integration"`) — 184 combined, all green, no regressions from touching
+a module (`billing.py`) this many other call sites depend on.
+
+---
+
 **2026-09-20 (Chunk 1/4 of the "any better improvements" list — fixed the
 2 remaining Playwright failures for real, not just tracked as flaky. All
 15 e2e specs now pass; the suite has been green with 5 known failures

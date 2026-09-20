@@ -210,6 +210,41 @@ def assert_flow_slot_available(tenant_id: str, sb) -> None:
             "it's full — archive one, or upgrade in Billing.")
 
 
+# The only place a flow node type maps to the plan `features` flag it
+# needs -- add a new gated node type here, nowhere else. Everything not
+# listed is "core" (every plan, including the free trial, includes it).
+_NODE_TYPE_FEATURE = {
+    "policy_gate": "policy_rules",
+    "agent": "agentic_actions",
+}
+
+
+def assert_flow_features_available(tenant_id: str, sb, node_types: "set[str] | list[str]") -> None:
+    """Called from POST /api/flows/{id}/publish, not at draft-save or at
+    run time (2026-09-20 product decision) -- a draft can freely use a
+    policy_gate or agent node while it's just being drafted/tried out
+    (nothing runs off a draft), but going live with one gated by a tier
+    the tenant isn't on is blocked here. Not re-checked on every run
+    afterward, so a plan downgrade after a flow is already published
+    doesn't retroactively break it -- same "no grandfather window" shape
+    already accepted for `assert_not_locked`'s BYOK gate isn't repeated
+    here on purpose; this is a one-time gate at the moment of going live,
+    not an ongoing one."""
+    needed = {t: _NODE_TYPE_FEATURE[t] for t in node_types if t in _NODE_TYPE_FEATURE}
+    if not needed:
+        return
+    plan = get_plan_for_tenant(tenant_id, sb)
+    have = set(plan.get("features") or [])
+    missing_features = set(needed.values()) - have
+    if not missing_features:
+        return
+    offending = sorted({t for t, feat in needed.items() if feat in missing_features})
+    raise PlanLimitError(
+        f"This plan doesn't include {', '.join(sorted(missing_features))} — used by the "
+        f"{', '.join(offending)} node{'s' if len(offending) != 1 else ''} in this flow. "
+        "Upgrade in Billing to publish it.")
+
+
 def get_plan_for_tenant(tenant_id: str, sb) -> dict[str, Any]:
     """The tenant's plan row from `plans` — the numbers `usage_summary` and
     `check_and_warn` need, sourced from data instead of a hardcoded dict."""
