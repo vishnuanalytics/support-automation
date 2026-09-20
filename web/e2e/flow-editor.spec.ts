@@ -43,9 +43,19 @@ test("stubbed auth -> load a flow -> add a node -> save the draft", async ({ pag
 
   // adding a node marks the draft dirty
   await expect(saveBtn).toBeEnabled();
+
+  // the new node's config slideover auto-opens with a dimming scrim over
+  // the whole app (ui.css's .ui-scrim) -- close it via its own "Done"
+  // button first, same as a real user would, before Save draft is
+  // actually clickable (it's genuinely covered by the slideover while open).
+  await page.getByRole("button", { name: "Done" }).click();
+  await expect(page.locator(".ui-slideover")).toBeHidden();
+
   await saveBtn.click();
 
-  await expect(page.getByText(/saved · draft v/)).toBeVisible();
+  // FlowEditor.tsx's toast text is "Saved · draft vN" (capital S) --
+  // this regex was lowercase and could never match.
+  await expect(page.getByText(/saved · draft v/i)).toBeVisible();
   expect(savedBody).not.toBeNull();
   expect(savedBody!.nodes).toHaveLength(2);
 });

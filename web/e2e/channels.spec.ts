@@ -11,7 +11,7 @@ test.beforeEach(async ({ page }) => {
   await seedFakeSession(page);
 });
 
-test("connect a Freshchat channel from the Channels tab", async ({ page }) => {
+test("connect a Freshchat channel from the Connections tab", async ({ page }) => {
   await installApiMocks(page);
 
   let saved: Record<string, unknown> | null = null;
@@ -53,17 +53,25 @@ test("connect a Freshchat channel from the Channels tab", async ({ page }) => {
 
   await page.goto("/");
 
-  // expand the collapsed "Admin" nav group, then open Channels
+  // expand the collapsed "Admin" nav group, then open Connections (the nav
+  // label was renamed from "Channels" at some point -- the underlying
+  // component/view slug/directory are still channels/ChannelsView.tsx and
+  // "connections" respectively, just the visible label changed)
   await page.getByRole("button", { name: /Admin/ }).click();
-  await page.getByRole("button", { name: "Channels" }).click();
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+
+  // the Connections page now splits into "Integrations" / "Channels"
+  // sub-sections (a radiogroup, added after this test was first written) --
+  // the Freshchat panel lives under "Channels", not the default
+  // "Integrations" one.
+  await page.getByRole("radio", { name: "Channels" }).click();
 
   // the email panel shares field placeholders/button text with the
-  // Freshchat one (both render on this same tab) -- scope every
-  // interaction to the Freshchat panel specifically. `.last()`: App.tsx's
-  // own outer content wrapper is ALSO `.pane` and (containing both panels)
-  // also matches `hasText` — the innermost/last match in document order is
-  // the actual Freshchat panel div.
-  const panel = page.locator(".pane").filter({ hasText: "Freshchat channel" }).last();
+  // Freshchat one (both render on this same "Channels" sub-section) --
+  // scope every interaction to the Freshchat panel specifically via its
+  // own `.int-card` wrapper (ChannelsView.tsx), not the outer `.pane` the
+  // whole sub-section shares (which matched both panels' "Save" buttons).
+  const panel = page.locator(".int-card").filter({ hasText: "Freshchat channel" });
   await expect(panel).toBeVisible();
 
   await panel.getByPlaceholder("yourcompany.freshchat.com").fill("acme.freshchat.com");

@@ -66,6 +66,14 @@ function jsonFor(url: string): unknown {
   if (path.startsWith("/review-tasks")) return [];
   if (path.startsWith("/action-requests")) return [];
   if (path === "/approvals") return { review_tasks: [], action_requests: [] };
+  if (path.startsWith("/feedback/summary"))
+    return {
+      window_days: 30,
+      corrections: { total_judged: 0, by_category: {}, avg_severity: null, recent: [] },
+      sessions: { total_judged: 0, by_category: {}, avg_severity: null, recent: [] },
+      exemplars: { draft_runs_sampled: 0, draft_runs_with_exemplars: 0, usage_rate: null },
+      gate_tuning: { pending: 0, approved: 0, rejected: 0, recent: [] },
+    };
   if (path.startsWith("/kil/metrics"))
     return {
       window_days: 30,
@@ -141,6 +149,8 @@ function jsonFor(url: string): unknown {
     return { tenant_id: FAKE_TENANT_ID, case_connector: "salesforce" };
   if (path.startsWith("/tenants/case-taxonomy"))
     return { tenant_id: FAKE_TENANT_ID, config: {}, updated_at: null, defaults: {} };
+  if (path.startsWith("/tenants/channel-connector-map"))
+    return { tenant_id: FAKE_TENANT_ID, channel_connector_map: {} };
 
   if (/^\/connections\/[^/]+\/actions/.test(path)) return [];
   if (path.startsWith("/connections"))
@@ -153,11 +163,21 @@ function jsonFor(url: string): unknown {
   if (path.startsWith("/billing/usage"))
     return {
       period_label: "2026-09",
+      // GET /api/billing/usage (api/main.py) always includes billing_state
+      // (the tenant's billing_status/trial_ends_at/grace_ends_at/
+      // payment_provider row) -- BillingView.tsx reads
+      // usage.billing_state.payment_provider unconditionally.
+      billing_state: {
+        billing_status: "trialing", trial_ends_at: NOW, grace_ends_at: null,
+        billing_country: null, payment_provider: null,
+      },
       period: { start: NOW, end: NOW },
       plan: "free",
-      limits: { runs: 1000, tokens: 1_000_000 },
+      limits: { runs: 75, tokens: null },
       runs_count: 0,
       tokens_total: 0,
+      billable_runs_count: 0,
+      billable_tokens_total: 0,
       tokens_by_model: {},
       by_node: [],
       by_flow: [],
@@ -192,7 +212,6 @@ const VIEWS = [
   "Rules",
   "Guide",
   "Team",
-  "Channels",
   "Connections",
   "Billing",
 ];
@@ -209,7 +228,7 @@ test("every nav view opens without a crash or console error", async ({ page }) =
   await page.goto("/");
 
   // wait for the shell (sidebar nav) to be up
-  await expect(page.locator(".sidebar")).toBeVisible();
+  await expect(page.locator(".app-sidebar")).toBeVisible();
 
   // the "Admin" nav group is collapsed by default — open it so Team /
   // Channels / Connections / Billing are reachable
@@ -224,8 +243,9 @@ test("every nav view opens without a crash or console error", async ({ page }) =
     expect(errors, `console/page errors after opening "${label}":\n${errors.join("\n")}`).toEqual([]);
   }
 
-  // also the Setup wizard
-  await page.getByRole("button", { name: "⚙ Setup" }).click();
+  // also the Setup wizard (its nav button icon is a Lucide <Settings> SVG,
+  // not a text emoji -- the accessible name is just "Setup")
+  await page.getByRole("button", { name: "Setup", exact: true }).click();
   await expect(page.locator(".pane, .editor").first()).toBeVisible();
   expect(errors, `errors after Setup:\n${errors.join("\n")}`).toEqual([]);
 });
@@ -276,7 +296,7 @@ test("no view clips its content — tall content scrolls inside the fixed frame"
   });
 
   await page.goto("/");
-  await expect(page.locator(".sidebar")).toBeVisible();
+  await expect(page.locator(".app-sidebar")).toBeVisible();
   await page.getByRole("button", { name: /Admin/ }).click();
 
   for (const label of ["Activity", "Approvals", "Connections", "Billing", "Knowledge", "Runs"]) {
@@ -313,7 +333,7 @@ test("switching browser tab away and back keeps the current view", async ({ page
   });
 
   await page.goto("/");
-  await expect(page.locator(".sidebar")).toBeVisible();
+  await expect(page.locator(".app-sidebar")).toBeVisible();
 
   // navigate away from the default (Editor) view
   await page.getByRole("button", { name: /Admin/ }).click();

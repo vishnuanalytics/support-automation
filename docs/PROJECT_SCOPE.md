@@ -707,6 +707,94 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-20 (Chunk 1/4 of the "any better improvements" list — fixed the
+2 remaining Playwright failures for real, not just tracked as flaky. All
+15 e2e specs now pass; the suite has been green with 5 known failures
+for most of this session until now.)** User: "Fix 1 by 1," starting with
+"fix the 2 remaining unexplained test failures" from the prioritized
+list offered the message before. Diagnosed each properly (debug logging,
+screenshots, tracing crashes to their actual source) instead of guessing:
+
+**`flow-editor.spec.ts`** — two real bugs in the test itself, not the
+app: (1) adding a node auto-opens its config `SlideOver` with a full-
+screen dimming `.ui-scrim` (deliberate modal-style overlay, confirmed via
+a bounding-box check — the slideover's `y:[0,720]` genuinely covers the
+toolbar's `y:[95,135]` "Save draft" button) — the test never dismissed it
+via the slideover's own "Done" button before trying to click Save draft,
+unlike a real user would. (2) the save-confirmation assertion regex was
+`/saved · draft v/` (lowercase) but `FlowEditor.tsx`'s actual toast text
+is `` `Saved · draft v${version}` `` (capital S) — never matched, a plain
+case-sensitivity bug in the test.
+
+**`channels.spec.ts`** — three real, compounding staleness bugs from UI
+changes the test was never updated for: (1) the nav button is labeled
+"Connections" now, not "Channels" (label renamed at some point; the
+underlying directory/component/view-slug are still `channels/
+ChannelsView.tsx` / `"connections"`). (2) Connections itself split into
+an "Integrations"/"Channels" sub-tab radiogroup after this test was
+written — the Freshchat panel lives under the "Channels" sub-tab, not the
+default "Integrations" one. (3) the test's `panel` locator matched the
+outer `.pane` wrapper the whole sub-section shares with the Email panel
+(both now render together under "Channels"), hitting a strict-mode
+"2 Save buttons" violation — rescoped to the Freshchat-specific `.int-card`
+wrapper instead.
+
+**`ui-walk.spec.ts`** (all 3 of its failing specs, all from one shared
+`jsonFor()` mock router) — the earlier `.sidebar` → `.app-sidebar` fix
+(a stale class name, root-caused two sessions-worth of "known flaky"
+entries in this file) cleared the first blocker, then each test hit a
+**further** issue one at a time as each got past the next step:
+- `VIEWS` still listed a dead "Channels" nav button (same rename as
+  above) — removed.
+- Opening **Approvals** genuinely crashed the whole React tree (no error
+  boundary anywhere in this app — confirmed by React's own "consider
+  adding an error boundary" console warning unmounting the entire page,
+  not just that pane): `ReviewView.tsx` reads `feedback.corrections.
+  total_judged` unconditionally once `feedback` is truthy, but the mock
+  router had **no case at all** for `/feedback/summary` — it fell through
+  to the generic `return []` default, an empty *array* (truthy, so the
+  `{feedback && (...)}` guard passed straight through) with no
+  `.corrections` key. Verified against the real backend
+  (`interpreter/feedback_metrics.compute()`) that production always
+  returns the full `corrections`/`sessions`/`exemplars`/`gate_tuning`
+  shape — this was purely a stale test mock, not a live bug — and added
+  a correctly-shaped one.
+- Opening **Connections** crashed the same way:
+  `ChannelConnectorMapPanel` (`ConnectionsView.tsx`) reads
+  `map[channel]` once `map !== null`, but the mock had no case for
+  `/tenants/channel-connector-map` either — same `return []` fallback,
+  `r.channel_connector_map` on an array is `undefined`, which the
+  component's `=== null` guard doesn't catch. Confirmed the real backend
+  (`GET /api/tenants/channel-connector-map`, api/main.py) always defaults
+  the column to `{}` server-side, never omits the key — same class of
+  stale-mock bug, not a live one. Added the missing mock case.
+- Opening **Billing** crashed identically a third time:
+  `BillingView.tsx` reads `usage.billing_state.payment_provider`
+  unconditionally, but the existing `/billing/usage` mock (unlike the
+  two above, this one *did* exist, just predated `GET /api/billing/usage`
+  gaining its `billing_state` field) never included it. Confirmed live
+  against `api/main.py` that `billing_state` is always present. Rewrote
+  the mock to the current real shape (also fixed `limits`/`plan` from
+  stale pre-migration-112 numbers — 1000 runs/1M tokens — to the real
+  current free-trial values, 75 runs/uncapped tokens) and added the
+  missing `billable_runs_count`/`billable_tokens_total` fields
+  `usage_summary()` also always returns. **This one fix incidentally
+  also fixed the other two still-failing specs in this file** ("no view
+  clips its content", "switching browser tab away and back") — both were
+  failing on this exact same Billing crash blocking them before they ever
+  reached their own actual assertions, not on anything specific to what
+  either test was actually checking.
+- Last one: the Setup-wizard nav button's accessible name is just
+  `"Setup"` (a Lucide `<Settings>` SVG icon, not a text emoji) — the test
+  still expected `"⚙ Setup"` from before the icon was componentized.
+
+**Verify:** all 15 specs across the whole `e2e/` suite pass, 0 failures
+— first time this session (previously steady at 10 passed / 5 failed
+throughout). `cd web && npm run build` and `npx vitest run` (20/20) both
+clean.
+
+---
+
 **2026-09-20 (Explicit edit/view mode indicator — a symmetric "editing"
 pill next to the pre-existing "view-only" one, plus a URL `mode=` param,
 in the flow editor specifically.)** Asked "is this good to have view and
