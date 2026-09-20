@@ -1542,7 +1542,17 @@ def test_accept_invitations_noop_when_none_pending(auth_headers):
 
 
 @pytest.mark.integration
-def test_invitation_create_list_revoke(auth_headers):
+def test_invitation_create_list_revoke(auth_headers, monkeypatch):
+    # This hits the live tenant_invitations table on purpose (that's the
+    # point of the test), but invite_user_by_email is a real Supabase Auth
+    # call that shares the project's rate-limited email-send quota with
+    # actual user invites -- stub it out so a test run never contends with
+    # a real invite for that budget (this is what starved a real user's
+    # invite on 2026-09-20: repeated test runs hit over_email_send_rate_limit
+    # back-to-back with a real invite attempt in the Auth logs).
+    from api import main
+    monkeypatch.setattr(main._service.auth.admin, "invite_user_by_email",
+                        lambda *a, **k: None)
     email = f"pytest-{uuid.uuid4().hex[:8]}@example.test"
     inv = client.post("/api/invitations", headers=auth_headers,
                       json={"email": email, "role": "viewer", "tenant_id": GLOBEX_TENANT})

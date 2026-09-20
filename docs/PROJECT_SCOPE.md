@@ -707,6 +707,55 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-20 (Actual root cause of invite emails not arriving, found —
+Supabase Auth email rate limit, not a code bug; live-integration test
+stopped from burning the shared quota.)** User (new session): "users not
+gettings mails to accept the invitation... when user logged in then
+immeditly this showing as accepted invitation" — read as two possible
+causes (delivery vs. the accept-on-any-sign-in semantics, see
+`accept_invitations`, api/main.py:854); user confirmed via
+`AskUserQuestion` it's the delivery side, and hadn't checked the Supabase
+dashboard yet.
+
+Queried this project's live `auth_logs` directly (Supabase MCP
+`query_logs`, read-only) instead of just pointing at the dashboard.
+Found it immediately: a real invite to `gundamvishnu1511@gmail.com`
+(2026-09-20T12:08:08Z) failed with `429: email rate limit exceeded` /
+`error_code: over_email_send_rate_limit` — and in the same ~40-minute
+window, four `user_invited` 429s for `pytest-*@example.test` addresses
+(11:37, 11:43, 11:58, 12:05), one-to-one with runs of
+`tests/test_api.py::test_invitation_create_list_revoke` (`-m
+integration`), which calls the real `POST /api/invitations` against this
+live project on every run. That test creating a real Supabase Auth invite
+each time was sharing (and exhausting) the same rate-limited email-send
+quota as actual user invites — this is likely why the real invite right
+after it failed. Not the "already registered, no email needed" case from
+earlier this session (different error_code entirely) — this is Supabase's
+Auth email rate limit being hit for real, on a genuinely new invitee.
+
+**What changed:** `test_invitation_create_list_revoke` now stubs
+`main._service.auth.admin.invite_user_by_email` via `monkeypatch` before
+creating its invite — it still exercises the real `tenant_invitations`
+insert/list/revoke against the live table (that's the point of the
+test), it just no longer fires a real Supabase Auth email each run.
+Verified: ran the test alone against the live project (passed) and
+confirmed via `query_logs` that no new `user_invited` auth-log entry was
+produced by that run.
+
+**Not done — needs the user, not code:** why the rate limit is so tight
+in the first place is a Supabase project **Auth → Rate Limits** dashboard
+setting this session can't read or change (no MCP tool exposes it) — the
+user should check "Rate limit for sending emails" there and raise it if
+it's still near Supabase's low built-in-mailer default, especially since
+a custom SMTP provider (apparently Resend, per the "Root cause of the
+whole invite-email thread found" entry below) already appears to be
+wired up for this project, which normally allows raising that cap well
+above the default. Removing the one test's real send stops tests from
+contributing to the problem; it doesn't by itself guarantee the live cap
+is high enough for real usage.
+
+---
+
 **2026-09-20 (Team tab: invite history + archive, closing out this
 session's invitations thread.)** User: "I want the archive option, so
 that the workplace admin knows exctly how many peopl they have sent the
