@@ -507,6 +507,7 @@ export interface Invitation {
   invited_by: string | null;
   created_at: string;
   accepted_at: string | null;
+  archived_at: string | null;
 }
 
 /** Shared by the POST /api/invitations and .../resend responses --

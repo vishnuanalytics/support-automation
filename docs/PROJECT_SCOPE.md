@@ -707,6 +707,37 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-20 (Team tab: invite history + archive, closing out this
+session's invitations thread.)** User: "I want the archive option, so
+that the workplace admin knows exctly how many peopl they have sent the
+request and also it needs to see whether user accepted invite or pending
+on the dashboard." Two real gaps: `tenant_invitations.status`
+(pending/accepted/revoked) was already tracked in full but the Team tab
+only ever rendered the `pending` subset — an owner had no way to see how
+many invites they'd sent in total or which ones were accepted vs revoked
+— and there was no way to declutter that history once an invite was
+resolved, without deleting the row (this project's own soft-delete
+discipline, applied here for the first time to invitations).
+
+**What changed:** migration **`113_invitation_archive.sql`** adds
+`tenant_invitations.archived_at` (nullable, one-way — same
+no-"un-revoke" precedent `status=revoked` already set). New
+`POST /api/invitations/{id}/archive` (owner-gated, 404 unknown, 409 if
+still `pending` — archiving only makes sense for a *resolved* invite).
+Web: a stat row (`invites sent` / `pending` / `accepted` / `revoked`,
+reusing the existing `StatTile`) above the existing Pending-invites table;
+a new **Invite history** table (every non-pending, non-archived invite,
+with a status `Tag` and an Archive button); a collapsed **"Show archived
+(N)"** toggle below it, read-only. 4 new offline tests for the archive
+endpoint (accepted, revoked, 409-pending, 404-unknown). `cd web && npm
+run build` clean; 1328 offline pytest green. **Needs migration `113`
+applied by hand** (same as `112` before it) before `archived_at` exists
+live — until then `archive_invitation`'s update will 4xx against the live
+DB (column doesn't exist), same drift `test_verify_migrations.py` would
+flag.
+
+---
+
 **2026-09-20 (Root cause of the whole invite-email thread found — not a
 bug. Distinguished "already has an account" from a real send failure.)**
 After the redeploy, Resend surfaced a clean error: "A user with this

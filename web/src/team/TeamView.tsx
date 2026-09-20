@@ -1,7 +1,13 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api";
 import type { Invitation, Member } from "../types";
-import { Button, Tag, Banner, Dialog, Field, Input, Select, ConfirmButton, Skeleton } from "../ui";
+import { Button, Tag, Banner, Dialog, Field, Input, Select, ConfirmButton, Skeleton, StatTile } from "../ui";
+
+const STATUS_TONE: Record<Invitation["status"], "success" | "accent" | "neutral"> = {
+  accepted: "success",
+  pending: "accent",
+  revoked: "neutral",
+};
 
 export function TeamView({ tenantId }: { tenantId: string }) {
   const [members, setMembers] = useState<Member[]>([]);
@@ -14,6 +20,8 @@ export function TeamView({ tenantId }: { tenantId: string }) {
   const [inviteOpen, setInviteOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [resendingId, setResendingId] = useState<string | null>(null);
+  const [archivingId, setArchivingId] = useState<string | null>(null);
+  const [showArchived, setShowArchived] = useState(false);
 
   /** already_registered means Supabase declined to send a *new-user*
    * invite because this email already has an account -- not a failure:
@@ -81,7 +89,27 @@ export function TeamView({ tenantId }: { tenantId: string }) {
     setResendingId(null);
   }
 
+  async function archive(inviteId: string) {
+    setArchivingId(inviteId);
+    setErr(null);
+    try {
+      await api.team.archive(inviteId);
+      load();
+    } catch (e) {
+      setErr((e as ApiError).message);
+    }
+    setArchivingId(null);
+  }
+
   const pending = invites.filter((i) => i.status === "pending");
+  // "history" = every invite ever sent, minus the still-open pending ones --
+  // this is what tells an owner exactly how many people they've invited and
+  // whether each one is accepted or was revoked, not just what's currently
+  // outstanding.
+  const history = invites.filter((i) => i.status !== "pending" && !i.archived_at);
+  const archived = invites.filter((i) => i.status !== "pending" && i.archived_at);
+  const acceptedCount = invites.filter((i) => i.status === "accepted").length;
+  const revokedCount = invites.filter((i) => i.status === "revoked").length;
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
@@ -109,6 +137,15 @@ export function TeamView({ tenantId }: { tenantId: string }) {
           title={notice.text}
           actions={<Button variant="ghost" size="sm" onClick={() => setNotice(null)}>Dismiss</Button>}
         />
+      )}
+
+      {!loading && invites.length > 0 && (
+        <div className="row" style={{ flexWrap: "wrap", gap: 10 }}>
+          <StatTile label="invites sent" value={invites.length} />
+          <StatTile label="pending" value={pending.length} tone="accent" />
+          <StatTile label="accepted" value={acceptedCount} tone="success" />
+          <StatTile label="revoked" value={revokedCount} />
+        </div>
       )}
 
       <div>
@@ -201,6 +238,81 @@ export function TeamView({ tenantId }: { tenantId: string }) {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {!loading && history.length > 0 && (
+        <div>
+          <h5>Invite history</h5>
+          <table className="runs-table">
+            <thead>
+              <tr>
+                <th>email</th>
+                <th>role</th>
+                <th>status</th>
+                <th>sent</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {history.map((i) => (
+                <tr key={i.invite_id}>
+                  <td>{i.email}</td>
+                  <td>
+                    <Tag tone="neutral">{i.role}</Tag>
+                  </td>
+                  <td>
+                    <Tag tone={STATUS_TONE[i.status]}>{i.status}</Tag>
+                  </td>
+                  <td className="muted">{new Date(i.created_at).toLocaleDateString()}</td>
+                  <td style={{ textAlign: "right" }}>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={archivingId === i.invite_id}
+                      onClick={() => archive(i.invite_id)}
+                    >
+                      {archivingId === i.invite_id ? "Archiving…" : "Archive"}
+                    </Button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {!loading && archived.length > 0 && (
+        <div>
+          <Button variant="ghost" size="sm" onClick={() => setShowArchived((s) => !s)}>
+            {showArchived ? "Hide" : "Show"} archived ({archived.length})
+          </Button>
+          {showArchived && (
+            <table className="runs-table" style={{ marginTop: 8 }}>
+              <thead>
+                <tr>
+                  <th>email</th>
+                  <th>role</th>
+                  <th>status</th>
+                  <th>sent</th>
+                </tr>
+              </thead>
+              <tbody>
+                {archived.map((i) => (
+                  <tr key={i.invite_id}>
+                    <td className="muted">{i.email}</td>
+                    <td>
+                      <Tag tone="neutral">{i.role}</Tag>
+                    </td>
+                    <td>
+                      <Tag tone={STATUS_TONE[i.status]}>{i.status}</Tag>
+                    </td>
+                    <td className="muted">{new Date(i.created_at).toLocaleDateString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
       )}
 

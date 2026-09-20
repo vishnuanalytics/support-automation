@@ -542,6 +542,7 @@ export const api = {
         `/invitations/${id}/resend`, { method: "POST" },
       ),
     revoke: (id: string) => req<void>(`/invitations/${id}`, { method: "DELETE" }),
+    archive: (id: string) => req<void>(`/invitations/${id}/archive`, { method: "POST" }),
   },
 
   rules: {

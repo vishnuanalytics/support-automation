@@ -826,6 +826,31 @@ def revoke_invitation(invite_id: str, c: Caller = Depends(caller)) -> None:
                      summary=f"revoked invite to {cur[0].get('email', '?')}")
 
 
+@app.post("/api/invitations/{invite_id}/archive", status_code=204)
+def archive_invitation(invite_id: str, c: Caller = Depends(caller)) -> None:
+    """Hides a resolved (accepted/revoked) invite from the Team tab's
+    default history view — never deletes the row (migration 113). Only a
+    still-`pending` invite can't be archived: it's still an open, actionable
+    request (resend/revoke), not history yet."""
+    rows = (c.sb.table("tenant_invitations").select("tenant_id, email, status")
+            .eq("invite_id", invite_id).execute().data or [])
+    if not rows:
+        raise HTTPException(404, "invitation not found")
+    inv = rows[0]
+    _require_owner(c, inv["tenant_id"])
+    if inv["status"] == "pending":
+        raise HTTPException(409, "a pending invite can't be archived — resend or revoke it first")
+
+    c.sb.table("tenant_invitations").update({"archived_at": _now_iso()}) \
+        .eq("invite_id", invite_id).execute()
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=inv["tenant_id"], action="invitation.archived",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="invitation", target_id=invite_id,
+                 summary=f"archived the ({inv['status']}) invite to {inv['email']}")
+
+
 @app.post("/api/invitations/accept")
 def accept_invitations(c: Caller = Depends(caller)) -> dict:
     """Claim every pending invite for the caller's email. Idempotent — the web

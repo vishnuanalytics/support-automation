@@ -481,6 +481,111 @@ def test_resend_invitation_409s_for_an_already_accepted_invite(monkeypatch):
     assert len(admin.calls) == 0   # never sent -- not pending
 
 
+# ── archive (2026-09-20: full invite history + a way to declutter it) ───
+class _FakeArchiveSb:
+    def __init__(self, invite_row):
+        self._invite_row = invite_row
+        self.updates = []
+
+    def table(self, name):
+        return self
+
+    def select(self, *a, **k):
+        return self
+
+    def eq(self, *a, **k):
+        return self
+
+    def update(self, values):
+        self.updates.append(values)
+        return self
+
+    def execute(self):
+        if self.updates:
+            return type("R", (), {"data": None})()
+        return type("R", (), {"data": [self._invite_row]})()
+
+
+def test_archive_invitation_sets_archived_at_on_an_accepted_invite(monkeypatch):
+    from api.main import Caller
+
+    admin = _FakeInviteAdmin()
+    main = _setup_invite_test(monkeypatch, admin)
+
+    sb = _FakeArchiveSb({"invite_id": "i1", "tenant_id": "t1", "email": "x@y.test", "status": "accepted"})
+    c = Caller.__new__(Caller)
+    c.sb = sb
+    c.user_id, c.email = "u1", "owner@acme.test"
+
+    main.archive_invitation("i1", c=c)
+    assert len(sb.updates) == 1
+    assert sb.updates[0]["archived_at"] is not None
+
+
+def test_archive_invitation_works_on_a_revoked_invite_too(monkeypatch):
+    from api.main import Caller
+
+    admin = _FakeInviteAdmin()
+    main = _setup_invite_test(monkeypatch, admin)
+
+    sb = _FakeArchiveSb({"invite_id": "i1", "tenant_id": "t1", "email": "x@y.test", "status": "revoked"})
+    c = Caller.__new__(Caller)
+    c.sb = sb
+    c.user_id, c.email = "u1", "owner@acme.test"
+
+    main.archive_invitation("i1", c=c)
+    assert len(sb.updates) == 1
+
+
+def test_archive_invitation_409s_for_a_pending_invite(monkeypatch):
+    from fastapi import HTTPException
+
+    from api.main import Caller
+
+    admin = _FakeInviteAdmin()
+    main = _setup_invite_test(monkeypatch, admin)
+
+    sb = _FakeArchiveSb({"invite_id": "i1", "tenant_id": "t1", "email": "x@y.test", "status": "pending"})
+    c = Caller.__new__(Caller)
+    c.sb = sb
+    c.user_id, c.email = "u1", "owner@acme.test"
+
+    with pytest.raises(HTTPException) as ei:
+        main.archive_invitation("i1", c=c)
+    assert ei.value.status_code == 409
+    assert sb.updates == []
+
+
+def test_archive_invitation_404s_for_an_unknown_invite(monkeypatch):
+    from fastapi import HTTPException
+
+    from api.main import Caller
+
+    admin = _FakeInviteAdmin()
+    main = _setup_invite_test(monkeypatch, admin)
+
+    class _FakeEmptyArchiveSb:
+        def table(self, name):
+            return self
+
+        def select(self, *a, **k):
+            return self
+
+        def eq(self, *a, **k):
+            return self
+
+        def execute(self):
+            return type("R", (), {"data": []})()
+
+    c = Caller.__new__(Caller)
+    c.sb = _FakeEmptyArchiveSb()
+    c.user_id, c.email = "u1", "owner@acme.test"
+
+    with pytest.raises(HTTPException) as ei:
+        main.archive_invitation("ghost", c=c)
+    assert ei.value.status_code == 404
+
+
 # ── billing follow-up fixes (2026-09-20, found by /code-review) ─────────
 def test_list_plans_orders_self_serve_tiers_before_talk_to_us_ones(monkeypatch):
     """A $0 base_price_usd (Enterprise, or a never-priced placeholder) must
