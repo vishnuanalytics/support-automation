@@ -707,6 +707,56 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-20 (Compliance — added GDPR (EU/EEA) and CCPA/CPRA (California)
+sections to the legal pages, the part of that thread that wasn't blocked
+on your entity details.)** Continuing the earlier "let's fix one by one
+compliances" thread: `PrivacyPolicy.tsx`/`TermsOfService.tsx`/
+`CookiePolicy.tsx` were DPDPA/India-only, with three bracketed
+placeholders (`[YOUR REGISTERED BUSINESS / ENTITY NAME]`, `[GRIEVANCE
+OFFICER NAME]`, `[YOUR REGISTERED ADDRESS]`, `[YOUR CITY OF
+JURISDICTION]`) still genuinely blocked — asked for twice, not yet
+provided, not fabricated. User: "Ok, lets complete small complete ones
+then" after being offered a choice of what "small, complete" meant;
+picked the compliance sections that don't touch those placeholders.
+
+**What changed:** `PrivacyPolicy.tsx` gained two new numbered sections
+(DPDPA stays the primary framework since that's the entity's home
+jurisdiction) — **§10 GDPR**: legal-basis mapping to Art. 6(1)(a)/(b)/(f)
+against the same purposes already in §4, plus the EU-specific rights
+(portability, objection, restriction, complaint to a supervisory
+authority) layered on top of the existing DPDPA rights in §9; a
+docstring note flags that GDPR Art. 27 may eventually require an EU
+representative if EU processing reaches scale — flagged, not invented,
+same treatment as the entity-detail placeholders. **§11 CCPA/CPRA**:
+know/delete/correct/opt-out-of-sale/non-discrimination rights, stating
+plainly "we do not sell or share personal information" (true — checked
+`CookieConsentBanner.tsx`/`analytics.ts`: analytics is opt-in-only GTM/
+GA4, no data sale or cross-context ad sharing happens anywhere in this
+codebase). Existing §10-13 renumbered to §12-15 to make room.
+`CookiePolicy.tsx` gained **§6** (GDPR/ePrivacy — explains the existing
+consent-banner default-to-"denied" behavior already meets opt-in, not
+opt-out, consent) and **§7** (CCPA — no "Do Not Sell/Share" link needed
+since that activity doesn't occur; rejecting the banner has the same
+effect). `TermsOfService.tsx` intentionally left untouched — GDPR/CCPA
+are data-protection frameworks (Privacy/Cookie Policy's domain), not
+contract-law ones, so there was nothing there to add.
+
+**Verify:** `cd web && npm run build` clean. Browser-verified with a
+throwaway Playwright spec (not committed) navigating the real footer
+links and asserting the new section headings and the "we do not sell or
+share" line actually render, not just that the source compiles. Full
+regression after: full `npx playwright test` still 15/15 green
+(including the existing `landing.spec.ts` legal-pages walk, unchanged).
+
+**Still blocked, unchanged:** the entity name, registered address,
+Grievance Officer name, and jurisdiction city placeholders — still need
+you to provide these before the Privacy Policy / Terms / Cookie Policy
+are enforceable documents, and before this should be reviewed by
+counsel. CDN/deploy work also stays parked ("currently I don't have
+domain").
+
+---
+
 **2026-09-20 (Error monitoring + alerting — Sentry, off by default, plus
 a real separate bug fix: the app had zero React error boundaries.)**
 User: "error monitoring and need alerts without I am aware of whether

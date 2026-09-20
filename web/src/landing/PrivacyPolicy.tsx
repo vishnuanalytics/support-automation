@@ -4,16 +4,23 @@ const EFFECTIVE_DATE = "17 September 2026";
 /**
  * Written to align with India's Digital Personal Data Protection Act, 2023
  * (DPDPA) and the Information Technology (Reasonable Security Practices and
- * Procedures and Sensitive Personal Data or Information) Rules, 2011. The
- * technical claims below (Row-Level Security tenant isolation, credential
- * encryption via Supabase Vault, TLS in transit) are the actual practices
- * in this codebase, not boilerplate — keep this in sync if either changes.
+ * Procedures and Sensitive Personal Data or Information) Rules, 2011 — the
+ * entity's home jurisdiction and this policy's primary framework — plus two
+ * supplementary sections (10, 11) covering the EU/EEA's GDPR and California's
+ * CCPA/CPRA for visitors in those regions. The technical claims throughout
+ * (Row-Level Security tenant isolation, credential encryption via Supabase
+ * Vault, TLS in transit, no sale of personal data) are the actual practices
+ * in this codebase, not boilerplate — keep this in sync if any of them change.
  *
  * The entity name / registered address / grievance officer name are
  * deliberately bracketed placeholders — a Privacy Policy needs a real,
  * identifiable Data Fiduciary to be enforceable, and that identity isn't
  * something this document can invent on your behalf. Fill them in (and
- * have this reviewed by counsel) before treating this as final.
+ * have this reviewed by counsel) before treating this as final. Note on
+ * GDPR Art. 27: if this Service comes to process EU/EEA residents' data at
+ * scale, an EU representative may become a legal requirement — flagged here
+ * rather than filled in, since (like the entity details above) it isn't
+ * something to invent.
  */
 export function PrivacyPolicy() {
   return (
@@ -134,10 +141,46 @@ export function PrivacyPolicy() {
       </ul>
       <p>To exercise any of these rights, contact us at {CONTACT_EMAIL}.</p>
 
-      <h2>10. Children's data</h2>
+      <h2>10. Additional rights for EU/EEA residents (GDPR)</h2>
+      <p>
+        If you're located in the European Union or European Economic Area, the General Data
+        Protection Regulation (GDPR) applies to our processing of your personal data in addition
+        to the DPDPA. The legal bases we rely on are the same processing purposes described in
+        Section 4 — your consent, our performance of the contract formed by your use of the
+        Service, and our legitimate interests in keeping it secure — mapped to GDPR Art. 6(1)(a),
+        (b), and (f) respectively. In addition to the Data Principal rights in Section 9, you have
+        the right to:
+      </p>
+      <ul>
+        <li>data portability — receive your account and workspace data in a structured, commonly-used, machine-readable format;</li>
+        <li>object to processing based on legitimate interests;</li>
+        <li>restrict processing in certain circumstances rather than have it deleted outright; and</li>
+        <li>lodge a complaint with your local supervisory authority, independent of contacting us first.</li>
+      </ul>
+      <p>To exercise any of these rights, contact us at {CONTACT_EMAIL}.</p>
+
+      <h2>11. Additional rights for California residents (CCPA/CPRA)</h2>
+      <p>
+        If you're a California resident, the California Consumer Privacy Act, as amended by the
+        California Privacy Rights Act (CCPA/CPRA), gives you the right to:
+      </p>
+      <ul>
+        <li>know what categories of personal information we've collected about you and why, as described in Section 2 and 3 above;</li>
+        <li>delete personal information we've collected from you, subject to the same legal-retention exceptions described in Section 8;</li>
+        <li>correct inaccurate personal information we hold about you;</li>
+        <li>opt out of the sale or sharing of your personal information — <strong>we do not sell or share personal information</strong>, so there's nothing to opt out of; and</li>
+        <li>not be discriminated against for exercising any of these rights.</li>
+      </ul>
+      <p>
+        We don't use or disclose sensitive personal information for any purpose beyond what's
+        necessary to provide the Service. To exercise any of these rights, contact us at{" "}
+        {CONTACT_EMAIL}; we'll verify your identity before acting on the request.
+      </p>
+
+      <h2>12. Children's data</h2>
       <p>The Service is intended for business use and is not directed at, or knowingly used to collect data from, individuals under 18 years of age.</p>
 
-      <h2>11. Grievance Officer</h2>
+      <h2>13. Grievance Officer</h2>
       <p>
         In accordance with the Information Technology Act, 2000 and the DPDPA, the Grievance
         Officer for this Service is:
@@ -151,10 +194,10 @@ export function PrivacyPolicy() {
       </p>
       <p>We aim to acknowledge grievances promptly and resolve them within the timelines required by applicable law.</p>
 
-      <h2>12. Changes to this policy</h2>
+      <h2>14. Changes to this policy</h2>
       <p>We may update this policy from time to time. Material changes will be reflected by updating the effective date above; continued use of the Service after a change constitutes acceptance of the updated policy.</p>
 
-      <h2>13. Contact us</h2>
+      <h2>15. Contact us</h2>
       <p>
         Questions about this policy, or to exercise your rights under the DPDPA, contact:{" "}
         <a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a>.

@@ -80,10 +80,27 @@ export function CookiePolicy() {
         in more often).
       </p>
 
-      <h2>6. Changes to this policy</h2>
+      <h2>6. EU/EEA visitors (GDPR / ePrivacy)</h2>
+      <p>
+        The consent-first approach described in Section 3 is designed to meet the EU's ePrivacy
+        rules, which require opt-in consent before any non-essential cookie is set — not just an
+        opt-out. Analytics stays off, and Google Consent Mode v2 stays set to "denied," until you
+        actively click <strong>Accept</strong>; nothing is assumed from continued browsing alone.
+      </p>
+
+      <h2>7. California visitors (CCPA/CPRA)</h2>
+      <p>
+        We don't sell or share personal information collected via cookies, and the analytics
+        cookies described in Section 3 are not used for cross-context behavioral advertising — so
+        there's no "Do Not Sell or Share My Personal Information" link to provide, since that
+        activity doesn't happen here. Rejecting analytics cookies via the banner has the same
+        practical effect.
+      </p>
+
+      <h2>8. Changes to this policy</h2>
       <p>We may update this policy from time to time; the effective date above reflects the latest version.</p>
 
-      <h2>7. Contact us</h2>
+      <h2>9. Contact us</h2>
       <p>
         Questions about this policy: <a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a>.
       </p>
