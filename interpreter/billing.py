@@ -13,6 +13,18 @@ Supabase round-trip (tenants.plan_id -> plans row) callers need first.
 invoice: Groq (this project's default LLM provider) runs on its free tier,
 so Groq/OpenRouter model ids price at $0; only opt-in Anthropic models
 carry a rate, taken from published list pricing at time of writing.
+
+BYOK simplification (2026-09-20): the three separate BYOK-aware
+mechanisms chunks E/F built on top of run/token metering (a checkout-time
+BYOK discount, excluding BYOK tokens from the plan quota, and a
+BYOK-aware trial-cap exemption) are down to one — BYOK is now the *only*
+ongoing billing method. The `free` plan's 75-run cap (migration `112`) is
+the sole thing metered by usage; every paid tier (Basic/Pro/Advanced) is a
+flat monthly fee, unmetered, and requires the tenant's own LLM key once
+the trial's over (`assert_not_locked` below). `tokens_by_key_source` and
+`usage_summary`'s billable_* split stay — they're still what the trial
+cap reads (see `_trial_cap_status`) and still useful dashboard context —
+but nothing past the trial is gated on run/token counts anymore.
 """
 
 from __future__ import annotations
@@ -38,18 +50,27 @@ DEFAULT_RATE_USD = 0.0
 # `plans` table. Never the primary source of quotas. Same field names as a
 # real plan row so `plan_limits()` reads it identically either way.
 _FREE_PLAN_FALLBACK: dict[str, Any] = {
-    "slug": "free", "name": "Free", "included_runs": 200, "included_tokens": 500_000,
+    "slug": "free", "name": "Free", "included_runs": 75, "included_tokens": None,
 }
 
 
 class BillingLockedError(RuntimeError):
     """Raised by `assert_not_locked` when a tenant's trial (or grace
-    period) has lapsed with no payment on file, or a trialing tenant has
-    used up its free credits for the period with no BYOK key to fall back
-    on. Callers turn this into a clear, actionable failure — a 402 for the
-    interactive "run" endpoint, a job that fails (and retries a few times,
-    harmlessly, before settling as an error) for the worker's queued path
-    — never a generic crash."""
+    period) has lapsed with no payment on file, a trialing tenant has used
+    up its free run cap for the period with no BYOK key to fall back on,
+    or a past-trial tenant has no LLM key of their own on file at all (the
+    only ongoing billing method — see the module docstring). Callers turn
+    this into a clear, actionable failure — a 402 for the interactive
+    "run" endpoint, a job that fails (and retries a few times, harmlessly,
+    before settling as an error) for the worker's queued path — never a
+    generic crash."""
+
+
+class PlanLimitError(RuntimeError):
+    """Raised by `assert_seat_available`/`assert_flow_slot_available` when
+    a tenant's plan-level seat or active-flow cap is full. Distinct from
+    `BillingLockedError`: this blocks one specific write (an invite, a new
+    flow) rather than every flow run."""
 
 
 def _trial_cap_status(tenant_id: str, sb) -> tuple[bool, bool]:
@@ -90,23 +111,26 @@ def _trial_cap_status(tenant_id: str, sb) -> tuple[bool, bool]:
 
 def assert_not_locked(tenant_id: "str | None", sb) -> None:
     """The billing-enforcement gate (chunk D, extended 2026-09-11 for the
-    trial free-credit cap): called before a flow actually runs, so a
-    locked-out tenant never spends an LLM call. A missing/unresolvable
-    tenant_id is let through — this is a billing gate, not a
-    tenant-existence check; other code already handles that.
+    trial free-run cap, extended again 2026-09-20 for BYOK-only paid
+    tiers): called before a flow actually runs, so a locked-out tenant
+    never spends an LLM call. A missing/unresolvable tenant_id is let
+    through — this is a billing gate, not a tenant-existence check; other
+    code already handles that.
 
-    Two independent ways a trialing tenant can be stopped, matching the
-    product framing "free credits for the first 7 days, up to this cap":
-      - the 7-day trial clock lapses (+ grace) -> `billing_trial_sweep`
-        flips `billing_status` to `locked` -> blocked here, always,
-        BYOK or not. The trial window itself is not extendable by BYOK.
-      - the plan's included runs/tokens run out *before* day 7 -> blocked
-        here too, UNLESS the tenant's own recorded usage was actually
-        covered by their own key for the provider(s) it used (see
-        `_trial_cap_status`) — a real BYOK run doesn't spend the
-        platform's credits (chunk E already excludes it from
-        `billable_*`), so there's nothing to protect by blocking it — it
-        just lets them keep testing until the trial clock itself ends."""
+    Three independent ways a run can be blocked here:
+      - `billing_status == "locked"` (the 7-day trial clock + grace period
+        both lapsed with no payment) -> always blocked, BYOK or not. The
+        trial window itself is not extendable by BYOK.
+      - still `"trialing"`, and the free plan's flat run cap is used up
+        (see `_trial_cap_status`) with no BYOK key covering the provider(s)
+        actually used -> blocked, UNLESS a real BYOK run doesn't spend the
+        platform's credits (excluded from `billable_*`), so there's
+        nothing to protect by blocking it — it just lets them keep testing
+        until the trial clock itself ends.
+      - anything past the trial (`active` / `grace` / `canceled`) -> BYOK
+        is the only ongoing billing method now (see the module docstring),
+        so a tenant with no LLM key on file at all has nothing for the
+        platform to run their flows on."""
     if not tenant_id:
         return
     rows = (sb.table("tenants").select("billing_status").eq("tenant_id", tenant_id)
@@ -122,10 +146,56 @@ def assert_not_locked(tenant_id: "str | None", sb) -> None:
         exceeded, byok_covered = _trial_cap_status(tenant_id, sb)
         if exceeded and not byok_covered:
             raise BillingLockedError(
-                "This workspace has used its free trial credits for this period — "
+                "This workspace has used its free trial runs for this period — "
                 "add your own LLM key in Connections (for the model your flows "
                 "actually use) to keep testing until your trial ends, or choose "
                 "a plan to keep going without one.")
+        return
+    from interpreter import llm
+
+    if not llm.tenant_has_byok(tenant_id):
+        raise BillingLockedError(
+            "This workspace's trial has ended — add your own LLM key in "
+            "Connections to keep running flows. Every plan is BYOK: the "
+            "subscription covers the platform, your own key covers the "
+            "LLM calls.")
+
+
+def assert_seat_available(tenant_id: str, sb) -> None:
+    """Called before a new invite is created (POST /api/invitations) —
+    `seats_included` (null = unlimited) counts existing members + still-
+    pending invites, so a tenant can't out-invite its own seat cap by
+    sending five invites for three seats."""
+    plan = get_plan_for_tenant(tenant_id, sb)
+    limit = plan.get("seats_included")
+    if limit is None:
+        return
+    members = len((sb.table("tenant_members").select("user_id")
+                   .eq("tenant_id", tenant_id).execute().data or []))
+    pending = len((sb.table("tenant_invitations").select("invite_id")
+                   .eq("tenant_id", tenant_id).eq("status", "pending")
+                   .execute().data or []))
+    if members + pending >= limit:
+        raise PlanLimitError(
+            f"This plan includes {limit} seat{'s' if limit != 1 else ''} and it's "
+            "full — remove a member or revoke a pending invite, or upgrade in Billing.")
+
+
+def assert_flow_slot_available(tenant_id: str, sb) -> None:
+    """Called before a new flow is created (POST /api/flows) —
+    `included_flows` (null = unlimited) counts non-archived flows only, so
+    archiving one frees a slot, matching the project's soft-delete
+    convention elsewhere."""
+    plan = get_plan_for_tenant(tenant_id, sb)
+    limit = plan.get("included_flows")
+    if limit is None:
+        return
+    count = len((sb.table("flows").select("flow_id").eq("tenant_id", tenant_id)
+                 .neq("status", "archived").execute().data or []))
+    if count >= limit:
+        raise PlanLimitError(
+            f"This plan includes {limit} active flow{'s' if limit != 1 else ''} and "
+            "it's full — archive one, or upgrade in Billing.")
 
 
 def get_plan_for_tenant(tenant_id: str, sb) -> dict[str, Any]:
@@ -146,28 +216,6 @@ def get_plan_for_tenant(tenant_id: str, sb) -> dict[str, Any]:
 
 def plan_limits(plan: dict[str, Any]) -> dict[str, int | None]:
     return {"runs": plan.get("included_runs"), "tokens": plan.get("included_tokens")}
-
-
-def resolve_checkout_plan(plan: dict[str, Any], provider_slug: str,
-                          tenant_id: str) -> tuple[dict[str, Any], bool]:
-    """Billing chunk F: a tenant who already brings their own LLM key costs
-    the platform nothing on tokens, so they check out at the plan's BYOK
-    price instead of the standard one — if the plan has one set yet.
-    `create_subscription` only ever reads razorpay_plan_id/stripe_price_id,
-    so swapping those two keys on a copy of the row is the whole mechanism;
-    `interpreter/payments.py` stays entirely unaware BYOK pricing exists.
-
-    Returns (plan_to_use, discount_applied)."""
-    from interpreter import llm
-
-    if not llm.tenant_has_byok(tenant_id):
-        return plan, False
-    byok_id = (plan.get("razorpay_plan_id_byok") if provider_slug == "razorpay"
-              else plan.get("stripe_price_id_byok"))
-    if not byok_id:
-        return plan, False
-    return {**plan, "razorpay_plan_id": plan.get("razorpay_plan_id_byok"),
-            "stripe_price_id": plan.get("stripe_price_id_byok")}, True
 
 
 def estimate_cost_usd(tokens_by_model: dict[str, int]) -> float:

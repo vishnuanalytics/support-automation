@@ -707,6 +707,156 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-20 (Billing simplification: BYOK becomes the one ongoing
+billing method, replacing the three-mechanism metered/discount stack —
+Basic/Pro/Advanced flat tiers.)** User: "In the billing section currently
+we are doing to check whether to use our llm or customer llm then give
+discount. It feels like complicated... we need to have basic, pro,
+advanced like that three variations in the product." Confirmed via
+AskUserQuestion before writing anything: (1) the trial stays on the
+platform's own key, now capped at a flat run count instead of a
+run+token quota, (2) the paid tiers differentiate on seats/flows/features,
+not LLM usage, (3) the old plan rows are renamed in place, not replaced
+alongside.
+
+**What changed:** the pre-existing stack — a checkout-time BYOK discount
+(`resolve_checkout_plan`, dual `razorpay_plan_id_byok`/`stripe_price_id_byok`
+columns), a BYOK-vs-platform token split excluded from the plan's
+included-runs/tokens quota, and a BYOK-aware trial-cap exemption — is down
+to **one** ongoing mechanism: every paid tier is now a flat monthly fee,
+and a tenant past the trial must have their own LLM key on file at all
+(`interpreter/llm.tenant_has_byok`) or `assert_not_locked` blocks every
+run, full stop. Migration **`112`**: retires `byok_discount_pct` /
+`overage_per_run_usd` / `razorpay_plan_id_byok` / `stripe_price_id_byok`;
+adds `included_flows` (null = unlimited) and a `features` jsonb flag list;
+renames `starter`→**Basic** ($29/mo, 3 seats, 5 flows, `["core"]`),
+`growth`→**Pro** ($79/mo, 10 seats, 25 flows, `+policy_rules,kb_writeback`),
+adds **Advanced** ($199/mo, unlimited seats/flows,
+`+agentic_actions,priority_support`); the `free` plan becomes the trial
+definition (`included_runs=75`, `included_tokens=null` — capped by run
+count only, not tokens); the old unlimited placeholder `pro` row
+(102_billing_foundation.sql, pre-real-pricing, unreferenced) is retired,
+any tenant/subscription pointing at it moved onto `growth` first so the
+slug rename doesn't collide. `enterprise` (sales-assisted, unlimited) is
+untouched — a separate mechanism from these three, not one of them.
+
+`interpreter/billing.py`: `resolve_checkout_plan` deleted;
+`assert_not_locked` gained a third branch — `active`/`grace`/`canceled`
+now require `llm.tenant_has_byok`, not just `locked`/trialing-over-cap as
+before. Two new gates, mirroring the seats/flows a plan now actually
+differentiates on: `assert_seat_available` (counts members + pending
+invites against `seats_included`, called from `POST /api/invitations`)
+and `assert_flow_slot_available` (counts non-archived flows against
+`included_flows`, called from `POST /api/flows`) — both raise a new
+`PlanLimitError` → 402, distinct from `BillingLockedError` (one blocks a
+specific write, the other blocks every run). `api/main.py`'s
+`/api/billing/plans` and `/api/billing/subscribe` dropped the BYOK-price
+math entirely (flat price always); `tenant_has_byok` in the plans response
+is now a UI nudge, not a discount signal. Web: `BillingView.tsx`'s
+`PlansSection` shows flat prices + flows/seats/features, a banner nudging
+a BYOK key before subscribing if the tenant has none; `types.ts`/`api.ts`
+updated to match. `cd web && npm run build` clean.
+
+**Test changes:** `tests/test_billing.py` — dropped the 4 chunk-F
+BYOK-discount-checkout tests (`resolve_checkout_plan` no longer exists);
+`assert_not_locked`'s "active tenant ignores usage" test split into
+BYOK-present (still ignores usage) / BYOK-absent (now raises), + a new
+grace-without-BYOK-raises test; 6 new tests for
+`assert_seat_available`/`assert_flow_slot_available`.
+`tests/test_sweeps.py::test_assert_not_locked_allows_every_other_status`
+now mocks `tenant_has_byok=True` (it's testing the status-transition
+logic, not the new BYOK gate). 1311 offline pytest green.
+
+**Not done — flagged, not built:** the `features` jsonb flags
+(`policy_rules`/`kb_writeback`/`agentic_actions`/`priority_support`) are
+stored and returned to the UI but **not enforced** anywhere yet — a Basic
+tenant can still use every node type today. Gating a node type or
+endpoint by the tenant's plan features is a real follow-on chunk (touches
+`interpreter/registry.py`/the flow validator, a bigger design question
+about where in the run path to check it), deliberately not built
+preemptively here. Also not done: real Razorpay/Stripe Plan/Price objects
+for the renamed Basic/Pro/Advanced tiers (`plans.razorpay_plan_id`/
+`stripe_price_id` need a follow-up UPDATE once those are created
+provider-side, same residual chunk F already had) and a "manage
+subscription / cancel" UI. **Migration `112` needs to be applied by hand**
+(Supabase MCP `apply_migration` or the SQL editor, per this repo's
+migration discipline) before any of this is live — `tests/
+test_verify_migrations.py::test_the_live_repo_schema_has_no_drift` will
+correctly report `plans.features`/`plans.included_flows` as missing until
+then.
+
+---
+
+**2026-09-17 (Real landing page + Privacy Policy / Terms of Service in
+front of the login screen.)** User: "My website is missing the landing
+page just blank login page. Improve the login page and follow the indian
+data security reules, plicies and add all those give my mail for contact
+- gundamvishnu7@gmail.com." Clarified via AskUserQuestion before writing
+anything: (1) build a full landing page in front of login, not just
+decorate the login screen, and (2) write real, substantive Privacy
+Policy / Terms of Service content now, with the entity name / registered
+address / grievance-officer name left as bracketed placeholders (a policy
+needs a real, identifiable Data Fiduciary to mean anything — that's not
+something to invent) — the user's email is the live contact/grievance
+address now.
+
+**What changed:** `App.tsx`'s `session === null` branch previously
+rendered `<Login />` directly with nothing in front of it — now renders
+new `<PreAuth />` (`web/src/auth/PreAuth.tsx`), which composes a real
+landing page (`web/src/landing/LandingPage.tsx` — hero, 6 feature cards
+describing actual platform capabilities, a "Sign in" CTA), the existing
+login form, and two new legal pages, all sharing one header/footer
+(`web/src/landing/PublicShell.tsx` — brand mark, "Sign in" CTA, theme
+toggle, and a footer with Privacy Policy / Terms of Service / a
+`mailto:` contact link). Plain React state for view switching, not
+URL/hash-synced — the Supabase client's own OAuth/magic-link redirect
+also lands on this origin and may use a URL hash itself, so this
+deliberately doesn't add a second thing writing to `location.hash`.
+
+**Legal content, written to align with India's Digital Personal Data
+Protection Act, 2023 (DPDPA) and the IT Act 2000 / SPDI Rules** —
+`web/src/landing/PrivacyPolicy.tsx` and `TermsOfService.tsx`. Substantive,
+not boilerplate: Data Fiduciary vs. Data Processor roles (the platform is
+a Processor for the case/customer data a tenant connects, a Fiduciary
+only for that tenant's own account data), what's collected, purposes,
+consent/legal basis, named categories of processor (Supabase; Groq/
+Anthropic/OpenRouter as AI providers — only the relevant case text is
+sent, not the whole workspace; connectors the tenant explicitly enables),
+cross-border transfer disclosure, a Data Principal rights section (access/
+correction/erasure/grievance/nomination per the DPDPA), retention, and a
+Grievance Officer section. **The security-practices claims are the real,
+verified practices in this codebase, not marketing copy** — checked before
+writing them: Postgres Row-Level Security tenant isolation (`CLAUDE.md`'s
+own mandatory-RLS rule), integration credentials encrypted at rest via
+Supabase Vault (confirmed live in `db/migrations/035_integration_secret_
+vault.sql`, not the plain-jsonb state an earlier security-review note had
+flagged as a residual gap — that was fixed later), TLS in transit, and the
+rate-limiting/audit-logging already documented in this file's own "Known
+issues" section.
+
+**Verify:** `npm run build` clean, `vitest run` 20/20 unchanged.
+Browser-verified: landing page renders (not a blank login form), the hero
+CTA reaches the real sign-in form, header "← Home" returns to the
+landing page, footer links open both legal pages with the DPDPA named and
+the contact email present, dark mode re-themes correctly (screenshot),
+and the page has no horizontal overflow at 390px phone width (measured,
+not eyeballed). Promoted to a permanent regression test
+(`web/e2e/landing.spec.ts`) rather than a throwaway check. Full e2e suite:
+one apparent new failure (`connections.spec.ts`) on first run turned out
+to be parallel-load flake, not a real regression — reran the full suite
+and it passed cleanly, back to the same 5 pre-existing failures (10
+passed, up from 8 — the 2 new tests now run too).
+
+**Open items, called out here rather than left implicit:** the Privacy
+Policy / Terms both have bracketed placeholders (`[YOUR REGISTERED
+BUSINESS / ENTITY NAME]`, `[YOUR REGISTERED ADDRESS]`, `[GRIEVANCE OFFICER
+NAME]`, `[YOUR CITY OF JURISDICTION]`) that need real values — and this
+content, however substantive, should have a lawyer's review before being
+treated as final compliance, not just an engineering pass. Not committed
+yet.
+
+---
+
 **2026-09-17 (Node & edge reference — what problem each one solves, with
 an example setup, added to the written guide.)** User: "can you add what
 each node and edge can help you solve the problems with an example to

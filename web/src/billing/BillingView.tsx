@@ -213,7 +213,7 @@ function BillingStatusBanner({ state }: { state: BillingUsage["billing_state"] }
       <Banner
         tone="accent"
         title={days != null && days >= 0 ? `Trial — ${days} day${days === 1 ? "" : "s"} left` : "Trial active"}
-        detail="Free credits included until the trial ends or your plan's usage cap is hit, whichever comes first — add your own LLM key in Connections to keep testing past the cap, or add a payment method below to keep flows running once the trial itself ends."
+        detail="Free runs on us until the trial ends or your plan's run cap is hit, whichever comes first — add your own LLM key in Connections to keep testing past the cap, or choose a plan below (every plan is BYOK) to keep flows running once the trial itself ends."
       />
     );
   }
@@ -286,7 +286,7 @@ function PlansSection({
     }
   };
 
-  const paid = plans.filter((p) => p.slug !== "free" && p.slug !== "pro");
+  const paid = plans.filter((p) => p.slug !== "free");
   if (paid.length === 0) return null;
 
   return (
@@ -309,11 +309,16 @@ function PlansSection({
           />
         </div>
       )}
+      {!plans.some((p) => p.tenant_has_byok) && (
+        <Banner
+          tone="warn"
+          title="Add your own LLM key first"
+          detail="Every plan is BYOK — the subscription covers the platform (seats, flows, features); your own LLM key (Connections) covers the model calls. Flows pause without one once your trial ends."
+        />
+      )}
       <div className="row" style={{ flexWrap: "wrap", gap: 12 }}>
         {paid.map((p) => {
           const isCurrent = p.slug === currentPlan;
-          const usd = p.tenant_has_byok ? p.byok_price_usd : p.base_price_usd;
-          const inr = p.tenant_has_byok ? p.byok_price_inr : p.base_price_inr;
           return (
             <div key={p.slug} className="tile" style={{ minWidth: 220, display: "grid", gap: 8 }}>
               <div className="row" style={{ justifyContent: "space-between" }}>
@@ -323,13 +328,13 @@ function PlansSection({
               {p.checkout_available ? (
                 <div>
                   <div style={{ font: "600 22px/1 var(--font-heading)" }}>
-                    ${(usd / 100).toFixed(2)}
+                    ${(p.base_price_usd / 100).toFixed(2)}
                     <span className="muted" style={{ fontSize: 12 }}>
                       /mo
                     </span>
                   </div>
                   <div className="muted" style={{ fontSize: 11 }}>
-                    ≈ ₹{(inr / 100).toLocaleString()}/mo
+                    ≈ ₹{(p.base_price_inr / 100).toLocaleString()}/mo, BYOK
                   </div>
                 </div>
               ) : (
@@ -338,12 +343,12 @@ function PlansSection({
                 </div>
               )}
               <div className="muted" style={{ fontSize: 12 }}>
-                {p.included_runs != null ? `${p.included_runs.toLocaleString()} runs/mo` : "custom volume"}
+                {p.included_flows != null ? `${p.included_flows} flows` : "unlimited flows"}
                 {p.seats_included != null ? ` · ${p.seats_included} seats` : " · unlimited seats"}
               </div>
-              {p.tenant_has_byok && p.byok_discount_pct > 0 && (
-                <div style={{ fontSize: 11, color: "var(--accent)" }}>
-                  {p.byok_discount_pct}% off — using your own LLM key
+              {p.features.length > 0 && (
+                <div className="muted" style={{ fontSize: 11 }}>
+                  {p.features.filter((f) => f !== "core").join(" · ") || "core features"}
                 </div>
               )}
               {p.checkout_available && !isCurrent && (

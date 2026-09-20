@@ -671,7 +671,7 @@ export const api = {
   billingPlans: (tenantId?: string) =>
     req<Plan[]>(`/billing/plans${tenantId ? `?tenant_id=${tenantId}` : ""}`),
   billingSubscribe: (b: { planSlug: string; tenantId: string; billingCountry?: string }) =>
-    req<{ checkout_url: string; provider: string; status: string; byok_discount_applied: boolean }>(
+    req<{ checkout_url: string; provider: string; status: string }>(
       "/billing/subscribe",
       {
         method: "POST",

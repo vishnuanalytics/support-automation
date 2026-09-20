@@ -705,6 +705,12 @@ def create_invitation(body: InviteIn, c: Caller = Depends(caller)) -> dict:
     email = body.email.strip().lower()
     if "@" not in email:
         raise HTTPException(400, "a real email is required")
+
+    from interpreter import billing
+    try:
+        billing.assert_seat_available(tid, c.sb)
+    except billing.PlanLimitError as e:
+        raise HTTPException(402, str(e))
     try:
         row = c.sb.table("tenant_invitations").insert({
             "tenant_id": tid, "email": email, "role": role, "invited_by": c.user_id,
@@ -770,6 +776,13 @@ def accept_invitations(c: Caller = Depends(caller)) -> dict:
 def create_flow(body: FlowCreate, c: Caller = Depends(caller)) -> dict:
     tenant_id = _caller_tenant(c, body.tenant_id)   # infer when not given
     _require_editor(c, tenant_id)
+
+    from interpreter import billing
+    try:
+        billing.assert_flow_slot_available(tenant_id, c.sb)
+    except billing.PlanLimitError as e:
+        raise HTTPException(402, str(e))
+
     fid = str(uuid.uuid4())
     try:
         c.sb.table("flows").insert({
@@ -1723,9 +1736,11 @@ def billing_flow_deltas(tenant_id: str | None = None, c: Caller = Depends(caller
 def list_plans(tenant_id: str | None = None, c: Caller = Depends(caller)) -> list[dict]:
     """The pricing catalog for the plan picker. Any tenant member can see
     prices (nothing sensitive); only an owner can actually subscribe
-    (POST .../subscribe is owner-gated separately). `byok_price_usd`/
-    `byok_price_inr` are computed here so the UI never has to redo the
-    discount math itself."""
+    (POST .../subscribe is owner-gated separately). Every paid tier is a
+    flat monthly fee — BYOK is the only ongoing billing method (2026-09-20
+    simplification), so `tenant_has_byok` here is a UI nudge ("add a key
+    before you'll be able to run flows on this plan"), not a discount
+    signal like it used to be."""
     from interpreter import llm
 
     tid = _caller_tenant(c, tenant_id)
@@ -1733,18 +1748,13 @@ def list_plans(tenant_id: str | None = None, c: Caller = Depends(caller)) -> lis
     tenant_has_byok = llm.tenant_has_byok(tid)
     out = []
     for p in rows:
-        discount = p.get("byok_discount_pct") or 0
         out.append({
             "slug": p["slug"], "name": p["name"],
             "base_price_usd": p.get("base_price_usd") or 0,
             "base_price_inr": p.get("base_price_inr") or 0,
-            "byok_price_usd": round((p.get("base_price_usd") or 0) * (100 - discount) / 100),
-            "byok_price_inr": round((p.get("base_price_inr") or 0) * (100 - discount) / 100),
-            "byok_discount_pct": discount,
-            "included_runs": p.get("included_runs"),
-            "included_tokens": p.get("included_tokens"),
-            "overage_per_run_usd": p.get("overage_per_run_usd") or 0,
             "seats_included": p.get("seats_included"),
+            "included_flows": p.get("included_flows"),
+            "features": p.get("features") or [],
             # can this tenant actually check out into this plan right now?
             "checkout_available": bool(p.get("razorpay_plan_id") or p.get("stripe_price_id")),
         })
@@ -1761,8 +1771,10 @@ class SubscribeIn(BaseModel):
 def billing_subscribe(body: SubscribeIn, c: Caller = Depends(caller)) -> dict:
     """Owner picks a plan -> create (or reuse) a provider customer and a
     hosted-checkout subscription, hand back its URL to redirect to. We
-    never see a card ourselves — Stripe/Razorpay's own hosted page does."""
-    from interpreter import billing, payments
+    never see a card ourselves — Stripe/Razorpay's own hosted page does.
+    A flat price regardless of BYOK status (2026-09-20 simplification) —
+    the plan pays for the platform, the tenant's own key pays for the LLM."""
+    from interpreter import payments
 
     tid = _caller_tenant(c, body.tenant_id)
     _require_owner(c, tid)
@@ -1781,8 +1793,6 @@ def billing_subscribe(body: SubscribeIn, c: Caller = Depends(caller)) -> dict:
     if not prows:
         raise HTTPException(404, f"no such plan {body.plan_slug!r}")
     plan = prows[0]
-
-    plan, byok_discount_applied = billing.resolve_checkout_plan(plan, provider_slug, tid)
 
     provider = payments.get_provider(provider_slug)
     try:
@@ -1808,11 +1818,8 @@ def billing_subscribe(body: SubscribeIn, c: Caller = Depends(caller)) -> dict:
     audit.record(_service, tenant_id=tid, action="billing.subscription_started",
                  actor_id=c.user_id, actor_email=c.email,
                  target_type="plan", target_id=plan["plan_id"],
-                 summary=f"started checkout for plan {plan['slug']!r} via {provider_slug}"
-                         + (" (BYOK price)" if byok_discount_applied else ""),
-                 metadata={"byok_discount_applied": byok_discount_applied})
-    return {"checkout_url": result.short_url, "provider": provider_slug, "status": result.status,
-            "byok_discount_applied": byok_discount_applied}
+                 summary=f"started checkout for plan {plan['slug']!r} via {provider_slug}")
+    return {"checkout_url": result.short_url, "provider": provider_slug, "status": result.status}
 
 
 def _apply_billing_webhook(provider_slug: str, event: "Any", payload: dict) -> None:

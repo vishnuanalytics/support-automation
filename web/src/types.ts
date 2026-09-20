@@ -881,23 +881,19 @@ export interface BillingState {
 export interface Plan {
   slug: string;
   name: string;
-  base_price_usd: number;   // minor units (cents)
+  base_price_usd: number;   // minor units (cents) — flat, BYOK is the only ongoing billing method
   base_price_inr: number;   // minor units (paise)
-  byok_price_usd: number;
-  byok_price_inr: number;
-  byok_discount_pct: number;
-  included_runs: number | null;
-  included_tokens: number | null;
-  overage_per_run_usd: number;
   seats_included: number | null;
+  included_flows: number | null;   // null = unlimited active (non-archived) flows
+  features: string[];
   checkout_available: boolean;
-  tenant_has_byok: boolean;
+  tenant_has_byok: boolean;   // nudge only now, not a discount signal
 }
 
 export interface BillingUsage {
   period_label: string;                 // "2026-09"
   period: { start: string; end: string };
-  plan: string;                         // "free" | "pro"
+  plan: string;                         // "free" | "basic" | "pro" | "advanced" | "enterprise"
   billing_state: BillingState;
   limits: { runs: number | null; tokens: number | null };
   runs_count: number;

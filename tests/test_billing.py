@@ -142,52 +142,6 @@ def test_usage_summary_pro_plan_has_no_pct_limits():
     assert s["daily"] == []
 
 
-# ── Billing chunk F (2026-09-10): resolve_checkout_plan (BYOK pricing) ──
-_STARTER_PLAN = {
-    "plan_id": "p-starter", "slug": "starter",
-    "razorpay_plan_id": "plan_std", "razorpay_plan_id_byok": "plan_byok",
-    "stripe_price_id": "price_std", "stripe_price_id_byok": "price_byok",
-}
-
-
-def test_resolve_checkout_plan_uses_byok_price_when_tenant_has_a_key(monkeypatch):
-    from interpreter import llm
-
-    monkeypatch.setattr(llm, "tenant_has_byok", lambda tid: True)
-    plan, applied = billing.resolve_checkout_plan(_STARTER_PLAN, "razorpay", "t1")
-    assert applied is True
-    assert plan["razorpay_plan_id"] == "plan_byok"
-    assert plan["stripe_price_id"] == "price_byok"   # both swapped, whichever provider is used
-
-
-def test_resolve_checkout_plan_stripe_provider_swaps_stripe_id(monkeypatch):
-    from interpreter import llm
-
-    monkeypatch.setattr(llm, "tenant_has_byok", lambda tid: True)
-    plan, applied = billing.resolve_checkout_plan(_STARTER_PLAN, "stripe", "t1")
-    assert applied is True and plan["stripe_price_id"] == "price_byok"
-
-
-def test_resolve_checkout_plan_no_byok_key_uses_standard_price(monkeypatch):
-    from interpreter import llm
-
-    monkeypatch.setattr(llm, "tenant_has_byok", lambda tid: False)
-    plan, applied = billing.resolve_checkout_plan(_STARTER_PLAN, "razorpay", "t1")
-    assert applied is False
-    assert plan == _STARTER_PLAN   # unchanged
-
-
-def test_resolve_checkout_plan_falls_back_when_no_byok_price_exists(monkeypatch):
-    from interpreter import llm
-
-    monkeypatch.setattr(llm, "tenant_has_byok", lambda tid: True)
-    plan_no_byok = {"plan_id": "p-free", "slug": "free",
-                    "razorpay_plan_id": None, "razorpay_plan_id_byok": None}
-    plan, applied = billing.resolve_checkout_plan(plan_no_byok, "razorpay", "t1")
-    assert applied is False
-    assert plan == plan_no_byok
-
-
 def test_plan_limits_reads_included_runs_and_tokens_off_a_plan_row():
     assert billing.plan_limits({"included_runs": 200, "included_tokens": 500_000}) == _FREE_LIMITS
     assert billing.plan_limits({"included_runs": None, "included_tokens": None}) == _PRO_LIMITS
@@ -280,6 +234,9 @@ class _Q:
         return self
 
     def eq(self, *a, **k):
+        return self
+
+    def neq(self, *a, **k):
         return self
 
     def gte(self, *a, **k):
@@ -412,7 +369,7 @@ def test_get_plan_for_tenant_falls_back_to_hardcoded_limits_if_plans_table_is_em
     sb = _SB({"tenants": [{"plan_id": "p-free"}], "plans": []})
     plan = billing.get_plan_for_tenant("t1", sb)
     assert plan["slug"] == "free"
-    assert billing.plan_limits(plan) == _FREE_LIMITS
+    assert billing.plan_limits(plan) == {"runs": 75, "tokens": None}
 
 
 # ── assert_not_locked (2026-09-11): the 7-day lock + a trial free-credit cap ──
@@ -428,13 +385,40 @@ def test_assert_not_locked_no_tenant_id_is_a_noop():
     billing.assert_not_locked(None, _SB())  # must not raise / must not touch the client
 
 
-def test_assert_not_locked_active_tenant_ignores_usage(monkeypatch):
+def test_assert_not_locked_active_tenant_without_byok_raises(monkeypatch):
+    """2026-09-20: BYOK is the only ongoing billing method -- an active
+    (paid, past-trial) tenant with no LLM key of their own has nothing for
+    the platform to run their flows on."""
     from interpreter import llm
 
-    monkeypatch.setattr(llm, "tenant_byok_providers", lambda tid: set())
+    monkeypatch.setattr(llm, "tenant_has_byok", lambda tid: False)
+    sb = _SB({"tenants": [{"billing_status": "active", "plan_id": "p-pro"}], "plans": [_PRO_PLAN]})
+    try:
+        billing.assert_not_locked("t1", sb)
+        assert False, "expected BillingLockedError"
+    except billing.BillingLockedError as e:
+        assert "own LLM key" in str(e)
+
+
+def test_assert_not_locked_active_tenant_with_byok_ignores_usage(monkeypatch):
+    from interpreter import llm
+
+    monkeypatch.setattr(llm, "tenant_has_byok", lambda tid: True)
     sb = _SB({"tenants": [{"billing_status": "active", "plan_id": "p-free"}],
               "plans": [_FREE_PLAN], "runs": _runs_at_cap()})
-    billing.assert_not_locked("t1", sb)  # over the "cap" but not trialing -- not this gate's job
+    billing.assert_not_locked("t1", sb)  # over the free plan's "cap" but not trialing -- not this gate's job
+
+
+def test_assert_not_locked_grace_tenant_without_byok_raises(monkeypatch):
+    from interpreter import llm
+
+    monkeypatch.setattr(llm, "tenant_has_byok", lambda tid: False)
+    sb = _SB({"tenants": [{"billing_status": "grace", "plan_id": "p-pro"}], "plans": [_PRO_PLAN]})
+    try:
+        billing.assert_not_locked("t1", sb)
+        assert False, "expected BillingLockedError"
+    except billing.BillingLockedError:
+        pass
 
 
 def test_assert_not_locked_locked_status_always_raises_even_with_byok(monkeypatch):
@@ -503,3 +487,55 @@ def test_assert_not_locked_trialing_unlimited_plan_never_capped(monkeypatch):
     sb = _SB({"tenants": [{"billing_status": "trialing", "plan_id": "p-pro"}],
               "plans": [_PRO_PLAN], "runs": _runs_at_cap()})
     billing.assert_not_locked("t1", sb)
+
+
+# ── seat / flow plan limits (2026-09-20 BYOK-tier simplification) ──────
+_BASIC_PLAN = {"plan_id": "p-basic", "slug": "basic", "seats_included": 3, "included_flows": 5}
+_UNLIMITED_PLAN = {"plan_id": "p-adv", "slug": "advanced", "seats_included": None, "included_flows": None}
+
+
+def test_assert_seat_available_under_limit_is_fine():
+    sb = _SB({"tenants": [{"plan_id": "p-basic"}], "plans": [_BASIC_PLAN],
+              "tenant_members": [{"user_id": "u1"}, {"user_id": "u2"}],
+              "tenant_invitations": []})
+    billing.assert_seat_available("t1", sb)
+
+
+def test_assert_seat_available_counts_pending_invites_too():
+    sb = _SB({"tenants": [{"plan_id": "p-basic"}], "plans": [_BASIC_PLAN],
+              "tenant_members": [{"user_id": "u1"}, {"user_id": "u2"}],
+              "tenant_invitations": [{"invite_id": "i1"}]})   # 2 members + 1 pending = 3 = the limit
+    try:
+        billing.assert_seat_available("t1", sb)
+        assert False, "expected PlanLimitError"
+    except billing.PlanLimitError as e:
+        assert "3 seats" in str(e)
+
+
+def test_assert_seat_available_unlimited_plan_never_blocks():
+    sb = _SB({"tenants": [{"plan_id": "p-adv"}], "plans": [_UNLIMITED_PLAN],
+              "tenant_members": [{"user_id": f"u{i}"} for i in range(50)],
+              "tenant_invitations": []})
+    billing.assert_seat_available("t1", sb)
+
+
+def test_assert_flow_slot_available_under_limit_is_fine():
+    sb = _SB({"tenants": [{"plan_id": "p-basic"}], "plans": [_BASIC_PLAN],
+              "flows": [{"flow_id": f"f{i}"} for i in range(4)]})
+    billing.assert_flow_slot_available("t1", sb)
+
+
+def test_assert_flow_slot_available_at_limit_raises():
+    sb = _SB({"tenants": [{"plan_id": "p-basic"}], "plans": [_BASIC_PLAN],
+              "flows": [{"flow_id": f"f{i}"} for i in range(5)]})
+    try:
+        billing.assert_flow_slot_available("t1", sb)
+        assert False, "expected PlanLimitError"
+    except billing.PlanLimitError as e:
+        assert "5 active flows" in str(e)
+
+
+def test_assert_flow_slot_available_unlimited_plan_never_blocks():
+    sb = _SB({"tenants": [{"plan_id": "p-adv"}], "plans": [_UNLIMITED_PLAN],
+              "flows": [{"flow_id": f"f{i}"} for i in range(200)]})
+    billing.assert_flow_slot_available("t1", sb)
