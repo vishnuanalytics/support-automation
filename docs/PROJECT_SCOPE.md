@@ -817,6 +817,45 @@ rate limiter's own documented residual) — left as a known limitation, not
 worth a DB-level constraint for a race this narrow (human-paced UI
 actions) unless it actually bites.
 
+**Follow-up 2 (same day, a broader `/code-review high` over the whole
+billing subsystem, not just the diff):** two more real gaps fixed, plus
+two lower-priority ones left as-is: (1) `assert_seat_available` was only
+ever called from `POST /api/invitations` (invite creation), never from
+`POST /api/invitations/accept` — if a tenant's plan/seat count shrank
+between an invite being sent and accepted, acceptance still inserted the
+`tenant_members` row with no check at all. `accept_invitations` now calls
+`assert_seat_available` per invite before inserting; a `PlanLimitError`
+leaves that one invite `pending` (not accepted) instead of erroring the
+whole request — it's called silently on every sign-in, so it just retries
+next time a seat frees up. (2) the webhook-driven `past_due` → `grace`
+transition (`_apply_billing_webhook`, pre-dates this billing-tier chunk)
+never set `tenants.grace_ends_at` — `billing_trial_sweep`'s grace-warning
+and grace→locked queries both filter on it and silently skip a null row,
+so a tenant whose card failed was never nudged and never actually locked;
+combined with the BYOK-only gate above, a tenant with a key on file could
+keep running indefinitely on a failed card. Now sets
+`grace_ends_at = now + sweeps.GRACE_DAYS` on that transition, same window
+the trial-lapse path already uses. 2 new offline tests
+(`tests/test_api.py`) exercise both directly (a fake `_service`, no
+network). **Left as-is (lower priority, both pre-existing / already-
+acknowledged tradeoffs, not part of this billing-tier chunk):** (c)
+`POST /api/billing/subscribe` never checks for an existing *live*
+subscription before creating a new one — clicking "Upgrade" while already
+on a paid plan would authorize a second real provider subscription and
+then hit `subscriptions_tenant_live_uidx`'s unique-constraint on the
+insert (unhandled, no try/except there unlike most other inserts in this
+file). Real "change plan" / "manage subscription" flow is already tracked
+above as not built — this is that same gap, now with a concrete failure
+mode on record, not a new one. (d) Razorpay webhook idempotency hashes the
+full raw payload (chunk C's own documented, deliberate choice — "deterministic
+across Razorpay's own retries of the same delivery"); would break dedup if a
+retry payload ever varies by even one byte. (e) the webhook dedup's
+duplicate-key detection substring-matches the exception's string
+representation — fragile against a client-library/Postgres message change,
+same style used for a couple of other conflict-handling spots in this
+codebase (e.g. `payments.razorpay_create_customer`'s `fail_existing`
+handling). 1315 offline pytest green.
+
 ---
 
 **2026-09-17 (Real landing page + Privacy Policy / Terms of Service in

@@ -749,6 +749,8 @@ def accept_invitations(c: Caller = Depends(caller)) -> dict:
     calls this on each sign-in, so invites made after signup are picked up too."""
     if not c.email:
         return {"accepted": 0}
+    from interpreter import billing
+
     pend = (_service.table("tenant_invitations").select("*")
             .eq("email", c.email).eq("status", "pending").execute().data or [])
     n = 0
@@ -757,6 +759,15 @@ def accept_invitations(c: Caller = Depends(caller)) -> dict:
                    .eq("tenant_id", inv["tenant_id"]).eq("user_id", c.user_id)
                    .execute().data)
         if not already:
+            try:
+                billing.assert_seat_available(inv["tenant_id"], _service)
+            except billing.PlanLimitError:
+                # the tenant's plan (or seat count) changed since this
+                # invite was sent and there's no room left -- leave it
+                # pending rather than accept over the cap; this endpoint is
+                # called silently on every sign-in, so it'll be retried
+                # once a seat frees up, with no error surface needed here.
+                continue
             _service.table("tenant_members").insert({
                 "tenant_id": inv["tenant_id"], "user_id": c.user_id, "role": inv["role"],
             }).execute()
@@ -1876,7 +1887,17 @@ def _apply_billing_webhook(provider_slug: str, event: "Any", payload: dict) -> N
         tenant_update = {"billing_status": "active", "plan_id": sub_row["plan_id"],
                          "grace_ends_at": None}
     elif event.status == "past_due":
-        tenant_update = {"billing_status": "grace"}
+        # grace_ends_at must be set here, not left for billing_trial_sweep to
+        # backfill — its grace-warning/grace->locked queries both filter on
+        # grace_ends_at (gt/lt `now`) and silently skip a null one, so a
+        # failed-payment tenant would otherwise never get nudged or ever
+        # actually lock, running indefinitely on a stale card.
+        from datetime import datetime, timedelta, timezone
+
+        from interpreter.sweeps import GRACE_DAYS
+
+        grace_ends_at = (datetime.now(timezone.utc) + timedelta(days=GRACE_DAYS)).isoformat()
+        tenant_update = {"billing_status": "grace", "grace_ends_at": grace_ends_at}
     elif event.status in ("canceled", "expired"):
         tenant_update = {"billing_status": "canceled"}
     if tenant_update:

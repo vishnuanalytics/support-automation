@@ -188,6 +188,91 @@ def test_get_job_with_no_attributable_tenant_falls_back_to_permissive(monkeypatc
     assert job["result"] == {"ok": True}
 
 
+# ── billing follow-up fixes (2026-09-20, found by /code-review) ─────────
+def test_accept_invitations_skips_one_over_the_seat_cap(monkeypatch):
+    """A seat check now happens at acceptance too, not just at invite time
+    (interpreter.billing.assert_seat_available) -- an invite that no longer
+    fits is left pending, not silently accepted over the cap."""
+    from api import main
+    from api.main import Caller
+    from interpreter import billing
+
+    monkeypatch.setattr(main, "_service", _FakeSb({
+        "tenant_invitations": [
+            {"invite_id": "i1", "tenant_id": "t1", "email": "u@x.com",
+             "role": "viewer", "status": "pending"},
+        ],
+        "tenant_members": [],
+    }))
+    monkeypatch.setattr(
+        billing, "assert_seat_available",
+        lambda tid, sb: (_ for _ in ()).throw(billing.PlanLimitError("full")),
+    )
+
+    c = Caller.__new__(Caller)
+    c.user_id, c.email = "u1", "u@x.com"
+    assert main.accept_invitations(c=c) == {"accepted": 0}
+
+
+def test_apply_billing_webhook_past_due_sets_grace_ends_at(monkeypatch):
+    """A payment-failure webhook must set grace_ends_at itself -- the sweep's
+    grace-warning/grace->locked queries both filter on it and silently skip
+    a null one, which previously left a failed-payment tenant never nudged
+    and never locked."""
+    from api import main
+    from interpreter.payments import WebhookEvent
+
+    class _FakeWebhookQuery:
+        def __init__(self, sb, name):
+            self.sb, self.name, self._update = sb, name, None
+
+        def select(self, *a, **k):
+            return self
+
+        def eq(self, *a, **k):
+            return self
+
+        def order(self, *a, **k):
+            return self
+
+        def limit(self, *a, **k):
+            return self
+
+        def insert(self, row):
+            return self
+
+        def update(self, values):
+            self._update = values
+            return self
+
+        def execute(self):
+            if self._update is not None:
+                self.sb.updates.setdefault(self.name, []).append(self._update)
+                return type("R", (), {"data": None})()
+            if self.name == "subscriptions":
+                return type("R", (), {"data": self.sb.subscription_rows})()
+            return type("R", (), {"data": []})()
+
+    class _FakeWebhookSb:
+        def __init__(self, subscription_rows):
+            self.subscription_rows = subscription_rows
+            self.updates: dict[str, list] = {}
+
+        def table(self, name):
+            return _FakeWebhookQuery(self, name)
+
+    sb = _FakeWebhookSb([{"subscription_id": "s1", "tenant_id": "t1", "plan_id": "p1"}])
+    monkeypatch.setattr(main, "_service", sb)
+
+    event = WebhookEvent(provider_event_id="evt1", event_type="subscription.charged",
+                         provider_subscription_id="sub_1", status="past_due")
+    main._apply_billing_webhook("razorpay", event, {})
+
+    tenant_update = sb.updates["tenants"][-1]
+    assert tenant_update["billing_status"] == "grace"
+    assert tenant_update["grace_ends_at"] is not None
+
+
 def test_posthog_integration_endpoints_need_a_token():
     assert client.get("/api/integrations/posthog").status_code == 401
     assert client.put("/api/integrations/posthog", json={"project_id": "1"}).status_code == 401
