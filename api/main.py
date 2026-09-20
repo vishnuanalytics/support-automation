@@ -690,9 +690,20 @@ def remove_member(user_id: str, tenant_id: str | None = None, c: Caller = Depend
 
 @app.get("/api/invitations")
 def list_invitations(c: Caller = Depends(caller)) -> list[dict]:
-    """RLS: an owner sees their tenant's rows; an invitee sees their own pending ones."""
-    return (c.sb.table("tenant_invitations").select("*")
+    """RLS: an owner sees their tenant's rows; an invitee sees their own pending
+    ones. tenant_name is attached via the service-role client -- an invitee
+    isn't a member of that tenant yet, so their own RLS'd client can't read
+    its `tenants` row, but they still need the name to make sense of
+    "you've been invited to ___" before they accept."""
+    rows = (c.sb.table("tenant_invitations").select("*")
             .order("created_at", desc=True).execute().data or [])
+    tids = {r["tenant_id"] for r in rows}
+    names: dict[str, "str | None"] = {}
+    if tids:
+        names = {t["tenant_id"]: t["name"] for t in
+                 _service.table("tenants").select("tenant_id, name")
+                 .in_("tenant_id", list(tids)).execute().data or []}
+    return [{**r, "tenant_name": names.get(r["tenant_id"])} for r in rows]
 
 
 def _send_invite_email(*, tenant_id: str, email: str, role: str,

@@ -508,6 +508,10 @@ export interface Invitation {
   created_at: string;
   accepted_at: string | null;
   archived_at: string | null;
+  /** The inviting workspace's name — an invitee isn't a member yet so can't
+   * read the tenants row themselves; the API attaches it via service role
+   * so "you've been invited to X" is renderable before they accept. */
+  tenant_name: string | null;
 }
 
 /** Shared by the POST /api/invitations and .../resend responses --

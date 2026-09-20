@@ -707,6 +707,67 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-20 (Explicit "accept invite" step on the web, replacing the
+silent auto-accept-on-sign-in — closes the loop on the invite-email
+thread above.)** User: "atleat give option to users to accept the invite
+on the website for them." Root cause of the underlying delivery problem
+(Supabase Auth email rate limit) was already found and mitigated in the
+entry directly below this one, same session. This chunk addresses the
+UX gap that made it worse: `accept_invitations` (api/main.py:854, called
+on every sign-in) silently claimed and accepted any pending invite the
+moment the invitee signed in *for any reason* — there was never a visible
+acceptance step, and it didn't help someone who never got the invite
+email at all but could still sign in some other way (their own
+self-signup, an existing Google account, etc.) and had no way to see or
+act on a pending invite addressed to them.
+
+**What changed:** `GET /api/invitations` now attaches `tenant_name` to
+every row via the service-role client — an invitee isn't a member of the
+inviting tenant yet, so their own RLS'd client can't read its `tenants`
+row, but the web needs the name to render "you've been invited to ___"
+before they accept. `App.tsx`'s `load()` no longer calls
+`api.acceptInvitations()` automatically; it now fetches the caller's own
+pending invites (via the same `GET /api/invitations`, filtered
+client-side to `status: pending` + matching email — RLS already scopes
+what comes back for a non-owner to just their own pending rows) and shows
+a new screen ("You've been invited") when any exist, ahead of both the
+tenant picker and the "Set up your workspace" screen. It lists each
+invite's workspace name + role with an explicit **Accept** button
+(calling the unchanged `POST /api/invitations/accept`, which still
+accepts every pending invite for the caller's verified email in one call)
+and a **Not now** dismiss that's session-only — not persisted, so it
+comes back on the next real sign-in until the invite is actually resolved
+one way or another. This means an invitee can now get into a workspace
+purely by having a pending `tenant_invitations` row and successfully
+signing in through *any* path, with no dependency on the invite email
+ever arriving.
+
+**Verify:** `cd web && npm run build` clean; `npx vitest run` 20/20
+green (no existing coverage for `App.tsx`'s top-level screens — not
+added here, matching this repo's existing pattern of leaving that
+component un-unit-tested). Backend: `tests/test_api.py -k invit` 17/17
+green including the live-Supabase `GET /api/invitations` call now
+returning `tenant_name`. **Not done:** no offline/integration test added
+for the new screen itself (`App.tsx` has no test harness today); the
+seat-limit case in `accept_invitations` (a `PlanLimitError` silently
+leaves an invite `pending` — see `test_accept_invitations_skips_one_over_
+the_seat_cap`) now surfaces as "still pending" in this new screen instead
+of vanishing into a server log, which is a behavior improvement but
+wasn't separately tested.
+
+**Noticed, not fixed (pre-existing, unrelated):** a full offline
+`pytest tests/test_api.py` run during this chunk's verification showed 2
+failures unrelated to invitations —
+`test_run_returns_a_run_id` (402, a billing-lock gate) and
+`test_publish_snapshots_and_run_records_the_version` (`KeyError` at
+line ~2000) — most likely the same class of shared-live-dev-tenant drift
+already documented elsewhere in this file (flow/seat caps or BYOK gate
+state accumulating from heavy same-day test activity against the one
+live Globex tenant). Flagged, not investigated further here — out of
+scope for this chunk.
+
+---
+
 **2026-09-20 (Actual root cause of invite emails not arriving, found —
 Supabase Auth email rate limit, not a code bug; live-integration test
 stopped from burning the shared quota.)** User (new session): "users not
