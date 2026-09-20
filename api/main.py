@@ -1755,7 +1755,7 @@ def list_plans(tenant_id: str | None = None, c: Caller = Depends(caller)) -> lis
     from interpreter import llm
 
     tid = _caller_tenant(c, tenant_id)
-    rows = (c.sb.table("plans").select("*").order("base_price_usd").execute().data or [])
+    rows = (c.sb.table("plans").select("*").execute().data or [])
     tenant_has_byok = llm.tenant_has_byok(tid)
     out = []
     for p in rows:
@@ -1769,6 +1769,12 @@ def list_plans(tenant_id: str | None = None, c: Caller = Depends(caller)) -> lis
             # can this tenant actually check out into this plan right now?
             "checkout_available": bool(p.get("razorpay_plan_id") or p.get("stripe_price_id")),
         })
+    # self-serve (priced, checkout_available) tiers first, cheapest to
+    # priciest; sales-assisted "Talk to us" tiers (Enterprise, or a
+    # never-priced placeholder) always last, regardless of their nominal
+    # $0 base_price_usd -- ordering by price alone put those before every
+    # real tier.
+    out.sort(key=lambda p: (not p["checkout_available"], p["base_price_usd"]))
     return [{**p, "tenant_has_byok": tenant_has_byok} for p in out]
 
 

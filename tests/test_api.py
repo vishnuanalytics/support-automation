@@ -189,6 +189,38 @@ def test_get_job_with_no_attributable_tenant_falls_back_to_permissive(monkeypatc
 
 
 # ── billing follow-up fixes (2026-09-20, found by /code-review) ─────────
+def test_list_plans_orders_self_serve_tiers_before_talk_to_us_ones(monkeypatch):
+    """A $0 base_price_usd (Enterprise, or a never-priced placeholder) must
+    not sort before real, priced tiers just because 0 < 2900 -- checkout
+    availability ranks first, then price ascending within each group."""
+    from api import main
+    from api.main import Caller
+    from interpreter import llm
+
+    monkeypatch.setattr(llm, "tenant_has_byok", lambda tid: False)
+    monkeypatch.setattr(main, "_caller_tenant", lambda c, explicit: "t1")
+
+    plans = [
+        {"slug": "enterprise", "name": "Enterprise", "base_price_usd": 0, "base_price_inr": 0,
+         "seats_included": None, "included_flows": None, "features": [],
+         "razorpay_plan_id": None, "stripe_price_id": None},
+        {"slug": "advanced", "name": "Advanced", "base_price_usd": 19900, "base_price_inr": 1660000,
+         "seats_included": None, "included_flows": None, "features": [],
+         "razorpay_plan_id": "plan_adv", "stripe_price_id": None},
+        {"slug": "basic", "name": "Basic", "base_price_usd": 2900, "base_price_inr": 240000,
+         "seats_included": 3, "included_flows": 5, "features": [],
+         "razorpay_plan_id": "plan_basic", "stripe_price_id": None},
+        {"slug": "pro", "name": "Pro", "base_price_usd": 7900, "base_price_inr": 660000,
+         "seats_included": 10, "included_flows": 25, "features": [],
+         "razorpay_plan_id": "plan_pro", "stripe_price_id": None},
+    ]
+    c = Caller.__new__(Caller)
+    c.sb = _FakeSb({"plans": plans})
+
+    out = main.list_plans(tenant_id="t1", c=c)
+    assert [p["slug"] for p in out] == ["basic", "pro", "advanced", "enterprise"]
+
+
 def test_accept_invitations_skips_one_over_the_seat_cap(monkeypatch):
     """A seat check now happens at acceptance too, not just at invite time
     (interpreter.billing.assert_seat_available) -- an invite that no longer
