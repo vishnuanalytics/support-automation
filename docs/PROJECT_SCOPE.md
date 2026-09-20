@@ -707,6 +707,55 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-20 (Fix: refreshing any page landed back on Editor.)** User:
+"if i refresh at any page it leading me back to editor page." Root
+cause: this app deliberately has no router (see `auth/PreAuth.tsx`'s own
+docstring — the Supabase OAuth/magic-link redirect uses the URL *hash*,
+so a router was avoided to not fight over it) — `App.tsx`'s `view` was
+plain React state, `useState<View>("editor")`, with zero persistence.
+Any full reload just re-ran that initializer, landing on Editor
+regardless of where you'd navigated to.
+
+**What changed:** reads/writes the URL's **query string** specifically
+(`?view=team`, etc.) rather than the hash, so it can never collide with
+Supabase's own hash-based session detection on the same page. New
+`VIEWS` runtime array (kept in sync with the `View` type) + `viewFromUrl()`
+validate the param on load, falling back to `"editor"` for anything
+missing or stale/hand-edited rather than rendering a blank pane. `view`'s
+`useState` initializer now lazily calls `viewFromUrl()`; a new effect
+mirrors every `view` change into the URL via `history.replaceState` (not
+`pushState` — clicking around the nav shouldn't spam the browser's back
+button). The default Editor view is left out of the query string
+entirely (`?view=editor` never appears), so the common case's URL stays
+clean.
+
+**Verify:** `cd web && npm run build` clean; `npx vitest run` 20/20.
+Browser-verified with Playwright (throwaway specs, not committed): (1)
+navigate to Team, confirm the URL gains `?view=team`, reload, confirm it
+lands back on Team (not the flow editor's "select or create a flow"
+empty state); (2) confirm the default Editor view's URL stays free of
+any `view=` param after a fresh load. Ran the full existing Playwright
+suite before and after (`npx playwright test`) to check for a
+regression: identical 5 pre-existing failures either way (the same
+`channels.spec.ts` / `flow-editor.spec.ts` / 3× `ui-walk.spec.ts`
+failures already tracked in this file's history) — while investigating
+one of those three directly this time (a `.sidebar` locator timeout),
+found the actual cause: `ui-walk.spec.ts` asserts against a `.sidebar`
+CSS class that doesn't exist anywhere in `web/src/ui/` (the real class is
+`.app-sidebar`) — a stale selector in the test itself, unrelated to this
+fix or any other code change. Not fixed here (out of scope — a pre-
+existing test-suite bug, not part of what was asked), but now root-
+caused rather than just "known flaky."
+
+**Not done:** `flowId` (which specific flow is open in the editor) still
+isn't persisted across a refresh — reloading while `view=editor` and a
+flow open lands on the flow list's empty state, not the exact flow you
+had open. Related to, but a narrower miss than, what was actually
+reported (which was about *other* pages, not mid-edit state) — flagged,
+not built preemptively.
+
+---
+
 **2026-09-20 (Billing go-live plumbing: the missing `docs/BILLING_SETUP.md`
 plus the actual price/plan wiring, both raised in the entry directly
 below.)** User asked for full billing details (checkout_available was

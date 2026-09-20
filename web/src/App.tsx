@@ -44,6 +44,25 @@ type View =
   | "billing"
   | "activity";
 
+// Keep in sync with the View union above -- used to validate the `view`
+// query param on load (a stale/hand-edited one falls back to "editor"
+// instead of rendering a blank pane).
+const VIEWS: View[] = [
+  "setup", "editor", "runs", "review", "trace", "knowledge", "ask",
+  "rules", "intake", "guide", "team", "connections", "billing", "activity",
+];
+
+// The app has no router (deliberately, per auth/PreAuth.tsx -- the
+// Supabase OAuth/magic-link redirect uses the URL *hash*, so this reads/
+// writes the query string instead to never collide with it). Without
+// this, `view` was plain React state with no persistence at all: a
+// refresh on any page other than the default landed back on Editor,
+// since the state just re-initialized to "editor" on every fresh mount.
+function viewFromUrl(): View {
+  const v = new URLSearchParams(window.location.search).get("view");
+  return VIEWS.includes(v as View) ? (v as View) : "editor";
+}
+
 type TenantMembership = { tenant_id: string; role: string; name?: string | null };
 
 const NAV_GROUPS: { key: string; label: string; items: { view: View; label: string; icon: LucideIcon; ownerOnly?: boolean }[] }[] = [
@@ -96,7 +115,7 @@ export function App() {
   const [tenantId, setTenantId] = useState<string | null>(null);
   const [flowId, setFlowId] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
-  const [view, setView] = useState<View>("editor");
+  const [view, setView] = useState<View>(() => viewFromUrl());
   const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
   const [newWorkspaceName, setNewWorkspaceName] = useState("");
   const [workspaceErr, setWorkspaceErr] = useState<string | null>(null);
@@ -120,6 +139,18 @@ export function App() {
   useEffect(() => {
     const owning = NAV_GROUPS.find((g) => g.items.some((i) => i.view === view));
     if (owning) setOpenGroups((prev) => (prev[owning.key] ? prev : { ...prev, [owning.key]: true }));
+  }, [view]);
+
+  // Mirror the current view into the URL (replaceState, not pushState --
+  // clicking around the nav shouldn't spam the browser's back button) so
+  // a refresh lands back where you were, not on the default Editor view.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (view === "editor") params.delete("view");
+    else params.set("view", view);
+    const qs = params.toString();
+    const url = window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash;
+    window.history.replaceState(null, "", url);
   }, [view]);
 
   // land a brand-new (or not-yet-dismissed) tenant on the setup wizard once,
