@@ -2,6 +2,7 @@ import { useState } from "react";
 import { LandingPage } from "../landing/LandingPage";
 import { PrivacyPolicy } from "../landing/PrivacyPolicy";
 import { TermsOfService } from "../landing/TermsOfService";
+import { CookiePolicy } from "../landing/CookiePolicy";
 import { PublicShell } from "../landing/PublicShell";
 import type { PublicView } from "../landing/types";
 import { Login } from "./Login";
@@ -26,6 +27,7 @@ export function PreAuth() {
       {view === "login" && <Login />}
       {view === "privacy" && <PrivacyPolicy />}
       {view === "terms" && <TermsOfService />}
+      {view === "cookies" && <CookiePolicy />}
     </PublicShell>
   );
 }

@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { Button, ThemeToggle } from "../ui";
+import { CookieConsentBanner } from "./CookieConsentBanner";
 import type { PublicView } from "./types";
 
 const CONTACT_EMAIL = "gundamvishnu7@gmail.com";
@@ -51,6 +52,9 @@ export function PublicShell({
           <button type="button" className="public-link" onClick={() => onNavigate("terms")}>
             Terms of Service
           </button>
+          <button type="button" className="public-link" onClick={() => onNavigate("cookies")}>
+            Cookie Policy
+          </button>
           <a className="public-link" href={`mailto:${CONTACT_EMAIL}`}>
             Contact — {CONTACT_EMAIL}
           </a>
@@ -59,6 +63,8 @@ export function PublicShell({
           © {new Date().getFullYear()} Support Automation. All rights reserved.
         </div>
       </footer>
+
+      <CookieConsentBanner onViewPolicy={() => onNavigate("cookies")} />
     </div>
   );
 }

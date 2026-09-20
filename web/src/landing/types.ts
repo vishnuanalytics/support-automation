@@ -1,1 +1,1 @@
-export type PublicView = "landing" | "login" | "privacy" | "terms";
+export type PublicView = "landing" | "login" | "privacy" | "terms" | "cookies";

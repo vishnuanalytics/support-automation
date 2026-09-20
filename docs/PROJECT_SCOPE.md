@@ -707,6 +707,82 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-20 (Consent-gated GTM + GA4, plus the Cookie Policy page this
+made genuinely necessary — first chunk of a new, separate "government
+compliance + marketing tooling" thread, kicked off by an explicit legal
+audit of `web/src/landing/PrivacyPolicy.tsx`/`TermsOfService.tsx` earlier
+this session.)** User: "do you all policies for end customers that
+follows the govt rules" → audited what exists (India DPDPA/IT-Act legal
+pages, genuinely substantive, not boilerplate, but three bracketed
+placeholders — entity name, address, Grievance Officer, jurisdiction —
+still unfilled, and no coverage at all for GDPR/CCPA despite
+`payments.py`'s own `provider_for_country()` explicitly routing non-India
+billing to Stripe) → user: "fix one by one... need to do the cache cdn
+too, GTM, GA4 marketing tools, real time logs etc too." Resolved via
+`AskUserQuestion` before building anything: expand legal scope to GDPR +
+CCPA (not India-only); GTM/GA4 need creating from scratch (no IDs exist
+yet); "real-time logs" turned out to mean three different things (GA4's
+own real-time report — free with GA4, nothing to build; a live audit-log
+viewer for tenant admins — a real feature, not started yet; and
+application/error monitoring for the operator to find and fix bugs —
+not started yet); CDN/deploy is fully unstarted (matches `.env` having no
+`WEB_ORIGINS` set and `DEPLOY_WEB_AND_API.md` being explicitly marked
+"parked").
+
+**Compliance placeholder-filling is still blocked** — asked directly for
+the real entity name/address/Grievance Officer/jurisdiction city
+needed to make the existing Privacy Policy/Terms actually valid; not yet
+provided, so `PrivacyPolicy.tsx`/`TermsOfService.tsx` are unchanged this
+entry. The GDPR/CCPA expansion of those two documents is also still
+open, blocked on the same information (a controller/processor analysis
+needs a real identified party). **What did land, unblocked:** GTM/GA4
+themselves, since shipping *any* real tracking script — even one that
+was asked for outright — without a consent mechanism would ship
+something that violates the very GDPR scope just agreed to, given GA4
+sets real cookies (`_ga`, `_ga_<id>`). So this chunk became "GTM/GA4 +
+consent gate + Cookie Policy" as one piece, not three.
+
+**What changed:** new `web/src/analytics.ts` — both `VITE_GTM_CONTAINER_ID`
+/ `VITE_GA4_MEASUREMENT_ID` are optional and independent; unset means
+neither script loads at all (verified live — zero network requests to
+`googletagmanager.com` with both unset). Google **Consent Mode v2**:
+`gtag('consent','default',{...: 'denied'})` fires before either script
+loads, flipped to `'granted'` only once a visitor accepts via new
+`landing/CookieConsentBanner.tsx` (localStorage-persisted, asks once).
+**Scoped to the public marketing site only** (landing/login/legal pages,
+via `PreAuth`/`PublicShell`) — deliberately never loads once someone is
+signed into the actual product, which stays fully free of third-party
+tracking; a real customer's product usage was never in scope here, only
+"how many visitors reach the sign-in button." New
+`landing/CookiePolicy.tsx` (same bracketed-placeholder convention as the
+other two legal pages — same entity-name blocker applies), linked from
+`PublicShell`'s footer and the consent banner itself. Also documents a
+real gotcha inline: setting both GTM and GA4 env vars double-counts
+pageviews if the GTM container is *also* configured (inside Google's own
+UI) with its own GA4 tag — pick one delivery path per GA4 property.
+
+**Verify:** `cd web && npm run build` clean. Browser-verified with two
+real Vite dev servers (one with fake GTM/GA4 ids set via shell env, one
+without) + a throwaway Playwright script: unconfigured → 0 banner, 0
+tracking requests; configured → banner renders (screenshotted), both
+`gtm.js`/`gtag/js` actually fetched from Google's real endpoints,
+`dataLayer` confirmed `denied` by default and flips to `granted` only
+after clicking Accept, choice persists in `localStorage`. Existing
+`e2e/landing.spec.ts` extended (not just left to coincidentally still
+pass) to click through to the new Cookie Policy page and assert no
+banner appears when unconfigured (matches this test run's real env).
+Full offline (`vitest` 20/20) + full Playwright suite (15/15) both still
+green.
+
+**Not done — separate follow-ups, each real:** filling the legal-doc
+placeholders + the GDPR/CCPA expansion (blocked on real entity info);
+the live tenant-admin audit-log viewer; application/error monitoring for
+the operator (Sentry-class tooling — frontend + backend); the CDN/deploy
+work itself (code-side prep is possible without an account, but nothing
+was started this entry — next chunk).
+
+---
+
 **2026-09-20 (Chunk 3/4 of the "any better improvements" list — self-
 serve "manage subscription / cancel," the last billing UI gap flagged in
 this file since the 112 migration: a tenant could subscribe but had no

@@ -40,6 +40,12 @@ test("unauthenticated visitor sees a landing page, can reach sign-in and the leg
   // footer -> Terms of Service
   await page.getByRole("button", { name: "Terms of Service" }).click();
   await expect(page.getByRole("heading", { name: "Terms of Service" })).toBeVisible();
+
+  // footer -> Cookie Policy (no GTM/GA4 env vars set in this test run, so
+  // no consent banner -- this only checks the page itself is reachable)
+  await page.getByRole("button", { name: "Cookie Policy" }).click();
+  await expect(page.getByRole("heading", { name: "Cookie Policy" })).toBeVisible();
+  await expect(page.locator(".cookie-banner")).toHaveCount(0);
 });
 
 test("landing page has no horizontal overflow at phone width", async ({ page }) => {
