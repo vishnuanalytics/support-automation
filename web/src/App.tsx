@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { supabase } from "./supabase";
 import { api } from "./api";
+import type { Invitation } from "./types";
 import { PreAuth } from "./auth/PreAuth";
 import { FlowList } from "./flows/FlowList";
 import { FlowEditor } from "./flows/FlowEditor";
@@ -85,6 +86,10 @@ function tenantLabel(t: TenantMembership): string {
 export function App() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
   const [tenants, setTenants] = useState<TenantMembership[] | null>(null);
+  const [pendingInvites, setPendingInvites] = useState<Invitation[] | null>(null);
+  const [invitesDismissed, setInvitesDismissed] = useState(false);
+  const [acceptingInvites, setAcceptingInvites] = useState(false);
+  const [inviteAcceptErr, setInviteAcceptErr] = useState<string | null>(null);
   const [tenantId, setTenantId] = useState<string | null>(null);
   const [flowId, setFlowId] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
@@ -163,11 +168,34 @@ export function App() {
 
   const load = () => {
     setTenants(null);
-    // claim any pending invites for this email first, then read memberships
-    api.acceptInvitations().catch(() => {}).finally(() => {
-      api.listTenants().then(applyTenants).catch(() => setTenants([]));
-    });
+    setInvitesDismissed(false);
+    setInviteAcceptErr(null);
+    // Invites used to be claimed silently here on every sign-in -- an
+    // invitee never saw it happen, which read as "it just shows accepted"
+    // with no visible acceptance step. Now: read memberships, and
+    // separately surface any pending invite for this email so accepting is
+    // an explicit click (api.acceptInvitations()), not a side effect of
+    // signing in.
+    api.listTenants().then(applyTenants).catch(() => setTenants([]));
+    const email = session?.user.email?.toLowerCase();
+    api.team.invitations()
+      .then((rows) => setPendingInvites(
+        rows.filter((i) => i.status === "pending" && i.email.toLowerCase() === email)))
+      .catch(() => setPendingInvites([]));
   };
+
+  async function acceptInvites() {
+    setAcceptingInvites(true);
+    setInviteAcceptErr(null);
+    try {
+      await api.acceptInvitations();
+      load();
+    } catch (e) {
+      setInviteAcceptErr(String(e));
+    } finally {
+      setAcceptingInvites(false);
+    }
+  }
 
   useEffect(() => {
     if (session) load();
@@ -226,6 +254,33 @@ export function App() {
   if (session === undefined) return <div style={{ padding: 20 }}>…</div>;
   if (session === null) return <PreAuth />;
   if (tenants === null) return <div style={{ padding: 20 }}>…</div>;
+
+  if (pendingInvites && pendingInvites.length > 0 && !invitesDismissed) {
+    return (
+      <div className="picker">
+        <h1 style={{ font: "var(--type-view-title)", margin: 0 }}>You've been invited</h1>
+        <p className="muted" style={{ margin: 0 }}>
+          Signed in as <strong>{session.user.email}</strong>.
+        </p>
+        <div className="picker__list">
+          {pendingInvites.map((i) => (
+            <div key={i.invite_id} className="picker__item">
+              <span style={{ flex: 1, fontWeight: 600 }}>{i.tenant_name || "a workspace"}</span>
+              <span className="muted" style={{ fontSize: 11 }}>as {i.role}</span>
+            </div>
+          ))}
+        </div>
+        {inviteAcceptErr && <Banner tone="exception" title={inviteAcceptErr} />}
+        <div className="row" style={{ gap: 10, alignItems: "center" }}>
+          <Button variant="primary" disabled={acceptingInvites} onClick={acceptInvites}>
+            {acceptingInvites ? "Accepting…" : pendingInvites.length > 1 ? "Accept all" : "Accept invite"}
+          </Button>
+          <Button variant="ghost" onClick={() => setInvitesDismissed(true)}>Not now</Button>
+          <Button variant="ghost" onClick={() => supabase.auth.signOut()}>Sign out</Button>
+        </div>
+      </div>
+    );
+  }
 
   if (tenants.length === 0) {
     return (
