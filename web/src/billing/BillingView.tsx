@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
 import type { BillingUsage, FlowCostDelta, Plan } from "../types";
-import { Button, Tag, Banner, StatTile, QuotaBar, Select, Skeleton } from "../ui";
+import { Button, Tag, Banner, StatTile, QuotaBar, Select, Skeleton, ConfirmButton } from "../ui";
 
 function daysUntil(iso: string | null): number | null {
   if (!iso) return null;
@@ -24,8 +24,10 @@ export function BillingView({ tenantId }: { tenantId: string }) {
   const [deltas, setDeltas] = useState<FlowCostDelta[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [cancelErr, setCancelErr] = useState<string | null>(null);
+  const [canceling, setCanceling] = useState(false);
 
-  useEffect(() => {
+  const loadUsage = () => {
     setErr(null);
     setLoading(true);
     api
@@ -34,7 +36,20 @@ export function BillingView({ tenantId }: { tenantId: string }) {
       .catch((e: ApiError) => setErr(e.message))
       .finally(() => setLoading(false));
     api.billingFlowDeltas(tenantId).then(setDeltas).catch(() => {});
-  }, [period, tenantId]);
+  };
+  useEffect(loadUsage, [period, tenantId]);
+
+  async function cancelSubscription() {
+    setCanceling(true);
+    setCancelErr(null);
+    try {
+      await api.billingCancel(tenantId);
+      loadUsage();
+    } catch (e) {
+      setCancelErr((e as ApiError).message);
+    }
+    setCanceling(false);
+  }
 
   const maxDailyTokens = Math.max(1, ...(usage?.daily.map((d) => d.tokens) ?? [0]));
 
@@ -59,6 +74,62 @@ export function BillingView({ tenantId }: { tenantId: string }) {
       </div>
 
       {usage && <BillingStatusBanner state={usage.billing_state} />}
+      {usage?.subscription && (
+        <div className="int-card" style={{ display: "grid", gap: 8 }}>
+          <h4 style={{ margin: 0 }}>Subscription</h4>
+          <div className="row" style={{ gap: 16, flexWrap: "wrap", alignItems: "center" }}>
+            <span>
+              <span className="muted">Provider</span>{" "}
+              <strong style={{ textTransform: "capitalize" }}>{usage.subscription.provider}</strong>
+            </span>
+            <span>
+              <span className="muted">Status</span>{" "}
+              <Tag tone={usage.subscription.status === "active" ? "success" : "neutral"}>
+                {usage.subscription.status}
+              </Tag>
+            </span>
+            {usage.subscription.current_period_end && (
+              <span>
+                <span className="muted">
+                  {usage.subscription.cancel_at_period_end ? "Access until" : "Renews"}
+                </span>{" "}
+                <strong>{new Date(usage.subscription.current_period_end).toLocaleDateString()}</strong>
+              </span>
+            )}
+          </div>
+          {cancelErr && <Banner tone="exception" title={cancelErr} />}
+          {usage.subscription.cancel_at_period_end ? (
+            <Banner
+              tone="warn"
+              title="Cancellation scheduled"
+              detail={
+                usage.subscription.current_period_end
+                  ? `Full access continues until ${new Date(usage.subscription.current_period_end).toLocaleDateString()}, then this workspace drops to the Free plan.`
+                  : "This subscription won't renew."
+              }
+            />
+          ) : (
+            (usage.subscription.status === "active" || usage.subscription.status === "past_due") && (
+              <div>
+                <ConfirmButton
+                  label={canceling ? "Canceling…" : "Cancel subscription"}
+                  variant="ghost"
+                  size="sm"
+                  disabled={canceling}
+                  title="Cancel this subscription?"
+                  confirmLabel="Cancel subscription"
+                  onConfirm={cancelSubscription}
+                  body={
+                    usage.subscription.current_period_end
+                      ? `You'll keep full access until ${new Date(usage.subscription.current_period_end).toLocaleDateString()} — it just won't renew after that. This can't be undone from here.`
+                      : "It just won't renew at the end of the current period. This can't be undone from here."
+                  }
+                />
+              </div>
+            )
+          )}
+        </div>
+      )}
 
       {err && (
         <Banner

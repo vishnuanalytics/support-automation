@@ -687,6 +687,10 @@ export const api = {
         }),
       },
     ),
+  billingCancel: (tenantId?: string) =>
+    req<{ cancel_at_period_end: boolean; current_period_end: string | null }>(
+      `/billing/cancel${tenantId ? `?tenant_id=${tenantId}` : ""}`, { method: "POST" },
+    ),
 
   listAudit: (q: { tenantId?: string; action?: string; since?: string; until?: string; limit?: number } = {}) => {
     const p = new URLSearchParams();

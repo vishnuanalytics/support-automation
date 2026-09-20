@@ -707,6 +707,70 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-20 (Chunk 3/4 of the "any better improvements" list — self-
+serve "manage subscription / cancel," the last billing UI gap flagged in
+this file since the 112 migration: a tenant could subscribe but had no
+way to see or cancel it afterward.)** One real, consequential decision
+confirmed via `AskUserQuestion` before writing anything, since this is
+the first thing this chunk touches that calls a **live, external, real-
+money-adjacent API** (Stripe/Razorpay's own cancel endpoints — a local-
+only DB flag flip would leave the tenant still being charged): does
+cancellation take effect immediately, or at the end of the period
+already paid for? **End of period** — no partial-refund mechanism exists
+here, so an immediate cut-off would mean paying for unused days.
+
+**What changed:** migration **`115_subscription_cancel_at_period_end.sql`**
+adds `subscriptions.cancel_at_period_end` (applied live) — a local mirror
+for the UI, not the source of truth; the real status flip still only ever
+comes from the provider's own webhook once the period actually ends,
+unchanged. `interpreter/payments.py`'s provider registry
+(`PaymentProviderSpec`) gains a fifth function per provider,
+`cancel_subscription()`: Stripe's `POST /subscriptions/{id}` with
+`cancel_at_period_end: true`; Razorpay's `POST /subscriptions/{id}/cancel`
+with `cancel_at_cycle_end: 1`. New `POST /api/billing/cancel`
+(owner-gated) looks up the tenant's most recent subscription, 404s if
+none, 409s if already canceled/expired or already scheduled, calls the
+real provider API, then sets the local mirror flag. Deliberately only
+ever called once `subscriptions.status` is `"active"`/`"past_due"`
+locally — by then Stripe's `provider_subscription_id` has already been
+backfilled from the Checkout Session placeholder to the real `sub_...`
+id by `_apply_billing_webhook`'s first status event, so this can never
+fire against an id Stripe wouldn't recognize as a subscription (a real
+gotcha specific to Stripe's two-step Checkout flow, not Razorpay's
+one-step one — documented inline since it's easy to get backwards).
+`GET /api/billing/usage` now also returns the tenant's current
+`subscription` (provider/status/period-end/cancel-scheduled) alongside
+the existing `billing_state`. Web: `BillingView.tsx` gets a new
+"Subscription" card (provider, status, renews/access-until date) with a
+`ConfirmButton`-gated Cancel action (this app's `confirm()` replacement,
+matching every other destructive action in the app) that's honest in
+its own confirmation copy about what happens and that it can't be undone
+from the UI; once scheduled, the button is replaced by a
+"Cancellation scheduled" banner instead of staying clickable.
+
+**Verify:** 2 new `test_payments.py` unit tests (request shape sent to
+each provider's real cancel endpoint). 4 new offline `test_api.py` tests
+for `billing_cancel` (happy path incl. the dataclass-frozen-function-
+reference gotcha — patching `payments.razorpay_cancel_subscription`
+directly does nothing once a `PaymentProviderSpec` is already
+registered with it; patched `get_provider()` instead — 404/409×2).
+`cd web && npm run build` clean; browser-verified all 4 real UI states
+with Playwright (throwaway specs) + screenshots: active-with-Cancel-
+button, the confirm dialog's exact copy, scheduled-cancellation banner,
+and no-subscription-card for a free/trial tenant — caught and fixed one
+real cosmetic bug this way (the Cancel button rendered centered inside
+its `.int-card` grid cell until wrapped in a block-level `<div>`). Full
+regression: `test_payments.py`/`test_billing.py`/`test_kb_writeback.py`
+(107) + `test_api.py -m "not integration"` (83) all green; full
+Playwright suite still 15/15.
+
+**Not done:** no "undo a scheduled cancellation" / "resume" action —
+narrower than what was asked (view + cancel), left out to keep this
+chunk to one verifiable piece; a real, likely-wanted follow-on if this
+UI gets used for real.
+
+---
+
 **2026-09-20 (Chunk 2/4 of the "any better improvements" list — plan
 `features` are now actually enforced, not just stored/displayed. This
 closes a gap flagged in the original migration-112 entry, later in this

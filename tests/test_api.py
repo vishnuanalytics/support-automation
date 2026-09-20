@@ -777,6 +777,127 @@ def test_apply_billing_webhook_past_due_sets_grace_ends_at(monkeypatch):
     assert tenant_update["grace_ends_at"] is not None
 
 
+# ── self-serve cancel (Billing tab, 2026-09-20 -- always at period end) ──
+class _FakeCancelSb:
+    def __init__(self, sub_row):
+        self._sub_row = sub_row
+        self.updates: list[dict] = []
+
+    def table(self, name):
+        return self
+
+    def select(self, *a, **k):
+        return self
+
+    def eq(self, *a, **k):
+        return self
+
+    def order(self, *a, **k):
+        return self
+
+    def limit(self, *a, **k):
+        return self
+
+    def update(self, values):
+        self.updates.append(values)
+        return self
+
+    def execute(self):
+        if self.updates:
+            return type("R", (), {"data": None})()
+        return type("R", (), {"data": [self._sub_row] if self._sub_row else []})()
+
+
+def _setup_cancel_test(monkeypatch, sb):
+    from api import main
+    from interpreter import audit
+
+    monkeypatch.setattr(main, "_caller_tenant", lambda c, explicit: "t1")
+    monkeypatch.setattr(main, "_require_owner", lambda c, tid: None)
+    monkeypatch.setattr(audit, "record", lambda *a, **k: None)
+    monkeypatch.setattr(main, "_service", sb)
+    return main
+
+
+def test_billing_cancel_happy_path(monkeypatch):
+    from api.main import Caller
+    from interpreter import payments
+
+    sb = _FakeCancelSb({"subscription_id": "s1", "provider": "razorpay",
+                        "provider_subscription_id": "sub_1", "status": "active",
+                        "cancel_at_period_end": False, "current_period_end": "2026-10-01T00:00:00Z"})
+    main = _setup_cancel_test(monkeypatch, sb)
+    cancel_calls = []
+    # PaymentProviderSpec is a dataclass registered once at import time --
+    # its .cancel_subscription field is a frozen function reference, not a
+    # dynamic module-attribute lookup, so patching
+    # payments.razorpay_cancel_subscription itself wouldn't be seen by an
+    # already-registered spec. Patch get_provider() instead.
+    fake_spec = type("Spec", (), {"cancel_subscription": staticmethod(lambda sid: cancel_calls.append(sid))})()
+    monkeypatch.setattr(payments, "get_provider", lambda slug: fake_spec)
+
+    c = Caller.__new__(Caller)
+    c.sb = sb
+    c.user_id, c.email = "u1", "owner@acme.test"
+
+    result = main.billing_cancel(c=c)
+    assert result == {"cancel_at_period_end": True, "current_period_end": "2026-10-01T00:00:00Z"}
+    assert cancel_calls == ["sub_1"]
+    assert sb.updates == [{"cancel_at_period_end": True}]
+
+
+def test_billing_cancel_404s_with_no_subscription(monkeypatch):
+    from fastapi import HTTPException
+
+    from api.main import Caller
+
+    sb = _FakeCancelSb(None)
+    main = _setup_cancel_test(monkeypatch, sb)
+    c = Caller.__new__(Caller)
+    c.sb = sb
+    c.user_id, c.email = "u1", "owner@acme.test"
+
+    with pytest.raises(HTTPException) as ei:
+        main.billing_cancel(c=c)
+    assert ei.value.status_code == 404
+
+
+def test_billing_cancel_409s_if_already_canceled(monkeypatch):
+    from fastapi import HTTPException
+
+    from api.main import Caller
+
+    sb = _FakeCancelSb({"subscription_id": "s1", "provider": "razorpay",
+                        "provider_subscription_id": "sub_1", "status": "canceled",
+                        "cancel_at_period_end": False})
+    main = _setup_cancel_test(monkeypatch, sb)
+    c = Caller.__new__(Caller)
+    c.sb = sb
+    c.user_id, c.email = "u1", "owner@acme.test"
+
+    with pytest.raises(HTTPException) as ei:
+        main.billing_cancel(c=c)
+    assert ei.value.status_code == 409
+
+
+def test_billing_cancel_409s_if_already_scheduled(monkeypatch):
+    from fastapi import HTTPException
+
+    from api.main import Caller
+
+    sb = _FakeCancelSb({"subscription_id": "s1", "provider": "razorpay",
+                        "provider_subscription_id": "sub_1", "status": "active",
+                        "cancel_at_period_end": True})
+    main = _setup_cancel_test(monkeypatch, sb)
+    c = Caller.__new__(Caller)
+    c.sb = sb
+    c.user_id, c.email = "u1", "owner@acme.test"
+
+    with pytest.raises(HTTPException) as ei:
+        main.billing_cancel(c=c)
+    assert ei.value.status_code == 409
+
+
 def test_posthog_integration_endpoints_need_a_token():
     assert client.get("/api/integrations/posthog").status_code == 401
     assert client.put("/api/integrations/posthog", json={"project_id": "1"}).status_code == 401

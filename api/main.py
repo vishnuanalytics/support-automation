@@ -1818,7 +1818,13 @@ def billing_usage(tenant_id: str | None = None, period: str | None = None,
              .select("billing_status, trial_ends_at, grace_ends_at, billing_country, payment_provider")
              .eq("tenant_id", tid).execute().data or [{}])
     billing_state = trows[0]
-    return {"period_label": period_label, "billing_state": billing_state,
+
+    sub_rows = (c.sb.table("subscriptions")
+                .select("provider, status, current_period_end, cancel_at_period_end")
+                .eq("tenant_id", tid).order("created_at", desc=True).limit(1).execute().data or [])
+    subscription = sub_rows[0] if sub_rows else None
+
+    return {"period_label": period_label, "billing_state": billing_state, "subscription": subscription,
             **billing.usage_summary(rows, plan, limits, period_start, period_end, flow_names)}
 
 
@@ -1970,6 +1976,48 @@ def billing_subscribe(body: SubscribeIn, c: Caller = Depends(caller)) -> dict:
                  target_type="plan", target_id=plan["plan_id"],
                  summary=f"started checkout for plan {plan['slug']!r} via {provider_slug}")
     return {"checkout_url": result.short_url, "provider": provider_slug, "status": result.status}
+
+
+@app.post("/api/billing/cancel")
+def billing_cancel(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    """Schedules cancellation at the end of the current billing period via
+    the real provider's own cancel API — never immediate (2026-09-20
+    product decision: no partial-refund mechanism exists here, so cutting
+    access off mid-period would mean paying for days never used). The
+    tenant keeps full access until then; `billing_status` only actually
+    flips to `canceled` once the provider's own webhook reports the period
+    really ended, same as it always has — this just stops the subscription
+    from renewing."""
+    from interpreter import payments
+
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+
+    rows = (c.sb.table("subscriptions").select("*").eq("tenant_id", tid)
+            .order("created_at", desc=True).limit(1).execute().data or [])
+    if not rows:
+        raise HTTPException(404, "no subscription to cancel")
+    sub = rows[0]
+    if sub["status"] not in ("active", "past_due"):
+        raise HTTPException(409, f"subscription is already {sub['status']}, nothing to cancel")
+    if sub.get("cancel_at_period_end"):
+        raise HTTPException(409, "already scheduled to cancel at period end")
+
+    provider = payments.get_provider(sub["provider"])
+    try:
+        provider.cancel_subscription(sub["provider_subscription_id"])
+    except RuntimeError as e:
+        raise HTTPException(502, f"could not reach {sub['provider']}: {e}")
+
+    c.sb.table("subscriptions").update({"cancel_at_period_end": True}) \
+        .eq("subscription_id", sub["subscription_id"]).execute()
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=tid, action="billing.cancel_scheduled",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="subscription", target_id=sub["subscription_id"],
+                 summary=f"scheduled cancellation at period end via {sub['provider']}")
+    return {"cancel_at_period_end": True, "current_period_end": sub.get("current_period_end")}
 
 
 def _apply_billing_webhook(provider_slug: str, event: "Any", payload: dict) -> None:

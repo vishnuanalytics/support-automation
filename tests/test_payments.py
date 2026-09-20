@@ -174,6 +174,39 @@ def test_missing_credentials_raises_a_clear_error(monkeypatch):
         payments.razorpay_create_customer("X", None, "t1")
 
 
+# ── cancel (self-serve Billing tab, 2026-09-20 -- always at period end) ──
+def test_razorpay_cancel_subscription_schedules_at_cycle_end(monkeypatch):
+    captured = {}
+
+    def fake_request(method, url, auth, timeout, json):
+        captured.update(method=method, url=url, json=json)
+        return _Resp(200, {"id": "sub_1", "status": "active"})
+
+    monkeypatch.setattr("requests.request", fake_request)
+    monkeypatch.setenv("RAZORPAY_KEY_ID", "x")
+    monkeypatch.setenv("RAZORPAY_KEY_SECRET", "y")
+
+    payments.razorpay_cancel_subscription("sub_1")
+    assert captured["method"] == "POST"
+    assert captured["url"].endswith("/subscriptions/sub_1/cancel")
+    assert captured["json"] == {"cancel_at_cycle_end": 1}
+
+
+def test_stripe_cancel_subscription_sets_cancel_at_period_end(monkeypatch):
+    captured = {}
+
+    def fake_request(method, url, auth, timeout, data):
+        captured.update(method=method, url=url, data=dict(data))
+        return _Resp(200, {"id": "sub_1", "cancel_at_period_end": True})
+
+    monkeypatch.setattr("requests.request", fake_request)
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_x")
+
+    payments.stripe_cancel_subscription("sub_1")
+    assert captured["url"].endswith("/subscriptions/sub_1")
+    assert captured["data"] == {"cancel_at_period_end": True}
+
+
 # ── webhook signature verification ─────────────────────────────────────
 def test_verify_webhook_accepts_a_correct_signature(monkeypatch):
     monkeypatch.setenv("RAZORPAY_WEBHOOK_SECRET", "whsec_test")

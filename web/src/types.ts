@@ -899,6 +899,13 @@ export interface BillingState {
   payment_provider: "stripe" | "razorpay" | null;
 }
 
+export interface Subscription {
+  provider: "stripe" | "razorpay";
+  status: string;                        // the provider's own normalized status (see interpreter/payments.py)
+  current_period_end: string | null;
+  cancel_at_period_end: boolean;
+}
+
 export interface Plan {
   slug: string;
   name: string;
@@ -916,6 +923,7 @@ export interface BillingUsage {
   period: { start: string; end: string };
   plan: string;                         // "free" | "basic" | "pro" | "advanced" | "enterprise"
   billing_state: BillingState;
+  subscription: Subscription | null;
   limits: { runs: number | null; tokens: number | null };
   runs_count: number;
   tokens_total: number;

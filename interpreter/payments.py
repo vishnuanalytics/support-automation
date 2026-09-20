@@ -28,6 +28,12 @@ picks which one a tenant bills through, once, at signup.
     create_subscription()  -> a hosted checkout URL (`short_url` /
                                Stripe's Checkout URL) to redirect the
                                tenant owner to — we never touch a card
+    cancel_subscription()  -> schedules cancellation at the end of the
+                               current billing period, never immediate
+                               (2026-09-20, self-serve Billing tab) —
+                               the real status flip still comes from
+                               the provider's own webhook once that
+                               period actually ends, same as always
     verify_webhook()       -> pure signature check (HMAC over the raw body)
     normalize_event()      -> the provider's own webhook payload shape ->
                                one common `WebhookEvent`, so
@@ -35,7 +41,7 @@ picks which one a tenant bills through, once, at signup.
                                api/worker.py's subscription-sync logic
                                don't need a per-provider branch
 
-Nothing downstream of these four functions is provider-specific.
+Nothing downstream of these five functions is provider-specific.
 """
 
 from __future__ import annotations
@@ -73,6 +79,7 @@ class WebhookEvent:
 
 CreateCustomerFn = Callable[[str, "str | None", str], str]                  # (name, email, tenant_id) -> provider_customer_id
 CreateSubscriptionFn = Callable[[str, dict[str, Any], str], CheckoutResult]  # (customer_id, plan_row, tenant_id) -> CheckoutResult
+CancelSubscriptionFn = Callable[[str], None]                                 # (provider_subscription_id) -> None
 VerifyWebhookFn = Callable[[bytes, dict[str, str]], bool]                    # (raw_body, headers) -> ok
 NormalizeEventFn = Callable[[dict[str, Any]], WebhookEvent]                  # parsed JSON body -> WebhookEvent
 
@@ -82,6 +89,7 @@ class PaymentProviderSpec:
     slug: str                         # "stripe" | "razorpay"
     create_customer: CreateCustomerFn
     create_subscription: CreateSubscriptionFn
+    cancel_subscription: CancelSubscriptionFn
     verify_webhook: VerifyWebhookFn
     normalize_event: NormalizeEventFn
 
@@ -197,6 +205,16 @@ def razorpay_create_subscription(customer_id: str, plan_row: dict[str, Any],
     )
 
 
+def razorpay_cancel_subscription(provider_subscription_id: str) -> None:
+    """Schedules cancellation at the end of the current billing cycle
+    (`cancel_at_cycle_end`) -- never immediate (2026-09-20 product
+    decision). The subscription stays `active` until the cycle actually
+    ends, at which point Razorpay's own webhook fires the status change
+    `_apply_billing_webhook` (api/main.py) already handles."""
+    _razorpay_call("POST", f"/subscriptions/{provider_subscription_id}/cancel",
+                   json={"cancel_at_cycle_end": 1})
+
+
 def razorpay_verify_webhook(raw_body: bytes, headers: dict[str, str]) -> bool:
     secret = os.environ.get("RAZORPAY_WEBHOOK_SECRET")
     if not secret:
@@ -243,6 +261,7 @@ register(PaymentProviderSpec(
     slug="razorpay",
     create_customer=razorpay_create_customer,
     create_subscription=razorpay_create_subscription,
+    cancel_subscription=razorpay_cancel_subscription,
     verify_webhook=razorpay_verify_webhook,
     normalize_event=razorpay_normalize_event,
 ))
@@ -352,6 +371,20 @@ def stripe_create_subscription(customer_id: str, plan_row: dict[str, Any],
     )
 
 
+def stripe_cancel_subscription(provider_subscription_id: str) -> None:
+    """Schedules cancellation at the end of the current billing period
+    (`cancel_at_period_end`) -- never immediate (2026-09-20 product
+    decision). Only ever called once `subscriptions.status == "active"`
+    (or `"past_due"`) locally -- by then `provider_subscription_id` has
+    already been backfilled from the Checkout Session id
+    (`create_subscription`'s placeholder) to the real `sub_...` id by
+    `_apply_billing_webhook`'s first `"active"`/`"past_due"` event, so
+    this never gets called against a `cs_...` id Stripe wouldn't
+    recognize as a subscription."""
+    _stripe_call("POST", f"/subscriptions/{provider_subscription_id}",
+                {"cancel_at_period_end": True})
+
+
 def stripe_verify_webhook(raw_body: bytes, headers: dict[str, str]) -> bool:
     secret = os.environ.get("STRIPE_WEBHOOK_SECRET")
     if not secret:
@@ -409,6 +442,7 @@ register(PaymentProviderSpec(
     slug="stripe",
     create_customer=stripe_create_customer,
     create_subscription=stripe_create_subscription,
+    cancel_subscription=stripe_cancel_subscription,
     verify_webhook=stripe_verify_webhook,
     normalize_event=stripe_normalize_event,
 ))
