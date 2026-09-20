@@ -25,6 +25,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from interpreter.observability import init_sentry  # noqa: E402
+init_sentry("slackbot")
+
 import requests  # noqa: E402
 import websockets  # noqa: E402
 

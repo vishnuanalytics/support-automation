@@ -22,6 +22,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from interpreter.observability import init_sentry  # noqa: E402
+init_sentry("worker")
+
 import hashlib  # noqa: E402
 
 from ingestion.scraper import get_supabase  # noqa: E402

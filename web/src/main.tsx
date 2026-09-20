@@ -13,11 +13,17 @@ import "./index.css";
 import "./ui/ui.css";
 import { App } from "./App";
 import { ToastProvider } from "./ui";
+import { ErrorFallback } from "./ErrorFallback";
+import { Sentry, initSentry } from "./sentry";
+
+initSentry();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <ToastProvider>
-      <App />
-    </ToastProvider>
+    <Sentry.ErrorBoundary fallback={<ErrorFallback />}>
+      <ToastProvider>
+        <App />
+      </ToastProvider>
+    </Sentry.ErrorBoundary>
   </React.StrictMode>,
 );

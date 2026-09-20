@@ -707,6 +707,79 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-20 (Error monitoring + alerting — Sentry, off by default, plus
+a real separate bug fix: the app had zero React error boundaries.)**
+User: "error monitoring and need alerts without I am aware of whether
+they exist at all" — explicitly asked to verify what already existed
+before building anything, after an earlier session mistake elsewhere of
+claiming a feature "hadn't been started" when it had (see the
+correction two entries below). Checked properly: no exception/crash
+tracking existed anywhere — no `@app.exception_handler` in
+`api/main.py`, no Sentry/Rollbar/Bugsnag/Datadog references, no
+`ErrorBoundary`/`componentDidCatch` anywhere in `web/src/`. Two things
+in the repo are adjacent but not this: `scripts/health_check.py`
+(aggregate pipeline health — heartbeats/failure-rate/SLA/KIL, Slack-
+alerts via `--slack`, not yet scheduled anywhere) and
+`interpreter/alert.py`'s `alert_human()` (business-logic notification
+for an escalated support *case*, unrelated to app errors). Built what
+was actually missing.
+
+**Backend:** `interpreter/observability.py` (new) — one shared
+`init_sentry(component)`, a no-op unless `SENTRY_DSN` is set (same
+off-by-default-until-env-var pattern as everywhere else: Groq/Anthropic
+model routing, GTM/GA4). Called once at the top of each of the 5 long-
+lived processes per `docs/DEPLOY.md` (`api/main.py`, `api/worker.py`,
+`ingestion/sf_cdc_watch.py` as "cdc", `ingestion/email_watch.py` as
+"poller", `interpreter/slack_socket.py` as "slackbot"), tagging every
+event with which process it came from. Deliberately conservative since
+this app handles real customer support text: `send_default_pii=False`
+and `traces_sample_rate=0` by default. `sentry-sdk` added to
+`requirements.txt`, `SENTRY_DSN`/`SENTRY_ENVIRONMENT`/
+`SENTRY_TRACES_SAMPLE_RATE` documented in `.env.example`. New
+`tests/test_observability.py` (4 tests: no-op without a DSN, initializes
++ tags correctly with a fake `sentry_sdk`, only initializes once per
+process, default sample rate is 0).
+
+**Frontend:** `@sentry/react` added. `web/src/sentry.ts` (new) —
+`initSentry()`, a no-op unless `VITE_SENTRY_DSN` is set; unlike GTM/GA4
+(public marketing pages only), this runs everywhere including signed-in,
+since catching a real product crash is the point. `web/src/
+ErrorFallback.tsx` (new) + `Sentry.ErrorBoundary` now wraps `<App/>` in
+`main.tsx` — **this is the standalone bug fix**: before this change
+there was no error boundary anywhere in the app, so any uncaught render
+exception (three real ones were found and fixed earlier this session, in
+ReviewView/ConnectionsView/BillingView) blanked the whole page to white
+with the error visible only in a devtools console no real user opens.
+Now it degrades to a legible "Something went wrong" / Reload screen
+instead.
+
+**Verify:** backend — `python -m pytest tests/ -q -m "not integration"`,
+1347 passed / 74 deselected, zero regressions from the 5 entrypoint
+edits; dedicated observability tests 4/4. Frontend — `npm run build`
+clean. No `@testing-library/react`/jsdom exists in this project (only 2
+pure-logic vitest files), and decided against adding component-test
+infra for one component; instead browser-verified the real thing via a
+temporary, self-documenting crash trigger (`__crash_test=1` query param
+in `App.tsx`, a throwaway Playwright spec) that confirmed
+`Sentry.ErrorBoundary` actually catches a real render-time throw and
+displays `ErrorFallback` — not just that it compiles. Both were reverted
+after confirming (the crash hook was never meant to ship). Full
+regression after reverting: `npm run build` clean, `npx vitest run`
+20/20, full `npx playwright test` 15/15 — all still green.
+
+**Alerting:** Sentry emails on new issue types automatically once a
+project exists — nothing extra to configure for that part. To turn
+this on: sentry.io → create a project → Python/FastAPI platform → copy
+DSN → `SENTRY_DSN` in `.env` (all 5 processes need it, or copy to each
+process's env); repeat with a React platform project → DSN →
+`VITE_SENTRY_DSN` in `web/.env.local`. **Compliance interaction flagged
+proactively**: if this is ever turned on for a real deployment, Sentry
+becomes a new sub-processor and needs a line in the Privacy Policy's
+"who we share data with" section — already noted as blocked below on
+the same missing entity details.
+
+---
+
 **2026-09-20 (Audit-log viewer, made live — with a real correction to
 this session's own earlier claim that it "hadn't been started.")** User:
 "Let's do the audit-log viewer next, currently I don't have domain."

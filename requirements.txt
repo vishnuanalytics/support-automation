@@ -11,6 +11,10 @@ supabase
 python-dotenv
 numpy
 
+# --- error monitoring (interpreter/observability.py) — a no-op unless
+# SENTRY_DSN is set, so this is safe to leave installed everywhere ---
+sentry-sdk
+
 # --- local embeddings (retrieve node) — ONNX, CPU, no torch ---
 fastembed
 

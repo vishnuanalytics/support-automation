@@ -31,6 +31,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from interpreter.observability import init_sentry  # noqa: E402
+init_sentry("cdc")
+
 from ingestion.scraper import get_supabase  # noqa: E402
 from interpreter import salesforce  # noqa: E402
 

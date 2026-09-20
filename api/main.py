@@ -44,6 +44,9 @@ from supabase import create_client
 
 load_dotenv()
 
+from interpreter.observability import init_sentry  # noqa: E402
+init_sentry("api")
+
 from interpreter.builder import build_graph, initial_state  # noqa: E402
 from interpreter.flows.validate_flow import Flow, check_flow  # noqa: E402
 from interpreter.loader import (  # noqa: E402

@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@dagrejs/dagre": "^1.1.4",
+    "@sentry/react": "^10.75.0",
     "@supabase/supabase-js": "^2.45.4",
     "@xyflow/react": "^12.3.5",
     "lucide-react": "^1.46.0",
