@@ -50,7 +50,16 @@ function passwordRules(password: string, email: string | null | undefined) {
  * password-strength settings (minimum length + character requirements +
  * leaked-password protection), which this app has no API access to set;
  * these rules are deliberately at least as strict as what's recommended
- * there, so a password accepted here should never be rejected server-side. */
+ * there, so a password accepted here should never be rejected server-side.
+ *
+ * If the project's Auth -> Providers -> Email "Require reauthentication
+ * when changing password" toggle is on, `updateUser` fails with
+ * `reauthentication_needed` for any session older than 24h -- expected on
+ * this dialog's own account-row entry point (a long-lived session), much
+ * less likely from the recovery screen (that session is always freshly
+ * minted by the reset-link redirect). Handled below by sending a
+ * reauthentication nonce and asking for it, rather than surfacing that
+ * error code as a dead end. */
 export function SetNewPassword({ onDone, submitLabel = "Save password" }: {
   onDone: () => void;
   submitLabel?: string;
@@ -61,6 +70,8 @@ export function SetNewPassword({ onDone, submitLabel = "Save password" }: {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [touched, setTouched] = useState(false);
+  const [needsNonce, setNeedsNonce] = useState(false);
+  const [nonce, setNonce] = useState("");
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setEmail(data.user?.email ?? null));
@@ -68,6 +79,29 @@ export function SetNewPassword({ onDone, submitLabel = "Save password" }: {
 
   const rules = passwordRules(password, email);
   const allMet = rules.every((r) => r.met);
+
+  async function updateWithPassword(nonceValue?: string) {
+    setBusy(true);
+    setErr(null);
+    const { error } = await supabase.auth.updateUser(
+      nonceValue ? { password, nonce: nonceValue } : { password },
+    );
+    setBusy(false);
+    if (!error) {
+      onDone();
+      return;
+    }
+    if (error.code === "reauthentication_needed" && !nonceValue) {
+      const { error: sendErr } = await supabase.auth.reauthenticate();
+      if (sendErr) {
+        setErr(sendErr.message);
+        return;
+      }
+      setNeedsNonce(true);
+      return;
+    }
+    setErr(error.message);
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -80,15 +114,47 @@ export function SetNewPassword({ onDone, submitLabel = "Save password" }: {
       setErr("Passwords don't match.");
       return;
     }
-    setBusy(true);
-    setErr(null);
-    const { error } = await supabase.auth.updateUser({ password });
-    setBusy(false);
-    if (error) {
-      setErr(error.message);
+    await updateWithPassword();
+  }
+
+  async function confirmNonce(e: React.FormEvent) {
+    e.preventDefault();
+    if (!nonce.trim()) {
+      setErr("Enter the code we emailed you.");
       return;
     }
-    onDone();
+    await updateWithPassword(nonce.trim());
+  }
+
+  if (needsNonce) {
+    return (
+      <form onSubmit={confirmNonce} style={{ display: "grid", gap: 10 }}>
+        <p className="muted" style={{ margin: 0, fontSize: 13 }}>
+          For your security, confirm this change with the code we just emailed you.
+        </p>
+        <Field label="Verification code">
+          <Input
+            value={nonce}
+            onChange={(e) => setNonce(e.target.value)}
+            autoFocus
+            required
+          />
+        </Field>
+        {err && <Banner tone="exception" title={err} />}
+        <div className="row" style={{ gap: 8 }}>
+          <Button variant="primary" type="submit" disabled={busy}>
+            {busy ? "Confirming…" : "Confirm"}
+          </Button>
+          <Button
+            variant="ghost"
+            type="button"
+            onClick={() => { setNeedsNonce(false); setNonce(""); setErr(null); }}
+          >
+            Back
+          </Button>
+        </div>
+      </form>
+    );
   }
 
   return (

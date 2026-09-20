@@ -707,6 +707,45 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-20 (Handle Supabase's `reauthentication_needed` error --
+follow-up to the dashboard settings pointed at in the entry directly
+below.)** User enabled Auth → Providers → Email's "Require
+reauthentication when changing password" toggle (found via the corrected
+dashboard path from the previous entry — their first attempt landed on
+Database → Policies, a completely different feature, hence "so many
+policies and tables"), then flagged, pasting the setting's own
+description, that our code probably needed updating for it. They were
+right: with that toggle on, `supabase.auth.updateUser({ password })`
+starts failing with `error.code === "reauthentication_needed"` for any
+session older than 24h — exactly the account-row "Set password" entry
+point (a long-lived session), not really the recovery-screen one (always
+freshly minted by the reset-link redirect). Confirmed the exact
+mechanics via Supabase's own docs (`search_docs` MCP tool) rather than
+guessing: the error code, and that `supabase.auth.reauthenticate()`
+sends an email OTP whose `nonce` must then be passed back into
+`updateUser({ password, nonce })`.
+
+**What changed:** `SetNewPassword.tsx` now catches
+`reauthentication_needed` specifically, calls `reauthenticate()`, and
+swaps to a second small form asking for the emailed code — "Confirm"
+retries `updateUser` with the nonce, "Back" returns to the password
+form (which will just trigger a fresh nonce send if resubmitted, so no
+separate "resend" control was needed). Any other error still surfaces
+as before. Browser-verified with Playwright (throwaway spec, not
+committed) mocking `PUT .../auth/v1/user` to 422 with
+`error_code: "reauthentication_needed"` on the first attempt and 200 on
+the nonce-bearing retry, plus `GET .../auth/v1/reauthenticate` — screenshot
+confirms the nonce prompt renders correctly and the full round trip
+succeeds. `cd web && npm run build` and `npx vitest run` (20/20) clean.
+
+**Not done:** no cooldown/rate-limit on `reauthenticate()` itself (it's
+also a real email send, same shared quota as everything else in this
+thread) — low risk since it only fires after a user has already passed
+the password-strength checklist and clicked submit once, not a bare
+button click, but worth revisiting if this becomes another abuse vector.
+
+---
+
 **2026-09-20 (Password strength rules + abuse-rate-limiting hardening on
 top of the password/invite work above.)** User: "Improve the password
 rules to max security and improve the rate limit to avoid misusing
