@@ -17,6 +17,20 @@ export function Login() {
     setBusy(false);
   }
 
+  async function forgotPassword() {
+    if (!email) {
+      setMsg("Enter your email above first.");
+      return;
+    }
+    setBusy(true);
+    setMsg(null);
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: window.location.origin,
+    });
+    setMsg(error ? error.message : "Check your email for a password reset link.");
+    setBusy(false);
+  }
+
   async function magicLink() {
     setBusy(true);
     setMsg(null);
@@ -91,6 +105,16 @@ export function Login() {
               Email me a link
             </Button>
           </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            type="button"
+            onClick={forgotPassword}
+            disabled={busy || !email}
+            style={{ justifySelf: "start" }}
+          >
+            Forgot password?
+          </Button>
         </form>
 
         {msg && <div className="muted" style={{ fontSize: 12 }}>{msg}</div>}

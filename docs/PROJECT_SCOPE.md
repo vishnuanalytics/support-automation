@@ -707,6 +707,61 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-20 (Self-serve password: set-a-password for a magic-link/Google
+account, plus a forgot-password flow — closes the loop on the invite-
+email thread above by cutting the auth path's dependency on email even
+further.)** User, after checking: "users from ui don't have an option to
+create the passwords or resets the password flow." Confirmed by reading
+`Login.tsx` — it offered Google, an existing-password sign-in with no way
+to ever set one, and a magic link, but no signup-with-password, no
+"forgot password," and no way for someone who'd only ever used the magic
+link or Google to add a password to their account. Same underlying
+fragility as the rate-limited invite emails: several of this app's auth
+paths depend on Supabase actually delivering an email, with no fallback.
+
+**What changed:** new `web/src/auth/SetNewPassword.tsx` — a small shared
+form (new password + confirm, ≥8 chars) that calls the *authenticated*
+`supabase.auth.updateUser({ password })`, which needs no email at all
+since it's just updating the currently-signed-in user. Two callers: (1)
+the account row in `App.tsx`'s sidebar footer gets a new key-icon
+"Set password" button opening a `Dialog` with this form — for anyone
+who's only ever signed in via magic link or Google; (2) `Login.tsx` gets
+a "Forgot password?" link that calls
+`supabase.auth.resetPasswordForEmail` (this one *does* still need a real
+email round-trip — same shared rate-limited Supabase Auth quota as
+everything else in this thread, no way around that for a true recovery).
+`App.tsx`'s `onAuthStateChange` now reads the event, not just the
+session: a `PASSWORD_RECOVERY` event (fired when the reset-link redirect
+lands back here, already signed in as part of processing the recovery
+token) sets a `recovering` flag that shows a dedicated "Choose a new
+password" screen — reusing the same `SetNewPassword` form — ahead of the
+normal app, instead of dropping the recovery session straight into the
+main shell with no chance to actually pick a new password.
+
+**Verify:** `cd web && npm run build` clean. Browser-verified (not just
+built) — Playwright, using this repo's existing `e2e/mocks.ts` fake-
+session infra (a throwaway spec, not committed): the Login screen shows
+"Forgot password?" under the password field; a signed-in shell shows the
+key-icon "Set password" button in the account row, opens the dialog, and
+renders both password fields correctly — screenshots confirmed the
+styling matches the rest of the shadcn redesign. Also ran the full
+existing Playwright suite before and after this change to rule out a
+regression: the same 5 specs (`channels.spec.ts`, `flow-editor.spec.ts`,
+2× `ui-walk.spec.ts`, 1 more `ui-walk.spec.ts`) fail identically with
+this change stashed out, so that's pre-existing sandbox flakiness
+(`.sidebar` locator timeouts / a slide-over intercepting a click),
+unrelated to this chunk — not investigated further here.
+
+**Not done:** no self-serve "sign up with a password" (create a brand
+new account by choosing a password up front, vs. the existing
+Google/magic-link/invite paths) — not asked for, and it's a bigger
+surface (email verification policy, etc.) than this chunk's fix. No
+offline/component test added for the new screens (`App.tsx`/`Login.tsx`
+have no unit-test harness today, matching this repo's existing pattern
+for that file).
+
+---
+
 **2026-09-20 (Explicit "accept invite" step on the web, replacing the
 silent auto-accept-on-sign-in — closes the loop on the invite-email
 thread above.)** User: "atleat give option to users to accept the invite

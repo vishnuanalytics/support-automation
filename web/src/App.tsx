@@ -4,12 +4,13 @@ import type { LucideIcon } from "lucide-react";
 import {
   Workflow, History, Activity as ActivityIcon, CheckCircle2, Search,
   BookOpen, HelpCircle, ListChecks, ClipboardList, Compass, Users, Plug,
-  CreditCard, Settings, LogOut,
+  CreditCard, Settings, LogOut, KeyRound,
 } from "lucide-react";
 import { supabase } from "./supabase";
 import { api } from "./api";
 import type { Invitation } from "./types";
 import { PreAuth } from "./auth/PreAuth";
+import { SetNewPassword } from "./auth/SetNewPassword";
 import { FlowList } from "./flows/FlowList";
 import { FlowEditor } from "./flows/FlowEditor";
 import { RunsView } from "./runs/RunsView";
@@ -85,6 +86,8 @@ function tenantLabel(t: TenantMembership): string {
 
 export function App() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
+  const [recovering, setRecovering] = useState(false);
+  const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
   const [tenants, setTenants] = useState<TenantMembership[] | null>(null);
   const [pendingInvites, setPendingInvites] = useState<Invitation[] | null>(null);
   const [invitesDismissed, setInvitesDismissed] = useState(false);
@@ -140,11 +143,16 @@ export function App() {
     // when the identity or token actually changed — otherwise a plain tab
     // switch churns `session`, which cascades into a full `load()` + shell
     // unmount below.
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) =>
+    const { data: sub } = supabase.auth.onAuthStateChange((e, s) => {
+      // A password-reset link lands back here already signed in (Supabase
+      // issues the session as part of processing the recovery token) --
+      // without this, that session would just fall straight through to the
+      // normal app with no chance to actually set the new password.
+      if (e === "PASSWORD_RECOVERY") setRecovering(true);
       setSession((prev) =>
         prev?.access_token === s?.access_token && prev?.user.id === s?.user.id ? prev : s,
-      ),
-    );
+      );
+    });
     return () => sub.subscription.unsubscribe();
   }, []);
 
@@ -252,6 +260,17 @@ export function App() {
   );
 
   if (session === undefined) return <div style={{ padding: 20 }}>…</div>;
+  if (recovering) {
+    return (
+      <div className="picker">
+        <h1 style={{ font: "var(--type-view-title)", margin: 0 }}>Choose a new password</h1>
+        <p className="muted" style={{ margin: 0 }}>
+          Signed in as <strong>{session?.user.email}</strong>.
+        </p>
+        <SetNewPassword submitLabel="Save and continue" onDone={() => setRecovering(false)} />
+      </div>
+    );
+  }
   if (session === null) return <PreAuth />;
   if (tenants === null) return <div style={{ padding: 20 }}>…</div>;
 
@@ -360,6 +379,15 @@ export function App() {
             {session.user.email}
           </span>
           <ThemeToggle />
+          <Button
+            variant="icon"
+            size="sm"
+            title="Set password"
+            aria-label="Set password"
+            onClick={() => setPasswordDialogOpen(true)}
+          >
+            <KeyRound size={16} />
+          </Button>
           <Button
             variant="icon"
             size="sm"
@@ -496,6 +524,7 @@ export function App() {
   );
 
   return (
+    <>
     <AppShell sidebar={sidebar}>
       <div className={view === "editor" && flowId ? "editor" : "pane"}>
         {view === "setup" ? (
@@ -546,5 +575,17 @@ export function App() {
         )}
       </div>
     </AppShell>
+    <Dialog
+      open={passwordDialogOpen}
+      onClose={() => setPasswordDialogOpen(false)}
+      title="Set a password"
+    >
+      <p className="muted" style={{ marginTop: 0 }}>
+        Useful if you've only ever signed in via a magic link or Google — this lets you sign in
+        with a password too, without needing another email.
+      </p>
+      <SetNewPassword onDone={() => setPasswordDialogOpen(false)} />
+    </Dialog>
+    </>
   );
 }
