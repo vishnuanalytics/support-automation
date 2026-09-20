@@ -664,6 +664,145 @@ code { font-family: var(--font-mono); }
 .setup-step--done .setup-step__title { color: var(--text-secondary); }
 .setup-step__body { display: grid; gap: 12px; padding: 0 16px 16px 55px; }
 
+/* public / pre-auth shell — landing, login, legal pages share one header
+   + footer (see web/src/landing/PublicShell.tsx). Full-bleed, no
+   .app-shell min-width constraint — this is a public page, phone-width
+   included. */
+.public-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--ground);
+  color: var(--text);
+}
+.public-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-6);
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.public-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  color: var(--text);
+}
+.public-brand__mark {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-md);
+  background: var(--accent);
+  color: var(--accent-on);
+  display: grid;
+  place-items: center;
+  font: 700 14px/1 var(--font-heading);
+  flex: none;
+}
+.public-brand__word { font: 600 15px/1.2 var(--font-heading); }
+.public-nav { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
+.public-link {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font: var(--type-label);
+  color: var(--text-muted);
+  cursor: pointer;
+  text-decoration: none;
+}
+.public-link:hover { color: var(--accent); text-decoration: underline; }
+.public-main { flex: 1; width: 100%; }
+.public-footer {
+  border-top: 1px solid var(--line);
+  padding: var(--space-4) var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  align-items: center;
+  text-align: center;
+}
+.public-footer__links { display: flex; gap: var(--space-4); flex-wrap: wrap; justify-content: center; }
+.public-footer__copy { font-size: 11.5px; }
+
+/* landing page */
+.landing { max-width: 960px; margin: 0 auto; padding: var(--space-8) var(--content-pad) var(--space-6); }
+.landing-hero {
+  display: grid;
+  gap: var(--space-3);
+  max-width: 640px;
+  margin: 0 auto var(--space-8);
+  text-align: center;
+  justify-items: center;
+}
+.landing-hero__kicker {
+  font: var(--type-kicker);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.landing-hero__title {
+  font: 700 clamp(28px, 4.5vw, 42px)/1.15 var(--font-heading);
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+.landing-hero__lede {
+  font: var(--type-body);
+  color: var(--text-secondary);
+  margin: 0;
+}
+.landing-features {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-4);
+  margin-bottom: var(--space-8);
+}
+.landing-feature {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+  background: var(--surface);
+}
+.landing-feature__title { font: 600 14.5px/1.35 var(--font-heading); margin-bottom: 6px; }
+.landing-feature__body { font-size: 13px; line-height: 1.55; color: var(--text-secondary); }
+.landing-cta {
+  text-align: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  padding: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.landing-cta__title { font: var(--type-section); }
+@media (max-width: 760px) {
+  .landing-features { grid-template-columns: 1fr; }
+}
+
+/* legal pages (Privacy / Terms) — a plain readable document, following the
+   app's own tokens (not a separate palette) so it respects light/dark. */
+.legal-doc { max-width: 720px; margin: 0 auto; padding: var(--space-6) var(--content-pad) var(--space-8); }
+.legal-doc h1 { font: var(--type-display); margin: 0 0 4px; }
+.legal-doc__meta { color: var(--text-muted); font-size: 12.5px; margin: 0 0 var(--space-6); }
+.legal-doc h2 { font: var(--type-section); margin: var(--space-6) 0 var(--space-2); }
+.legal-doc p { font-size: 14px; line-height: 1.65; color: var(--text-secondary); margin: 0 0 var(--space-3); }
+.legal-doc ul { margin: 0 0 var(--space-3); padding-left: 20px; }
+.legal-doc li { font-size: 14px; line-height: 1.65; color: var(--text-secondary); margin-bottom: 6px; }
+.legal-doc__block {
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+}
+.legal-doc a { color: var(--accent); }
+.legal-doc strong { color: var(--text); }
+
 /* login — split panel (Screen 01) */
 .login-split {
   display: grid; grid-template-columns: 1fr 1fr;

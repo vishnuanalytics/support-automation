@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { supabase } from "./supabase";
 import { api } from "./api";
-import { Login } from "./auth/Login";
+import { PreAuth } from "./auth/PreAuth";
 import { FlowList } from "./flows/FlowList";
 import { FlowEditor } from "./flows/FlowEditor";
 import { RunsView } from "./runs/RunsView";
@@ -224,7 +224,7 @@ export function App() {
   );
 
   if (session === undefined) return <div style={{ padding: 20 }}>…</div>;
-  if (session === null) return <Login />;
+  if (session === null) return <PreAuth />;
   if (tenants === null) return <div style={{ padding: 20 }}>…</div>;
 
   if (tenants.length === 0) {
