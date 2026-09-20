@@ -9,10 +9,11 @@ export function TeamView({ tenantId }: { tenantId: string }) {
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<"editor" | "viewer">("viewer");
   const [err, setErr] = useState<string | null>(null);
-  const [warn, setWarn] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ tone: "success" | "warn"; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [resendingId, setResendingId] = useState<string | null>(null);
 
   function load() {
     api.team.members(tenantId).then(setMembers).catch((e: ApiError) => setErr(e.message)).finally(() => setLoading(false));
@@ -27,15 +28,17 @@ export function TeamView({ tenantId }: { tenantId: string }) {
     if (!email.trim()) return;
     setBusy(true);
     setErr(null);
-    setWarn(null);
+    setNotice(null);
     try {
       const res = await api.team.invite({ email: email.trim().toLowerCase(), role, tenant_id: tenantId });
       if (!res.email_sent) {
-        setWarn(
-          `Invite created for ${res.email}, but the email failed to send` +
+        setNotice({
+          tone: "warn",
+          text:
+            `Invite created for ${res.email}, but the email failed to send` +
             (res.email_error ? `: ${res.email_error}` : "") +
             ". They can still get in by signing up directly with that email address.",
-        );
+        });
       }
       setEmail("");
       setInviteOpen(false);
@@ -44,6 +47,26 @@ export function TeamView({ tenantId }: { tenantId: string }) {
       setErr((e as ApiError).message);
     }
     setBusy(false);
+  }
+
+  async function resend(inviteId: string, inviteEmail: string) {
+    setResendingId(inviteId);
+    setErr(null);
+    setNotice(null);
+    try {
+      const res = await api.team.resend(inviteId);
+      setNotice(
+        res.email_sent
+          ? { tone: "success", text: `Resent the invite to ${inviteEmail}.` }
+          : {
+              tone: "warn",
+              text: `Resend to ${inviteEmail} failed` + (res.email_error ? `: ${res.email_error}` : "") + ".",
+            },
+      );
+    } catch (e) {
+      setErr((e as ApiError).message);
+    }
+    setResendingId(null);
   }
 
   const pending = invites.filter((i) => i.status === "pending");
@@ -68,11 +91,11 @@ export function TeamView({ tenantId }: { tenantId: string }) {
           actions={<Button variant="ghost" size="sm" onClick={() => setErr(null)}>Dismiss</Button>}
         />
       )}
-      {warn && (
+      {notice && (
         <Banner
-          tone="warn"
-          title={warn}
-          actions={<Button variant="ghost" size="sm" onClick={() => setWarn(null)}>Dismiss</Button>}
+          tone={notice.tone}
+          title={notice.text}
+          actions={<Button variant="ghost" size="sm" onClick={() => setNotice(null)}>Dismiss</Button>}
         />
       )}
 
@@ -142,15 +165,25 @@ export function TeamView({ tenantId }: { tenantId: string }) {
                   </td>
                   <td className="muted">{new Date(i.created_at).toLocaleDateString()}</td>
                   <td style={{ textAlign: "right" }}>
-                    <ConfirmButton
-                      label="Revoke"
-                      size="sm"
-                      title={`Revoke the invite for ${i.email}?`}
-                      confirmLabel="Revoke"
-                      onConfirm={() =>
-                        api.team.revoke(i.invite_id).then(load).catch((e) => setErr(String(e)))
-                      }
-                    />
+                    <div className="row" style={{ gap: 6, justifyContent: "flex-end" }}>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={resendingId === i.invite_id}
+                        onClick={() => resend(i.invite_id, i.email)}
+                      >
+                        {resendingId === i.invite_id ? "Resending…" : "Resend"}
+                      </Button>
+                      <ConfirmButton
+                        label="Revoke"
+                        size="sm"
+                        title={`Revoke the invite for ${i.email}?`}
+                        confirmLabel="Revoke"
+                        onConfirm={() =>
+                          api.team.revoke(i.invite_id).then(load).catch((e) => setErr(String(e)))
+                        }
+                      />
+                    </div>
                   </td>
                 </tr>
               ))}

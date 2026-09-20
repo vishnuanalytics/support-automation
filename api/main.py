@@ -695,6 +695,35 @@ def list_invitations(c: Caller = Depends(caller)) -> list[dict]:
             .order("created_at", desc=True).execute().data or [])
 
 
+def _send_invite_email(*, tenant_id: str, email: str, role: str, invited_by_email: "str | None") -> tuple[bool, "str | None"]:
+    """Supabase Auth's own admin invite (same service-role client already
+    used everywhere else here) — actually delivers an email, whose accept
+    flow signs the invitee in, landing them exactly where
+    accept_invitations (called on every sign-in) claims the pending row.
+    Best-effort: an existing account 400s here ("already registered") --
+    that invitee still gets in via their own normal sign-in, so a caller
+    must never let this fail the invitation/resend itself. Returns
+    (sent, error) -- error is never an empty string when sent is False."""
+    trows = _service.table("tenants").select("name").eq("tenant_id", tenant_id).execute().data or []
+    tenant_name = trows[0]["name"] if trows else None
+    try:
+        _service.auth.admin.invite_user_by_email(email, {
+            "redirect_to": WEB_ORIGINS[0],
+            "data": {"tenant_name": tenant_name, "role": role, "invited_by_email": invited_by_email},
+        })
+        return True, None
+    except Exception as e:  # noqa: BLE001
+        # str(e) can come back empty (some supabase-auth error paths build
+        # their message from a server response field that's itself blank)
+        # -- fall back to the exception's class name (+ HTTP status, for a
+        # supabase_auth.AuthApiError) so the caller always has something
+        # diagnosable instead of "failed to send" with nothing after it.
+        status = getattr(e, "status", None)
+        detail = str(e).strip() or f"{type(e).__name__}" + (f" (HTTP {status})" if status else "")
+        log.warning("invite email to %s failed: %s", email, e)
+        return False, detail
+
+
 @app.post("/api/invitations", status_code=201)
 def create_invitation(body: InviteIn, c: Caller = Depends(caller)) -> dict:
     tid = _caller_tenant(c, body.tenant_id)
@@ -715,36 +744,15 @@ def create_invitation(body: InviteIn, c: Caller = Depends(caller)) -> dict:
         row = c.sb.table("tenant_invitations").insert({
             "tenant_id": tid, "email": email, "role": role, "invited_by": c.user_id,
         }).execute().data[0]
-    except Exception as e:  # noqa: BLE001  — dup pending invite, etc.
+    except Exception as e:  # noqa: BLE001
+        if "uq_tenant_invite_pending" in str(e):
+            raise HTTPException(
+                409, f"{email} already has a pending invite to this workspace — "
+                     "resend it instead of creating a new one.")
         raise HTTPException(409, f"could not invite {email}: {e}")
 
-    # An invitation row alone never notified anyone -- nothing sent an
-    # email. Supabase Auth's own admin invite (same service-role client
-    # already used everywhere else here) actually delivers one, and its
-    # accept flow signs the invitee in, landing them exactly where
-    # accept_invitations (called on every sign-in) claims this row. Best-
-    # effort: an existing account 400s here ("already registered") -- that
-    # invitee still gets in via their own normal sign-in, so this must
-    # never fail the invitation itself.
-    trows = _service.table("tenants").select("name").eq("tenant_id", tid).execute().data or []
-    tenant_name = trows[0]["name"] if trows else None
-    email_sent, email_error = True, None
-    try:
-        _service.auth.admin.invite_user_by_email(email, {
-            "redirect_to": WEB_ORIGINS[0],
-            "data": {"tenant_name": tenant_name, "role": role, "invited_by_email": c.email},
-        })
-    except Exception as e:  # noqa: BLE001
-        # str(e) can come back empty (some supabase-auth error paths build
-        # their message from a server response field that's itself blank)
-        # -- fall back to the exception's class name (+ HTTP status, for a
-        # supabase_auth.AuthApiError) so email_error is never empty when
-        # email_sent is False; an owner seeing "the email failed to send"
-        # with nothing after it can't tell a real cause from a browser bug.
-        status = getattr(e, "status", None)
-        detail = str(e).strip() or f"{type(e).__name__}" + (f" (HTTP {status})" if status else "")
-        email_sent, email_error = False, detail
-        log.warning("invite email to %s failed (invitation row still created): %s", email, e)
+    email_sent, email_error = _send_invite_email(
+        tenant_id=tid, email=email, role=role, invited_by_email=c.email)
 
     from interpreter import audit
     audit.record(_service, tenant_id=tid, action="invitation.created",
@@ -754,9 +762,38 @@ def create_invitation(body: InviteIn, c: Caller = Depends(caller)) -> dict:
                          + ("" if email_sent else f" (email send failed: {email_error})"))
     # email_sent/email_error are transient response-only fields, not
     # persisted on the tenant_invitations row -- the invitation itself
-    # always succeeds even if the email didn't, per the comment above; the
-    # owner just needs to see whether they should follow up another way.
+    # always succeeds even if the email didn't, per _send_invite_email's
+    # docstring; the owner just needs to see whether to follow up another way.
     return {**row, "email_sent": email_sent, "email_error": email_error}
+
+
+@app.post("/api/invitations/{invite_id}/resend")
+def resend_invitation(invite_id: str, c: Caller = Depends(caller)) -> dict:
+    """A pending invite blocks a fresh POST /api/invitations for the same
+    (tenant, email) — uq_tenant_invite_pending — so a failed first email
+    (the gap this and the two commits before it closed) had no way to
+    retry short of revoking and re-inviting, which throws away the
+    original invited_by/created_at. Re-sends against the existing row
+    instead; does not touch tenant_invitations at all."""
+    rows = (c.sb.table("tenant_invitations").select("*")
+            .eq("invite_id", invite_id).execute().data or [])
+    if not rows:
+        raise HTTPException(404, "invitation not found")
+    inv = rows[0]
+    _require_owner(c, inv["tenant_id"])
+    if inv["status"] != "pending":
+        raise HTTPException(409, f"this invitation is {inv['status']}, not pending")
+
+    email_sent, email_error = _send_invite_email(
+        tenant_id=inv["tenant_id"], email=inv["email"], role=inv["role"], invited_by_email=c.email)
+
+    from interpreter import audit
+    audit.record(_service, tenant_id=inv["tenant_id"], action="invitation.resent",
+                 actor_id=c.user_id, actor_email=c.email,
+                 target_type="invitation", target_id=invite_id,
+                 summary=f"resent invite to {inv['email']}"
+                         + ("" if email_sent else f" (email send failed: {email_error})"))
+    return {"email_sent": email_sent, "email_error": email_error}
 
 
 @app.delete("/api/invitations/{invite_id}", status_code=204)

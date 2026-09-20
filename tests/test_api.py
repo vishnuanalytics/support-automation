@@ -310,6 +310,140 @@ def test_create_invitation_email_error_is_never_blank(monkeypatch):
     assert result["email_error"]   # non-empty -- must not be "" or None
 
 
+def test_create_invitation_pending_duplicate_points_at_resend(monkeypatch):
+    """The exact report that led here: a second invite to the same
+    (tenant, email) with one already pending hits uq_tenant_invite_pending
+    and used to surface as a raw Postgres error string -- now a clear
+    message pointing at the resend endpoint instead."""
+    from fastapi import HTTPException
+
+    from api import main
+    from api.main import Caller, InviteIn
+    from interpreter import billing
+
+    monkeypatch.setattr(main, "_caller_tenant", lambda c, explicit: "t1")
+    monkeypatch.setattr(main, "_require_owner", lambda c, tid: None)
+    monkeypatch.setattr(billing, "assert_seat_available", lambda tid, sb: None)
+
+    class _FakeDupSb:
+        def table(self, name):
+            return self
+
+        def insert(self, row):
+            return self
+
+        def execute(self):
+            raise Exception(
+                '{\'message\': \'duplicate key value violates unique constraint '
+                '"uq_tenant_invite_pending"\', \'code\': \'23505\'}')
+
+    c = Caller.__new__(Caller)
+    c.sb = _FakeDupSb()
+    c.user_id, c.email = "u1", "owner@acme.test"
+
+    body = InviteIn(email="vishnu.r@urbanpiper.com", role="viewer", tenant_id="t1")
+    with pytest.raises(HTTPException) as ei:
+        main.create_invitation(body, c=c)
+    assert ei.value.status_code == 409
+    assert "resend" in ei.value.detail
+
+
+# ── resend (2026-09-20: a pending invite had no way to retry a failed email) ──
+def test_resend_invitation_resends_to_the_existing_pending_invite(monkeypatch):
+    from api.main import Caller
+
+    admin = _FakeInviteAdmin()
+    main = _setup_invite_test(monkeypatch, admin)
+
+    class _FakePendingInviteSb:
+        def table(self, name):
+            return self
+
+        def select(self, *a, **k):
+            return self
+
+        def eq(self, *a, **k):
+            return self
+
+        def execute(self):
+            return type("R", (), {"data": [
+                {"invite_id": "i1", "tenant_id": "t1", "email": "vishnu.r@urbanpiper.com",
+                 "role": "viewer", "status": "pending"},
+            ]})()
+
+    c = Caller.__new__(Caller)
+    c.sb = _FakePendingInviteSb()
+    c.user_id, c.email = "u1", "owner@acme.test"
+
+    result = main.resend_invitation("i1", c=c)
+    assert result == {"email_sent": True, "email_error": None}
+    assert admin.calls[0][0] == "vishnu.r@urbanpiper.com"
+
+
+def test_resend_invitation_404s_for_an_unknown_invite(monkeypatch):
+    from fastapi import HTTPException
+
+    from api.main import Caller
+
+    admin = _FakeInviteAdmin()
+    main = _setup_invite_test(monkeypatch, admin)
+
+    class _FakeEmptySb:
+        def table(self, name):
+            return self
+
+        def select(self, *a, **k):
+            return self
+
+        def eq(self, *a, **k):
+            return self
+
+        def execute(self):
+            return type("R", (), {"data": []})()
+
+    c = Caller.__new__(Caller)
+    c.sb = _FakeEmptySb()
+    c.user_id, c.email = "u1", "owner@acme.test"
+
+    with pytest.raises(HTTPException) as ei:
+        main.resend_invitation("ghost", c=c)
+    assert ei.value.status_code == 404
+
+
+def test_resend_invitation_409s_for_an_already_accepted_invite(monkeypatch):
+    from fastapi import HTTPException
+
+    from api.main import Caller
+
+    admin = _FakeInviteAdmin()
+    main = _setup_invite_test(monkeypatch, admin)
+
+    class _FakeAcceptedInviteSb:
+        def table(self, name):
+            return self
+
+        def select(self, *a, **k):
+            return self
+
+        def eq(self, *a, **k):
+            return self
+
+        def execute(self):
+            return type("R", (), {"data": [
+                {"invite_id": "i1", "tenant_id": "t1", "email": "x@y.test",
+                 "role": "viewer", "status": "accepted"},
+            ]})()
+
+    c = Caller.__new__(Caller)
+    c.sb = _FakeAcceptedInviteSb()
+    c.user_id, c.email = "u1", "owner@acme.test"
+
+    with pytest.raises(HTTPException) as ei:
+        main.resend_invitation("i1", c=c)
+    assert ei.value.status_code == 409
+    assert len(admin.calls) == 0   # never sent -- not pending
+
+
 # ── billing follow-up fixes (2026-09-20, found by /code-review) ─────────
 def test_list_plans_orders_self_serve_tiers_before_talk_to_us_ones(monkeypatch):
     """A $0 base_price_usd (Enterprise, or a never-priced placeholder) must

@@ -707,6 +707,47 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-20 (Resend invite + fixed a blank error message, closing the
+loop on the invite-email work above.)** Retrying the invite to
+`vishnu.r@urbanpiper.com` surfaced two more real things: (1) the exact
+gap already flagged — `email_error` came back blank (`str(e)` was `""`
+for that particular exception) — fixed: `_send_invite_email` (new,
+`create_invitation`'s email-sending logic extracted into a shared
+helper) now falls back to the exception's class name + HTTP status
+(for a `supabase_auth.AuthApiError`) so there's always something
+diagnosable. (2) the *second* attempt then hit
+`uq_tenant_invite_pending` (033_tenant_invitations.sql — at most one
+pending invite per tenant+email) because the first attempt's row was
+still sitting there from before, and there was no way to retry a failed
+send without revoking + re-creating the invite (losing its original
+`invited_by`/`created_at`). User: "If this is true, I need resend
+option in the dashboard."
+
+**What changed:** new `POST /api/invitations/{invite_id}/resend`
+(owner-gated, 404 if not found, 409 if not `status='pending'`) re-runs
+`_send_invite_email` against the existing row without touching
+`tenant_invitations` at all. `create_invitation`'s duplicate-pending
+insert failure now detects `uq_tenant_invite_pending` specifically and
+returns "already has a pending invite... resend it instead" rather than
+the raw Postgres error string the user saw verbatim
+(`{'message': 'duplicate key value violates unique constraint ...'}`).
+Web: `TeamView.tsx`'s Pending-invites row gets a **Resend** button next
+to Revoke; the banner state generalized from a single "warn-only"
+message to `{tone: success|warn, text}` so a successful resend reads
+differently from a failed one. `api.team.resend(inviteId)` +
+`InvitationCreateResult`-shaped response type. 6 new offline tests
+(duplicate-pending message, resend happy path, 404, 409-not-pending,
+plus the blank-error-message regression test from the fix just before
+this). `cd web && npm run build` clean; 1323 offline pytest green.
+
+**Still open** (same as the note in the entry below): why the email
+didn't arrive at all in the first place is a live-environment question
+(Supabase email-provider config / rate limits / spam) this session
+can't diagnose without dashboard access — the user should retry now
+with Resend and read whatever `email_error` says.
+
+---
+
 **2026-09-20 (Invite-email follow-up: surfaced send failures instead of
 swallowing them, and verified/documented that invites are already
 tenant-scoped.)** User reported a real invite (from the `gundamvishnu7@

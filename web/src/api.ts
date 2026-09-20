@@ -536,6 +536,10 @@ export const api = {
     invitations: () => req<Invitation[]>("/invitations"),
     invite: (b: { email: string; role: "editor" | "viewer"; tenant_id?: string }) =>
       req<InvitationCreateResult>("/invitations", { method: "POST", body: JSON.stringify(b) }),
+    resend: (id: string) =>
+      req<{ email_sent: boolean; email_error: string | null }>(
+        `/invitations/${id}/resend`, { method: "POST" },
+      ),
     revoke: (id: string) => req<void>(`/invitations/${id}`, { method: "DELETE" }),
   },
 
