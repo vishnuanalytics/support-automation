@@ -193,8 +193,11 @@ class _FakeInviteAdmin:
     def __init__(self):
         self.calls = []
         self.raise_error = False
+        self.raise_empty_message_error = False
 
     def invite_user_by_email(self, email, options=None):
+        if self.raise_empty_message_error:
+            raise Exception("")   # some supabase-auth error paths build an empty message
         if self.raise_error:
             raise Exception("User already registered")
         self.calls.append((email, options))
@@ -284,6 +287,27 @@ def test_create_invitation_still_succeeds_if_the_invite_email_fails(monkeypatch)
     assert result["invite_id"] == "i1"
     assert result["email_sent"] is False
     assert "already registered" in result["email_error"]
+
+
+def test_create_invitation_email_error_is_never_blank(monkeypatch):
+    """Some supabase-auth error paths build their message from a server
+    response field that's itself blank, so str(e) can be "" -- email_error
+    must still say SOMETHING, or an owner sees "failed to send" with no
+    way to tell what actually went wrong (the exact report that led here)."""
+    from api.main import Caller, InviteIn
+
+    admin = _FakeInviteAdmin()
+    admin.raise_empty_message_error = True
+    main = _setup_invite_test(monkeypatch, admin)
+
+    c = Caller.__new__(Caller)
+    c.sb = _FakeInviteCallerSb()
+    c.user_id, c.email = "u1", "owner@acme.test"
+
+    body = InviteIn(email="someone@example.test", role="viewer", tenant_id="t1")
+    result = main.create_invitation(body, c=c)
+    assert result["email_sent"] is False
+    assert result["email_error"]   # non-empty -- must not be "" or None
 
 
 # ── billing follow-up fixes (2026-09-20, found by /code-review) ─────────

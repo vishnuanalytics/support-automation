@@ -735,7 +735,15 @@ def create_invitation(body: InviteIn, c: Caller = Depends(caller)) -> dict:
             "data": {"tenant_name": tenant_name, "role": role, "invited_by_email": c.email},
         })
     except Exception as e:  # noqa: BLE001
-        email_sent, email_error = False, str(e)
+        # str(e) can come back empty (some supabase-auth error paths build
+        # their message from a server response field that's itself blank)
+        # -- fall back to the exception's class name (+ HTTP status, for a
+        # supabase_auth.AuthApiError) so email_error is never empty when
+        # email_sent is False; an owner seeing "the email failed to send"
+        # with nothing after it can't tell a real cause from a browser bug.
+        status = getattr(e, "status", None)
+        detail = str(e).strip() or f"{type(e).__name__}" + (f" (HTTP {status})" if status else "")
+        email_sent, email_error = False, detail
         log.warning("invite email to %s failed (invitation row still created): %s", email, e)
 
     from interpreter import audit
