@@ -150,21 +150,6 @@ export function App() {
     if (owning) setOpenGroups((prev) => (prev[owning.key] ? prev : { ...prev, [owning.key]: true }));
   }, [view]);
 
-  // Mirror the current view (and, on the editor, which flow) into the URL
-  // (replaceState, not pushState -- clicking around the nav shouldn't spam
-  // the browser's back button) so a refresh lands back where you were,
-  // not on the default Editor view with no flow open.
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (view === "editor") params.delete("view");
-    else params.set("view", view);
-    if (view === "editor" && flowId) params.set("flow", flowId);
-    else params.delete("flow");
-    const qs = params.toString();
-    const url = window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash;
-    window.history.replaceState(null, "", url);
-  }, [view, flowId]);
-
   // land a brand-new (or not-yet-dismissed) tenant on the setup wizard once,
   // the first time we know which tenant is active — never fights later nav.
   const [setupCheckedFor, setSetupCheckedFor] = useState<string | null>(null);
@@ -275,6 +260,31 @@ export function App() {
   const role = current?.role ?? null;
   const canEdit = role === "owner" || role === "editor";
   const isOwner = role === "owner";
+
+  // Mirror the current view (and, on the editor, which flow + whether this
+  // membership can actually edit it) into the URL (replaceState, not
+  // pushState -- clicking around the nav shouldn't spam the browser's back
+  // button) so a refresh lands back where you were, not on the default
+  // Editor view with no flow open. `mode` is always derived fresh from the
+  // real role here, on write -- never read back on load (see
+  // `flowIdFromUrl`), so a hand-edited `?mode=edit` in the URL can't imply
+  // edit access that RLS/the API wouldn't already grant; it's a display
+  // label, not a permission.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (view === "editor") params.delete("view");
+    else params.set("view", view);
+    if (view === "editor" && flowId) {
+      params.set("flow", flowId);
+      params.set("mode", canEdit ? "edit" : "view");
+    } else {
+      params.delete("flow");
+      params.delete("mode");
+    }
+    const qs = params.toString();
+    const url = window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash;
+    window.history.replaceState(null, "", url);
+  }, [view, flowId, canEdit]);
 
   async function createWorkspace() {
     const name = newWorkspaceName.trim();

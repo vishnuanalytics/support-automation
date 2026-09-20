@@ -687,7 +687,9 @@ function Inner({ flowId, canEdit, onSaved, onDeleted }: {
                   ⚠ {disconnectedRoots.length} disconnected entry points
                 </span>
               )}
-              {!canEdit && (
+              {canEdit ? (
+                <span className="pill" title="you can edit this flow">editing</span>
+              ) : (
                 <span className="pill" title="your access is view-only">view-only</span>
               )}
               {canEdit ? (

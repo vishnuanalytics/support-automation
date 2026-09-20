@@ -707,6 +707,48 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-20 (Explicit edit/view mode indicator — a symmetric "editing"
+pill next to the pre-existing "view-only" one, plus a URL `mode=` param,
+in the flow editor specifically.)** Asked "is this good to have view and
+edit url" (answered — sharing, bookmarking, the `replaceState`-vs-
+`pushState` tradeoff), then: "if user editng the it should show edit, if
+he view then show view like that." Clarified via `AskUserQuestion`
+whether they meant the URL, a UI badge, or both — answer: both.
+`FlowEditor.tsx` already showed a `view-only` pill in its toolbar when
+`!canEdit`, but nothing complementary for the edit case (implicit,
+absence-of-a-badge) — asymmetric.
+
+**What changed:** `FlowEditor.tsx`'s toolbar now shows `editing` when
+`canEdit`, `view-only` otherwise — same neutral `.pill` styling as
+before (no color added; per this repo's own design rule, color signals
+real status, not decoration, and this is informational, not a
+success/warn/exception state). `App.tsx`'s URL-mirroring effect (added
+earlier this session for `view`/`flow`) gained a `mode=edit`/`mode=view`
+param, set only alongside `flow=<id>` on the editor view — **write-only,
+never read back on load**: `mode` is always derived fresh from the
+caller's real role at write time, not trusted from the URL, so a hand-
+edited `?mode=edit` can't imply edit access the API/RLS wouldn't already
+grant on their own — it's a display label mirrored into the URL, not a
+permission. Relocated the URL-sync effect itself from near the top of
+`App()` down to right after `canEdit` is computed (it referenced
+`canEdit`, declared ~120 lines later — technically valid via normal JS
+closure semantics since the effect callback only runs after the full
+render commits, but confusing to read and impossible to get a correct
+dependency array from without duplicating logic) — no behavior change
+from earlier in this same session's `view`/`flow` persistence, just
+cleaner placement now that it does one more thing.
+
+**Verify:** `cd web && npm run build` clean; `npx vitest run` 20/20.
+Browser-verified with Playwright (throwaway specs, not committed): an
+owner-role session shows `editing` + `mode=edit` in the URL; a viewer-
+role session (mocked `/api/tenants` role override) shows `view-only` +
+`mode=view` — both screenshotted, both pills render identically styled
+and correctly placed next to the existing `unpublished`/`draft rev N`
+pills. Full existing Playwright suite re-run once more: identical 5
+pre-existing failures, no new regression.
+
+---
+
 **2026-09-20 (Fix: refreshing any page landed back on Editor.)** User:
 "if i refresh at any page it leading me back to editor page." Root
 cause: this app deliberately has no router (see `auth/PreAuth.tsx`'s own
