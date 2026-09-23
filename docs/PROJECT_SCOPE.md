@@ -707,6 +707,28 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-23 (CI integration drift: broken Globex flow repaired + validator
+hardened, branch `fix-ci-integration-drift`.)** Root cause: seed migration
+`009_seed_multiflow.sql` had been re-applied on 2026-09-05; its edge INSERTs
+have no ON CONFLICT guard, so the Globex demo flow (`a2a2a2a2-…`) got every
+edge twice, was published as v11, and every run failed with FlowBuildError
+(multiple unconditional edges from one node). Fixes:
+`scripts/repair_duplicate_flow_edges.py` (dry run by default; dedupes the
+draft edges, re-validates, publishes a new version the same way the API
+does, and writes an audit entry). **Already applied: Globex is now v12 with
+9 unique edges.** `validate_flow.check_flow` now rejects more than one
+unconditional outgoing edge per node, so save/publish catch this before a
+run does. Migration 009 has a "NOT re-runnable" warning comment.
+`tests/test_multiflow.py` now hides Anthropic/OpenRouter env keys and
+workspace BYOK Vault keys so it always uses the stub LLM (a real model's
+draft had routed Acme to ask_human). Verified: 1353 offline tests pass, and
+the 4 multiflow integration tests pass (about 8 min).
+**Pre-existing, not fixed here:** `python -m interpreter.flows.validate_flow`
+fails on the 4 `flows/templates/*.json` files because they use
+`source`/`target` edge keys, not `source_node_id`/`target_node_id`.
+
+---
+
 **2026-09-23 (README rewrite + machine handover.)** `README.md` rewritten
 to cover the whole platform (features, architecture, node types, stack,
 setup, Docker services, tests, docs index) with 13 screenshots in
