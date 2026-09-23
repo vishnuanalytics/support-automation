@@ -154,3 +154,27 @@ def test_delete_custom_removes_and_reports():
     assert templates.delete_custom(sb, "t1", "tpl1") is True
     assert sb.rows == []
     assert templates.delete_custom(sb, "t1", "tpl1") is False   # already gone
+
+
+# ── validate_flow CLI accepts the template (candidate) shape ──────────
+@pytest.mark.parametrize("path", sorted(templates._DIR.glob("*.json")), ids=lambda p: p.stem)
+def test_validate_flow_cli_accepts_every_template(path, capsys):
+    from interpreter.flows.validate_flow import validate
+
+    validate(str(path))  # sys.exit(1) on INVALID
+    assert capsys.readouterr().out.startswith(f"VALID: {path} (template)")
+
+
+def test_validate_flow_cli_rejects_a_broken_template(tmp_path, capsys):
+    import json
+
+    from interpreter.flows.validate_flow import validate
+
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({
+        "nodes": [{"key": "a", "type": "retrieve"}, {"key": "b", "type": "classify"}],
+        "edges": [{"source": "a", "target": "b"}, {"source": "b", "target": "a"}],
+    }))
+    with pytest.raises(SystemExit):
+        validate(str(bad))
+    assert "INVALID" in capsys.readouterr().out

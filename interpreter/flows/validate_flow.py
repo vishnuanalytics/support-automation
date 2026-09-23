@@ -138,9 +138,43 @@ def check_flow(flow: "Flow", *, require_expected_types: bool = True) -> list[str
     return errors
 
 
+def _is_candidate(raw: dict) -> bool:
+    """A template / AI-generate candidate (`{nodes:[{key,...}], edges:[{source,
+    target}]}`, see interpreter/templates.py) rather than a stored flow row."""
+    return "flow_id" not in raw and any(
+        "source" in e or "target" in e for e in raw.get("edges") or []
+    )
+
+
+def validate_candidate(path: str, raw: dict) -> None:
+    """Validate a template the way the app loads it: assemble_candidate()
+    (which runs check_flow without the EXPECTED_TYPES convention check)."""
+    if __package__ in (None, ""):  # run as a script path: make `interpreter` importable
+        import pathlib
+        sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+    from interpreter.flows.flow_candidate import assemble_candidate  # avoid import cycle
+
+    cand = assemble_candidate(raw.get("nodes") or [], raw.get("edges") or [])
+    if cand["errors"]:
+        print(f"INVALID: {path}")
+        for err in cand["errors"]:
+            print(f"  - {err}")
+        sys.exit(1)
+
+    print(f"VALID: {path} (template)")
+    print(f"  template: {raw.get('name') or raw.get('id') or path}")
+    print(f"  nodes: {len(cand['nodes'])}, edges: {len(cand['edges'])}")
+    for w in cand["warnings"]:
+        print(f"  warning: {w}")
+
+
 def validate(path: str) -> None:
     with open(path) as f:
         raw = json.load(f)
+
+    if _is_candidate(raw):
+        validate_candidate(path, raw)
+        return
 
     flow = Flow.model_validate(raw)
     errors = check_flow(flow)
