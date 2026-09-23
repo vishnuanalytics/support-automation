@@ -64,6 +64,11 @@ insert into flow_nodes (node_id, flow_id, type, label, config) values
    'handover', 'Full handover', '{"reason": "enterprise_or_low_confidence"}'::jsonb)
 on conflict (node_id) do nothing;
 
+-- WARNING: NOT re-runnable. These edge INSERTs have no ON CONFLICT guard
+-- (edge_id is a random default), so re-applying this migration duplicates
+-- every edge. That happened on 2026-09-05: the Globex flow got two
+-- unconditional edges per node, was published as v11, and every run failed
+-- until scripts/repair_duplicate_flow_edges.py fixed it (v12, 2026-09-23).
 insert into flow_edges (source_node_id, target_node_id, flow_id, condition) values
   ('a2000001-2222-4222-8222-222222222222', 'a2000002-2222-4222-8222-222222222222', 'a2a2a2a2-2222-4222-8222-222222222222', '{}'::jsonb),
   ('a2000002-2222-4222-8222-222222222222', 'a2000003-2222-4222-8222-222222222222', 'a2a2a2a2-2222-4222-8222-222222222222', '{}'::jsonb),

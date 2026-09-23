@@ -1383,6 +1383,15 @@ def test_team_endpoints_need_a_token():
                    {"edge_id": "e2", "source_node_id": "b", "target_node_id": "a", "condition": {}}]},
         "cycle",
     ),
+    (  # the 2026-09-23 Globex incident: the same edge duplicated -> two defaults, unbuildable
+        {"flow_id": "f", "tenant_id": "t", "team": "support", "name": "n",
+         "version": 1, "status": "draft",
+         "nodes": [{"node_id": "a", "type": "retrieve", "config": {}},
+                   {"node_id": "b", "type": "classify", "config": {}}],
+         "edges": [{"edge_id": "e1", "source_node_id": "a", "target_node_id": "b", "condition": {}},
+                   {"edge_id": "e2", "source_node_id": "a", "target_node_id": "b", "condition": {}}]},
+        "2 unconditional outgoing edges",
+    ),
 ])
 def test_structural_errors_catches_bad_graphs(flow, expect_substr):
     errs = _structural_errors(flow)
@@ -1481,6 +1490,22 @@ def test_salesforce_case_hook_needs_the_shared_secret():
 
 def test_sf_entry_endpoint_needs_a_token():
     assert client.put("/api/flows/some-id/sf-entry", json={"sf_entry": True}).status_code == 401
+
+
+def test_structural_errors_allows_one_default_plus_conditional_branches():
+    """A router node: conditional edges plus exactly one unconditional
+    default/else edge is the normal shape and must stay valid."""
+    flow = {
+        "flow_id": "f", "tenant_id": "t", "team": "support", "name": "n",
+        "version": 1, "status": "draft",
+        "nodes": [{"node_id": "g", "type": "confidence_gate", "config": {}},
+                  {"node_id": "s", "type": "auto_reply", "config": {}},
+                  {"node_id": "h", "type": "ask_human", "config": {}}],
+        "edges": [{"edge_id": "e1", "source_node_id": "g", "target_node_id": "s",
+                   "condition": {"if": "confidence_gate.pass"}},
+                  {"edge_id": "e2", "source_node_id": "g", "target_node_id": "h", "condition": {}}],
+    }
+    assert _structural_errors(flow) == []
 
 
 def test_structural_errors_passes_a_linear_flow():

@@ -23,7 +23,12 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 load_dotenv()
 
-for _k in ("GROQ_API_KEY", "SF_USERNAME", "SF_PASSWORD", "SF_SECURITY_TOKEN",
+# Every LLM provider key, not just Groq's: llm.py falls back to OpenRouter /
+# Anthropic when Groq is absent, and a real model's draft can trip the
+# integrity check and flip the routing (2026-09-23: Acme went to ask_human).
+# These assertions are about the flow rows, so the run must use the stub.
+for _k in ("GROQ_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY",
+           "SF_USERNAME", "SF_PASSWORD", "SF_SECURITY_TOKEN",
            "SF_CONSUMER_KEY", "SF_CONSUMER_SECRET", "SF_PRIVATE_KEY", "SF_PRIVATE_KEY_FILE"):
     os.environ.pop(_k, None)
 os.environ["RUNS_DISABLED"] = "1"
@@ -41,6 +46,17 @@ GLOBEX = "22222222-2222-2222-2222-222222222222"
 CASE = json.loads(
     (pathlib.Path(__file__).resolve().parents[1] / "interpreter" / "cases" / "basic_howto.json").read_text()
 )
+
+
+@pytest.fixture(autouse=True)
+def _stub_llm_even_with_workspace_keys(monkeypatch):
+    """Popping the env keys isn't enough on its own: llm.py also uses a
+    workspace's own BYOK key from Vault (the demo workspaces have one since
+    2026-09-23). Hide those too, for this module only -- the billing tests
+    elsewhere in the same run still need to see them."""
+    from interpreter import llm
+
+    monkeypatch.setattr(llm, "_tenant_keys", lambda tenant_id: {})
 
 
 def _run(tenant: str, team: str):

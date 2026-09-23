@@ -118,6 +118,23 @@ def check_flow(flow: "Flow", *, require_expected_types: bool = True) -> list[str
     if cycle:
         errors.append(f"flow contains a cycle: {' -> '.join(cycle)}")
 
+    # routing: the builder (interpreter/builder.py::_make_router) treats a
+    # node's unconditional edge as its default/else branch, so more than one
+    # is unbuildable. Checked here too so save/publish reject it up front
+    # instead of publishing a flow that only fails at run time (2026-09-23: a
+    # re-applied seed migration duplicated the Globex flow's edges and the
+    # broken graph was published).
+    defaults: dict[str, int] = {}
+    for e in flow.edges:
+        if not (e.condition or {}).get("if"):
+            defaults[e.source_node_id] = defaults.get(e.source_node_id, 0) + 1
+    for source_id, count in defaults.items():
+        if count > 1:
+            errors.append(
+                f"node '{source_id}' has {count} unconditional outgoing edges "
+                "(at most one; give the others an 'if' condition)"
+            )
+
     return errors
 
 
