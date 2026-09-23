@@ -707,6 +707,22 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-09-23 (README rewrite + machine handover.)** `README.md` rewritten
+to cover the whole platform (features, architecture, node types, stack,
+setup, Docker services, tests, docs index) with 13 screenshots in
+`docs/screenshots/`. They were rendered from the real web app via a throwaway
+Playwright spec on mocked demo data (same fixture approach as
+`web/e2e/ui-walk.spec.ts`; spec not committed), so no customer data.
+Every local branch was pushed to origin before the owner changed laptops.
+**Not in git by design (back up by hand when moving machines):** `.env`,
+`web/.env.local`, `sf_jwt/` (Salesforce JWT key pair), `hubspot.config.yml`,
+`hubspot-webhook-app/` (per-tenant deploy artifact), `gunner urbanpiper old
+cases/` (real customer case export), and the Claude memory dir
+`~/.claude/projects/-home-vishnuv-projects-support-automation/memory/`. No
+code or behaviour changes.
+
+---
+
 **2026-09-20 (Compliance — added GDPR (EU/EEA) and CCPA/CPRA (California)
 sections to the legal pages, the part of that thread that wasn't blocked
 on your entity details.)** Continuing the earlier "let's fix one by one
