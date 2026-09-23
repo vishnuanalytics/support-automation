@@ -723,9 +723,18 @@ run does. Migration 009 has a "NOT re-runnable" warning comment.
 workspace BYOK Vault keys so it always uses the stub LLM (a real model's
 draft had routed Acme to ask_human). Verified: 1353 offline tests pass, and
 the 4 multiflow integration tests pass (about 8 min).
-**Pre-existing, not fixed here:** `python -m interpreter.flows.validate_flow`
-fails on the 4 `flows/templates/*.json` files because they use
-`source`/`target` edge keys, not `source_node_id`/`target_node_id`.
+**Follow-up, same day (branch `fix-template-validate-cli`):** the validator
+CLI (`python -m interpreter.flows.validate_flow`) failed on the 4
+`flows/templates/*.json` files. The templates themselves were fine: they use
+the loose candidate shape (`key` nodes, `source`/`target` edges) that
+`templates.graph` feeds through `assemble_candidate`, and
+`test_every_template_assembles_and_compiles` already covered them. Only the
+CLI demanded a stored flow row. It now detects the candidate shape and
+validates it through `assemble_candidate`, the same path the app uses. It
+also works when run as a script path. Templates were left unchanged, since
+rewriting them would break `templates.graph`. Tests: `tests/test_templates.py`
+checks that the CLI accepts every template and rejects a cyclic one. 1358
+offline tests pass.
 
 ---
 
