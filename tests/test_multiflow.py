@@ -46,6 +46,14 @@ GLOBEX = "22222222-2222-2222-2222-222222222222"
 CASE = json.loads(
     (pathlib.Path(__file__).resolve().parents[1] / "interpreter" / "cases" / "basic_howto.json").read_text()
 )
+# These runs are on the deterministic stub (see the fixture below), whose
+# keyword classifier tags any "plan" as topic=billing -- and billing is a
+# forced escalation in every flow, which would mask the gate-config
+# difference this module is about. Drop the incidental "free plan" aside;
+# it's still a plain how-to (the shared case file is left alone -- the
+# concurrency tests use it too).
+CASE["body"] = CASE["body"].replace("I'm on the free plan and want", "I want")
+assert "plan" not in CASE["body"].lower()
 
 
 @pytest.fixture(autouse=True)
@@ -66,6 +74,24 @@ def _stub_llm_even_with_workspace_keys(monkeypatch):
 
     monkeypatch.setattr(llm, "_tenant_keys", lambda tenant_id: {})
     monkeypatch.setattr(llm, "_cache", OrderedDict())
+    # the import-time pop above isn't durable: another module's
+    # load_dotenv() puts a local .env's keys straight back, so locally this
+    # quietly ran against real Groq while CI (no keys) got the stub
+    for k in ("GROQ_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+
+    # And no KIL contradiction verdict. On the stub draft that's the
+    # polarity heuristic: >=3 shared words + a "not"/"only" in just one side
+    # = "contradicts" -- so it flips with whichever doc chunks today's live
+    # re-ingest returns, and a flagged draft force-escalates in every flow.
+    # The integrity check has its own tests (test_integrity.py); here it'd
+    # only mask the gate-config difference. No contexts -> its own neutral
+    # result, real shape.
+    from interpreter import integrity
+
+    real_check_many = integrity.check_many
+    monkeypatch.setattr(integrity, "check_many",
+                        lambda statements, contexts=None, **kw: real_check_many(statements, [], **kw))
 
 
 def _run(tenant: str, team: str):
