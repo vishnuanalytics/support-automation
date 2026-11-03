@@ -109,7 +109,7 @@ docker compose up -d --build
 docker compose exec -T worker python -c "from fastembed import TextEmbedding; TextEmbedding()"
 ```
 First build: a few minutes (arm64 wheels for `grpcio` / `onnxruntime`,
-one‑time fastembed model download into the `model-cache` volume). ~700 MB
+one‑time fastembed model download into the `model-cache` volume). ~650 MB
 image (`MEDIA=0`).
 
 **Optional — attachment OCR / video (Phase 25).** Off by default to keep the

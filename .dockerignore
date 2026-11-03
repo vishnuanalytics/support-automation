@@ -25,3 +25,10 @@ scratchpad/
 docs/
 ingestion/eval/
 tests/
+
+# not used by any Python service at runtime
+web/
+hubspot-webhook-app/
+eval/
+# raw Salesforce bulk export (customer data, ~233 MB) — never bake it into the image
+gunner urbanpiper old cases/
