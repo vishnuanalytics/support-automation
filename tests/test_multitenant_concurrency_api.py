@@ -68,6 +68,26 @@ CASE = json.loads(
 N_RUNS_PER_FLOW = 10  # interleaved -> 20 total concurrent HTTP run requests
 
 
+@pytest.fixture(autouse=True)
+def _no_billing_gate_or_live_llm(monkeypatch):
+    """This test is about tenant-config isolation, not billing or LLM output
+    (the tell is the gate threshold, echoed back verbatim). Two things in the
+    live data had made it fail for reasons unrelated to isolation
+    (2026-09-23): an `active` workspace needs its own BYOK key to run, and
+    the second tenant has none, so every one of its runs got a 402; and
+    Globex's real BYOK key sent 20 concurrent Groq calls into 429s.
+    assert_not_locked has its own unit tests in test_billing.py."""
+    from collections import OrderedDict
+
+    from interpreter import billing, llm
+
+    monkeypatch.setattr(billing, "assert_not_locked", lambda tenant_id, sb: None)
+    monkeypatch.setattr(llm, "_tenant_keys", lambda tenant_id: {})
+    monkeypatch.setattr(llm, "_cache", OrderedDict())
+    for k in ("GROQ_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+
+
 @pytest.fixture(scope="module")
 def auth_headers():
     if os.environ.get("SUPABASE_ANON_KEY", "test-anon-key") == "test-anon-key":

@@ -31,6 +31,15 @@ jobs:
     # P2b — the PostgREST/DB paths the offline suite can't cover (KIL writers,
     # queue dedupe, RLS). Self-skips when the secrets aren't configured.
     runs-on: ubuntu-latest
+    # One at a time: every run shares the same live Supabase test data, and
+    # some fixtures mutate it (test_api's globex_as_viewer demotes the shared
+    # test user). 2026-09-23: a PR run and a main run overlapped and one's
+    # demotion 403'd the other's writes ("your access is view-only"). A running
+    # job is never cancelled; GitHub keeps only the newest *pending* one, so
+    # with 3+ queued an older waiting run is skipped.
+    concurrency:
+      group: integration-live-supabase
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6

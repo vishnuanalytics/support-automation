@@ -53,10 +53,19 @@ def _stub_llm_even_with_workspace_keys(monkeypatch):
     """Popping the env keys isn't enough on its own: llm.py also uses a
     workspace's own BYOK key from Vault (the demo workspaces have one since
     2026-09-23). Hide those too, for this module only -- the billing tests
-    elsewhere in the same run still need to see them."""
+    elsewhere in the same run still need to see them.
+
+    Also start from an empty response cache: `llm._cache` is keyed by
+    model + prompt only and is checked before any key lookup, so an earlier
+    test module in the same pytest process that ran this case with a real
+    key would otherwise hand back its real-model draft (2026-09-23: CI had
+    Acme routing to ask_human while this module alone passed)."""
+    from collections import OrderedDict
+
     from interpreter import llm
 
     monkeypatch.setattr(llm, "_tenant_keys", lambda tenant_id: {})
+    monkeypatch.setattr(llm, "_cache", OrderedDict())
 
 
 def _run(tenant: str, team: str):
