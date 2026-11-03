@@ -24,7 +24,7 @@ WORKDIR /app
 
 # deps first so a code change doesn't reinstall the world
 COPY requirements.txt requirements-media.txt ./
-RUN pip install --no-cache-dir -r requirements.txt \
+RUN pip install --no-cache-dir --no-compile -r requirements.txt \
     && if [ "$MEDIA" = "1" ]; then pip install --no-cache-dir -r requirements-media.txt ; fi
 
 COPY . .
