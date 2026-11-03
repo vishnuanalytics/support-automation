@@ -74,6 +74,17 @@ def _run(tenant: str, team: str):
     return flow, final
 
 
+def _why(final: dict) -> str:
+    """Enough of the run to tell *why* it routed where it did when an
+    assertion fails -- the gate's score breakdown / forced-escalation reason
+    plus the trace summaries (a bare 'ask_human != auto_reply' is opaque)."""
+    steps = [f"{t.get('type')}: {t.get('summary') or t.get('detail') or ''}"
+             for t in final.get("trace") or [] if isinstance(t, dict)]
+    return (f"\n gate={final.get('confidence_gate')}"
+            f"\n integrity={final.get('integrity')}"
+            f"\n trace=\n  " + "\n  ".join(str(s)[:300] for s in steps))
+
+
 @pytest.mark.parametrize("tenant, team, want_action, has_gate", [
     (ACME, "support", "auto_reply", True),      # lenient per-tier gate, score clears it
     (GLOBEX, "support", "ask_human", True),      # strict gate (basic 0.9), nothing auto-sends
@@ -83,7 +94,7 @@ def test_seeded_flow_routes_as_designed(tenant, team, want_action, has_gate):
     flow, final = _run(tenant, team)
     node_types = {n["type"] for n in flow["nodes"]}
     assert ("confidence_gate" in node_types) is has_gate
-    assert (final.get("outcome") or {}).get("action") == want_action
+    assert (final.get("outcome") or {}).get("action") == want_action, _why(final)
 
 
 def test_same_case_diverges_across_tenants():
@@ -91,7 +102,7 @@ def test_same_case_diverges_across_tenants():
     different outcome — same interpreter."""
     _, a = _run(ACME, "support")
     _, b = _run(GLOBEX, "support")
-    assert a["outcome"]["action"] != b["outcome"]["action"]
+    assert a["outcome"]["action"] != b["outcome"]["action"], _why(a) + _why(b)
     # and it's the gate config that causes it (Acme's bar is lower)
     assert a["confidence_gate"]["threshold"] < b["confidence_gate"]["threshold"]
 
