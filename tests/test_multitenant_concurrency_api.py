@@ -167,7 +167,20 @@ def second_tenant_flow(auth_headers):
 
 
 def _run_one(flow_id: str, headers: dict) -> tuple[str, dict]:
-    r = client.post(f"/api/flows/{flow_id}/run", headers=headers, json={"case": dict(CASE)})
+    import httpx
+
+    # One retry on a *transport* drop only. Under 8 threads the API's shared
+    # HTTP/2 connection to Supabase occasionally gets closed mid-request
+    # (CI 2026-11-03: 3/20 runs raised RemoteProtocolError 'Server
+    # disconnected'). That says nothing about tenant isolation, which is all
+    # this test checks; a non-200 or a wrong threshold still fails it.
+    for attempt in (1, 2):
+        try:
+            r = client.post(f"/api/flows/{flow_id}/run", headers=headers, json={"case": dict(CASE)})
+            break
+        except httpx.TransportError:
+            if attempt == 2:
+                raise
     assert r.status_code == 200, r.text
     return flow_id, r.json()
 
