@@ -110,6 +110,20 @@ def test_job_failures_needs_a_token():
     assert client.get("/api/jobs/failures").status_code == 401
 
 
+def test_job_failures_is_not_shadowed_by_the_job_id_route():
+    # /api/jobs/{job_id} is declared first; it must not match "failures"
+    from starlette.routing import Match
+
+    from api import main
+
+    scope = {"type": "http", "path": "/api/jobs/failures", "method": "GET"}
+    hit = next(r for r in main.app.routes if r.matches(scope)[0] == Match.FULL)
+    assert hit.endpoint is main.job_failures
+    scope["path"] = "/api/jobs/6f1c1f3e-8a5e-4f0e-9d7a-2b9f3c4d5e6f"
+    hit = next(r for r in main.app.routes if r.matches(scope)[0] == Match.FULL)
+    assert hit.endpoint is main.get_job
+
+
 # ── GET /api/jobs/{job_id} tenant scoping (2026-09-11 fix) ──────────────
 # Calls the route function directly (bypassing the real bearer-auth /
 # live-Supabase Caller.__init__) so this stays offline: a fake `c.sb`

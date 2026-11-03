@@ -708,6 +708,15 @@ Design decisions already settled in that conversation:
 ## Immediate next step
 
 **2026-11-03 (Deploy prep + CI green + Supabase transport hardening.)**
+- **Fix (branch `fix-jobs-failures-route`):** `GET /api/jobs/failures`
+  has returned a 500 on every call since it was added on 2026-09-06, so
+  the Failed-jobs panel never loaded. `/api/jobs/{job_id}` is declared
+  earlier and matched "failures" as a job id, which failed Postgres's
+  uuid cast. The route is now `{job_id:uuid}`, so a non-UUID path falls
+  through: `failures` now gives a 200 and other non-UUID ids a 404. A
+  route-resolution test is in `tests/test_api.py`. Found by the
+  post-Mumbai-cutover endpoint sweep: 32 read endpoints were called as a
+  real user, and this was the only failure.
 - **Deploy target changed:** the Oracle Always-Free signup rejects the card,
   so the plan is a **paid ~4 GB Ubuntu VPS** (Hetzner-class).
   `DEPLOY_ORACLE.md` Part B works unchanged on any Ubuntu VM (log in as

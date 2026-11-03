@@ -1685,12 +1685,15 @@ def salesforce_case_hook(
     return {"job_id": job_id, "deduped": job_id is None}
 
 
-@app.get("/api/jobs/{job_id}")
-def get_job(job_id: str, c: Caller = Depends(caller)) -> dict:
+# `:uuid` so this doesn't swallow the fixed /api/jobs/<word> routes declared
+# further down (it matched /api/jobs/failures as job_id="failures" -> a
+# Postgres uuid cast error -> 500; the Failed-jobs panel never loaded).
+@app.get("/api/jobs/{job_id:uuid}")
+def get_job(job_id: uuid.UUID, c: Caller = Depends(caller)) -> dict:
     rows = (
         _service.table("jobs")
         .select("job_id, kind, status, attempts, payload, result, error, created_at, updated_at, tenant_id")
-        .eq("job_id", job_id).execute().data
+        .eq("job_id", str(job_id)).execute().data
     )
     if not rows:
         raise HTTPException(404, "job not found")
