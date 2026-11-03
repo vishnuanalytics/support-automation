@@ -62,6 +62,16 @@ log = logging.getLogger("zapier_sync")
 
 _embedder = None  # lazy-loaded, local, free (no API calls)
 
+# How many chunks go through the ONNX model at once when *indexing* docs.
+# Batch size changes memory, not the vectors: each text is embedded on its
+# own attention mask, so batch 4 and batch 256 give the same embeddings
+# (tests/test_embed_batching.py). ONNX Runtime keeps its peak memory
+# arena, so a big batch permanently inflates the process: measured in the
+# worker container, 64 chunks used 720 MB at fastembed's default batch
+# (256), 491 MB at 16, 347 MB at 4. 4 keeps the whole stack inside a 2 GB
+# VPS; raise it on a bigger box for faster bulk crawls.
+EMBED_BATCH_SIZE = max(1, int(os.environ.get("EMBED_BATCH_SIZE", "4")))
+
 
 def get_embedder() -> TextEmbedding:
     global _embedder
@@ -73,6 +83,11 @@ def get_embedder() -> TextEmbedding:
         # (verified cosine ~1.0) -- no re-embed needed for the swap.
         _embedder = TextEmbedding(model_name=EMBED_MODEL)
     return _embedder
+
+
+def embed_texts(texts: list[str]) -> list[list[float]]:
+    """Embed document chunks for indexing, `EMBED_BATCH_SIZE` at a time."""
+    return [vec.tolist() for vec in get_embedder().embed(texts, batch_size=EMBED_BATCH_SIZE)]
 
 
 def get_supabase():
@@ -327,12 +342,7 @@ def replace_chunks(sb, url: str, md: str, crumb: str, section: str) -> int:
     chunks = chunk_markdown(md, crumb)
     if not chunks:
         return 0
-    embeddings = [
-        vec.tolist()
-        for vec in get_embedder().embed(
-            [c["chunk_text"] for c in chunks], batch_size=32,
-        )
-    ]
+    embeddings = embed_texts([c["chunk_text"] for c in chunks])
     rows = [
         {
             "doc_url": url, "chunk_index": i, "chunk_text": c["chunk_text"],
