@@ -739,7 +739,16 @@ Design decisions already settled in that conversation:
   `Retry-After: 2`. Covered by `tests/test_supabase_client.py`; verified
   live (table read, auth, RLS client, storage, RPC). In `ingestion/`, the
   `get_supabase()` functions import the factory lazily, because importing
-  it at module load is circular.
+  it at module load is circular. In the same PR, two fixes for races
+  against the live stack, which CI shares a database and queue with:
+  `mailbox.set_status` now writes only while the channel is
+  `active`/`error`, so a late poll result can't undo a user's switch-off
+  (a real bug: the "error" rows would be polled again). `test_queue` now
+  waits if a live worker wins the claim on the test's job. **Still open:**
+  CI's integration tests run against the *production* Supabase project
+  and queue. A separate CI project would remove this whole class of race.
+  The running containers need `docker compose up -d --build` to pick up
+  the poller fix.
 
 **2026-09-23 (CI integration drift: broken Globex flow repaired + validator
 hardened, branch `fix-ci-integration-drift`.)** Root cause: seed migration
