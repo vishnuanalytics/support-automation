@@ -764,6 +764,39 @@ Design decisions already settled in that conversation:
   / Bluehost NVMe 2 class). Deploy plan for India: Hostinger (bills in
   INR). Hetzner was dropped because its sign-up verification is strict
   for non-EU accounts.
+- **Supabase moving Tokyo -> Mumbai (branch `supabase-mumbai-migration`).**
+  The customers are in Mumbai, and Supabase can't change a project's
+  region, so the copy goes into a new project, `idntkzlwlpclbtlclnlx`
+  (support-automation-mumbai, ap-south-1).
+  `scripts/migrate_supabase_project.sh` copies the following:
+  - the public schema *with* privileges, minus supabase_admin's
+    platform-owned default ACLs;
+  - the public data;
+  - `auth.users`/`auth.identities`;
+  - Vault secrets. These are re-created by name because Vault is
+    encrypted per project, and `tenant_integrations.vault_secret_id`
+    is remapped.
+
+  Connection strings live in the git-ignored `.env.migrate`, using the
+  session pooler on 5432. **Test copy done and verified:** row counts
+  match on all 43 tables plus auth; all 13 Vault secrets decrypt in the
+  new project; there are 0 dangling secret refs; RLS, policies, function
+  and table grants, and triggers are identical (234 items). **The live
+  app is still on Tokyo.**
+
+  **Cutover, still to do:**
+  1. stop the stack;
+  2. run `--reset` to re-copy the data written since the test copy;
+  3. switch `SUPABASE_URL`, the keys and the DB URLs in `.env`, Vercel
+     and the GitHub Actions secrets;
+  4. in the dashboard, set the Auth site/redirect URLs, the SMTP and
+     email templates, and the Google OAuth provider (its callback URL
+     changes in Google Cloud Console);
+  5. restart and verify.
+
+  Sessions don't carry over, so everyone logs in again; passwords are
+  kept. After that: rotate both DB passwords, then pause or delete Tokyo
+  once the new project has run cleanly.
 
 **2026-09-23 (CI integration drift: broken Globex flow repaired + validator
 hardened, branch `fix-ci-integration-drift`.)** Root cause: seed migration
