@@ -201,18 +201,19 @@ don't open the port. Only if you *do* want it:
    }
    ```
    (`sudo apt install -y caddy`; point a DNS A record at the VM's public IP.)
-2. Then follow the VCN / firewall steps below for port `443`, not `8000`.
+2. Open **443** (and 80, for Let's Encrypt's HTTP challenge) — on Oracle
+   via **VCN → Security Lists → Add Ingress Rule**; on a plain VPS
+   (Hostinger, etc.) via its panel firewall / `ufw allow 80,443/tcp`.
+3. Point the frontend at `https://sa.example.com` (`VITE_API_BASE`) and set
+   `WEB_ORIGINS` in `.env`.
 
-Only if you don't want the API on Vercel:
-1. **VCN → Security Lists → Add Ingress Rule**: source `0.0.0.0/0`, TCP,
-   port `8000`.
-2. Open the host firewall too:
-   ```bash
-   sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 8000 -j ACCEPT
-   sudo netfilter-persistent save
-   ```
-3. Point the frontend at `http://<PUBLIC_IP>:8000` (`VITE_API_BASE`) and
-   set `WEB_ORIGINS` in `.env`.
+**Never open port 8000 itself.** `docker-compose.yml` binds the API to
+`127.0.0.1:8000` on purpose: a published Docker port bypasses the host
+firewall (`ufw` / iptables `INPUT` rules don't apply), so binding it to all
+interfaces would serve the API over plain HTTP to the internet whatever the
+firewall says. Caddy on the host reaches it at `localhost:8000`, which is all
+it needs. (`API_BIND=0.0.0.0` in `.env` overrides this — only for a trusted
+LAN, never on a public VM.)
 
 The pipeline itself needs none of this.
 
