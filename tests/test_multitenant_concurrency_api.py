@@ -68,6 +68,26 @@ CASE = json.loads(
 N_RUNS_PER_FLOW = 10  # interleaved -> 20 total concurrent HTTP run requests
 
 
+@pytest.fixture(autouse=True)
+def _no_billing_gate_or_live_llm(monkeypatch):
+    """This test is about tenant-config isolation, not billing or LLM output
+    (the tell is the gate threshold, echoed back verbatim). Two things in the
+    live data had made it fail for reasons unrelated to isolation
+    (2026-09-23): an `active` workspace needs its own BYOK key to run, and
+    the second tenant has none, so every one of its runs got a 402; and
+    Globex's real BYOK key sent 20 concurrent Groq calls into 429s.
+    assert_not_locked has its own unit tests in test_billing.py."""
+    from collections import OrderedDict
+
+    from interpreter import billing, llm
+
+    monkeypatch.setattr(billing, "assert_not_locked", lambda tenant_id, sb: None)
+    monkeypatch.setattr(llm, "_tenant_keys", lambda tenant_id: {})
+    monkeypatch.setattr(llm, "_cache", OrderedDict())
+    for k in ("GROQ_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+
+
 @pytest.fixture(scope="module")
 def auth_headers():
     if os.environ.get("SUPABASE_ANON_KEY", "test-anon-key") == "test-anon-key":
@@ -147,7 +167,20 @@ def second_tenant_flow(auth_headers):
 
 
 def _run_one(flow_id: str, headers: dict) -> tuple[str, dict]:
-    r = client.post(f"/api/flows/{flow_id}/run", headers=headers, json={"case": dict(CASE)})
+    import httpx
+
+    # One retry on a *transport* drop only. Under 8 threads the API's shared
+    # HTTP/2 connection to Supabase occasionally gets closed mid-request
+    # (CI 2026-11-03: 3/20 runs raised RemoteProtocolError 'Server
+    # disconnected'). That says nothing about tenant isolation, which is all
+    # this test checks; a non-200 or a wrong threshold still fails it.
+    for attempt in (1, 2):
+        try:
+            r = client.post(f"/api/flows/{flow_id}/run", headers=headers, json={"case": dict(CASE)})
+            break
+        except httpx.TransportError:
+            if attempt == 2:
+                raise
     assert r.status_code == 200, r.text
     return flow_id, r.json()
 
