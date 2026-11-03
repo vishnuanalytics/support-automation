@@ -61,9 +61,12 @@ def _is_stub_run(run: dict) -> bool:
         d = e.get("data") or {}
         if d.get("stub") is True or "stub" in str(e.get("summary", "")).lower():
             return True
-        if (d.get("groundedness") or {}).get("backend") == "stub":
+        # the draft node stores groundedness as {"score", "backend"}; the
+        # confidence_gate stores it as a bare float score
+        g = d.get("groundedness")
+        if isinstance(g, dict) and g.get("backend") == "stub":
             return True
-    return bool((run.get("groundedness") or {}).get("backend") == "stub")
+    return False
 
 
 def _age(ts, now: datetime) -> timedelta | None:
@@ -150,7 +153,8 @@ def _check() -> tuple[bool, list[str]]:
         if rate > FAIL_RATE:
             problems.append(f"jobs: {failed}/{len(jobs)} run_flow failed in the last hour ({rate:.0%})")
 
-    runs = (sb.table("runs").select("trace,groundedness")
+    # `groundedness` lives inside each trace entry's data, not a runs column
+    runs = (sb.table("runs").select("trace")
             .gte("created_at", since).limit(500).execute().data or [])
     if len(runs) >= 5:
         stub = sum(1 for r in runs if _is_stub_run(r))
