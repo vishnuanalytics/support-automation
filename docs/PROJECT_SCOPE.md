@@ -749,6 +749,21 @@ Design decisions already settled in that conversation:
   and queue. A separate CI project would remove this whole class of race.
   The running containers need `docker compose up -d --build` to pick up
   the poller fix.
+- **Worker RAM halved, quality unchanged (branch `embed-small-batches`).**
+  The models themselves are small: in the container the app uses 139 MB,
+  the bge-small embedder adds about 175 MB and the cross-encoder
+  reranker about 167 MB. The 1.2 GB worker peak came from **indexing in
+  big batches**: ONNX Runtime keeps its peak memory arena, and KB
+  uploads/crawls used fastembed's default batch of 256. Both indexing
+  paths (`scraper.replace_chunks`, `kb_common.embed_entry`) now go
+  through `scraper.embed_texts` with `EMBED_BATCH_SIZE` (env, default 4).
+  The vectors are **bit-identical** at batch 1/4/16/256
+  (`tests/test_embed_batching.py`, integration). Measured worker peak
+  with both models plus a 200-chunk index: **510 MB** (was about 890 MB
+  in the same test). The stack now fits a **2 GB VPS** (Hostinger KVM 1
+  / Bluehost NVMe 2 class). Deploy plan for India: Hostinger (bills in
+  INR). Hetzner was dropped because its sign-up verification is strict
+  for non-EU accounts.
 
 **2026-09-23 (CI integration drift: broken Globex flow repaired + validator
 hardened, branch `fix-ci-integration-drift`.)** Root cause: seed migration

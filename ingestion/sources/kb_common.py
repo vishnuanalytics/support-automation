@@ -9,7 +9,7 @@ so retrieval scoping (`resolve_sources` + `p_source_ids`) works unchanged.
 
 from __future__ import annotations
 
-from ingestion.scraper import chunk_markdown, content_hash, get_embedder, normalise
+from ingestion.scraper import chunk_markdown, content_hash, embed_texts, normalise
 
 
 def embed_entry(sb, *, source_id: str, url: str, title: str, body_md: str,
@@ -29,7 +29,7 @@ def embed_entry(sb, *, source_id: str, url: str, title: str, body_md: str,
 
     chunks = chunk_markdown(md, crumb) if md.strip() else []
     if chunks:
-        vecs = [v.tolist() for v in get_embedder().embed([c["chunk_text"] for c in chunks])]
+        vecs = embed_texts([c["chunk_text"] for c in chunks])
         sb.table("doc_chunks").insert([
             {
                 "doc_url": url, "chunk_index": i, "chunk_text": c["chunk_text"],
