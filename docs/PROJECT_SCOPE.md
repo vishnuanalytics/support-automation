@@ -707,6 +707,49 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-03 (Deploy prep + CI green + Supabase transport hardening.)**
+- **Deploy target changed:** the Oracle Always-Free signup rejects the card,
+  so the plan is a **paid ~4 GB Ubuntu VPS** (Hetzner-class).
+  `DEPLOY_ORACLE.md` Part B works unchanged on any Ubuntu VM (log in as
+  `root` instead of `ubuntu`). Measured RAM: worker ≈1.2 GB (fastembed),
+  every other daemon ≈100–125 MB, so 4 GB is comfortable and 2 GB only works
+  with `api` stopped. **Not deployed yet.** Next step: provision the VPS and
+  run Part B.
+- **PR #90:** Docker image went from 1 GB to about 650 MB.
+  `.dockerignore` now excludes the raw SF bulk export
+  (`gunner urbanpiper old cases/`, 233 MB of customer data was being baked
+  in) plus `web/`, `hubspot-webhook-app/`, `eval/`. Compose now builds one
+  shared `support-automation:latest` image.
+- **PR #91:** the integration CI job passes for the first time since
+  2026-09-23. `test_multiflow` was only passing locally by accident:
+  another module's `load_dotenv()` restored `.env`'s Groq key, while CI
+  ran on the stub, whose keyword classifier reads "free plan" as billing
+  (a forced escalation). The test is now hermetic: keys are cleared per
+  test, it uses a local case copy, and the KIL check is neutralised there.
+  The concurrency API test now stubs the billing gate, and the CI
+  integration job is serialised.
+- **This change (branch `supabase-transport-hardening`):** every Supabase
+  client is now built through `interpreter/supabase_client.make_client`.
+  It uses HTTP/1.1 instead of postgrest's HTTP/2 default; under concurrency
+  one dropped HTTP/2 connection failed every in-flight request
+  (`RemoteProtocolError: Server disconnected` came out as a 500). Reads
+  (GET/HEAD/OPTIONS) retry twice on a dropped connection. Writes and RPCs
+  are **never** retried, because they may already have been applied. The
+  API maps any remaining `httpx.TransportError` to a 503 with
+  `Retry-After: 2`. Covered by `tests/test_supabase_client.py`; verified
+  live (table read, auth, RLS client, storage, RPC). In `ingestion/`, the
+  `get_supabase()` functions import the factory lazily, because importing
+  it at module load is circular. In the same PR, two fixes for races
+  against the live stack, which CI shares a database and queue with:
+  `mailbox.set_status` now writes only while the channel is
+  `active`/`error`, so a late poll result can't undo a user's switch-off
+  (a real bug: the "error" rows would be polled again). `test_queue` now
+  waits if a live worker wins the claim on the test's job. **Still open:**
+  CI's integration tests run against the *production* Supabase project
+  and queue. A separate CI project would remove this whole class of race.
+  The running containers need `docker compose up -d --build` to pick up
+  the poller fix.
+
 **2026-09-23 (CI integration drift: broken Globex flow repaired + validator
 hardened, branch `fix-ci-integration-drift`.)** Root cause: seed migration
 `009_seed_multiflow.sql` had been re-applied on 2026-09-05; its edge INSERTs

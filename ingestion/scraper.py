@@ -42,7 +42,6 @@ try:                                     # scraper-only (requirements-ingest.txt
 except ImportError:                      # from here but never scrape.
     BeautifulSoup = None                 # type: ignore[assignment,misc]
 from fastembed import TextEmbedding
-from supabase import create_client
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -79,7 +78,11 @@ def get_embedder() -> TextEmbedding:
 def get_supabase():
     url = os.environ["SUPABASE_URL"].strip()
     key = os.environ["SUPABASE_SERVICE_KEY"].strip()  # service role -- bypasses RLS, trusted backend job
-    return create_client(url, key)
+    # lazy: importing interpreter.* at module load is circular
+    # (interpreter/__init__ -> loader -> ... -> this module)
+    from interpreter.supabase_client import make_client
+
+    return make_client(url, key)
 
 
 def _now() -> str:

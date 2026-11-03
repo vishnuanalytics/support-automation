@@ -40,7 +40,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from supabase import create_client
+import httpx
 
 load_dotenv()
 
@@ -53,6 +53,7 @@ from interpreter.loader import (  # noqa: E402
     FlowInvalid, FlowNotFound, definition_hash as flow_definition_hash, load_flow,
 )
 from interpreter import jobs, sf_ingest  # noqa: E402
+from interpreter.supabase_client import make_client  # noqa: E402
 from interpreter.registry import known_types  # noqa: E402
 from interpreter.runs import record_run  # noqa: E402
 from interpreter import gdrive, github as githubmod, slack as slackmod  # noqa: E402
@@ -77,7 +78,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_service = create_client(SUPABASE_URL, SERVICE_KEY)
+_service = make_client(SUPABASE_URL, SERVICE_KEY)
+
+
+@app.exception_handler(httpx.TransportError)
+async def _supabase_transport_error(request: Request, exc: httpx.TransportError):
+    """A connection-level failure talking to Supabase (or another upstream)
+    that survived interpreter/supabase_client.py's read retries -- most
+    often a write whose connection dropped, which is deliberately not
+    retried. Transient and safe for the caller to retry, so a 503 +
+    Retry-After rather than an opaque 500."""
+    from fastapi.responses import JSONResponse
+
+    log.warning("upstream transport error on %s %s: %r", request.method, request.url.path, exc)
+    return JSONResponse(status_code=503, headers={"Retry-After": "2"},
+                        content={"detail": "temporarily couldn't reach the database — please retry"})
 
 # default node config for the palette (mirrors the seed flows)
 NODE_DEFAULTS: dict[str, dict[str, Any]] = {
@@ -204,7 +219,7 @@ class Caller:
     def __init__(self, token: str):
         self.token = token
         self.user_id, self.email = _verify_token(token)
-        self.sb = create_client(SUPABASE_URL, ANON_KEY)
+        self.sb = make_client(SUPABASE_URL, ANON_KEY)
         self.sb.postgrest.auth(token)          # RLS applies to this client
 
 

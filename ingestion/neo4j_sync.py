@@ -35,7 +35,6 @@ import threading
 from urllib.parse import urlparse
 
 from neo4j import GraphDatabase
-from supabase import create_client
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -50,7 +49,11 @@ BATCH_SIZE = 500
 def get_supabase():
     url = os.environ["SUPABASE_URL"].strip()
     key = os.environ["SUPABASE_SERVICE_KEY"].strip()  # service role -- trusted backend job
-    return create_client(url, key)
+    # lazy: importing interpreter.* at module load is circular
+    # (interpreter/__init__ -> loader -> ... -> this module)
+    from interpreter.supabase_client import make_client
+
+    return make_client(url, key)
 
 
 _driver = None

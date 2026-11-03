@@ -303,8 +303,15 @@ def set_status(tenant_id: str, sb, status: str, *, error: str | None = None) -> 
             patch["config"] = cfg
     except Exception:  # noqa: BLE001 — status update must not fail on this
         pass
+    # Only while the channel is still pollable. This is the poller reporting
+    # a poll it started earlier; if the user switched the channel off (or
+    # disconnected it) in the meantime, a late "error"/"active" must not
+    # overwrite that -- "error" rows get polled again, so the switch-off
+    # would silently not stick. (2026-11-03: a live poller turned a channel
+    # the user had just set inactive back into "error" mid-test.)
     sb.table("tenant_integrations").update(patch) \
-        .eq("tenant_id", tenant_id).eq("kind", KIND).execute()
+        .eq("tenant_id", tenant_id).eq("kind", KIND) \
+        .in_("status", ["active", "error"]).execute()
 
 
 def set_cursor(tenant_id: str, sb, cursor: dict) -> None:
