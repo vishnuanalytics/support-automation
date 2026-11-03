@@ -13,7 +13,7 @@ name: Email automation
 # The mailbox password / OAuth token lives in Supabase Vault, so it is NOT
 # a repo secret. Required repo secrets (Settings -> Secrets and variables
 # -> Actions):
-#   SUPABASE_URL          https://mjohgmivnxfwkqmlojqs.supabase.co
+#   SUPABASE_URL          https://idntkzlwlpclbtlclnlx.supabase.co
 #   SUPABASE_SERVICE_KEY  service_role key
 #   GROQ_API_KEY          for the classify / draft LLM calls
 #   SF_USERNAME           Salesforce integration user

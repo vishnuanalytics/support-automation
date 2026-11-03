@@ -781,22 +781,31 @@ Design decisions already settled in that conversation:
   session pooler on 5432. **Test copy done and verified:** row counts
   match on all 43 tables plus auth; all 13 Vault secrets decrypt in the
   new project; there are 0 dangling secret refs; RLS, policies, function
-  and table grants, and triggers are identical (234 items). **The live
-  app is still on Tokyo.**
+  and table grants, and triggers are identical.
 
-  **Cutover, still to do:**
-  1. stop the stack;
-  2. run `--reset` to re-copy the data written since the test copy;
-  3. switch `SUPABASE_URL`, the keys and the DB URLs in `.env`, Vercel
-     and the GitHub Actions secrets;
-  4. in the dashboard, set the Auth site/redirect URLs, the SMTP and
-     email templates, and the Google OAuth provider (its callback URL
-     changes in Google Cloud Console);
-  5. restart and verify.
+  **Cutover done on 2026-11-03 at 14:20–14:26 UTC.** The stack was
+  stopped and the copy re-run with `--reset`; VERIFY was OK and the
+  security fingerprint was identical. `.env` and `web/.env.local` now
+  point at Mumbai, and the Tokyo versions are kept as `*.bak-tokyo`
+  (git-ignored). After the rebuild, all 6 services talk only to Mumbai,
+  `scripts/health_check.py` reports healthy, `/api/health` is OK, the
+  worker is draining the queue, and Tokyo took 0 writes after the
+  cutover. The workflow and doc comments now name the new ref.
+
+  **Still open (needs a person in the dashboards):**
+  - **Vercel:** set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`,
+    then redeploy.
+  - **GitHub Actions:** set the `SUPABASE_URL` and
+    `SUPABASE_SERVICE_KEY` secrets.
+  - **Mumbai Auth:** Site/Redirect URLs, SMTP and templates. **Google
+    is not enabled yet**; when it is, add the new callback URL in
+    Google Cloud Console.
+  - Rotate both DB passwords.
+  - Pause Tokyo (`mjohgmivnxfwkqmlojqs`) once Mumbai has run cleanly
+    for a few days.
 
   Sessions don't carry over, so everyone logs in again; passwords are
-  kept. After that: rotate both DB passwords, then pause or delete Tokyo
-  once the new project has run cleanly.
+  kept.
 
 **2026-09-23 (CI integration drift: broken Globex flow repaired + validator
 hardened, branch `fix-ci-integration-drift`.)** Root cause: seed migration
