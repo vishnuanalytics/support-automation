@@ -120,3 +120,84 @@ def test_parse_message_html_only_is_stripped_to_text():
 def test_parse_message_flags_an_autoresponder():
     c = parse_message(_mk(extra={"Auto-Submitted": "auto-replied"}))
     assert c["is_autoreply"] is True
+
+
+# ── set_status: the poller never overrides a user's switch-off ───────
+class _StatusTable:
+    """Just enough of a PostgREST table for set_status: one row, honours
+    eq() / in_() filters on update so the guard is actually exercised."""
+
+    def __init__(self, row: dict):
+        self.row = row
+        self._filters: list = []
+        self._patch: dict | None = None
+
+    def select(self, *_a):
+        self._patch = None
+        self._filters = []
+        return self
+
+    def update(self, patch):
+        self._patch = patch
+        self._filters = []
+        return self
+
+    def eq(self, col, val):
+        self._filters.append(lambda r: r.get(col) == val)
+        return self
+
+    def in_(self, col, vals):
+        self._filters.append(lambda r: r.get(col) in vals)
+        return self
+
+    def execute(self):
+        class _R:
+            pass
+        res = _R()
+        hit = all(f(self.row) for f in self._filters)
+        if self._patch is not None:
+            if hit:
+                self.row.update(self._patch)
+            res.data = [self.row] if hit else []
+        else:
+            res.data = [dict(self.row)] if hit else []
+        return res
+
+
+class _SB:
+    def __init__(self, row):
+        self.t = _StatusTable(row)
+
+    def table(self, _name):
+        return self.t
+
+
+def _row(status):
+    return {"tenant_id": "t1", "kind": "email", "status": status, "config": {}}
+
+
+def test_a_late_poll_error_does_not_undo_a_switch_off():
+    from interpreter import mailbox
+
+    sb = _SB(_row("inactive"))
+    mailbox.set_status("t1", sb, "error", error="fetch: imap down")
+    assert sb.t.row["status"] == "inactive"
+    assert "error_retries" not in sb.t.row["config"]
+
+
+def test_a_late_poll_success_does_not_reactivate_a_switched_off_channel():
+    from interpreter import mailbox
+
+    sb = _SB(_row("inactive"))
+    mailbox.set_status("t1", sb, "active")
+    assert sb.t.row["status"] == "inactive"
+
+
+def test_poll_status_still_updates_a_pollable_channel():
+    from interpreter import mailbox
+
+    sb = _SB(_row("active"))
+    mailbox.set_status("t1", sb, "error", error="fetch: imap down")
+    assert sb.t.row["status"] == "error" and sb.t.row["config"]["error_retries"] == 1
+    mailbox.set_status("t1", sb, "active")
+    assert sb.t.row["status"] == "active" and "error_retries" not in sb.t.row["config"]
