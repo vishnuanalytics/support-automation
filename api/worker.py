@@ -823,7 +823,8 @@ _SWEEP_EVERY_MIN = {"queue_sweep": 5, "cdc_reconcile": 60, "reasoning_ttl": 5,
                     "fire_schedules": 1, "kil_digest": 30, "failed_jobs_sweep": 10,
                     "product_analytics_sync": 720, "zendesk_case_graph_sync": 60,
                     "billing_trial_sweep": 60, "correction_review_sweep": 5,
-                    "session_review_sweep": 5, "gate_tuning_sweep": 1440}
+                    "session_review_sweep": 5, "gate_tuning_sweep": 1440,
+                    "monitor_sync_sweep": 5}
 
 
 def _reschedule(kind: str, sb) -> None:
@@ -836,6 +837,12 @@ def _reschedule(kind: str, sb) -> None:
     bucket = int(nxt.timestamp() // (mins * 60))
     jobs.enqueue(kind, {}, dedupe_key=f"{kind}:{bucket}",
                  run_after=nxt.isoformat(), sb=sb)
+
+
+def _monitor_sync(payload: dict, sb) -> dict:
+    from interpreter.monitor import service
+
+    return service.run_sync(sb, payload["tenant_id"], payload.get("trigger") or "schedule")
 
 
 def _sweep_handler(fn):
@@ -871,9 +878,13 @@ HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
             "billing_trial_sweep": _sweep_handler("billing_trial_sweep"),
             "correction_review_sweep": _sweep_handler("correction_review_sweep"),
             "session_review_sweep": _sweep_handler("session_review_sweep"),
-            "gate_tuning_sweep": _sweep_handler("gate_tuning_sweep")}
+            "gate_tuning_sweep": _sweep_handler("gate_tuning_sweep"),
+            "monitor_sync_sweep": _sweep_handler("monitor_sync_sweep"),
+            "monitor_sync": _monitor_sync}
 
 JOB_TIMEOUT = int(os.environ.get("WORKER_JOB_TIMEOUT", "120"))
+# A Case Monitor sync reads every linked thread, so it needs longer than a run.
+JOB_TIMEOUT_BY_KIND = {"monitor_sync": int(os.environ.get("MONITOR_SYNC_TIMEOUT", "600"))}
 
 
 class _JobTimeout(Exception):
@@ -926,12 +937,12 @@ def process_one(sb, *, job_id: str | None = None) -> bool:
                 log.warning("stamp job %s tenant: %s", jid, e)
 
     def _alarm(_sig, _frm):
-        raise _JobTimeout(f"job exceeded {JOB_TIMEOUT}s")
+        raise _JobTimeout(f"job exceeded {JOB_TIMEOUT_BY_KIND.get(kind, JOB_TIMEOUT)}s")
 
     have_alarm = hasattr(signal, "SIGALRM")
     if have_alarm:
         signal.signal(signal.SIGALRM, _alarm)
-        signal.alarm(JOB_TIMEOUT)
+        signal.alarm(JOB_TIMEOUT_BY_KIND.get(kind, JOB_TIMEOUT))
     try:
         handler = HANDLERS.get(kind)
         if not handler:

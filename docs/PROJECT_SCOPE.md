@@ -707,6 +707,40 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-05 (Case Monitor, FR-52, branch `case-monitor`.)** New feature for leads and managers:
+one queue showing whose turn it is on every open case, combining cases the AI agents handed to a
+human with cases waiting on engineering or a third party. It's built into the platform on the
+existing stack, and each tenant's fields and rules are config, not code. Setup and limits: `docs/CASE_MONITOR.md`.
+- **Built:** `interpreter/monitor/` (pure: links, redact, verdict, timeline, brief, similar,
+  drafts; I/O: config, readers, store, sync, service, demo), migration `116_case_monitor.sql`
+  (**applied live**), `/api/monitor/*` in `api/main.py`, the `monitor_sync` job plus
+  `monitor_sync_sweep` in the worker, per-lead Slack user login, and `web/src/monitor/`.
+- **Verified:** 123 offline tests in `tests/monitor/` plus the full offline suite; 6 live tests
+  (real tables, sync lock, RLS); a real Chromium walk of the queue, all 9 demo cases, shortcuts,
+  digest and dark mode with no console errors; case API 300-420 ms against live Supabase; every
+  Salesforce query run for real on the dev org, which found and fixed a failure on orgs with no
+  record types.
+- **First real sync done (2026-11-05):** first production workspace, 3 open cases,
+  resolved pool 2000, partial status from one GitHub and one Slack link, no secrets or signed URLs
+  stored, case pages about 200 ms.
+- **Whole-team rules (same day):** owner filter removed (95 open cases). Added per-tenant
+  `customer_wait_sub_statuses`, `team_replied_sub_statuses` and `dependency_record_type`; DSP emails
+  count as third-party evidence; links on parent and child cases are shared; an agent-nudge draft;
+  `scripts/monitor_github_token.py`. The repo is public, so keep tenant names and tenant field names
+  out of commits, code and docs; they belong in `monitor_config`.
+- **Not verified:** reading real Slack threads (no Slack login yet), the Slack user OAuth round trip, the tag-team post, LLM summaries, a scheduled sync
+  firing, and the UI on real data. No `web/e2e` spec yet; the browser walk was a throwaway script.
+- **Salesforce without a secret:** the owner has no Connected App client ID or secret, so
+  `scripts/sf_connect_cli.py` stores a `sf org login web` refresh token in Vault as a public OAuth
+  client (`SF_OAUTH_PUBLIC_CLIENT_ID`). A production org accepted this login. Also fixed a bug from
+  2026-09-03: `client_from_oauth` passed a bare domain as `instance_url`, so every OAuth-connected
+  org got host `None`; its test had pinned the wrong value. Case Monitor builds its
+  own client and deliberately skips `salesforce.client_for`, which falls back to the platform's env
+  org on a failed login. Other `client_for` callers still have that fallback.
+- **Next step:** connect a Slack login per `docs/CASE_MONITOR.md`. 89 of 95 cases are overdue and 77 critical, so review the scoring.
+- `fix-jobs-failures-route` (commit `4c35e7f`) is still unmerged and has no PR. This branch is
+  based on `origin/main` and doesn't include it.
+
 **2026-11-03 (Deploy prep + CI green + Supabase transport hardening.)**
 - **Deploy target changed:** the Oracle Always-Free signup rejects the card,
   so the plan is a **paid ~4 GB Ubuntu VPS** (Hetzner-class).

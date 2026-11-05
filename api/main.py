@@ -4922,6 +4922,217 @@ def list_action_requests(limit: int = 50, c: Caller = Depends(caller)) -> list[d
             .order("created_at", desc=True).limit(min(limit, 200)).execute().data or [])
 
 
+# ── Case Monitor (FR-52) ─────────────────────────────────────────────
+# Members read; editors act on review state and syncs; owners configure.
+# Writes use the service role after an explicit role check, like case_taxonomy.
+_monitor_slack_state: dict[str, tuple[float, str, str]] = {}
+
+
+class MonitorConfigIn(BaseModel):
+    config: dict
+
+
+class MonitorReviewIn(BaseModel):
+    reviewed: bool = False
+    snooze_until: str | None = None
+    clear: bool = False
+
+
+class MonitorTagIn(BaseModel):
+    channel: str
+    thread_ts: str
+    text: str
+
+
+def _monitor_slack_finish(code: str, state: str) -> str:
+    expires, user_id, tenant_id = _monitor_slack_state.pop(state)
+    if expires < time.time():
+        return "This login link has expired. Try again."
+    from interpreter import vault_secrets
+    from interpreter.monitor import service
+
+    try:
+        tok = slackmod.exchange_user_code(code, SLACK_REDIRECT_URI)
+    except Exception:  # noqa: BLE001
+        log.warning("monitor slack login failed for tenant %s", tenant_id)
+        return "Could not complete Slack login. Try again."
+    kind = f"{service.SLACK_USER_PREFIX}{user_id}"
+    vault_id = vault_secrets.put(tenant_id, kind, tok, sb=_service)
+    if not vault_id:
+        return "Could not store the Slack login. Try again."
+    _service.table("tenant_integrations").upsert({
+        "tenant_id": tenant_id, "kind": kind, "vault_secret_id": vault_id,
+        "secret": {"team": tok.get("team"), "has_credentials": True}}).execute()
+    return "Slack connected. You can close this window."
+
+
+@app.get("/api/monitor/config")
+def monitor_get_config(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    from interpreter.monitor import service
+    tid = _caller_tenant(c, tenant_id)
+    return {"config": service.load_config(c.sb, tid)}
+
+
+@app.put("/api/monitor/config")
+def monitor_put_config(body: MonitorConfigIn, tenant_id: str | None = None,
+                       c: Caller = Depends(caller)) -> dict:
+    from interpreter.monitor import config as monitor_config
+    tid = _caller_tenant(c, tenant_id)
+    _require_owner(c, tid)
+    errors = monitor_config.validate(body.config)
+    if errors:
+        raise HTTPException(422, "; ".join(errors))
+    _service.table("monitor_config").upsert({
+        "tenant_id": tid, "config": body.config, "updated_by": c.user_id}).execute()
+    return {"config": monitor_config.merge(body.config)}
+
+
+@app.get("/api/monitor/queue")
+def monitor_queue(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    from interpreter.monitor import service
+    return service.queue(c.sb, _caller_tenant(c, tenant_id))
+
+
+@app.get("/api/monitor/digest")
+def monitor_digest(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    from interpreter.monitor import service
+    return service.digest(c.sb, _caller_tenant(c, tenant_id))
+
+
+@app.get("/api/monitor/cases/{case_id}")
+def monitor_case(case_id: str, tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    from interpreter.monitor import service
+    detail = service.case_detail(c.sb, _caller_tenant(c, tenant_id), case_id)
+    if detail is None:
+        raise HTTPException(404, "case not found")
+    return detail
+
+
+@app.post("/api/monitor/cases/{case_id}/refresh")
+def monitor_refresh_case(case_id: str, tenant_id: str | None = None,
+                         c: Caller = Depends(caller)) -> dict:
+    from interpreter.monitor import service
+    tid = _caller_tenant(c, tenant_id)
+    rate_limit(c.user_id, "monitor_refresh", 60)
+    try:
+        return {"refreshed": service.refresh_case(_service, tid, case_id)}
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+
+
+@app.post("/api/monitor/cases/{case_id}/summary")
+def monitor_summary(case_id: str, tenant_id: str | None = None,
+                    c: Caller = Depends(caller)) -> dict:
+    from interpreter.monitor import service
+    tid = _caller_tenant(c, tenant_id)
+    rate_limit(c.user_id, "monitor_summary", 20)
+    result = service.summarize(c.sb, tid, case_id)
+    if result is None:
+        raise HTTPException(404, "case not found")
+    return result
+
+
+@app.post("/api/monitor/cases/{case_id}/review")
+def monitor_review(case_id: str, body: MonitorReviewIn, tenant_id: str | None = None,
+                   c: Caller = Depends(caller)) -> dict:
+    from interpreter.monitor import service
+    tid = _caller_tenant(c, tenant_id)
+    _require_editor(c, tid)
+    return service.set_review(_service, tid, case_id, c.user_id, reviewed=body.reviewed,
+                              snooze_until=body.snooze_until, clear=body.clear)
+
+
+@app.post("/api/monitor/cases/{case_id}/tag-team", status_code=201)
+def monitor_tag_team(case_id: str, body: MonitorTagIn, tenant_id: str | None = None,
+                     c: Caller = Depends(caller)) -> dict:
+    """Post one Slack thread reply as the person who clicked. Only a known
+    thread on this case is allowed, so this can't post anywhere else."""
+    from interpreter import audit
+    from interpreter.monitor import readers, service
+    tid = _caller_tenant(c, tenant_id)
+    _require_editor(c, tid)
+    rate_limit(c.user_id, "monitor_tag", 10)
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(422, "message is empty")
+    detail = service.case_detail(c.sb, tid, case_id)
+    if detail is None:
+        raise HTTPException(404, "case not found")
+    if not any(t["channel"] == body.channel and t["thread_ts"] == body.thread_ts
+               for t in detail["slack_threads"]):
+        raise HTTPException(422, "that thread isn't linked to this case")
+    token = service.slack_user_token(_service, tid, c.user_id)
+    if not token:
+        raise HTTPException(409, "Connect your Slack login first")
+    try:
+        result = readers.post_team_tag(token, channel=body.channel, thread_ts=body.thread_ts,
+                                       text=text)
+    except readers.SlackError as e:
+        raise HTTPException(409, str(e))
+    audit.record(_service, tenant_id=tid, actor_id=c.user_id, action="monitor.tag_team",
+                 target_type="case", target_id=case_id)
+    return result
+
+
+@app.post("/api/monitor/sync", status_code=202)
+def monitor_sync(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    tid = _caller_tenant(c, tenant_id)
+    _require_editor(c, tid)
+    rate_limit(c.user_id, "monitor_sync", 6)
+    from interpreter import jobs as jobmod
+    bucket = int(time.time() // 30)
+    job_id = jobmod.enqueue("monitor_sync", {"tenant_id": tid, "trigger": "manual"},
+                            dedupe_key=f"monitor_sync:{tid}:manual:{bucket}", tenant_id=tid,
+                            sb=_service)
+    return {"job_id": job_id}
+
+
+@app.post("/api/monitor/demo")
+def monitor_load_demo(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    from interpreter.monitor import service
+    tid = _caller_tenant(c, tenant_id)
+    _require_editor(c, tid)
+    return service.load_demo(_service, tid)
+
+
+@app.delete("/api/monitor/demo", status_code=204)
+def monitor_clear_demo(tenant_id: str | None = None, c: Caller = Depends(caller)) -> None:
+    from interpreter.monitor import service
+    tid = _caller_tenant(c, tenant_id)
+    _require_editor(c, tid)
+    service.clear_demo(_service, tid)
+
+
+@app.get("/api/monitor/slack/status")
+def monitor_slack_status(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    from interpreter.monitor import service
+    tid = _caller_tenant(c, tenant_id)
+    mine = bool(service.slack_user_token(_service, tid, c.user_id))
+    return {"configured": slackmod.available(), "connected": mine,
+            "leads_connected": len(service.slack_user_rows(_service, tid))}
+
+
+@app.get("/api/monitor/slack/authorize")
+def monitor_slack_authorize(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    if not slackmod.available():
+        raise HTTPException(503, "Slack is not configured on this server")
+    tid = _caller_tenant(c, tenant_id)
+    nonce = secrets.token_urlsafe(24)
+    _monitor_slack_state[nonce] = (time.time() + 600, c.user_id, tid)
+    return {"url": slackmod.authorize_user_url(SLACK_REDIRECT_URI, nonce)}
+
+
+@app.delete("/api/monitor/slack", status_code=204)
+def monitor_slack_disconnect(tenant_id: str | None = None, c: Caller = Depends(caller)) -> None:
+    from interpreter import vault_secrets
+    from interpreter.monitor import service
+    tid = _caller_tenant(c, tenant_id)
+    kind = f"{service.SLACK_USER_PREFIX}{c.user_id}"
+    vault_secrets.delete(tid, kind, sb=_service)
+    (_service.table("tenant_integrations").delete().eq("tenant_id", tid).eq("kind", kind)
+     .execute())
+
+
 # ── Phase 16: Slack integration ─────────────────────────────────────
 SLACK_REDIRECT_URI = os.environ.get(
     "SLACK_REDIRECT_URI", "http://localhost:8000/api/integrations/slack/callback"
@@ -4953,6 +5164,8 @@ def slack_callback(code: str = "", state: str = "", error: str = "") -> HTMLResp
                             "<script>setTimeout(()=>window.close(),1500)</script>")
     if error:
         return page(f"Slack authorisation failed: {error}")
+    if state in _monitor_slack_state:
+        return page(_monitor_slack_finish(code, state))
     hit = _oauth_state.pop(state, None)
     if not hit or hit[0] < time.time():
         return page("This authorisation link has expired — try again.")

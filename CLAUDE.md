@@ -12,6 +12,7 @@ docs/            PROJECT_SCOPE.md (the real memory), REQUIREMENTS.md (the spec),
 db/migrations/   001_*.sql .. NNN_*.sql   (sequential, single-concern — run `ls db/migrations | tail` for the real current number; do not trust a count written in this file, it will go stale)
 ingestion/       scraper.py, neo4j_sync.py, email_watch.py, sf_cdc_watch.py, webcrawl.py, case_graph_sync.py, case_memory_sync.py, eval/
 interpreter/     the config-driven LangGraph interpreter — 50+ modules (builder/loader/registry/conditions/retrieval/llm/salesforce/runs/billing/integrity/kb_writeback/handoff_watch/approvals/connections/triggers/cron/templates/fileimport/reasoning/slack_socket/…)
+  monitor/       Case Monitor (FR-52): whose-turn queue — pure verdict/timeline/brief/drafts plus readers, store, sync
   flows/         validate_flow.py, flow_support_example.json, templates/*.json
   cases/         sample support cases
 api/             FastAPI backend (reuses interpreter/) — main.py, worker.py, trace.py

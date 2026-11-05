@@ -21,6 +21,9 @@ log = logging.getLogger("interpreter.slack")
 from typing import Any
 
 SCOPES = "chat:write,chat:write.public,usergroups:read,channels:read,groups:read,users:read"
+# Case Monitor signs each lead in with their own user token, so it can read the
+# external channels that lead is in without inviting a bot to each one.
+USER_SCOPES = "channels:history,groups:history,users:read,users:read.email,chat:write"
 _AUTH = "https://slack.com/oauth/v2/authorize"
 _TOKEN = "https://slack.com/api/oauth.v2.access"
 _API = "https://slack.com/api"
@@ -48,6 +51,33 @@ def authorize_url(redirect_uri: str, state: str) -> str:
     return f"{_AUTH}?" + urlencode({
         "client_id": cid, "scope": SCOPES, "redirect_uri": redirect_uri, "state": state,
     })
+
+
+def authorize_user_url(redirect_uri: str, state: str) -> str:
+    cid, _ = _need()
+    from urllib.parse import urlencode
+
+    return f"{_AUTH}?" + urlencode({
+        "client_id": cid, "user_scope": USER_SCOPES, "redirect_uri": redirect_uri, "state": state,
+    })
+
+
+def exchange_user_code(code: str, redirect_uri: str) -> dict[str, Any]:
+    cid, secret = _need()
+    import requests
+
+    r = requests.post(_TOKEN, data={
+        "client_id": cid, "client_secret": secret, "code": code, "redirect_uri": redirect_uri,
+    }, timeout=15)
+    r.raise_for_status()
+    body = r.json()
+    if not body.get("ok"):
+        raise RuntimeError(f"Slack OAuth failed: {body.get('error')}")
+    user = body.get("authed_user") or {}
+    if not user.get("access_token"):
+        raise RuntimeError("Slack OAuth returned no user token")
+    return {"token": user["access_token"], "slack_user_id": user.get("id"),
+            "team": body.get("team", {})}
 
 
 def exchange_code(code: str, redirect_uri: str) -> dict[str, Any]:

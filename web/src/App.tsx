@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import type { LucideIcon } from "lucide-react";
 import {
-  Workflow, History, Activity as ActivityIcon, CheckCircle2, Search,
+  Workflow, History, Activity as ActivityIcon, CheckCircle2, ListTodo, Search,
   BookOpen, HelpCircle, ListChecks, ClipboardList, Compass, Users, Plug,
   CreditCard, Settings, LogOut, KeyRound,
 } from "lucide-react";
@@ -15,6 +15,7 @@ import { FlowList } from "./flows/FlowList";
 import { FlowEditor } from "./flows/FlowEditor";
 import { RunsView } from "./runs/RunsView";
 import { ReviewView } from "./review/ReviewView";
+import { MonitorView } from "./monitor/MonitorView";
 import { TraceView } from "./trace/TraceView";
 import { KnowledgeView } from "./kb/KnowledgeView";
 import { RulesView } from "./rules/RulesView";
@@ -33,6 +34,7 @@ type View =
   | "editor"
   | "runs"
   | "review"
+  | "monitor"
   | "trace"
   | "knowledge"
   | "ask"
@@ -48,7 +50,7 @@ type View =
 // query param on load (a stale/hand-edited one falls back to "editor"
 // instead of rendering a blank pane).
 const VIEWS: View[] = [
-  "setup", "editor", "runs", "review", "trace", "knowledge", "ask",
+  "setup", "editor", "runs", "review", "monitor", "trace", "knowledge", "ask",
   "rules", "intake", "guide", "team", "connections", "billing", "activity",
 ];
 
@@ -82,6 +84,7 @@ const NAV_GROUPS: { key: string; label: string; items: { view: View; label: stri
       { view: "editor", label: "Editor", icon: Workflow },
       { view: "runs", label: "Runs", icon: History },
       { view: "activity", label: "Activity", icon: ActivityIcon },
+      { view: "monitor", label: "Case Monitor", icon: ListTodo },
       { view: "review", label: "Approvals", icon: CheckCircle2 },
       { view: "trace", label: "Trace", icon: Search },
     ],
@@ -618,6 +621,8 @@ export function App() {
           <RunsView />
         ) : view === "review" ? (
           <ReviewView key={tenantId} tenantId={tenantId} />
+        ) : view === "monitor" ? (
+          <MonitorView key={tenantId} tenantId={tenantId} isOwner={isOwner} />
         ) : view === "trace" ? (
           <TraceView />
         ) : flowId ? (

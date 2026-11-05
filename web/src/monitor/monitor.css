@@ -1,0 +1,112 @@
+.monitor {
+  height: 100%;
+  overflow-y: auto;
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  font-size: 13px;
+}
+.monitor h1 { margin: 0; font-size: 20px; }
+.monitor h2 { margin: 0 0 var(--space-2); font-size: 14px; }
+.monitor h3 { margin: 0 0 var(--space-1); font-size: 13px; }
+.monitor p { margin: 0 0 var(--space-1); }
+.monitor ul, .monitor ol { margin: 0; padding-left: var(--space-4); }
+.monitor-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.monitor-muted, .monitor-head p { color: var(--text-muted); font-size: 12px; }
+.monitor-note { color: var(--success-text); font-size: 12px; }
+.monitor-actions { display: flex; flex-wrap: wrap; gap: var(--space-1); align-items: center; }
+.monitor-actions input { width: auto; }
+.monitor-tiles { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: stretch; }
+.monitor-trend { margin: 0; display: flex; flex-direction: column; justify-content: flex-end; gap: var(--space-1); }
+.monitor-trend rect { fill: var(--text-muted); }
+.monitor-trend rect:hover { fill: var(--text); }
+.monitor-trend figcaption { color: var(--text-muted); font-size: 11px; }
+.monitor-tabs { display: flex; flex-wrap: wrap; gap: var(--space-1); border-bottom: 1px solid var(--border); }
+.monitor-tabs button {
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font: inherit;
+  padding: var(--space-1) var(--space-2);
+}
+.monitor-tabs button.is-active { border-bottom-color: var(--accent); color: var(--text); }
+.monitor-filters { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+.monitor-filters > * { width: auto; }
+.monitor-check { display: flex; white-space: nowrap; gap: var(--space-1); align-items: center; font-size: 12px; }
+.monitor-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.monitor-table th {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  padding: var(--space-1) var(--space-2);
+  text-align: left;
+}
+.monitor-table td { border-top: 1px solid var(--border); padding: var(--space-2); vertical-align: top; }
+.monitor-table tbody tr { cursor: pointer; }
+.monitor-table tbody tr:hover, .monitor-table tr.is-selected { background: var(--accent-wash); }
+.monitor-table small { color: var(--text-muted); }
+.monitor-link {
+  background: none;
+  border: 0;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  padding: 0;
+  text-decoration: underline;
+}
+.monitor-cite { color: var(--text-muted); font-size: 11px; }
+.monitor-brief, .monitor-card, .monitor-digest, .monitor-settings {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+}
+.monitor-brief { display: flex; flex-direction: column; gap: var(--space-1); }
+.monitor-turn { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+.monitor-facts { display: flex; flex-wrap: wrap; gap: var(--space-4); margin: 0; }
+.monitor-facts dt { color: var(--text-muted); font-size: 11px; }
+.monitor-facts dd { margin: 0; }
+.monitor-next { font-size: 14px; }
+.monitor-summary { border-top: 1px solid var(--border); padding-top: var(--space-2); }
+.monitor-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 380px);
+  gap: var(--space-4);
+}
+.monitor-columns > div, .monitor-columns > aside {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.monitor-timeline { list-style: none; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.monitor-timeline p, .monitor-card p { overflow-wrap: anywhere; white-space: pre-wrap; }
+.monitor-card pre {
+  font-family: var(--font-body);
+  font-size: 12px;
+  margin: 0 0 var(--space-1);
+  white-space: pre-wrap;
+}
+.monitor-card details { font-size: 12px; margin-top: var(--space-1); }
+.monitor-errors { font-size: 12px; }
+.monitor-demo { align-items: center; color: var(--text-muted); display: flex; font-size: 12px; gap: var(--space-2); }
+.monitor-keys { margin: 0; }
+.monitor-keys div { display: flex; gap: var(--space-2); padding: var(--space-1) 0; }
+.monitor-keys dt { min-width: 80px; }
+.monitor-keys dd { margin: 0; }
+@media (max-width: 1100px) {
+  .monitor-columns { grid-template-columns: minmax(0, 1fr); }
+}
+@media print {
+  .monitor-head .monitor-actions, .monitor-digest button.ui-btn { display: none; }
+}

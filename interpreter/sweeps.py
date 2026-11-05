@@ -653,6 +653,22 @@ def fire_schedules(sb, *, dry_run: bool | None = None) -> dict:
 
 
 # ── failed_jobs (robustness pass, 2026-09-03) ────────────────────────────
+def monitor_sync_sweep(sb, *, dry_run: bool | None = None) -> dict:
+    """Enqueue a Case Monitor sync for each workspace that is due one. The sync
+    runs as its own job because it can take far longer than a sweep should."""
+    from . import jobs
+    from .monitor import service
+
+    due = service.tenants_due(sb)
+    if _dry() if dry_run is None else dry_run:
+        return {"due": len(due), "dry_run": True}
+    bucket = _now().strftime("%Y%m%d%H%M")
+    for tid in due:
+        jobs.enqueue("monitor_sync", {"tenant_id": tid, "trigger": "schedule"},
+                     dedupe_key=f"monitor_sync:{tid}:{bucket}", tenant_id=tid, sb=sb)
+    return {"due": len(due)}
+
+
 def failed_jobs_sweep(sb, *, dry_run: bool | None = None) -> dict:
     """Page once for each job that ran out of retries (`jobs.status =
     'failed'`) in the last `FAILED_JOBS_WINDOW_MIN` minutes. A job only
