@@ -764,6 +764,48 @@ Design decisions already settled in that conversation:
   / Bluehost NVMe 2 class). Deploy plan for India: Hostinger (bills in
   INR). Hetzner was dropped because its sign-up verification is strict
   for non-EU accounts.
+- **Supabase moving Tokyo -> Mumbai (branch `supabase-mumbai-migration`).**
+  The customers are in Mumbai, and Supabase can't change a project's
+  region, so the copy goes into a new project, `idntkzlwlpclbtlclnlx`
+  (support-automation-mumbai, ap-south-1).
+  `scripts/migrate_supabase_project.sh` copies the following:
+  - the public schema *with* privileges, minus supabase_admin's
+    platform-owned default ACLs;
+  - the public data;
+  - `auth.users`/`auth.identities`;
+  - Vault secrets. These are re-created by name because Vault is
+    encrypted per project, and `tenant_integrations.vault_secret_id`
+    is remapped.
+
+  Connection strings live in the git-ignored `.env.migrate`, using the
+  session pooler on 5432. **Test copy done and verified:** row counts
+  match on all 43 tables plus auth; all 13 Vault secrets decrypt in the
+  new project; there are 0 dangling secret refs; RLS, policies, function
+  and table grants, and triggers are identical.
+
+  **Cutover done on 2026-11-03 at 14:20–14:26 UTC.** The stack was
+  stopped and the copy re-run with `--reset`; VERIFY was OK and the
+  security fingerprint was identical. `.env` and `web/.env.local` now
+  point at Mumbai, and the Tokyo versions are kept as `*.bak-tokyo`
+  (git-ignored). After the rebuild, all 6 services talk only to Mumbai,
+  `scripts/health_check.py` reports healthy, `/api/health` is OK, the
+  worker is draining the queue, and Tokyo took 0 writes after the
+  cutover. The workflow and doc comments now name the new ref.
+
+  **Still open (needs a person in the dashboards):**
+  - **Vercel:** set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`,
+    then redeploy.
+  - **GitHub Actions:** set the `SUPABASE_URL` and
+    `SUPABASE_SERVICE_KEY` secrets.
+  - **Mumbai Auth:** Site/Redirect URLs, SMTP and templates. **Google
+    is not enabled yet**; when it is, add the new callback URL in
+    Google Cloud Console.
+  - Rotate both DB passwords.
+  - Pause Tokyo (`mjohgmivnxfwkqmlojqs`) once Mumbai has run cleanly
+    for a few days.
+
+  Sessions don't carry over, so everyone logs in again; passwords are
+  kept.
 
 **2026-09-23 (CI integration drift: broken Globex flow repaired + validator
 hardened, branch `fix-ci-integration-drift`.)** Root cause: seed migration

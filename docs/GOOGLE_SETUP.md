@@ -80,7 +80,7 @@ configured.
 **APIs & Services → Credentials →** your OAuth **Web** client:
 - **Authorised redirect URIs** — add
   `https://<your-project-ref>.supabase.co/auth/v1/callback`
-  (this project: `https://mjohgmivnxfwkqmlojqs.supabase.co/auth/v1/callback`).
+  (this project: `https://idntkzlwlpclbtlclnlx.supabase.co/auth/v1/callback`).
 - **Authorised JavaScript origins** — add `http://localhost:5173`
   (and your deployed web origin in prod).
 

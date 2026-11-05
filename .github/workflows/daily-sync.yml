@@ -6,7 +6,7 @@ name: Daily docs sync
 # run is cheap and well inside the free tier.
 #
 # Requires these repo secrets (Settings -> Secrets and variables -> Actions):
-#   SUPABASE_URL            https://mjohgmivnxfwkqmlojqs.supabase.co
+#   SUPABASE_URL            https://idntkzlwlpclbtlclnlx.supabase.co
 #   SUPABASE_SERVICE_KEY    service_role key (Project Settings -> API)
 #   NEO4J_URI               neo4j+s://<id>.databases.neo4j.io
 #   NEO4J_USERNAME          Aura instance username
