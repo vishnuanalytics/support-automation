@@ -22,8 +22,14 @@ log = logging.getLogger("interpreter.monitor.knowledge")
 COLLECTION = "Resolved third-party cases"
 MESSAGE_LIMIT = 4000
 _ENTRY_NS = uuid.UUID("7f1a9d3e-52b1-4c7a-9b5e-3d2c4a6f8e10")
-_QUOTE = re.compile(r"(^\s*On .{5,120} wrote:\s*$|^-{2,}\s*Original Message|^-{2,}\s*Forwarded message|"
-                    r"^From:\s.+$\n^(Sent|Date):\s)", re.M | re.I)
+# Where an email stops being new text: a quoted thread, or a mail footer. Mail
+# clients wrap the "On ... wrote:" header, so it can span lines.
+_QUOTE = re.compile(
+    r"(^[ \t>]*On\s[^\n]{5,160}(\n[^\n]{0,160}){0,2}?\s*wrote:\s*$|"
+    r"^-{2,}\s*Original Message|^-{2,}\s*Forwarded message|"
+    r"^From:\s.+$\n^(Sent|Date):\s|"
+    r"^--\s*$|^IMPORTANT NOTICE|^This e-?mail message may contain|^DISCLAIMER)",
+    re.M | re.I)
 
 
 def strip_quoted(text: str | None) -> str:
@@ -121,25 +127,37 @@ def backfill(sb: Any, tenant_id: str, reader: Any, partners: list[dict], cfg: di
     return counts
 
 
-def similar_context(tenant_id: str, query: str, sb: Any, top_k: int = 4) -> list[dict]:
+def similar_context(tenant_id: str, query: str, sb: Any, top_k: int = 4,
+                    exclude_case: str | None = None) -> list[dict]:
     from interpreter.retrieval import hybrid_retrieve
 
-    results, _ = hybrid_retrieve(query[:800], top_k=top_k, use_graph=False,
+    skip = entry_id(exclude_case) if exclude_case else None
+    results, _ = hybrid_retrieve(query[:800], top_k=top_k + 4, use_graph=False,
                                  kb_sources=[COLLECTION], tenant_id=tenant_id, sb=sb)
-    return [{"title": r.get("title") or r.get("heading_path") or COLLECTION,
-             "text": r.get("chunk_text") or r.get("text") or "",
-             "url": r.get("doc_url") or r.get("url")} for r in results]
+    kept = [r for r in results if not (skip and skip in (r.get("doc_url") or ""))]
+    return [{"title": r.get("heading_path") or COLLECTION, "text": r.get("chunk_text") or "",
+             "url": r.get("doc_url")} for r in kept[:top_k]]
 
 
 DRAFT_SYSTEM = (
-    "You help a restaurant software company's support lead. Using only the numbered sources, "
-    "write a reply for the requested audience. Past cases show how similar issues went: use them "
-    "for approach, but never state their details as facts about this case. Never promise an ETA "
-    "or an RCA unless a source commits to one. Keep any placeholder like [email] or [number] "
-    "exactly as written. Cite sources only in situation, never in the draft. If a needed fact is "
-    "missing, list it under missing. Answer as JSON: "
-    "{\"situation\": two or three sentences on where this case stands, citing sources like [1], "
-    "\"draft\": the message, \"missing\": [facts to fill in before sending]}."
+    "You help a restaurant software company's support lead reply on a case. Write the next message "
+    "for the requested audience, responding to the latest message.\n"
+    "Rules:\n"
+    "- Start from the latest message: answer what it says or asks. Earlier messages are background.\n"
+    "- Match the size of what's needed. If the latest message settles the question, write a short "
+    "reply that acknowledges it and gives the next step. Don't reopen or recap the whole issue.\n"
+    "- When a platform team gives a finding, the usual reply thanks them and says what you'll do "
+    "with it, such as informing the merchant. Only ask them a new question if the case can't move "
+    "without the answer.\n"
+    "- Keep to what's asked of you. Don't invent lists, steps or details the latest message "
+    "doesn't call for.\n"
+    "- Past cases only show how similar issues went. Never state their IDs, names or findings as "
+    "facts about this case.\n"
+    "- Use only facts from this case's sources. Never promise an ETA or RCA unless a source commits "
+    "to one. Keep placeholders like [email] or [number] exactly as written.\n"
+    "- If a needed fact is missing, list it under missing instead of guessing.\n"
+    "Answer as JSON: {\"situation\": two sentences on where this case stands, citing sources like "
+    "[1], \"draft\": the message with no citations, \"missing\": [facts to fill in before sending]}."
 )
 
 
@@ -151,21 +169,28 @@ def draft_prompt(case: dict, audience: str, timeline: list[dict], similar: list[
     sources += [{"source": "Past case", "url": s.get("url"), "text": redact_pii(s["text"])}
                 for s in similar]
     numbered = "\n\n".join(f"[{i + 1}] {s['source']}: {s['text']}" for i, s in enumerate(sources))
+    talk = [t for t in timeline if t.get("party") != "system" and t.get("text")]
+    latest = f"{talk[-1]['party_label']}: {redact_pii(talk[-1]['text'])}" if talk else "none"
     target = "the merchant" if audience == "merchant" else (
         f"the {partner['name']} team" if partner else "the delivery platform's team")
     header = (f"Audience: {target}\nCase: {redact_pii(case.get('subject'))}\n"
               f"Aggregator: {', '.join(case.get('third_parties') or []) or 'not stated'}\n")
-    return f"{header}\nSources:\n{numbered}", sources
+    return f"{header}\nLatest message, which you are replying to:\n{latest}\n\nSources:\n{numbered}", sources
+
+
+SIMILAR_LIMIT = 3
 
 
 def generate_draft(tenant_id: str, case: dict, audience: str, timeline: list[dict],
-                   sb: Any, partner: dict | None, complete: Any = None) -> dict[str, Any]:
+                   sb: Any, partner: dict | None, complete: Any = None,
+                   exclude_case: str | None = None, system: str | None = None) -> dict[str, Any]:
     from interpreter import llm
 
     query = " ".join([case.get("subject") or "", *[t.get("text") or "" for t in timeline[-3:]]])
-    similar = similar_context(tenant_id, redact_pii(query), sb)
+    similar = similar_context(tenant_id, redact_pii(query), sb, top_k=SIMILAR_LIMIT,
+                              exclude_case=exclude_case)
     user, sources = draft_prompt(case, audience, timeline, similar, partner)
-    raw = (complete or llm.complete)(DRAFT_SYSTEM, user, max_tokens=900, json_object=True,
+    raw = (complete or llm.complete)(system or DRAFT_SYSTEM, user, max_tokens=900, json_object=True,
                                      tenant_id=tenant_id)
     body = json.loads(raw)
     draft = re.sub(r" ?\[\d+\](?:\s*\[\d+\])*", "", body.get("draft") or "")
@@ -173,4 +198,4 @@ def generate_draft(tenant_id: str, case: dict, audience: str, timeline: list[dic
             "missing": body.get("missing") or [],
             "sources": [{"n": i + 1, "source": s["source"], "url": s.get("url")}
                         for i, s in enumerate(sources)],
-            "similar_used": len(similar)}
+            "similar_used": len(similar), "context": [s["text"] for s in sources]}

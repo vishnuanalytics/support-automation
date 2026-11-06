@@ -757,6 +757,40 @@ existing stack, and each tenant's fields and rules are config, not code. Setup a
   tidied at read time, with `email_footer_markers` removing footers.
 - **Unsent drafts:** `EmailMessage` rows with Status 5 are excluded from every read, since a draft
   had been counted as our last reply.
+- **Follow-ups and alerts (migration `119`, applied):** a daily list by agent, and alerts for what
+  changed, polled every minute with optional desktop notifications while the app is open. Syncs run
+  every 15 minutes, and a scheduled sync has been seen firing.
+- **Review and refresh fixes (2026-11-06):** "Mark reviewed" now returns to the list at once, and the
+  header, focus cards and breakdown leave reviewed cases out (the tabs already did). A review clears
+  that case's alerts so far, for the whole workspace; alerts raised later still count as new. Reviews
+  are stamped no earlier than the case's newest event, because the database clock runs about 0.3s
+  ahead of the app's. The setup wizard's auto-landing now happens once per tenant and never overrides
+  a page in the URL; it used to redirect every refresh for anyone who left it from the sidebar.
+  Covered by `web/e2e/monitor-review.spec.ts` with mocked API responses.
+- **Escalations page (2026-11-06):** a Case Monitor tab listing cases where the party we're waiting
+  on has sent no real update for `escalation_days` (default 5), with a CSV download.
+  `interpreter/monitor/escalations.py` reads email, Slack and GitHub. Acks, customers and internal
+  threads don't count, our-turn and never-raised cases are left out, and a Support case folds into
+  its DSP case, sharing replies from either side. Sync now keeps a textless `email_log` of up to 40
+  emails per case, because the 5-email feed hid older replies; the first 5 still drive verdicts, so
+  queue results don't change. Checked against Salesforce on all 12 real rows: every external email
+  from an aggregator is accounted for. Unread links show as "Not read" rather than as silence.
+- **Engineering page (2026-11-06):** Escalations is now third parties only. A new tab lists every open
+  GitHub issue with the `github_support_label` label, plus any an open case links to, by squad, with
+  filters for squad, status and age (`tech_pending_days`, default 7) and a CSV. Each sync lists the
+  label, so issues with no open case show too. `interpreter/monitor/issue_status.py` settles an issue
+  with no non-support comment by rule, and an LLM reads the rest into a status, who it's waiting on
+  and a reason. A reading is kept in `monitor_issues` (migration 120, applied) until `thread_hash`
+  changes, and anything unread shows as "Not read yet", never as answered. This replaced a keyword
+  RCA check, which called three explained issues "no RCA". It feeds this page only, never a verdict.
+  GitHub comments and descriptions are now stored up to 1,500 characters so they can be read whole.
+  Scored on 16 hand-read issues: 13 agree, none shown further along than they are. Open question:
+  `support_github_users` is partial, so a support person off the list counts as a tech reply, because
+  "No tech reply" is decided by that list alone and never by the LLM.
+- **AI evaluation:** `eval/monitor/backtest.py` hides a real agent reply on a resolved case and
+  scores the draft with DeepEval. `eval/monitor/reply_labels.py` scores reply labels against a
+  hand-labelled file; gold data stays out of the repo. Holdout result: 1 of 22 real replies hidden.
+  Heavy runs exhaust Groq's 200k daily tokens, which also pushes the live pipeline to fallbacks.
 - **Not verified:** the Slack user OAuth round trip, the tag-team post, LLM summaries, a scheduled sync
   firing, and the UI on real data. No `web/e2e` spec yet; the browser walk was a throwaway script.
 - **Salesforce without a secret:** the owner has no Connected App client ID or secret, so

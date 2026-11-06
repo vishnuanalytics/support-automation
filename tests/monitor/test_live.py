@@ -95,3 +95,29 @@ def test_anon_key_cannot_read_monitor_tables(sb, tenant):
     anon = make_client(os.environ["SUPABASE_URL"], key)
     for table in ("monitor_cases", "monitor_evidence", "monitor_config", "monitor_syncs"):
         assert anon.table(table).select("*").limit(1).execute().data == []
+
+
+def test_alerts_flow_through_real_tables(sb, tenant):
+    from interpreter.monitor import service
+    from interpreter.monitor.store import SupabaseStore
+
+    user = "57c26330-0000-0000-0000-000000000001"
+    sync_id = SupabaseStore(sb).start_sync(tenant, "test")
+    SupabaseStore(sb).finish_sync(sync_id, "ok", {}, [])
+    try:
+        service.start_alerts(sb, tenant, user)
+        SupabaseStore(sb).add_events(tenant, sync_id, [
+            {"case_id": "alert-test", "case_number": "1", "subject": "S", "kind": "needs_action",
+             "detail": "Fix shared"}])
+        got = service.alerts(sb, tenant, user)
+        assert got["unread"] == 1 and got["alerts"][0]["detail"] == "Fix shared"
+        service.set_review(sb, tenant, "alert-test", user, reviewed=True)
+        assert service.alerts(sb, tenant, user)["unread"] == 0
+        service.set_review(sb, tenant, "alert-test", user, clear=True)
+        assert service.alerts(sb, tenant, user)["unread"] == 1
+        service.mark_alerts_seen(sb, tenant, user)
+        assert service.alerts(sb, tenant, user)["unread"] == 0
+    finally:
+        sb.table("monitor_events").delete().eq("case_id", "alert-test").execute()
+        sb.table("monitor_reviews").delete().eq("case_id", "alert-test").execute()
+        sb.table("monitor_alert_seen").delete().eq("user_id", user).execute()

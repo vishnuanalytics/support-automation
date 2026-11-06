@@ -43,6 +43,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "eng_nudge_hours": 8,
     "third_party_nudge_hours": 24,
     "third_party_overrides": {},      # {"PartnerA": 12}
+    "escalation_days": 5,             # no update for this long puts a case on the Escalations page
+    "tech_pending_days": 7,           # the Engineering page's age filter
+    "github_support_label": "support",  # the Engineering page lists open issues with this label
+    "github_squad_suffix": "-squad",  # the issue label ending in this names its squad
     "third_party_label": "Third party",
     "customer_label": "Customer",
     "support_github_users": [],
@@ -52,6 +56,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "email_footer_markers": [],       # text after one of these is a signature or footer
     "focus_partners": [],             # third parties shown as cards above the queue
     "slack_team_mention": "",         # e.g. "<!subteam^S123>", used by Tag team
+    "slack_via_claude": False,        # threads are imported from a Claude session, with no app login
     "sync_every_min": 60,             # 0 disables interval syncs
     "sync_hour": 9,
     "timezone": "Asia/Kolkata",
@@ -88,9 +93,12 @@ def validate(config: Any) -> list[str]:
     waiting = config.get("waiting_values", {})
     if not isinstance(waiting, dict) or any(v not in PARTIES for v in waiting.values()):
         errors.append(f"waiting_values must map to one of {PARTIES}")
-    for key in ("eng_nudge_hours", "third_party_nudge_hours"):
+    for key in ("eng_nudge_hours", "third_party_nudge_hours", "escalation_days",
+                "tech_pending_days"):
         if key in config and not (isinstance(config[key], (int, float)) and config[key] > 0):
             errors.append(f"{key} must be a positive number")
+    if not str(config.get("github_support_label", "support")).strip():
+        errors.append("github_support_label can't be empty")
     for key in ("support_github_users", "github_bot_users"):
         if any(not GH_USER.match(str(u)) for u in config.get(key, [])):
             errors.append(f"{key} has an invalid username")

@@ -1,5 +1,5 @@
 import { supabase } from "./supabase";
-import type { AiDraft, CaseDetail, Digest, Queue, SlackStatus, Summary } from "./monitor/types";
+import type { AiDraft, Alerts, CaseDetail, Digest, Escalations, FollowUps, Queue, SlackStatus, Summary, TechPending } from "./monitor/types";
 import type {
   AssistResult,
   AuditEvent,
@@ -598,6 +598,12 @@ export const api = {
   monitor: {
     queue: (tenantId?: string) => req<Queue>(`/monitor/queue${monitorQuery(tenantId)}`),
     digest: (tenantId?: string) => req<Digest>(`/monitor/digest${monitorQuery(tenantId)}`),
+    followUps: (tenantId?: string) => req<FollowUps>(`/monitor/follow-ups${monitorQuery(tenantId)}`),
+    escalations: (tenantId?: string) => req<Escalations>(`/monitor/escalations${monitorQuery(tenantId)}`),
+    techPending: (tenantId?: string) => req<TechPending>(`/monitor/tech-pending${monitorQuery(tenantId)}`),
+    alerts: (tenantId?: string) => req<Alerts>(`/monitor/alerts${monitorQuery(tenantId)}`),
+    alertsSeen: (tenantId?: string) =>
+      req<void>(`/monitor/alerts/seen${monitorQuery(tenantId)}`, { method: "POST" }),
     caseDetail: (id: string, tenantId?: string) =>
       req<CaseDetail>(`/monitor/cases/${encodeURIComponent(id)}${monitorQuery(tenantId)}`),
     refreshCase: (id: string, tenantId?: string) =>

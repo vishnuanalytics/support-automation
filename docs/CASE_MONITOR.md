@@ -129,6 +129,43 @@ and escalation time for a workspace. Never store portal passwords in it. The cha
 A third-party case with no linked case of the raising record type, as parent or child, shows as not
 raised. If that linked case is closed while this one is open, it's our turn to update the customer.
 
+### Follow-ups and alerts
+
+**Follow-ups** lists what each agent owes today: cases to reply to, cases to raise, and waiting cases
+that have gone quiet past their limit. Each agent has a copy-ready message. **Alerts** lists what
+changed since you last looked, skipping acknowledgements. With the app open, it can also show
+desktop notifications and play a chime. Use **Test alert** to check both. Browsers only allow sound
+after a click on the page. Alerts are only as fresh as the latest sync, so set `sync_every_min` to suit.
+
+### Escalations
+
+**Escalations** lists open cases where the third party we're waiting on has sent no real update for
+`escalation_days` (default 5), across all channels, and downloads as CSV. An update must
+come from that party, so acknowledgements, customers and internal threads don't count. Cases on our
+turn or never raised aren't listed. A support case folds into its DSP case. A review doesn't remove
+a case: the silence is still true. Links that couldn't be read show as "Not read".
+
+### Engineering
+
+**Engineering** lists every open GitHub issue labelled `github_support_label` (default `support`), in
+each repository open cases link to, plus any other issue an open case links to. Issues are grouped by
+squad label (`github_squad_suffix`), filter by squad, status and age (`tech_pending_days`, default 7),
+and download as CSV. An issue with no open case shows "No open case".
+
+Each issue has a status, who it's waiting on and a one-line note:
+
+| Status | Meaning |
+|---|---|
+| No tech reply | Only support has commented |
+| Cause not confirmed yet | An engineer replied, with no confirmed cause |
+| Cause given, not closed yet | The cause or decision is stated, and a step is still open |
+| Answered or fix released | Nothing is left for engineers |
+| Not read yet | The AI couldn't read it, usually a rate limit. The next sync retries |
+
+An issue with no comment from outside `support_github_users` is "No tech reply" by rule. The AI reads
+the rest, and only re-reads an issue when its thread changes. Text is redacted first. These statuses
+never affect a case's verdict. Score them with `python -m eval.monitor.issue_status`.
+
 ### Email footers
 
 List text that starts your email footer in `email_footer_markers`. Everything after it is hidden from
@@ -173,7 +210,7 @@ found in a post is tagged in the queue.
 
 ### Without a Slack app
 
-If your organization doesn't allow a Slack app, a Claude Code session with a Slack connector can load
+If your organization doesn't allow a Slack app, set `slack_via_claude` to true and a Claude Code session with a Slack connector can load
 threads instead. Claude reads the threads linked from open cases with your own Slack access, then
 calls `service.import_slack_threads`. The page shows when each thread was read. Syncs keep the last
 import until a real read succeeds, so it goes stale until the next refresh. Tagging your team isn't
@@ -192,7 +229,8 @@ written to the audit log. In an external channel, external members can see the p
 - Slack: only `conversations.replies` and `users.info`, plus the tag above.
 - Reviewed and snooze stay in this app and are shared across the workspace. They're never written
   to Salesforce, and new activity brings a case back.
-- Stored text is cut to about 400 characters with signed URL parameters removed. Text is redacted
+- Stored text is cut to about 400 characters, or 1,500 for GitHub comments and 2,000 for emails, with
+  signed URL parameters removed. Text is redacted
   before any LLM call. Slack tokens live only in Vault.
 
 ## Known limits

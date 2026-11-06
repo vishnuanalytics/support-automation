@@ -4999,6 +4999,38 @@ def monitor_digest(tenant_id: str | None = None, c: Caller = Depends(caller)) ->
     return service.digest(c.sb, _caller_tenant(c, tenant_id))
 
 
+@app.get("/api/monitor/follow-ups")
+def monitor_follow_ups(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    from interpreter.monitor import service
+    return service.follow_up_list(c.sb, _caller_tenant(c, tenant_id))
+
+
+@app.get("/api/monitor/escalations")
+def monitor_escalations(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    from interpreter.monitor import service
+    return service.escalation_list(c.sb, _caller_tenant(c, tenant_id))
+
+
+@app.get("/api/monitor/tech-pending")
+def monitor_tech_pending(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    from interpreter.monitor import service
+    return service.tech_pending_list(c.sb, _caller_tenant(c, tenant_id))
+
+
+@app.get("/api/monitor/alerts")
+def monitor_alerts(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    from interpreter.monitor import service
+    tid = _caller_tenant(c, tenant_id)
+    service.start_alerts(_service, tid, c.user_id)
+    return service.alerts(c.sb, tid, c.user_id)
+
+
+@app.post("/api/monitor/alerts/seen", status_code=204)
+def monitor_alerts_seen(tenant_id: str | None = None, c: Caller = Depends(caller)) -> None:
+    from interpreter.monitor import service
+    service.mark_alerts_seen(_service, _caller_tenant(c, tenant_id), c.user_id)
+
+
 @app.get("/api/monitor/cases/{case_id}")
 def monitor_case(case_id: str, tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
     from interpreter.monitor import service

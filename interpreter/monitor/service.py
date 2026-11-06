@@ -7,7 +7,8 @@ from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from . import brief, config, demo, drafts, readers, redact, similar, sync, timeline, verdict
+from . import (brief, config, demo, drafts, escalations, followups, readers, redact, similar, sync,
+               tech_pending, timeline, verdict)
 from .store import SupabaseStore
 from .verdict import parse_dt
 
@@ -70,6 +71,7 @@ def queue(sb: Any, tenant_id: str, now: datetime | None = None) -> dict[str, Any
             "partner_channel": (c.get("partner") or {}).get("channel"),
             "not_raised": bool(v.get("not_raised")),
             "stage": verdict.stage(v), "signal": v.get("signal"), "latest": v.get("latest"),
+            "stale": bool(v.get("stale")),
             "overdue_hours": v.get("overdue_hours") or 0,
             "mine": bool(cfg_all["lead_owner_name"])
             and c.get("owner") == cfg_all["lead_owner_name"],
@@ -94,7 +96,12 @@ def queue(sb: Any, tenant_id: str, now: datetime | None = None) -> dict[str, Any
     done = [s for s in history if s["status"] != "running"]
     cfg = _cfg_for(load_config(sb, tenant_id), "demo" if any(
         r["source"] == "demo" for r in cases) else None)
+    slack_read = (sb.table("monitor_evidence").select("data").eq("tenant_id", tenant_id)
+                  .ilike("url", "%slack.com%").execute().data or [])
+    read_times = [r["data"]["imported_at"] for r in slack_read if r["data"].get("imported_at")]
     return {"cases": items,
+            "slack_via_claude": bool(cfg_all["slack_via_claude"]),
+            "slack_read_at": max(read_times, default=None),
             "labels": {"third_party": cfg["third_party_label"],
                        "customer": cfg["customer_label"]},
             "has_lead": bool(cfg_all["lead_owner_name"]),
@@ -158,6 +165,7 @@ def case_detail(sb: Any, tenant_id: str, case_id: str,
                           for x in case.get("links") or []
                           if x.get("kind") == "slack" and x.get("channel")],
         "slack_team_mention": cfg.get("slack_team_mention") or "",
+        "slack_via_claude": bool(cfg.get("slack_via_claude")),
         "partner": case.get("partner"),
         "labels": {"third_party": cfg["third_party_label"], "customer": cfg["customer_label"]},
         "llm_enabled": bool(cfg.get("llm_enabled")),
@@ -176,6 +184,98 @@ def digest(sb: Any, tenant_id: str, limit: int = 300) -> dict[str, Any]:
     return {"since": last[0]["started_at"] if last else None, "events": events}
 
 
+def follow_up_list(sb: Any, tenant_id: str) -> dict[str, Any]:
+    return followups.build(queue(sb, tenant_id)["cases"])
+
+
+def _evidence_by_url(sb: Any, tenant_id: str, urls: list[str]) -> dict[str, dict]:
+    found: dict[str, dict] = {}
+    for start in range(0, len(urls), 50):
+        rows = (sb.table("monitor_evidence").select("url, data").eq("tenant_id", tenant_id)
+                .in_("url", urls[start:start + 50]).execute().data or [])
+        found.update({r["url"]: r["data"] for r in rows})
+    return found
+
+
+def escalation_list(sb: Any, tenant_id: str, now: datetime | None = None) -> dict[str, Any]:
+    now = now or datetime.now(timezone.utc)
+    rows = (sb.table("monitor_cases").select("source, case_data, verdict, timeline")
+            .eq("tenant_id", tenant_id).eq("is_open", True).execute().data or [])
+    cfg = load_config(sb, tenant_id)
+    urls = sorted({x["url"] for r in rows for x in r["case_data"].get("links") or []})
+    found = _evidence_by_url(sb, tenant_id, urls)
+    items = []
+    for r in rows:
+        case = r["case_data"]
+        evidence = [found[x["url"]] for x in case.get("links") or [] if x["url"] in found]
+        if case.get("email_evidence"):
+            evidence.append(case["email_evidence"])
+        # The DSP feed keeps only the newest few emails; the timeline has the rest.
+        evidence.append(sync.case_emails(case, r["timeline"], _cfg_for(cfg, r["source"])))
+        evidence.append({"kind": "email", "ok": True, "messages": case.get("email_log") or []})
+        items.append((case, r["verdict"], evidence))
+    return escalations.build(items, cfg["escalation_days"], now, cfg["dependency_record_type"])
+
+
+def tech_pending_list(sb: Any, tenant_id: str, now: datetime | None = None) -> dict[str, Any]:
+    now = now or datetime.now(timezone.utc)
+    rows = (sb.table("monitor_cases").select("case_data").eq("tenant_id", tenant_id)
+            .eq("is_open", True).execute().data or [])
+    cases = [r["case_data"] for r in rows]
+    cfg = load_config(sb, tenant_id)
+    issues = (sb.table("monitor_issues").select("url, status, waiting_on, reason")
+              .eq("tenant_id", tenant_id).eq("is_open", True).execute().data or [])
+    evidence = _evidence_by_url(sb, tenant_id, [i["url"] for i in issues])
+    return tech_pending.build(issues, cases, evidence, cfg["tech_pending_days"], now, cfg)
+
+
+ALERT_LIMIT = 100
+
+
+def cleared_by_review(event: dict, reviewed_at: str | None) -> bool:
+    """Reviewing a case deals with its alerts so far; later ones still count as new."""
+    reviewed, created = parse_dt(reviewed_at), parse_dt(event.get("created_at"))
+    return bool(reviewed and created and created <= reviewed)
+
+
+def alerts(sb: Any, tenant_id: str, user_id: str) -> dict[str, Any]:
+    rows = (sb.table("monitor_events").select("*").eq("tenant_id", tenant_id)
+            .neq("kind", "new_case").order("created_at", desc=True).limit(ALERT_LIMIT)
+            .execute().data or [])
+    seen = (sb.table("monitor_alert_seen").select("seen_event_id").eq("tenant_id", tenant_id)
+            .eq("user_id", user_id).execute().data or [])
+    last = seen[0]["seen_event_id"] if seen else 0
+    reviews = (sb.table("monitor_reviews").select("case_id, reviewed_at")
+               .eq("tenant_id", tenant_id).execute().data or [])
+    reviewed = {r["case_id"]: r["reviewed_at"] for r in reviews}
+    for r in rows:
+        r["unread"] = r["id"] > last and not cleared_by_review(r, reviewed.get(r["case_id"]))
+    return {"alerts": rows, "unread": sum(r["unread"] for r in rows)}
+
+
+def start_alerts(sb: Any, tenant_id: str, user_id: str) -> None:
+    """A person's first visit starts from now, so history doesn't arrive as new."""
+    seen = (sb.table("monitor_alert_seen").select("user_id").eq("tenant_id", tenant_id)
+            .eq("user_id", user_id).execute().data or [])
+    if not seen:
+        mark_alerts_seen(sb, tenant_id, user_id)
+
+
+def mark_alerts_seen(sb: Any, tenant_id: str, user_id: str) -> None:
+    newest = (sb.table("monitor_events").select("id").eq("tenant_id", tenant_id)
+              .order("id", desc=True).limit(1).execute().data or [])
+    sb.table("monitor_alert_seen").upsert({
+        "tenant_id": tenant_id, "user_id": user_id,
+        "seen_event_id": newest[0]["id"] if newest else 0}).execute()
+
+
+def _review_stamp(sb: Any, tenant_id: str, case_id: str, now: str) -> str:
+    """Events carry the database's clock, so a review can't simply use ours to cover them."""
+    newest = (sb.table("monitor_events").select("created_at").eq("tenant_id", tenant_id)
+              .eq("case_id", case_id).order("created_at", desc=True).limit(1).execute().data or [])
+    return max(now, newest[0]["created_at"], key=parse_dt) if newest else now
+
+
 def set_review(sb: Any, tenant_id: str, case_id: str, user_id: str, *, reviewed: bool = False,
                snooze_until: str | None = None, clear: bool = False) -> dict:
     now = datetime.now(timezone.utc).isoformat()
@@ -183,7 +283,7 @@ def set_review(sb: Any, tenant_id: str, case_id: str, user_id: str, *, reviewed:
                            "reviewed_at": None, "snooze_until": None, "snoozed_at": None}
     if not clear:
         if reviewed:
-            row["reviewed_at"] = now
+            row["reviewed_at"] = _review_stamp(sb, tenant_id, case_id, now)
         if snooze_until:
             row.update(snooze_until=snooze_until, snoozed_at=now)
     return sb.table("monitor_reviews").upsert(row).execute().data[0]
@@ -214,8 +314,8 @@ def _evidence_readers(sb: Any, tenant_id: str, cfg: dict) -> dict[str, Any]:
         token = None
     return {"github": readers.GithubReader(token, cfg["support_github_users"],
                                            cfg["github_bot_users"]),
-            "slack": readers.SlackReader(_slack_tokens(sb, tenant_id),
-                                         cfg["internal_slack_domain"])}
+            "slack": readers.SlackReader(_slack_tokens(sb, tenant_id), cfg["internal_slack_domain"],
+                                         cfg["slack_via_claude"])}
 
 
 def _case_reader(sb: Any, tenant_id: str, cfg: dict) -> readers.SalesforceCaseReader:
@@ -370,8 +470,13 @@ def ai_draft(sb: Any, tenant_id: str, case_id: str, audience: str) -> dict[str, 
         return None
     if not detail["llm_enabled"]:
         return {"enabled": False}
-    return {"enabled": True, **knowledge.generate_draft(
-        tenant_id, detail["case"], audience, detail["timeline"], sb, detail["partner"])}
+    try:
+        return {"enabled": True, **knowledge.generate_draft(
+            tenant_id, detail["case"], audience, detail["timeline"], sb, detail["partner"])}
+    except Exception as e:  # noqa: BLE001 -- usually the AI provider's daily limit
+        log.warning("ai draft failed: %s", type(e).__name__)
+        return {"enabled": True, "error": "The AI service is busy or over its daily limit. "
+                                          "Try again later, or use a copy draft below."}
 
 
 SUMMARY_SYSTEM = (

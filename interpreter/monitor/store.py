@@ -23,6 +23,9 @@ class Store(Protocol):
     def save_evidence(self, tenant_id: str, evidence: list[dict], now: datetime) -> None: ...
     def close_cases(self, tenant_id: str, ids: list[str]) -> None: ...
     def imported_evidence(self, tenant_id: str) -> dict[str, dict]: ...
+    def issue_reads(self, tenant_id: str) -> dict[str, dict]: ...
+    def save_issues(self, tenant_id: str, reads: dict[str, dict], now: datetime) -> None: ...
+    def close_issues(self, tenant_id: str, urls: list[str]) -> None: ...
     def partners(self, tenant_id: str) -> list[dict]: ...
     def reply_labels(self, tenant_id: str, hashes: list[str]) -> dict[str, dict]: ...
     def save_reply_labels(self, tenant_id: str, labels: dict[str, dict]) -> None: ...
@@ -135,6 +138,22 @@ class SupabaseStore:
         if labels:
             self.sb.table("monitor_reply_labels").upsert(
                 [{"tenant_id": tenant_id, "text_hash": k, **v} for k, v in labels.items()]).execute()
+
+    def issue_reads(self, tenant_id: str) -> dict[str, dict]:
+        rows = (self.sb.table("monitor_issues").select("*").eq("tenant_id", tenant_id)
+                .execute().data or [])
+        return {r["url"]: r for r in rows}
+
+    def save_issues(self, tenant_id: str, reads: dict[str, dict], now: datetime) -> None:
+        payload = [{"tenant_id": tenant_id, "url": url, "is_open": True,
+                    "synced_at": now.isoformat(), **read} for url, read in reads.items()]
+        for start in range(0, len(payload), _CHUNK):
+            self.sb.table("monitor_issues").upsert(payload[start:start + _CHUNK]).execute()
+
+    def close_issues(self, tenant_id: str, urls: list[str]) -> None:
+        for start in range(0, len(urls), _CHUNK):
+            (self.sb.table("monitor_issues").update({"is_open": False})
+             .eq("tenant_id", tenant_id).in_("url", urls[start:start + _CHUNK]).execute())
 
     def partners(self, tenant_id: str) -> list[dict]:
         return (self.sb.table("monitor_partners").select("*").eq("tenant_id", tenant_id)

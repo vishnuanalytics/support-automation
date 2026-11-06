@@ -38,6 +38,19 @@ class FakeStore:
     def close_cases(self, tenant_id, ids):
         self.closed = ids
 
+    issue_rows: dict = {}
+    issues_saved: dict = {}
+    issues_closed: list = []
+
+    def issue_reads(self, tenant_id):
+        return self.issue_rows
+
+    def save_issues(self, tenant_id, reads, now):
+        self.issues_saved = reads
+
+    def close_issues(self, tenant_id, urls):
+        self.issues_closed = urls
+
     imported: dict = {}
     partner_rows: list = []
 
@@ -104,7 +117,12 @@ class FakeReader:
         return [{"id": "r1"}]
 
 
-class OkGithub:
+class ListsNothing:
+    def open_issue_links(self, owner, repo, label):
+        return []
+
+
+class OkGithub(ListsNothing):
     calls = 0
 
     def fetch(self, link):
@@ -112,7 +130,7 @@ class OkGithub:
         return {"kind": "github", "url": link["url"], "ok": True, "state": "open", "messages": []}
 
 
-class ExplodingGithub:
+class ExplodingGithub(ListsNothing):
     def fetch(self, link):
         raise requests.ConnectionError("down")
 
@@ -537,6 +555,42 @@ def test_digest_events():
         "new_reply", "newly_overdue", "newly_missing_link", "new_case"}
 
 
+def _v(**kw):
+    return {"ball": "third_party", "overdue": False, "missing_link": False, **kw}
+
+
+def _kinds(before, after):
+    return {e["kind"] for e in sync.diff_events({"1": {"verdict": before}},
+                                                [{"case": case("1"), "verdict": after}])}
+
+
+def test_a_real_update_raises_an_action_alert():
+    after = _v(ball="us", signal={"code": "reply_solution", "text": "Fix shared"},
+               latest_reply_at="2026-11-02T00:00:00Z")
+    assert "needs_action" in _kinds(_v(latest_reply_at="2026-11-01T00:00:00Z"), after)
+
+
+def test_a_case_that_stays_on_the_same_action_does_not_alert_again():
+    same = _v(ball="us", signal={"code": "reply_solution"})
+    assert "needs_action" not in _kinds(same, same)
+
+
+def test_a_new_reason_to_act_alerts_again():
+    before = _v(ball="us", signal={"code": "reply_needs_info"})
+    after = _v(ball="us", signal={"code": "customer_replied_email"})
+    assert "needs_action" in _kinds(before, after)
+
+
+def test_an_ack_raises_no_reply_alert():
+    after = _v(signal={"code": "third_party_ack"}, latest_reply_at="2026-11-02T00:00:00Z")
+    assert _kinds(_v(latest_reply_at="2026-11-01T00:00:00Z"), after) == set()
+
+
+def test_going_quiet_alerts_once():
+    stale = _v(stale=True, next_action="Nudge")
+    assert "newly_stale" in _kinds(_v(), stale) and "newly_stale" not in _kinds(stale, stale)
+
+
 def test_first_sync_has_no_digest_events():
     assert sync.diff_events({}, [{"case": case("1"), "verdict": {}}]) == []
 
@@ -590,6 +644,113 @@ def http(monkeypatch):
 
 
 LINK = {"url": GH, "kind": "github", "owner": "o", "repo": "r", "number": 1}
+GH2 = "https://github.com/o/r/issues/2"
+LINK2 = {"url": GH2, "kind": "github", "owner": "o", "repo": "r", "number": 2}
+
+
+class LabelledGithub:
+    """Issue 1 is linked to a case; issue 2 is only found by its label."""
+
+    def __init__(self, listed=(LINK2,), states=None, list_error=None, fetch_error=()):
+        self.listed, self.states = list(listed), states or {}
+        self.list_error, self.fetch_error = list_error, fetch_error
+        self.asked = None
+
+    def open_issue_links(self, owner, repo, label):
+        self.asked = (owner, repo, label)
+        if self.list_error:
+            raise self.list_error
+        return self.listed
+
+    def fetch(self, link):
+        if link["number"] in self.fetch_error:
+            raise requests.ConnectionError("down")
+        return {"kind": "github", "url": link["url"], "label": f"o/r#{link['number']}", "ok": True,
+                "state": self.states.get(link["number"], "open"), "title": "T", "messages": []}
+
+
+def test_sync_lists_labelled_issues_that_no_case_links():
+    store, github = FakeStore(), LabelledGithub()
+    run(store, FakeReader([case("1")]), {"github": github})
+    assert github.asked == ("o", "r", "support")
+    assert sorted(store.issues_saved) == [GH, GH2]
+    assert sorted(e["url"] for e in store.evidence) == [GH, GH2]
+
+
+def test_an_issue_that_left_the_list_is_closed():
+    store = FakeStore()
+    store.issue_rows = {GH + "9": {"is_open": True}, GH + "8": {"is_open": False}}
+    run(store, FakeReader([case("1")]), {"github": LabelledGithub()})
+    assert store.issues_closed == [GH + "9"]
+
+
+def test_a_linked_issue_closed_on_github_is_closed_here():
+    store = FakeStore()
+    store.issue_rows = {GH: {"is_open": True}}
+    run(store, FakeReader([case("1")]), {"github": LabelledGithub(listed=[], states={1: "closed"})})
+    assert store.issues_closed == [GH] and GH not in store.issues_saved
+
+
+def test_a_failed_listing_closes_nothing_and_says_so():
+    store = FakeStore()
+    store.issue_rows = {GH + "9": {"is_open": True}}
+    result = run(store, FakeReader([case("1")]),
+                 {"github": LabelledGithub(list_error=requests.ConnectionError("down"))})
+    assert store.issues_closed == [] and result["status"] == "partial"
+    assert "not listed" in result["errors"][0]["error"]
+
+
+def test_issues_that_failed_to_load_each_keep_a_row():
+    store = FakeStore()
+    run(store, FakeReader([case("1")]), {"github": LabelledGithub(fetch_error=(1, 2))})
+    assert sorted(store.issues_saved) == [GH, GH2]
+    assert store.issues_closed == []
+
+
+def test_one_issue_linked_by_two_urls_is_read_once():
+    link = {**LINK, "url": GH + "#issuecomment-5"}
+    store = FakeStore()
+    c = case("1", url=link["url"])
+    run(store, FakeReader([c]), {"github": LabelledGithub(listed=[LINK])})
+    assert list(store.issues_saved) == [GH]
+
+
+def test_a_broken_issue_step_does_not_stop_the_queue():
+    class Broken(FakeStore):
+        def issue_reads(self, tenant_id):
+            raise RuntimeError("no table")
+
+    store = Broken()
+    result = run(store, FakeReader([case("1")]), {"github": LabelledGithub()})
+    assert result["status"] == "partial" and len(store.saved) == 1
+
+
+def test_github_lists_issues_by_label_across_pages_without_pull_requests(http):
+    calls, queue = http
+    row = {"html_url": GH, "number": 1}
+    queue += [Resp(200, [row] * 99 + [{**row, "pull_request": {}}]), Resp(200, [{"html_url": GH2, "number": 2}])]
+    links = readers.GithubReader("t", []).open_issue_links("o", "r", "support")
+    assert len(links) == 100 and links[-1] == LINK2
+    assert calls[0][2]["labels"] == "support" and calls[0][2]["state"] == "open" and calls[1][2]["page"] == 2
+
+
+def test_github_listing_raises_rather_than_return_part_of_the_list(http):
+    queue = http[1]
+    queue += [Resp(200, [{"html_url": GH, "number": 1}] * 100), Resp(403, {})]
+    with pytest.raises(requests.HTTPError):
+        readers.GithubReader("t", []).open_issue_links("o", "r", "support")
+    with pytest.raises(ValueError):
+        readers.GithubReader(None, []).open_issue_links("o", "r", "support")
+
+
+def test_github_keeps_the_description_and_long_comments(http):
+    queue = http[1]
+    long = "x" * 1200
+    queue += [Resp(200, {"user": {"login": "lead"}, "state": "open", "title": "T", "labels": [], "body": "Printer down"}),
+              Resp(200, [{"user": {"login": "dev"}, "created_at": "2026-01-01T00:00:00Z",
+                          "html_url": "c", "body": long}])]
+    ev = readers.GithubReader("t", []).fetch(LINK)
+    assert ev["body"] == "Printer down" and ev["messages"][0]["text"] == long
 
 
 def test_github_normalises_and_paginates(http):
@@ -686,6 +847,11 @@ def test_slack_tries_the_next_lead_token(http):
 
 def test_slack_without_a_login_says_so(http):
     assert "connect Slack" in readers.SlackReader([], "x.com").fetch(SLACK)["error"]
+
+
+def test_slack_via_claude_says_how_to_refresh(http):
+    ev = readers.SlackReader([], "x.com", via_claude=True).fetch(SLACK)
+    assert "refresh Slack" in ev["error"]
 
 
 def test_jira_is_linked_but_not_checked():
@@ -785,3 +951,23 @@ def test_no_secret_or_signed_url_reaches_saved_rows():
     assert len(got["description"]) <= 401
 
 
+
+
+def test_older_emails_keep_a_textless_log_but_no_text():
+    from interpreter.monitor import sync as s
+    cfg = {"dependency_record_type": "DSP", "internal_email_domains": ["us.com"], "third_party_label": "T"}
+    mails = [{"who": "a@us.com", "ours": True, "at": f"2026-11-0{9 - i}T00:00:00Z", "text": f"mail {i}"}
+             for i in range(5)]
+    mails.append({"who": "z@acme.com", "ours": False, "at": "2026-10-01T00:00:00Z",
+                  "text": "Here is the root cause of the problem"})
+
+    class Reader:
+        def latest_emails(self, ids):
+            return {"1": mails}
+
+    case = {"id": "1", "record_type": "DSP", "waiting_party": "third_party", "url": "u",
+            "partner": {"email_domains": ["acme.com"]}}
+    s._dsp_emails([case], Reader(), cfg, [])
+    assert len(case["email_evidence"]["messages"]) == 5
+    old = case["email_log"][-1]
+    assert old["party"] == "third_party" and old["ack"] is False and "text" not in old

@@ -24,6 +24,8 @@ CONCURRENCY = 8
 # Salesforce keeps unsent drafts as EmailMessage rows, with Status 5.
 SENT_ONLY = "Status != '5'"
 EMAIL_LIMIT = 2000
+ISSUE_TEXT_LIMIT = 1500  # engineers explain a cause at length, and it has to be read whole
+EMAIL_HISTORY = 40  # emails read per case; only the newest few keep their text
 MAX_RETRIES = 2
 MAX_RETRY_WAIT_S = 30.0
 TIMEOUT_S = 20
@@ -53,6 +55,25 @@ class GithubReader:
         self.token = token
         self.support = {u.lower() for u in support_users}
         self.bots = {u.lower() for u in bot_users or []}
+
+    def open_issue_links(self, owner: str, repo: str, label: str) -> list[dict[str, Any]]:
+        """Open issues with this label. Raises rather than return part of the list."""
+        if not self.token:
+            raise ValueError("GitHub is not connected for this workspace")
+        headers = {"Authorization": f"Bearer {self.token}",
+                   "Accept": "application/vnd.github+json"}
+        links: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            r = _get(f"https://api.github.com/repos/{owner}/{repo}/issues", headers,
+                     {"state": "open", "labels": label, "per_page": 100, "page": page})
+            r.raise_for_status()
+            rows = r.json()
+            links += [{"url": x["html_url"], "kind": "github", "owner": owner, "repo": repo,
+                       "number": x["number"]} for x in rows if "pull_request" not in x]
+            if len(rows) < 100:
+                return links
+            page += 1
 
     def fetch(self, link: dict[str, Any]) -> dict[str, Any]:
         repo = f"{link['owner']}/{link['repo']}"
@@ -91,10 +112,12 @@ class GithubReader:
                 continue
             messages.append({"who": login, "at": c.get("created_at"), "url": c.get("html_url"),
                              "ours": login.lower() == author or login.lower() in self.support,
-                             "text": clean(c.get("body"))})
+                             "text": clean(c.get("body"), ISSUE_TEXT_LIMIT)})
         return {**base, "ok": True, "state": body.get("state"), "title": clean(body.get("title")),
+                "body": clean(body.get("body"), ISSUE_TEXT_LIMIT),
                 "labels": [x.get("name") for x in body.get("labels") or []],
-                "updated_at": body.get("updated_at"), "messages": messages}
+                "opened_at": body.get("created_at"), "updated_at": body.get("updated_at"),
+                "messages": messages}
 
 
 class SlackError(Exception):
@@ -114,8 +137,9 @@ class SlackReader:
     """Reads threads with connected leads' user tokens, trying each in turn
     because different leads belong to different external channels."""
 
-    def __init__(self, tokens: list[str], internal_domain: str):
+    def __init__(self, tokens: list[str], internal_domain: str, via_claude: bool = False):
         self.tokens = tokens
+        self.via_claude = via_claude
         self.domain = internal_domain.lower().lstrip("@")
         self._emails: dict[str, str] = {}
 
@@ -175,7 +199,9 @@ class SlackReader:
         if not link.get("channel"):
             return {**base, "ok": False, "error": "not a message link: paste a thread permalink"}
         if not self.tokens:
-            return {**base, "ok": False, "error": "connect Slack in Case Monitor to read this"}
+            hint = "say \"refresh Slack\" in a Claude session to read this" if self.via_claude \
+                else "connect Slack in Case Monitor to read this"
+            return {**base, "ok": False, "error": hint}
         code = "unknown_error"
         for token in self.tokens:
             try:
@@ -407,7 +433,7 @@ class SalesforceCaseReader:
                     out[r["ParentId"]] = merge_links(out.get(r["ParentId"], []), found)
         return out
 
-    def latest_emails(self, ids: list[str], per_case: int = 5) -> dict[str, list[dict]]:
+    def latest_emails(self, ids: list[str], per_case: int = EMAIL_HISTORY) -> dict[str, list[dict]]:
         """The newest emails on each case, for reading follow-ups on DSP cases."""
         out: dict[str, list[dict]] = {}
         for start in range(0, len(ids), 200):
@@ -478,10 +504,11 @@ class SalesforceCaseReader:
             batch = cases[start:start + 100]
             chunk = ", ".join(f"'{_lit(c['Id'])}'" for c in batch)
             emails: dict[str, list[dict]] = {}
-            for e in self._records("SELECT ParentId, FromAddress, TextBody, MessageDate, Incoming "
+            for e in self._records("SELECT ParentId, FromAddress, ToAddress, TextBody, MessageDate, "
+                                   "Incoming "
                                    f"FROM EmailMessage WHERE ParentId IN ({chunk}) AND {SENT_ONLY}"):
                 emails.setdefault(e["ParentId"], []).append({
-                    "from": e.get("FromAddress"), "text": e.get("TextBody"),
+                    "from": e.get("FromAddress"), "to": e.get("ToAddress"), "text": e.get("TextBody"),
                     "at": e.get("MessageDate"), "incoming": bool(e.get("Incoming"))})
             notes: dict[str, list[str]] = {}
             for c in self._records("SELECT ParentId, CommentBody FROM CaseComment "

@@ -67,6 +67,8 @@ export type Queue = {
   cases: QueueCase[];
   labels: { third_party: string; customer: string };
   has_lead: boolean;
+  slack_via_claude: boolean;
+  slack_read_at: string | null;
   focus_partners: string[];
   tiles: Tiles;
   trend: { at: string; my_turn: number }[];
@@ -174,6 +176,7 @@ export type CaseDetail = {
   duplicates: { id: string; case_number: string | null; subject: string | null; owner: string | null }[];
   slack_threads: { url: string; channel: string; thread_ts: string }[];
   slack_team_mention: string;
+  slack_via_claude: boolean;
   labels: { third_party: string; customer: string };
   llm_enabled: boolean;
 };
@@ -184,6 +187,7 @@ export type Digest = {
 export type SlackStatus = { configured: boolean; connected: boolean; leads_connected: number };
 export type AiDraft = {
   enabled: boolean;
+  error?: string;
   situation?: string;
   draft?: string;
   missing?: string[];
@@ -195,3 +199,93 @@ export type Summary = {
   text?: string;
   sources?: { n: number; source: string; url: string | null }[];
 };
+
+export type FollowUpCase = {
+  id: string;
+  action: "reply" | "raise" | "chase";
+  case_number: string | null;
+  subject: string | null;
+  next_action: string;
+  third_parties: string[];
+  overdue: boolean;
+  overdue_hours: number;
+  record_type: string | null;
+  latest: QueueCase["latest"];
+};
+export type FollowUpOwner = {
+  owner: string;
+  mine: boolean;
+  counts: { reply: number; raise: number; chase: number };
+  total: number;
+  overdue: number;
+  cases: FollowUpCase[];
+  message: string;
+};
+export type Escalation = {
+  id: string;
+  case_number: string | null;
+  url: string | null;
+  subject: string | null;
+  record_type: string | null;
+  owner: string | null;
+  priority: string | null;
+  waiting_on: string[];
+  days_silent: number;
+  silent_since: string;
+  last_update_at: string | null;
+  last_update_via: string | null;
+  last_ack_at: string | null;
+  our_last_at: string | null;
+  our_follow_ups: number;
+  checked: string[];
+  not_read: string[];
+  support_cases: string[];
+};
+export type TechIssue = {
+  squad: string;
+  issue: string;
+  url: string;
+  title: string | null;
+  last_reply_by: string | null;
+  days_open: number;
+  case_id: string | null;
+  case_number: string | null;
+  other_cases: string[];
+  priority: string | null;
+  sla_due: string | null;
+  sla_status: string | null;
+  tech_status: string;
+  status: string;
+  waiting_on: string | null;
+  reason: string;
+  over_days: boolean;
+};
+export type TechPending = {
+  days: number;
+  total: number;
+  unread: number;
+  statuses: Record<string, string>;
+  squads: { squad: string; issues: TechIssue[] }[];
+};
+export type Escalations = {
+  days: number;
+  total: number;
+  summary: { name: string; cases: number; longest_days: number }[];
+  cases: Escalation[];
+};
+export type FollowUps = {
+  owners: FollowUpOwner[];
+  total: number;
+  counts: { reply: number; raise: number; chase: number };
+};
+export type Alert = {
+  id: number;
+  case_id: string;
+  case_number: string | null;
+  subject: string | null;
+  kind: string;
+  detail: string | null;
+  created_at: string;
+  unread: boolean;
+};
+export type Alerts = { alerts: Alert[]; unread: number };

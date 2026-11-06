@@ -153,14 +153,19 @@ export function App() {
     if (owning) setOpenGroups((prev) => (prev[owning.key] ? prev : { ...prev, [owning.key]: true }));
   }, [view]);
 
-  // land a brand-new (or not-yet-dismissed) tenant on the setup wizard once,
-  // the first time we know which tenant is active — never fights later nav.
+  // Land a new tenant on the setup wizard once, ever. The flag is written here
+  // because leaving the wizard from the sidebar never dismisses it, and a page
+  // the URL asked for (a refresh, a shared link) is left alone.
+  const [openedOnPage] = useState(() => viewFromUrl() !== "editor" || flowIdFromUrl() !== null);
   const [setupCheckedFor, setSetupCheckedFor] = useState<string | null>(null);
   useEffect(() => {
     if (!tenantId || setupCheckedFor === tenantId) return;
     setSetupCheckedFor(tenantId);
-    if (!localStorage.getItem(`onboarding-dismissed:${tenantId}`)) setView("setup");
-  }, [tenantId, setupCheckedFor]);
+    const key = `onboarding-dismissed:${tenantId}`;
+    if (localStorage.getItem(key)) return;
+    localStorage.setItem(key, "1");
+    if (setupCheckedFor !== null || !openedOnPage) setView("setup");
+  }, [tenantId, setupCheckedFor, openedOnPage]);
 
   function dismissOnboarding() {
     if (tenantId) localStorage.setItem(`onboarding-dismissed:${tenantId}`, "1");

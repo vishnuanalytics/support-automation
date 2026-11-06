@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from . import replies, verdict
+from . import issue_status, replies, verdict
 from .readers import CONCURRENCY, EvidenceCollector, merge_links
 
 log = logging.getLogger("interpreter.monitor.sync")
@@ -50,8 +50,17 @@ def diff_events(prior: dict[str, dict], rows: list[dict]) -> list[dict]:
             out.append({**base, "kind": "new_case"})
             continue
         before = old.get("verdict") or {}
-        if _is_after(v.get("latest_reply_at"), before.get("latest_reply_at")):
-            out.append({**base, "kind": "new_reply"})
+        detail = (v.get("signal") or {}).get("text")
+        acts_now = verdict.stage(v) == "act"
+        was_acting = before.get("ball") == verdict.US
+        same_reason = (before.get("signal") or {}).get("code") == (v.get("signal") or {}).get("code")
+        if acts_now and not (was_acting and same_reason):
+            out.append({**base, "kind": "needs_action", "detail": detail})
+        elif _is_after(v.get("latest_reply_at"), before.get("latest_reply_at")) and \
+                (v.get("signal") or {}).get("code") != "third_party_ack":
+            out.append({**base, "kind": "new_reply", "detail": detail})
+        if v.get("stale") and not before.get("stale") and not acts_now:
+            out.append({**base, "kind": "newly_stale", "detail": v.get("next_action")})
         if v["overdue"] and not before.get("overdue"):
             out.append({**base, "kind": "newly_overdue"})
         if v["missing_link"] and not before.get("missing_link"):
@@ -156,6 +165,9 @@ def _attach_partners(cases: list[dict], partners: list[dict], cfg: dict) -> None
             _dsp_ids(c, record_type))
 
 
+EMAILS_WITH_TEXT = 5
+
+
 def _domains(text: str | None) -> list[str]:
     return [a.lower() for a in re.findall(r"@([\w.-]+\.\w+)", text or "")]
 
@@ -166,6 +178,13 @@ def _with_partner(messages: list[dict], domains: list[str]) -> list[dict]:
     return [m for m in messages
             if any(verdict.in_domains(d, domains)
                    for d in _domains(m.get("who")) + _domains(m.get("to")))]
+
+
+def _email_log(messages: list[dict]) -> list[dict]:
+    """Who wrote and when, without the text: enough to tell how long someone's been quiet."""
+    return [{"who": m.get("who"), "at": m.get("at"), "party": m["party"], "ours": m["ours"],
+             "ack": replies.rule_kind(m.get("text")) is not None}
+            for m in messages if m["party"] != verdict.CUSTOMER]
 
 
 def _dsp_emails(cases: list[dict], reader: Any, cfg: dict, errors: list[dict]) -> None:
@@ -195,22 +214,30 @@ def _dsp_emails(cases: list[dict], reader: Any, cfg: dict, errors: list[dict]) -
         group = wanted.get(c["id"])
         if not group:
             continue
+        def keep(found: list[dict]) -> list[dict]:
+            if c.get("record_type") == record_type:
+                return found
+            return _with_partner(found, (c.get("partner") or {}).get("email_domains") or [])
+
+        def classify(found: list[dict]) -> list[dict]:
+            parties = [verdict.email_party(m.get("who"), not m.get("ours"), c, cfg) for m in found]
+            return [{**m, "party": p, "ours": p == verdict.US, "url": c.get("url")}
+                    for m, p in zip(found, parties)]
+
         own = emails.get(c["id"], [])
-        if c.get("record_type") != record_type:
-            own = _with_partner(own, (c.get("partner") or {}).get("email_domains") or [])
-        children = [m for i in group[1:] for m in emails.get(i, [])]
-        messages = []
-        for m in own + children:
-            party = verdict.email_party(m.get("who"), not m.get("ours"), c, cfg)
-            messages.append({**m, "party": party, "ours": party == verdict.US,
-                             "url": c.get("url")})
+        linked = [emails.get(i, []) for i in group[1:]]
+        messages = classify(keep(own[:EMAILS_WITH_TEXT])
+                            + [m for found in linked for m in found[:EMAILS_WITH_TEXT]])
+        log = _email_log(classify(keep(own) + [m for found in linked for m in found]))
+        if log:
+            c["email_log"] = log
         if messages:
             c["email_evidence"] = {"kind": "email", "url": f"email:{c['id']}", "ok": True,
                                    "label": "DSP email", "messages": messages,
-                                   "related": bool(children) or c.get("record_type") != record_type}
+                                   "related": any(linked) or c.get("record_type") != record_type}
 
 
-def _case_emails(case: dict, raw: dict | None, cfg: dict) -> dict:
+def case_emails(case: dict, raw: dict | None, cfg: dict) -> dict:
     """The case's own emails, so a row's last response can't miss a customer email."""
     messages = []
     for e in (raw or {}).get("emails") or []:
@@ -220,6 +247,38 @@ def _case_emails(case: dict, raw: dict | None, cfg: dict) -> dict:
                          "url": case.get("url")})
     return {"kind": "email", "ok": True, "label": "Case email", "url": case.get("url"),
             "messages": messages}
+
+
+def _read_issues(tenant_id: str, cases: list[dict], collector: EvidenceCollector, store: Any,
+                 cfg: dict, errors: list[dict], now: datetime) -> None:
+    """Keep the Engineering page's list: every open labelled issue, plus any a case links to."""
+    github = collector.readers.get("github")
+    if github is None:
+        return
+    linked = [x for c in cases for x in c.get("links") or [] if x["kind"] == "github"]
+    listed: list[dict] = []
+    complete = True
+    for owner, repo in sorted({(x["owner"], x["repo"]) for x in linked}):
+        try:
+            listed += github.open_issue_links(owner, repo, cfg["github_support_label"])
+        except Exception as e:  # noqa: BLE001 -- a partial list must not close issues
+            complete = False
+            errors.append({"error": f"GitHub issues not listed for {repo} ({type(e).__name__})"})
+    found = collector.collect(listed)
+    # A case can link an issue by another URL form, so one issue is keyed by its number.
+    by_issue = {issue_status.issue_key(x): found[x["url"]] for x in linked + listed}
+    current = {ev["url"]: ev for ev in by_issue.values()}
+    issues = [ev for ev in current.values() if ev.get("ok") and ev.get("state") == "open"]
+    known = store.issue_reads(tenant_id)
+    reads = issue_status.read_all(tenant_id, issues, known, cfg)
+    # An issue that failed to load keeps its row, so the page can say it wasn't read.
+    missing = {url: {"status": issue_status.NOT_READ, "method": "none"}
+               for url, ev in current.items() if not ev.get("ok") and url not in known}
+    store.save_issues(tenant_id, {**reads, **missing}, now)
+    if complete:
+        kept = {url for url, ev in current.items() if not ev.get("ok") or ev.get("state") == "open"}
+        store.close_issues(tenant_id, [url for url, row in known.items()
+                                       if row.get("is_open") and url not in kept])
 
 
 def run(tenant_id: str, store: Any, reader: Any, evidence_readers: dict, cfg: dict,
@@ -243,6 +302,11 @@ def run(tenant_id: str, store: Any, reader: Any, evidence_readers: dict, cfg: di
         imported = store.imported_evidence(tenant_id)
         found.update({url: imported[url] for url, ev in found.items()
                       if not ev.get("ok") and url in imported})
+        try:
+            _read_issues(tenant_id, cases, collector, store, cfg, errors, now)
+        except Exception as e:  # noqa: BLE001 -- the case queue doesn't depend on this
+            log.exception("issue read failed for %s", tenant_id)
+            errors.append({"error": f"GitHub issues not read ({type(e).__name__})"})
         timelines = _timelines(cases, prior, reader, errors)
 
         rows = []
@@ -263,7 +327,7 @@ def run(tenant_id: str, store: Any, reader: Any, evidence_readers: dict, cfg: di
             v = verdict.compute(case, evidence, cfg, now)
             raw = timelines.get(case["id"]) or (prior.get(case["id"]) or {}).get("timeline")
             v["latest"] = verdict.latest_message(
-                evidence + [_case_emails(case, raw, cfg)])
+                evidence + [case_emails(case, raw, cfg)])
             rows.append({"case": case, "verdict": v, "timeline": timelines.get(case["id"])})
 
         store.save_cases(tenant_id, rows, now)

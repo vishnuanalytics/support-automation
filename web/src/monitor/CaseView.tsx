@@ -103,11 +103,12 @@ function Conversation({ items }: { items: TimelineItem[] }) {
   );
 }
 
-export function CaseView({ caseId, tenantId, slackConnected, onBack, onConnectSlack }: {
+export function CaseView({ caseId, tenantId, slackConnected, onBack, onReviewed, onConnectSlack }: {
   caseId: string;
   tenantId?: string;
   slackConnected: boolean;
   onBack: () => void;
+  onReviewed: () => void;
   onConnectSlack: () => void;
 }) {
   const [data, setData] = useState<CaseDetail | null>(null);
@@ -162,7 +163,8 @@ export function CaseView({ caseId, tenantId, slackConnected, onBack, onConnectSl
   const review = async (body: { reviewed?: boolean; snooze_until?: string }, done: string) => {
     try {
       await api.monitor.review(caseId, body, tenantId);
-      setNote(done);
+      if (body.reviewed) onReviewed();
+      else setNote(done);
     } catch (e) {
       setErr((e as ApiError).message);
     }
@@ -415,6 +417,7 @@ export function CaseView({ caseId, tenantId, slackConnected, onBack, onConnectSl
                   <p>{summary.text}</p>
                 </div>
               )}
+              {ai?.error && <Banner tone="warn" title={ai.error} />}
               {ai?.draft && (
                 <div className="monitor-ai">
                   <Tag tone="warn-soft">AI-assisted, verify</Tag>
@@ -464,7 +467,12 @@ export function CaseView({ caseId, tenantId, slackConnected, onBack, onConnectSl
           {data.slack_threads.length > 0 && (
             <article className="monitor-card">
               <h3>Tag the team</h3>
-              {!slackConnected ? (
+              {data.slack_via_claude ? (
+                <p className="monitor-muted">
+                  Slack is read through Claude. Say "refresh Slack" in a Claude session to update
+                  this thread, or ask Claude to post a message.
+                </p>
+              ) : !slackConnected ? (
                 <Button size="sm" onClick={onConnectSlack}>Connect Slack</Button>
               ) : tagText === null ? (
                 <Button size="sm" onClick={() => setTagText(

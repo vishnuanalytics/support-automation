@@ -1,7 +1,7 @@
 from datetime import timedelta
 
 from interpreter.monitor import brief, drafts, links, similar, timeline, verdict
-from interpreter.monitor.service import is_hidden, sync_due
+from interpreter.monitor.service import cleared_by_review, is_hidden, sync_due
 
 GH = "https://github.com/o/r/issues/1"
 
@@ -140,6 +140,15 @@ def test_hidden_until_new_activity(now):
     older = {"latest_activity_at": (now - timedelta(hours=1)).isoformat()}
     newer = {"latest_activity_at": (now + timedelta(hours=1)).isoformat()}
     assert is_hidden(r, older, now) and not is_hidden(r, newer, now)
+
+
+def test_review_clears_alerts_up_to_then_but_not_later_ones(now):
+    reviewed = now.isoformat()
+    before = {"created_at": (now - timedelta(minutes=1)).isoformat()}
+    after = {"created_at": (now + timedelta(minutes=1)).isoformat()}
+    assert cleared_by_review(before, reviewed)
+    assert not cleared_by_review(after, reviewed)
+    assert not cleared_by_review(before, None)
 
 
 def test_snooze_expires_and_new_activity_ends_it(now):

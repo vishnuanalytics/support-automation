@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "../api";
 import { Banner, Button, ConfirmButton, Dialog, EmptyState, Input, Select, Skeleton, Tag, type TagTone } from "../ui";
+import { AlertsView, useAlerts } from "./AlertsView";
+import { EscalationsView } from "./EscalationsView";
+import { TechPendingView } from "./TechPendingView";
 import { CaseView } from "./CaseView";
+import { FollowUpsView } from "./FollowUpsView";
 import { MonitorSettings } from "./MonitorSettings";
 import { copyText, formatAge, formatTime } from "./util";
 import type { Digest, Queue, QueueCase, SlackStatus, Stage } from "./types";
@@ -33,7 +37,8 @@ const LEVEL_TONE: Record<string, TagTone> = {
   critical: "exception", high: "warn", medium: "warn-soft", low: "neutral",
 };
 const EVENT_TEXT: Record<string, string> = {
-  new_case: "New case", new_reply: "New reply", newly_overdue: "Newly overdue",
+  needs_action: "Needs action", new_case: "New case", new_reply: "New reply",
+  newly_overdue: "Newly overdue", newly_stale: "Gone quiet",
   newly_missing_link: "Newly missing link",
 };
 // Why a case needs action: the groups shown as chips inside Act now.
@@ -88,6 +93,9 @@ function matches(c: QueueCase, f: Filters): boolean {
     (!q || `${c.case_number} ${c.subject} ${c.owner}`.toLowerCase().includes(q))
   );
 }
+
+const MODES = ["queue", "followups", "escalations", "engineering", "alerts", "digest", "settings"] as const;
+type Mode = (typeof MODES)[number];
 
 function choices(all: string, values: (string | null)[]) {
   const unique = [...new Set(values.filter(Boolean) as string[])].sort();
@@ -288,11 +296,22 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
   const [openId, setOpenId] = useState<string | null>(
     () => new URLSearchParams(window.location.search).get("case"),
   );
-  const [mode, setMode] = useState<"queue" | "digest" | "settings">("queue");
+  const [mode, setModeState] = useState<Mode>(() => {
+    const tab = new URLSearchParams(window.location.search).get("tab");
+    return MODES.includes(tab as Mode) ? (tab as Mode) : "queue";
+  });
+  const setMode = useCallback((next: Mode) => {
+    setModeState(next);
+    const url = new URL(window.location.href);
+    if (next === "queue") url.searchParams.delete("tab");
+    else url.searchParams.set("tab", next);
+    window.history.replaceState(null, "", url);
+  }, []);
   const [digest, setDigest] = useState<Digest | null>(null);
   const [slack, setSlack] = useState<SlackStatus | null>(null);
   const [help, setHelp] = useState(false);
   const pendingG = useRef(false);
+  const alertState = useAlerts(tid);
 
   const load = useCallback(() => {
     api.monitor.queue(tid).then(setQueue).catch((e: ApiError) => setErr(e.message));
@@ -342,11 +361,14 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
   const thirdParty = queue?.labels.third_party ?? "Third party";
   const customer = queue?.labels.customer ?? "Customer";
 
+  const reviewedCount = useMemo(() => all.filter((c) => c.hidden).length, [all]);
+  const listed = useMemo(() => all.filter((c) => showHidden || !c.hidden), [all, showHidden]);
+
   // Everything except the stage tab: the tab counts must reflect these.
-  const visible = useMemo(() => all.filter((c) =>
-    (showHidden || !c.hidden) && matches(c, filters) &&
+  const visible = useMemo(() => listed.filter((c) =>
+    matches(c, filters) &&
     (who === "everyone" || (who === "mine" ? c.mine : !c.mine)) &&
-    (!overdueOnly || c.overdue)), [all, showHidden, filters, who, overdueOnly]);
+    (!overdueOnly || c.overdue)), [listed, filters, who, overdueOnly]);
 
   const stages: { key: StageTab; label: string; hint: string }[] = [
     { key: "act", label: "Act now", hint: "A real update or reply needs us" },
@@ -372,6 +394,15 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
     setTab(s);
     setReason("");
     setSelected(0);
+  };
+
+  // Back to the list at once, so working through it goes straight to the next case.
+  const onReviewed = (id: string) => {
+    setQueue((q) => q && { ...q, cases: q.cases.map((c) => (c.id === id ? { ...c, hidden: true } : c)) });
+    setNote("Marked reviewed");
+    open(null);
+    load();
+    alertState.refresh();
   };
 
   const copySuggested = useCallback(async (id: string) => {
@@ -408,7 +439,7 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [rows, selected, openId, mode, open, copySuggested]);
+  }, [rows, selected, openId, mode, setMode, open, copySuggested]);
 
   const sync = async () => {
     setErr(null);
@@ -455,7 +486,8 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
     return (
       <div className="monitor">
         <CaseView caseId={openId} tenantId={tid} slackConnected={!!slack?.connected}
-                  onBack={() => { open(null); load(); }} onConnectSlack={connectSlack} />
+                  onBack={() => { open(null); load(); }} onReviewed={() => onReviewed(openId)}
+                  onConnectSlack={connectSlack} />
         {shortcuts}
       </div>
     );
@@ -472,12 +504,23 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
         <div>
           <h1>Case Monitor</h1>
           <p>
-            {all.length} open · {queue?.running ? "Sync running…" : queue?.last_sync
+            {all.length - reviewedCount} open{reviewedCount ? ` · ${reviewedCount} reviewed` : ""} · {queue?.running ? "Sync running…" : queue?.last_sync
               ? `Synced ${formatTime(queue.last_sync.started_at)}` : "Not synced yet"}
+            {queue?.slack_via_claude && (
+              <> · Slack read {queue.slack_read_at ? formatTime(queue.slack_read_at) : "not yet"}
+                <span title='Say "refresh Slack" in a Claude session to update Slack threads.'> (say "refresh Slack" in Claude to update)</span>
+              </>
+            )}
           </p>
         </div>
         <div className="monitor-actions">
           <Button size="sm" variant={mode === "queue" ? "secondary" : "ghost"} onClick={() => setMode("queue")}>Queue</Button>
+          <Button size="sm" variant={mode === "followups" ? "secondary" : "ghost"} onClick={() => setMode("followups")}>Follow-ups</Button>
+          <Button size="sm" variant={mode === "escalations" ? "secondary" : "ghost"} onClick={() => setMode("escalations")}>Escalations</Button>
+          <Button size="sm" variant={mode === "engineering" ? "secondary" : "ghost"} onClick={() => setMode("engineering")}>Engineering</Button>
+          <Button size="sm" variant={mode === "alerts" ? "secondary" : "ghost"} onClick={() => setMode("alerts")}>
+            Alerts{alertState.unread ? ` (${alertState.unread})` : ""}
+          </Button>
           <Button size="sm" variant={mode === "digest" ? "secondary" : "ghost"} onClick={() => setMode("digest")}>Digest</Button>
           {isOwner && (
             <Button size="sm" variant={mode === "settings" ? "secondary" : "ghost"} onClick={() => setMode("settings")}>Settings</Button>
@@ -507,6 +550,14 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
 
       {mode === "settings" ? (
         <MonitorSettings tenantId={tid} />
+      ) : mode === "followups" ? (
+        <FollowUpsView tenantId={tid} onOpen={open} />
+      ) : mode === "escalations" ? (
+        <EscalationsView tenantId={tid} onOpen={open} />
+      ) : mode === "engineering" ? (
+        <TechPendingView tenantId={tid} onOpen={open} />
+      ) : mode === "alerts" ? (
+        <AlertsView state={alertState} onOpen={open} />
       ) : mode === "digest" ? (
         <section className="monitor-digest">
           <h2>What changed in the last sync</h2>
@@ -552,7 +603,7 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
           </div>
 
           {queue.focus_partners.length > 0 && (
-            <FocusCards names={queue.focus_partners} cases={all} customer={customer} active={filters}
+            <FocusCards names={queue.focus_partners} cases={listed} customer={customer} active={filters}
                         onPick={(patch) => { updateFilters(patch); chooseTab("all"); }} />
           )}
 
@@ -631,7 +682,7 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
                 <Select aria-label="Level" value={filters.level} options={choices("Level: all", ["critical", "high", "medium", "low"])}
                         onChange={(e) => updateFilters({ level: e.target.value })} />
               </div>
-              <Breakdown cases={all} active={filters} onPick={updateFilters} />
+              <Breakdown cases={listed} active={filters} onPick={updateFilters} />
             </section>
           )}
 
