@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from .redact import clean
-from .verdict import ENGINEERING, THIRD_PARTY, US
+from .verdict import ENGINEERING, THIRD_PARTY, US, age_text
 
 
 def _fact(label: str, value: Any, source: str, url: str | None) -> dict:
@@ -29,7 +29,7 @@ def _latest_external(evidence: list[dict]) -> tuple[dict, dict] | None:
 
 def _hours_text(verdict: dict) -> str:
     hours = verdict.get("stale_hours")
-    return f"No update for {hours:g}h. " if hours is not None else ""
+    return f"No update for {age_text(hours)}. " if hours is not None else ""
 
 
 def build(case: dict, verdict: dict, evidence: list[dict], cfg: dict) -> list[dict]:
@@ -37,6 +37,18 @@ def build(case: dict, verdict: dict, evidence: list[dict], cfg: dict) -> list[di
     subject = case.get("subject") or "(no subject)"
     third = cfg.get("third_party_label", "Third party")
     drafts: list[dict] = []
+
+    partner = case.get("partner") or {}
+    channel_email = partner.get("channel") == "email"
+    if channel_email and verdict.get("not_raised"):
+        template = partner.get("raise_template") or f"Title: {subject}\nIssue Description:"
+        drafts.append({
+            "id": "raise_email", "title": f"Raise to {partner['name']}", "review_required": True,
+            "to": partner.get("to_emails") or [], "cc": partner.get("cc_emails") or [],
+            "text": template.replace("{title}", subject),
+            "facts": [_case_fact(case), _fact("Recipients", partner["name"],
+                                              "Aggregator directory", None)],
+        })
 
     gh = next((e for e in evidence if e["kind"] == "github" and e.get("ok")), None)
     if gh:
@@ -56,6 +68,8 @@ def build(case: dict, verdict: dict, evidence: list[dict], cfg: dict) -> list[di
             facts.append(_fact("Thread", slack["url"], "Slack", slack["url"]))
         drafts.append({
             "id": "third_party_followup", "title": f"{third} follow-up",
+            **({"to": partner.get("to_emails") or [], "cc": partner.get("cc_emails") or []}
+               if channel_email else {}),
             "text": f"Hi {names} team, following up on {subject} (our ref {number}). "
                     f"{_hours_text(verdict)}Could you share an update?",
             "facts": facts,
@@ -100,6 +114,8 @@ def suggested_id(case: dict, verdict: dict, drafts: list[dict]) -> str | None:
     """The draft the `c` shortcut copies: the one that fits the next action."""
     ids = {d["id"] for d in drafts}
     ball = verdict["ball"]
+    if "raise_email" in ids:
+        return "raise_email"
     if ball == US and "customer_update" in ids:
         return "customer_update"
     if ball == ENGINEERING and "github_nudge" in ids:

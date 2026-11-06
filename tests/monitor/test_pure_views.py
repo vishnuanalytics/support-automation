@@ -166,12 +166,16 @@ def test_agent_nudge_needs_a_named_owner(cfg):
     assert "Do it" in got["agent_nudge"]["text"] and "Asha" in got["agent_nudge"]["text"]
 
 
-def test_dsp_inbound_email_is_labelled_as_the_third_party(cfg):
-    cfg = {**cfg, "dependency_record_type": "DSP"}
-    raw = {"emails": [{"from": "ops@x.in", "text": "t", "at": "2026-01-01T00:00:00Z",
-                       "incoming": True}]}
-    assert timeline.merge(case(record_type="DSP"), raw, [], cfg)[0]["party_label"] == "Aggregator"
-    assert timeline.merge(case(record_type="Support"), raw, [], cfg)[0]["party_label"] == "Merchant"
+def test_inbound_email_is_labelled_by_sender_domain(cfg):
+    cfg = {**cfg, "internal_email_domains": ["us.test"]}
+    c = case(partner={"name": "AcmeEats", "email_domains": ["acmeeats.test"]})
+    def label(sender):
+        raw = {"emails": [{"from": sender, "text": "t", "at": "2026-01-01T00:00:00Z",
+                           "incoming": True}]}
+        return timeline.merge(c, raw, [], cfg)[0]["party_label"]
+    assert label("ops@acmeeats.test") == "Aggregator"
+    assert label("owner@gmail.com") == "Merchant"
+    assert label("agent@us.test") == "Our team"
 
 
 def test_related_dsp_email_appears_in_the_parent_timeline(cfg):
@@ -179,3 +183,35 @@ def test_related_dsp_email_appears_in_the_parent_timeline(cfg):
         {"who": "ops@x.in", "ours": False, "at": "2026-01-01T00:00:00Z", "text": "t"}]}
     item = timeline.merge(case(), None, [ev], cfg)[0]
     assert item["source"] == "DSP email" and item["party_label"] == "Aggregator"
+
+
+def test_raise_email_draft_has_recipients_and_comes_first(cfg):
+    c = case(partner={"name": "AcmeEats", "channel": "email", "to_emails": ["a@x.test"],
+                      "cc_emails": ["c@x.test"], "raise_template": "Title: {title}"})
+    got = drafts.build(c, v("unknown", not_raised=True), [], cfg)
+    assert got[0]["id"] == "raise_email" and got[0]["to"] == ["a@x.test"]
+    assert got[0]["text"] == "Title: Orders stuck" and got[0]["review_required"]
+
+
+def test_brief_shortens_long_messages(cfg):
+    raw = {"comments": [{"text": "word " * 200, "at": "2026-01-01T00:00:00Z", "by": "L"}]}
+    items = timeline.merge(case(), raw, [], cfg)
+    assert len(brief.build(case(), v(), raw, items, cfg)["done_so_far"][0]["text"]) <= 141
+
+
+def test_tidy_removes_footers_and_blank_lines(cfg):
+    conf = {**cfg, "email_footer_markers": ["Not satisfied with"]}
+    got = timeline.tidy("Hi,\n\n\n  Ticket: 1\n\nThanks\nNot satisfied with us? Click", conf)
+    assert got == "Hi,\nTicket: 1\nThanks"
+
+
+def test_email_subject_shows_only_when_it_adds_something(cfg):
+    raw = {"emails": [
+        {"subject": "Re: Orders stuck", "text": "a", "at": "2026-01-01T00:00:00Z"},
+        {"subject": "FW: Refund", "text": "b", "at": "2026-01-02T00:00:00Z"}]}
+    items = timeline.merge(case(), raw, [], cfg)
+    assert items[0]["subject"] is None and items[1]["subject"] == "Refund"
+
+
+def test_long_quiet_periods_read_in_days():
+    assert verdict.age_text(234.6) == "10d" and verdict.age_text(11.5) == "11.5h"

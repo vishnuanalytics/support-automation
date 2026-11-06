@@ -10,12 +10,19 @@ from typing import Any
 from .timeline import US
 from .verdict import AI, CUSTOMER, ENGINEERING, THIRD_PARTY, parse_dt
 
+DONE_LENGTH = 140
 _BALL_TEXT = {US: "Our turn", ENGINEERING: "Waiting on Engineering", AI: "AI agent working",
               CUSTOMER: "Waiting on the customer", "unknown": "Turn unknown"}
 
 
 def _sf(cfg: dict, key: str, url: str | None) -> dict:
     return {"label": f"Salesforce: {cfg['fields'].get(key) or key}", "url": url}
+
+
+def _one_line(text: str | None) -> str:
+    """The brief is read in seconds, so it only gets the start of a message."""
+    line = " ".join((text or "").split())
+    return line if len(line) <= DONE_LENGTH else line[:DONE_LENGTH].rstrip() + "…"
 
 
 def waiting_since(case: dict, raw: dict | None, cfg: dict) -> str | None:
@@ -36,6 +43,8 @@ def build(case: dict, verdict: dict, raw: dict | None, timeline: list[dict],
                               ("product", "Product", "product")):
         if case.get(key):
             facts.append({"label": label, "value": case[key], "source": _sf(cfg, field, url)})
+    if case.get("bu"):
+        facts.append({"label": "BU", "value": case["bu"], "source": _sf(cfg, "bu", url)})
     if case.get("owner"):
         facts.append({"label": "Owner", "value": case["owner"],
                       "source": {"label": "Salesforce: Owner", "url": url}})
@@ -60,7 +69,7 @@ def build(case: dict, verdict: dict, raw: dict | None, timeline: list[dict],
         "problem": {"text": case.get("subject") or "(no subject)",
                     "source": {"label": "Salesforce: Subject", "url": url}},
         "facts": facts,
-        "done_so_far": [{"text": i["text"], "at": i["at"], "who": i["who"],
+        "done_so_far": [{"text": _one_line(i["text"]), "at": i["at"], "who": i["who"],
                          "source": {"label": i["source"], "url": i["url"]}} for i in done],
         "ball": {"text": ball_text, "mismatch": verdict["mismatch"]},
         "waiting": waiting,

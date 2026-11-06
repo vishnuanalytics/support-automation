@@ -2,8 +2,16 @@ export type Source = { label: string; url?: string | null };
 export type Ball = "us" | "engineering" | "third_party" | "ai" | "customer" | "unknown";
 export type Level = "critical" | "high" | "medium" | "low";
 
+export type Stage = "act" | "raise" | "engineering" | "third_party" | "customer" | "ai" | "check";
 export type QueueCase = {
   id: string;
+  stage: Stage;
+  signal: { code: string; text: string; source: Source } | null;
+  latest: { who: string | null; ours: boolean; at: string; text: string | null; url: string | null; source: string; party?: string } | null;
+  overdue_hours: number;
+  mine: boolean;
+  links: { kind: string; url: string }[];
+  related: { id: string; case_number: string | null; record_type: string | null; status: string | null; url: string | null }[];
   source: string;
   case_number: string | null;
   subject: string | null;
@@ -11,6 +19,14 @@ export type QueueCase = {
   owner: string | null;
   record_type: string | null;
   waiting_raw: string | null;
+  sub_status: string | null;
+  bu: string | null;
+  module: string | null;
+  sub_module: string | null;
+  link_kinds: string[];
+  link_from_post: boolean;
+  partner_channel: string | null;
+  not_raised: boolean;
   waiting_party: "engineering" | "third_party" | null;
   third_parties: string[];
   url: string | null;
@@ -33,6 +49,7 @@ export type Tiles = {
   my_turn: number;
   mismatches: number;
   missing_link: number;
+  not_raised: number;
   overdue: number;
   critical: number;
 };
@@ -48,7 +65,9 @@ export type SyncRow = {
 
 export type Queue = {
   cases: QueueCase[];
-  labels: { third_party: string };
+  labels: { third_party: string; customer: string };
+  has_lead: boolean;
+  focus_partners: string[];
   tiles: Tiles;
   trend: { at: string; my_turn: number }[];
   last_sync: SyncRow | null;
@@ -65,6 +84,7 @@ export type TimelineItem = {
   who: string | null;
   text: string;
   url: string | null;
+  subject?: string | null;
 };
 export type Evidence = {
   kind: string;
@@ -84,6 +104,8 @@ export type Draft = {
   title: string;
   text: string;
   review_required?: boolean;
+  to?: string[];
+  cc?: string[];
   facts: Fact[];
 };
 export type Related = {
@@ -93,8 +115,19 @@ export type Related = {
   record_type?: string | null;
   url?: string | null;
 };
+export type Partner = {
+  name: string;
+  channel: string;
+  to_emails: string[];
+  cc_emails: string[];
+  contacts: string[];
+  portal_url: string | null;
+  escalation_note: string | null;
+  notes: string | null;
+};
 export type CaseDetail = {
   source: string;
+  partner: Partner | null;
   case: {
     id: string;
     case_number: string | null;
@@ -149,6 +182,14 @@ export type Digest = {
   events: { id: number; case_id: string; case_number: string | null; subject: string | null; kind: string }[];
 };
 export type SlackStatus = { configured: boolean; connected: boolean; leads_connected: number };
+export type AiDraft = {
+  enabled: boolean;
+  situation?: string;
+  draft?: string;
+  missing?: string[];
+  sources?: { n: number; source: string; url: string | null }[];
+  similar_used?: number;
+};
 export type Summary = {
   enabled: boolean;
   text?: string;

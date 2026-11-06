@@ -5032,6 +5032,20 @@ def monitor_summary(case_id: str, tenant_id: str | None = None,
     return result
 
 
+@app.post("/api/monitor/cases/{case_id}/ai-draft")
+def monitor_ai_draft(case_id: str, audience: str = "merchant", tenant_id: str | None = None,
+                     c: Caller = Depends(caller)) -> dict:
+    from interpreter.monitor import service
+    if audience not in ("merchant", "aggregator"):
+        raise HTTPException(422, "audience must be merchant or aggregator")
+    tid = _caller_tenant(c, tenant_id)
+    rate_limit(c.user_id, "monitor_summary", 20)
+    result = service.ai_draft(c.sb, tid, case_id, audience)
+    if result is None:
+        raise HTTPException(404, "case not found")
+    return result
+
+
 @app.post("/api/monitor/cases/{case_id}/review")
 def monitor_review(case_id: str, body: MonitorReviewIn, tenant_id: str | None = None,
                    c: Caller = Depends(caller)) -> dict:

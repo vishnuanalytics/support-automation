@@ -46,6 +46,7 @@ def queue(sb: Any, tenant_id: str, now: datetime | None = None) -> dict[str, Any
              .eq("is_open", True).execute().data or [])
     reviews = {r["case_id"]: r for r in (sb.table("monitor_reviews").select("*")
                                          .eq("tenant_id", tenant_id).execute().data or [])}
+    cfg_all = load_config(sb, tenant_id)
     case_rows = [r["case_data"] for r in cases]
     dupes = similar.group_duplicates(case_rows)
     dup_of: dict[str, str] = {}
@@ -61,6 +62,20 @@ def queue(sb: Any, tenant_id: str, now: datetime | None = None) -> dict[str, Any
             "id": r["case_id"], "source": r["source"], "case_number": c.get("case_number"),
             "subject": c.get("subject"), "priority": c.get("priority"), "owner": c.get("owner"),
             "record_type": c.get("record_type"), "waiting_raw": c.get("waiting_raw"),
+            "sub_status": c.get("sub_status"), "bu": c.get("bu"), "module": c.get("module"),
+            "sub_module": c.get("sub_module"),
+            "link_kinds": sorted({x["kind"] for x in c.get("links") or []}
+                                 | ({"email"} if c.get("email_evidence") else set())),
+            "link_from_post": any(x.get("via") == "post" for x in c.get("links") or []),
+            "partner_channel": (c.get("partner") or {}).get("channel"),
+            "not_raised": bool(v.get("not_raised")),
+            "stage": verdict.stage(v), "signal": v.get("signal"), "latest": v.get("latest"),
+            "overdue_hours": v.get("overdue_hours") or 0,
+            "mine": bool(cfg_all["lead_owner_name"])
+            and c.get("owner") == cfg_all["lead_owner_name"],
+            "links": [{"kind": x["kind"], "url": x["url"]} for x in c.get("links") or []],
+            "related": [{k: x.get(k) for k in ("id", "case_number", "record_type", "status", "url")}
+                        for x in [*(p for p in [c.get("parent")] if p), *(c.get("children") or [])]],
             "waiting_party": c.get("waiting_party"), "third_parties": c.get("third_parties") or [],
             "url": c.get("url"), "ball": v["ball"], "mismatch": v["mismatch"],
             "score": v["score"], "level": v["level"], "next_action": v["next_action"],
@@ -79,7 +94,11 @@ def queue(sb: Any, tenant_id: str, now: datetime | None = None) -> dict[str, Any
     done = [s for s in history if s["status"] != "running"]
     cfg = _cfg_for(load_config(sb, tenant_id), "demo" if any(
         r["source"] == "demo" for r in cases) else None)
-    return {"cases": items, "labels": {"third_party": cfg["third_party_label"]}, "tiles": sync.counts([{"verdict": r["verdict"]} for r in cases]),
+    return {"cases": items,
+            "labels": {"third_party": cfg["third_party_label"],
+                       "customer": cfg["customer_label"]},
+            "has_lead": bool(cfg_all["lead_owner_name"]),
+            "focus_partners": cfg["focus_partners"], "tiles": sync.counts([{"verdict": r["verdict"]} for r in cases]),
             "trend": [{"at": s["started_at"], "my_turn": (s["counts"] or {}).get("my_turn", 0)}
                       for s in reversed(done) if s["status"] != "failed"],
             "last_sync": done[0] if done else None,
@@ -139,6 +158,7 @@ def case_detail(sb: Any, tenant_id: str, case_id: str,
                           for x in case.get("links") or []
                           if x.get("kind") == "slack" and x.get("channel")],
         "slack_team_mention": cfg.get("slack_team_mention") or "",
+        "partner": case.get("partner"),
         "labels": {"third_party": cfg["third_party_label"], "customer": cfg["customer_label"]},
         "llm_enabled": bool(cfg.get("llm_enabled")),
     }
@@ -192,7 +212,8 @@ def _evidence_readers(sb: Any, tenant_id: str, cfg: dict) -> dict[str, Any]:
         token = github.token_for(tenant_id, sb)
     except Exception:  # noqa: BLE001
         token = None
-    return {"github": readers.GithubReader(token, cfg["support_github_users"]),
+    return {"github": readers.GithubReader(token, cfg["support_github_users"],
+                                           cfg["github_bot_users"]),
             "slack": readers.SlackReader(_slack_tokens(sb, tenant_id),
                                          cfg["internal_slack_domain"])}
 
@@ -295,6 +316,62 @@ def clear_demo(sb: Any, tenant_id: str) -> None:
      .in_("url", list(data["evidence"])).execute())
     (sb.table("monitor_resolved").delete().eq("tenant_id", tenant_id)
      .in_("case_id", [r["id"] for r in data["resolved"]]).execute())
+
+
+def slack_links(sb: Any, tenant_id: str) -> list[dict]:
+    """Every Slack thread linked from an open case, for a person to import."""
+    rows = (sb.table("monitor_cases").select("case_data").eq("tenant_id", tenant_id)
+            .eq("is_open", True).execute().data or [])
+    out: dict[str, dict] = {}
+    for r in rows:
+        case = r["case_data"]
+        for link in case.get("links") or []:
+            if link.get("kind") == "slack" and link.get("channel"):
+                out.setdefault(link["url"], {
+                    "url": link["url"], "channel": link["channel"],
+                    "thread_ts": link["thread_ts"], "case_number": case.get("case_number")})
+    return list(out.values())
+
+
+def import_slack_threads(sb: Any, tenant_id: str, threads: list[dict],
+                         now: datetime | None = None) -> int:
+    """Store threads read through a person's own Slack access. Each entry is
+    `{url, messages: [{who, ours, at, text, url?}], internal?}`, or `{url, error}`
+    when that person can't see the thread. `internal` marks a thread with no
+    external party, which shows staleness but can't show a third party's turn.
+    Text is cleaned like any other evidence."""
+    now = now or datetime.now(timezone.utc)
+    known = {x["url"] for x in slack_links(sb, tenant_id)}
+    rows = []
+    for thread in threads:
+        url = thread["url"]
+        if url not in known:
+            raise ValueError("that Slack thread isn't linked to an open case")
+        base = {"kind": "slack", "url": url, "label": "Slack thread",
+                "imported_at": now.isoformat(),
+                "note": f"Read through Claude on {now.date().isoformat()}; not updated by syncs"}
+        if thread.get("error"):
+            rows.append({**base, "ok": False, "error": redact.clean(thread["error"])})
+            continue
+        rows.append({**base, "ok": True, "internal": bool(thread.get("internal")), "messages": [
+            {"who": m.get("who"), "ours": bool(m.get("ours")), "at": m["at"],
+             "text": redact.clean(m.get("text")), "url": m.get("url") or url}
+            for m in thread.get("messages") or []]})
+    SupabaseStore(sb).save_evidence(tenant_id, rows, now)
+    return len(rows)
+
+
+def ai_draft(sb: Any, tenant_id: str, case_id: str, audience: str) -> dict[str, Any] | None:
+    """A context-based draft for the merchant or the aggregator. Never sent."""
+    from . import knowledge
+
+    detail = case_detail(sb, tenant_id, case_id)
+    if detail is None:
+        return None
+    if not detail["llm_enabled"]:
+        return {"enabled": False}
+    return {"enabled": True, **knowledge.generate_draft(
+        tenant_id, detail["case"], audience, detail["timeline"], sb, detail["partner"])}
 
 
 SUMMARY_SYSTEM = (

@@ -22,6 +22,10 @@ class Store(Protocol):
     def save_cases(self, tenant_id: str, rows: list[dict], now: datetime) -> None: ...
     def save_evidence(self, tenant_id: str, evidence: list[dict], now: datetime) -> None: ...
     def close_cases(self, tenant_id: str, ids: list[str]) -> None: ...
+    def imported_evidence(self, tenant_id: str) -> dict[str, dict]: ...
+    def partners(self, tenant_id: str) -> list[dict]: ...
+    def reply_labels(self, tenant_id: str, hashes: list[str]) -> dict[str, dict]: ...
+    def save_reply_labels(self, tenant_id: str, labels: dict[str, dict]) -> None: ...
     def add_events(self, tenant_id: str, sync_id: str, events: list[dict]) -> None: ...
     def last_resolved_at(self, tenant_id: str) -> datetime | None: ...
     def save_resolved(self, tenant_id: str, rows: list[dict]) -> None: ...
@@ -121,6 +125,26 @@ class SupabaseStore:
                     "fetched_at": now.isoformat()} for e in evidence]
         for start in range(0, len(payload), _CHUNK):
             self.sb.table("monitor_evidence").upsert(payload[start:start + _CHUNK]).execute()
+
+    def reply_labels(self, tenant_id: str, hashes: list[str]) -> dict[str, dict]:
+        rows = (self.sb.table("monitor_reply_labels").select("text_hash, kind, summary")
+                .eq("tenant_id", tenant_id).in_("text_hash", hashes).execute().data or [])
+        return {r["text_hash"]: r for r in rows}
+
+    def save_reply_labels(self, tenant_id: str, labels: dict[str, dict]) -> None:
+        if labels:
+            self.sb.table("monitor_reply_labels").upsert(
+                [{"tenant_id": tenant_id, "text_hash": k, **v} for k, v in labels.items()]).execute()
+
+    def partners(self, tenant_id: str) -> list[dict]:
+        return (self.sb.table("monitor_partners").select("*").eq("tenant_id", tenant_id)
+                .execute().data or [])
+
+    def imported_evidence(self, tenant_id: str) -> dict[str, dict]:
+        """Threads loaded by a person's session, which a sync can't read itself."""
+        rows = (self.sb.table("monitor_evidence").select("url, data").eq("tenant_id", tenant_id)
+                .ilike("url", "%slack.com%").execute().data or [])
+        return {r["url"]: r["data"] for r in rows if r["data"].get("imported_at")}
 
     def close_cases(self, tenant_id: str, ids: list[str]) -> None:
         for start in range(0, len(ids), _CHUNK):

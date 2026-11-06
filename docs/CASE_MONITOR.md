@@ -67,6 +67,7 @@ Claude can use it, and only during a session.
     "product": "Product__c",
     "module": "Module__c",
     "sub_module": "Sub_Module__c",
+    "bu": "Business_Unit__c",
     "case_type": "Category__c",
     "escalation_level": "Escalation__c",
     "escalated": "Is_Escalated__c"
@@ -76,6 +77,8 @@ Claude can use it, and only during a session.
   "customer_wait_sub_statuses": ["Awaiting Revert"],
   "team_replied_sub_statuses": ["Internal Team Replied", "External Team Replied"],
   "dependency_record_type": "DSP",
+  "internal_email_domains": ["example.com"],
+  "focus_partners": ["PartnerA", "PartnerB"],
   "third_party_label": "Aggregator",
   "customer_label": "Merchant",
   "eng_nudge_hours": 8,
@@ -111,6 +114,70 @@ In the Slack app settings (api.slack.com/apps):
    workspace bot install uses.
 3. The app must be installable in your company workspace: either create it there, or enable
    **Manage Distribution** on an app from another workspace. A workspace admin may need to approve it.
+
+### Third-party directory
+
+`monitor_partners` holds each third party's channel, recipients, contacts, portal link, raising format
+and escalation time for a workspace. Never store portal passwords in it. The channel sets the rule:
+
+| Channel | Evidence | With no evidence |
+|---|---|---|
+| email | Emails on the raising record type, or emails to or from the partner's domains | Not raised |
+| slack, jira, portal | The linked thread or ticket | Missing link |
+| whatsapp | None: it can't be read | Checked by hand |
+
+A third-party case with no linked case of the raising record type, as parent or child, shows as not
+raised. If that linked case is closed while this one is open, it's our turn to update the customer.
+
+### Email footers
+
+List text that starts your email footer in `email_footer_markers`. Everything after it is hidden from
+the conversation.
+
+### GitHub accounts
+
+List your support team in `support_github_users`, so their comments count as ours. List automation
+accounts that GitHub doesn't mark as bots in `github_bot_users`, so they're ignored. A support login
+missing from the list shows up as an engineer replying.
+
+### Who sent an email
+
+Unsent drafts are ignored everywhere, because Salesforce stores them as emails with Status 5.
+A sender on `internal_email_domains` is our team. A sender on the partner's `email_domains`, a
+subdomain of one, or a domain containing the partner's name is the third party. Anyone else is the
+customer, who may use any domain. So a customer looped into a raised case shows as the customer, and
+it's our turn.
+
+### Real updates, past cases and AI drafts
+
+With `llm_enabled` on, the latest third-party reply is sorted into acknowledgement, internal tag, bug
+raised, solution, needs more info, or update. Clear acknowledgements are caught by rules first.
+An acknowledgement keeps the case waiting on the third party. If a reply can't be sorted, it counts
+as real, so a failure can never hide one. Text is redacted before any LLM call.
+
+Resolved cases load into the "Resolved third-party cases" Knowledge collection with their whole
+conversation, redacted:
+
+```
+python -m scripts.monitor_load_knowledge --tenant <id> --since 2026-08-01 --until 2026-11-01
+```
+
+It's safe to rerun: unchanged cases are skipped. Case pages use that collection to write AI drafts for
+the customer or the third party. Drafts are only shown for copying, never sent.
+
+### Where links come from
+
+The link field comes first. If it has no URL, the sync looks at parent and child cases, then at the
+case's posts and post comments, where it accepts only GitHub, Slack, Jira and Freshchat links. A link
+found in a post is tagged in the queue.
+
+### Without a Slack app
+
+If your organization doesn't allow a Slack app, a Claude Code session with a Slack connector can load
+threads instead. Claude reads the threads linked from open cases with your own Slack access, then
+calls `service.import_slack_threads`. The page shows when each thread was read. Syncs keep the last
+import until a real read succeeds, so it goes stale until the next refresh. Tagging your team isn't
+available this way.
 
 ### Tagging your team
 

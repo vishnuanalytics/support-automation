@@ -7,11 +7,12 @@ feature is `post_team_tag`, reachable only from a person's click.
 
 from __future__ import annotations
 
+import html
 import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Protocol
+from typing import Any, Iterator, Protocol
 
 import requests
 
@@ -20,6 +21,9 @@ from .redact import clean
 log = logging.getLogger("interpreter.monitor.readers")
 
 CONCURRENCY = 8
+# Salesforce keeps unsent drafts as EmailMessage rows, with Status 5.
+SENT_ONLY = "Status != '5'"
+EMAIL_LIMIT = 2000
 MAX_RETRIES = 2
 MAX_RETRY_WAIT_S = 30.0
 TIMEOUT_S = 20
@@ -44,9 +48,11 @@ def _get(url: str, headers: dict, params: dict | None = None) -> requests.Respon
 
 
 class GithubReader:
-    def __init__(self, token: str | None, support_users: list[str]):
+    def __init__(self, token: str | None, support_users: list[str],
+                 bot_users: list[str] | None = None):
         self.token = token
         self.support = {u.lower() for u in support_users}
+        self.bots = {u.lower() for u in bot_users or []}
 
     def fetch(self, link: dict[str, Any]) -> dict[str, Any]:
         repo = f"{link['owner']}/{link['repo']}"
@@ -80,9 +86,9 @@ class GithubReader:
         messages = []
         for c in comments:
             user = c.get("user") or {}
-            if user.get("type") == "Bot":
-                continue
             login = user.get("login", "")
+            if user.get("type") == "Bot" or login.lower() in self.bots:
+                continue
             messages.append({"who": login, "at": c.get("created_at"), "url": c.get("html_url"),
                              "ours": login.lower() == author or login.lower() in self.support,
                              "text": clean(c.get("body"))})
@@ -226,6 +232,15 @@ class EvidenceCollector:
         return self.cache
 
 
+POST_LINK_KINDS = ("github", "slack", "jira", "freshchat")
+
+
+def strip_quoted(text: str | None) -> str:
+    from .knowledge import strip_quoted as strip
+
+    return strip(text)
+
+
 def merge_links(*groups: list[dict]) -> list[dict]:
     seen: dict[str, dict] = {}
     for group in groups:
@@ -253,7 +268,8 @@ class SalesforceCaseReader:
 
     BASE = ("Id", "CaseNumber", "Subject", "Description", "Priority", "Status", "RecordType.Name",
             "Owner.Name", "CreatedDate", "LastModifiedDate", "Reason", "ParentId",
-            "Parent.CaseNumber", "Parent.Status", "Parent.RecordType.Name", "ContactEmail")
+            "Parent.CaseNumber", "Parent.Status", "Parent.IsClosed", "Parent.RecordType.Name",
+            "ContactEmail")
 
     def __init__(self, sf: Any, cfg: dict):
         self.sf = sf
@@ -290,7 +306,7 @@ class SalesforceCaseReader:
         if row.get("ParentId"):
             p = row.get("Parent") or {}
             parent = {"id": row["ParentId"], "case_number": p.get("CaseNumber"),
-                      "status": p.get("Status"),
+                      "status": p.get("Status"), "closed": bool(p.get("IsClosed")),
                       "record_type": (p.get("RecordType") or {}).get("Name"),
                       "url": f"{base}/lightning/r/Case/{row['ParentId']}/view" if base else None}
         return {
@@ -309,7 +325,7 @@ class SalesforceCaseReader:
             "target_at": value("target_at"), "ageing": value("ageing"), "brand": value("brand"),
             "biz_id": value("biz_id"), "business_id": value("business_id"),
             "product": value("product"), "module": value("module"),
-            "sub_module": value("sub_module"), "case_type": value("case_type"),
+            "sub_module": value("sub_module"), "bu": value("bu"), "case_type": value("case_type"),
             "reason": row.get("Reason"), "escalation_level": value("escalation_level"),
             "escalated": value("escalated"), "contact_email": row.get("ContactEmail"),
             "parent": parent, "children": [],
@@ -369,21 +385,45 @@ class SalesforceCaseReader:
                     "url": f"{base}/lightning/r/Case/{r['Id']}/view" if base else None})
         return out
 
+    def post_links(self, ids: list[str]) -> dict[str, list[dict]]:
+        """Links shared in a case's posts and post comments, for cases with
+        nothing in the link field. Only ticketing and chat links count: other
+        URLs in posts are mostly images and unrelated pages."""
+        from .links import parse
+
+        out: dict[str, list[dict]] = {}
+        for start in range(0, len(ids), 200):
+            chunk = ", ".join(f"'{_lit(i)}'" for i in ids[start:start + 200])
+            rows = self._records(
+                "SELECT ParentId, Body, LinkUrl, (SELECT CommentBody FROM FeedComments) "
+                f"FROM CaseFeed WHERE ParentId IN ({chunk}) AND Type IN ('TextPost', 'LinkPost', "
+                "'ContentPost', 'CaseCommentPost') ORDER BY CreatedDate DESC LIMIT 2000")
+            for r in rows:
+                comments = (r.get("FeedComments") or {}).get("records") or []
+                parts = [r.get("Body"), r.get("LinkUrl"), *[c.get("CommentBody") for c in comments]]
+                text = html.unescape(" ".join(p for p in parts if p))
+                found = [{**x, "via": "post"} for x in parse(text) if x["kind"] in POST_LINK_KINDS]
+                if found:
+                    out[r["ParentId"]] = merge_links(out.get(r["ParentId"], []), found)
+        return out
+
     def latest_emails(self, ids: list[str], per_case: int = 5) -> dict[str, list[dict]]:
         """The newest emails on each case, for reading follow-ups on DSP cases."""
         out: dict[str, list[dict]] = {}
         for start in range(0, len(ids), 200):
             chunk = ", ".join(f"'{_lit(i)}'" for i in ids[start:start + 200])
-            rows = self._records("SELECT ParentId, FromAddress, Subject, TextBody, MessageDate, "
-                                 f"Incoming FROM EmailMessage WHERE ParentId IN ({chunk}) "
+            rows = self._records("SELECT ParentId, FromAddress, ToAddress, Subject, TextBody, "
+                                 f"MessageDate, Incoming FROM EmailMessage WHERE ParentId IN ({chunk}) "
+                                 f"AND {SENT_ONLY} "
                                  "ORDER BY MessageDate DESC LIMIT 2000")
             for r in rows:
                 held = out.setdefault(r["ParentId"], [])
                 if len(held) < per_case:
-                    held.append({"who": r.get("FromAddress"), "ours": not r.get("Incoming"),
+                    held.append({"who": r.get("FromAddress"), "to": r.get("ToAddress"),
+                                 "ours": not r.get("Incoming"),
                                  "at": r.get("MessageDate"),
-                                 "text": clean(f"{r.get('Subject') or ''}\n"
-                                               f"{r.get('TextBody') or ''}")})
+                                 "text": clean(strip_quoted(r.get("TextBody")) or r.get("Subject"),
+                                              EMAIL_LIMIT)})
         return out
 
     def brand_stats(self, brands: list[str]) -> dict[str, dict]:
@@ -404,14 +444,15 @@ class SalesforceCaseReader:
         cid = _lit(case_id)
         emails = self._records(
             "SELECT FromAddress, ToAddress, Subject, TextBody, MessageDate, Incoming "
-            f"FROM EmailMessage WHERE ParentId = '{cid}' ORDER BY MessageDate")
+            f"FROM EmailMessage WHERE ParentId = '{cid}' AND {SENT_ONLY} ORDER BY MessageDate")
         comments = self._records("SELECT CommentBody, CreatedDate, CreatedBy.Name "
                                  f"FROM CaseComment WHERE ParentId = '{cid}' ORDER BY CreatedDate")
         history = self._records("SELECT Field, OldValue, NewValue, CreatedDate, CreatedBy.Name "
                                 f"FROM CaseHistory WHERE CaseId = '{cid}' ORDER BY CreatedDate")
         return {
             "emails": [{"from": e.get("FromAddress"), "to": e.get("ToAddress"),
-                        "subject": clean(e.get("Subject")), "text": clean(e.get("TextBody")),
+                        "subject": clean(e.get("Subject")),
+                        "text": clean(strip_quoted(e.get("TextBody")), EMAIL_LIMIT),
                         "at": e.get("MessageDate"), "incoming": bool(e.get("Incoming"))}
                        for e in emails],
             "comments": [{"text": clean(c.get("CommentBody")), "at": c.get("CreatedDate"),
@@ -420,6 +461,42 @@ class SalesforceCaseReader:
                          "new": h.get("NewValue"), "at": h.get("CreatedDate"),
                          "by": (h.get("CreatedBy") or {}).get("Name")} for h in history],
         }
+
+    def resolved_conversations(self, record_type: str, since_iso: str,
+                               until_iso: str) -> Iterator[dict]:
+        """Resolved cases of a record type, each with its full emails and notes."""
+        f = self.fields
+        cols = ["Id", "CaseNumber", "Subject", "Description", "CreatedDate", "ClosedDate"]
+        cols += [c for c in (f.get("module"), f.get("sub_module"), f.get("third_party"),
+                             f.get("bu")) if c]
+        cases = self._records(
+            f"SELECT {', '.join(dict.fromkeys(cols))} FROM Case "
+            f"WHERE RecordType.Name = '{_lit(record_type)}' AND IsClosed = true "
+            f"AND Status != 'Merged' AND ClosedDate >= {since_iso} AND ClosedDate < {until_iso} "
+            "ORDER BY ClosedDate")
+        for start in range(0, len(cases), 100):
+            batch = cases[start:start + 100]
+            chunk = ", ".join(f"'{_lit(c['Id'])}'" for c in batch)
+            emails: dict[str, list[dict]] = {}
+            for e in self._records("SELECT ParentId, FromAddress, TextBody, MessageDate, Incoming "
+                                   f"FROM EmailMessage WHERE ParentId IN ({chunk}) AND {SENT_ONLY}"):
+                emails.setdefault(e["ParentId"], []).append({
+                    "from": e.get("FromAddress"), "text": e.get("TextBody"),
+                    "at": e.get("MessageDate"), "incoming": bool(e.get("Incoming"))})
+            notes: dict[str, list[str]] = {}
+            for c in self._records("SELECT ParentId, CommentBody FROM CaseComment "
+                                   f"WHERE ParentId IN ({chunk})"):
+                notes.setdefault(c["ParentId"], []).append(c.get("CommentBody") or "")
+            for c in batch:
+                third = _dig(c, f["third_party"]) if f.get("third_party") else None
+                yield {"id": c["Id"], "case_number": c.get("CaseNumber"),
+                       "subject": clean(c.get("Subject")), "description": c.get("Description"),
+                       "closed_at": c.get("ClosedDate"),
+                       "module": _dig(c, f["module"]) if f.get("module") else None,
+                       "sub_module": _dig(c, f["sub_module"]) if f.get("sub_module") else None,
+                       "bu": _dig(c, f["bu"]) if f.get("bu") else None,
+                       "third_parties": [x for x in (third or "").split(";") if x],
+                       "messages": emails.get(c["Id"], []), "comments": notes.get(c["Id"], [])}
 
     def resolved_since(self, since_iso: str, limit: int = 2000) -> list[dict]:
         f = self.fields

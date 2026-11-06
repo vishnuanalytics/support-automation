@@ -10,9 +10,10 @@ from .links import parse
 
 CONFIG = config.merge({
     "third_party_label": "Aggregator", "customer_label": "Merchant",
+    "focus_partners": ["FoodRunner", "QuickEats"],
     "fields": {"waiting_on": "Waiting_Party__c", "link": "External_Link__c",
                "last_reply_from": "Last_Reply_From__c", "target_at": "Target_Date__c",
-               "third_party": "Partner__c", "brand": "Brand__c",
+               "third_party": "Partner__c", "bu": "Business_Unit__c", "brand": "Brand__c",
                "biz_id": "Location_ID__c", "product": "Product__c", "module": "Module__c",
                "sub_module": "Sub_Module__c"},
     "third_party_overrides": {"FoodRunner": 12},
@@ -42,7 +43,7 @@ def build(now: datetime | None = None) -> dict[str, Any]:
                 "waiting_party": party, "links": parse(link), "third_parties": [],
                 "brand": "Tasty Bites", "biz_id": "BZ-1042", "product": "Hub", "module": "Orders",
                 "sub_module": "Relay", "children": [], "parent": None,
-                "brand_stats": {"open": 4, "last_30_days": 9}, **kw}
+                "bu": "North", "brand_stats": {"open": 4, "last_30_days": 9}, **kw}
 
     def gh(url: str, msgs: list, state: str = "open") -> dict:
         n = url.rsplit("/", 1)[1]
@@ -71,7 +72,8 @@ def build(now: datetime | None = None) -> dict[str, Any]:
         case(3, "Rider not assigned on delivery orders", "Aggregator", SLACK_A,
              third_parties=["FoodRunner"], last_modified_at=t(10), module="Delivery"),
         case(4, "Commission mismatch on settlement", "Aggregator", None,
-             third_parties=["QuickEats"], module="Finance", sub_module="Settlement"),
+             third_parties=["QuickEats"], module="Finance", sub_module="Settlement", bu="South",
+             record_type="DSP"),
         case(5, "Store timings not updating", "Engineer", GH_C, last_reply_from="customer",
              last_modified_at=t(2), module="Stores"),
         case(6, "Payout failed for outlet A", "Engineer", GH_C, last_modified_at=t(11),

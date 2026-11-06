@@ -21,12 +21,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "case_connector": "salesforce",
     "org_label": None,
     "owner_username": "",
+    "lead_owner_name": "",            # the case-system name shown as "Mine" in the queue
     "lightning_url": "",
     # logical name -> Salesforce API field; "" means the org doesn't have it
     "fields": {
         "waiting_on": "", "waiting_sub_status": "", "link": "", "third_party": "",
         "target_at": "", "ageing": "", "last_reply_from": "", "brand": "",
-        "biz_id": "", "business_id": "", "product": "", "module": "", "sub_module": "",
+        "biz_id": "", "business_id": "", "product": "", "module": "", "sub_module": "", "bu": "",
         "case_type": "Type", "escalation_level": "", "escalated": "",
     },
     "waiting_values": {},             # {"Engineer": "engineering", ...}
@@ -37,13 +38,19 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "team_replied_sub_statuses": [],
     # record type used to raise a case with a third party; its emails are follow-up evidence
     "dependency_record_type": "",
+    # shown with a stale third-party case, e.g. who to escalate to
+    "third_party_escalation": "",
     "eng_nudge_hours": 8,
     "third_party_nudge_hours": 24,
     "third_party_overrides": {},      # {"PartnerA": 12}
     "third_party_label": "Third party",
     "customer_label": "Customer",
     "support_github_users": [],
+    "github_bot_users": [],           # automation accounts GitHub doesn't mark as bots
     "internal_slack_domain": "",
+    "internal_email_domains": [],     # senders on these domains are our own team
+    "email_footer_markers": [],       # text after one of these is a signature or footer
+    "focus_partners": [],             # third parties shown as cards above the queue
     "slack_team_mention": "",         # e.g. "<!subteam^S123>", used by Tag team
     "sync_every_min": 60,             # 0 disables interval syncs
     "sync_hour": 9,
@@ -84,6 +91,7 @@ def validate(config: Any) -> list[str]:
     for key in ("eng_nudge_hours", "third_party_nudge_hours"):
         if key in config and not (isinstance(config[key], (int, float)) and config[key] > 0):
             errors.append(f"{key} must be a positive number")
-    if any(not GH_USER.match(str(u)) for u in config.get("support_github_users", [])):
-        errors.append("support_github_users has an invalid username")
+    for key in ("support_github_users", "github_bot_users"):
+        if any(not GH_USER.match(str(u)) for u in config.get(key, [])):
+            errors.append(f"{key} has an invalid username")
     return errors

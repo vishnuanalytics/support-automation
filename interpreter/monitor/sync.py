@@ -8,11 +8,12 @@ against that case and the sync carries on.
 from __future__ import annotations
 
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from . import verdict
+from . import replies, verdict
 from .readers import CONCURRENCY, EvidenceCollector, merge_links
 
 log = logging.getLogger("interpreter.monitor.sync")
@@ -24,6 +25,7 @@ def counts(rows: list[dict]) -> dict[str, int]:
             "my_turn": sum(x["ball"] == "us" for x in v),
             "mismatches": sum(bool(x["mismatch"]) for x in v),
             "missing_link": sum(bool(x["missing_link"]) for x in v),
+            "not_raised": sum(bool(x.get("not_raised")) for x in v),
             "overdue": sum(bool(x["overdue"]) for x in v),
             "critical": sum(x["level"] == "critical" for x in v)}
 
@@ -116,23 +118,72 @@ def _enrich(cases: list[dict], reader: Any, errors: list[dict]) -> None:
         errors.append({"error": f"brand counts not read ({type(e).__name__})"})
 
 
-def _dsp_emails(cases: list[dict], reader: Any, cfg: dict, errors: list[dict]) -> None:
-    """Attach email follow-ups from the record type used to raise third-party
-    cases: the case itself, or its child cases. Other cases' emails are with
-    the customer, so they say nothing about the third party's turn."""
-    record_type = cfg.get("dependency_record_type")
-    if not record_type:
+def _post_links(cases: list[dict], reader: Any, errors: list[dict]) -> None:
+    """When the link field is empty, the link may be in the case's posts."""
+    empty = [c for c in cases if c.get("source") != "ai" and not c.get("links")]
+    ids = sorted({i for c in empty for i in (c["id"], (c.get("parent") or {}).get("id")) if i})
+    if not ids:
         return
-    sources: dict[str, list[tuple[str, bool]]] = {}
+    try:
+        found = reader.post_links(ids)
+    except Exception as e:  # noqa: BLE001
+        errors.append({"error": f"case posts not read ({type(e).__name__})"})
+        return
+    for c in empty:
+        c["links"] = merge_links(found.get(c["id"], []),
+                                 found.get((c.get("parent") or {}).get("id"), []))
+
+
+def _dsp_ids(case: dict, record_type: str) -> list[str]:
+    """The cases of the raising record type linked to this one, in either direction."""
+    related = [*(c for c in [case.get("parent")] if c), *(case.get("children") or [])]
+    return [x["id"] for x in related if x.get("record_type") == record_type]
+
+
+def _attach_partners(cases: list[dict], partners: list[dict], cfg: dict) -> None:
+    """Add each third-party case's directory entry and whether a DSP case exists."""
+    index: dict[str, dict] = {}
+    for p in partners:
+        for name in [p["name"], *(p.get("aliases") or [])]:
+            index[name.lower()] = p
+    record_type = cfg.get("dependency_record_type")
     for c in cases:
         if c.get("waiting_party") != verdict.THIRD_PARTY:
             continue
-        if c.get("record_type") == record_type:
-            sources[c["id"]] = [(c["id"], False)]
-        else:
-            sources[c["id"]] = [(x["id"], True) for x in c.get("children") or []
-                                if x.get("record_type") == record_type]
-    ids = sorted({i for pairs in sources.values() for i, _ in pairs})
+        c["partner"] = next((index[n.lower()] for n in c.get("third_parties") or []
+                             if n.lower() in index), None)
+        c["has_dsp"] = not record_type or c.get("record_type") == record_type or bool(
+            _dsp_ids(c, record_type))
+
+
+def _domains(text: str | None) -> list[str]:
+    return [a.lower() for a in re.findall(r"@([\w.-]+\.\w+)", text or "")]
+
+
+def _with_partner(messages: list[dict], domains: list[str]) -> list[dict]:
+    """A non-DSP case's emails are mostly with the customer, so keep only those
+    to or from the third party's own domains."""
+    return [m for m in messages
+            if any(verdict.in_domains(d, domains)
+                   for d in _domains(m.get("who")) + _domains(m.get("to")))]
+
+
+def _dsp_emails(cases: list[dict], reader: Any, cfg: dict, errors: list[dict]) -> None:
+    """Attach third-party email follow-ups: all emails on the record type used to
+    raise them, on the case or the case linked to it, plus any email to or from
+    the third party on the case itself."""
+    record_type = cfg.get("dependency_record_type")
+    if not record_type:
+        return
+    wanted: dict[str, list[str]] = {}
+    for c in cases:
+        if c.get("waiting_party") != verdict.THIRD_PARTY:
+            continue
+        ids = [c["id"]]
+        if c.get("record_type") != record_type:
+            ids += _dsp_ids(c, record_type)
+        wanted[c["id"]] = ids
+    ids = sorted({i for group in wanted.values() for i in group})
     if not ids:
         return
     try:
@@ -141,12 +192,34 @@ def _dsp_emails(cases: list[dict], reader: Any, cfg: dict, errors: list[dict]) -
         errors.append({"error": f"DSP emails not read ({type(e).__name__})"})
         return
     for c in cases:
-        pairs = sources.get(c["id"]) or []
-        messages = [{**m, "url": c.get("url")} for i, _ in pairs for m in emails.get(i, [])]
+        group = wanted.get(c["id"])
+        if not group:
+            continue
+        own = emails.get(c["id"], [])
+        if c.get("record_type") != record_type:
+            own = _with_partner(own, (c.get("partner") or {}).get("email_domains") or [])
+        children = [m for i in group[1:] for m in emails.get(i, [])]
+        messages = []
+        for m in own + children:
+            party = verdict.email_party(m.get("who"), not m.get("ours"), c, cfg)
+            messages.append({**m, "party": party, "ours": party == verdict.US,
+                             "url": c.get("url")})
         if messages:
             c["email_evidence"] = {"kind": "email", "url": f"email:{c['id']}", "ok": True,
                                    "label": "DSP email", "messages": messages,
-                                   "related": any(child for _, child in pairs)}
+                                   "related": bool(children) or c.get("record_type") != record_type}
+
+
+def _case_emails(case: dict, raw: dict | None, cfg: dict) -> dict:
+    """The case's own emails, so a row's last response can't miss a customer email."""
+    messages = []
+    for e in (raw or {}).get("emails") or []:
+        party = verdict.email_party(e.get("from"), bool(e.get("incoming")), case, cfg)
+        messages.append({"who": e.get("from"), "party": party, "ours": party == verdict.US,
+                         "at": e.get("at"), "text": e.get("text") or e.get("subject"),
+                         "url": case.get("url")})
+    return {"kind": "email", "ok": True, "label": "Case email", "url": case.get("url"),
+            "messages": messages}
 
 
 def run(tenant_id: str, store: Any, reader: Any, evidence_readers: dict, cfg: dict,
@@ -161,12 +234,19 @@ def run(tenant_id: str, store: Any, reader: Any, evidence_readers: dict, cfg: di
                               errors)
         prior = store.open_cases(tenant_id)
         _enrich(cases, reader, errors)
+        _post_links(cases, reader, errors)
+        _attach_partners(cases, store.partners(tenant_id), cfg)
         _dsp_emails(cases, reader, cfg, errors)
         collector = EvidenceCollector(evidence_readers)
         found = collector.collect([x for c in cases for x in c.get("links") or []])
+        # A thread the sync can't read keeps its last import, not an error.
+        imported = store.imported_evidence(tenant_id)
+        found.update({url: imported[url] for url, ev in found.items()
+                      if not ev.get("ok") and url in imported})
         timelines = _timelines(cases, prior, reader, errors)
 
         rows = []
+        evidence_by_case = {}
         for case in cases:
             evidence = [found[x["url"]] for x in case.get("links") or []]
             if case.get("email_evidence"):
@@ -175,7 +255,15 @@ def run(tenant_id: str, store: Any, reader: Any, evidence_readers: dict, cfg: di
                 if ev.get("error"):
                     errors.append({"case_id": case["id"], "case_number": case.get("case_number"),
                                    "url": ev["url"], "error": ev["error"]})
+            evidence_by_case[case["id"]] = evidence
+        replies.label_latest(tenant_id, [(c, verdict.latest_message(evidence_by_case[c["id"]]))
+                                         for c in cases], store, cfg)
+        for case in cases:
+            evidence = evidence_by_case[case["id"]]
             v = verdict.compute(case, evidence, cfg, now)
+            raw = timelines.get(case["id"]) or (prior.get(case["id"]) or {}).get("timeline")
+            v["latest"] = verdict.latest_message(
+                evidence + [_case_emails(case, raw, cfg)])
             rows.append({"case": case, "verdict": v, "timeline": timelines.get(case["id"])})
 
         store.save_cases(tenant_id, rows, now)

@@ -251,3 +251,91 @@ def test_sub_status_is_ignored_on_the_raising_record_type(cfg):
     conf = {**waiting_cfg(cfg), "dependency_record_type": "DSP"}
     c = agg(sub_status="Awaiting Revert", record_type="DSP")
     assert v.compute(c, [slack(msg(False, 5))], conf, NOW)["ball"] == "us"
+
+
+def test_internal_thread_cant_show_a_third_partys_turn(cfg):
+    ev = {**slack(msg(True, 2)), "internal": True}
+    r = v.compute(agg(last_modified_at=ago(100)), [ev], cfg, NOW)
+    assert r["ball"] == "unknown" and r["stale_hours"] == 2
+
+
+def test_directory_escalation_time_counts_toward_the_smallest_threshold(cfg):
+    c = agg(third_parties=["Other"], partner={"escalate_after_hours": 72})
+    assert v.threshold_hours(c, {**cfg, "third_party_nudge_hours": 24}) == 72
+
+
+def test_stale_action_includes_the_escalation_path(cfg):
+    conf = {**cfg, "third_party_escalation": "Use the escalation channel."}
+    c = agg(last_modified_at=ago(100))
+    r = v.compute(c, [slack(msg(True, 50))], conf, NOW)
+    assert r["next_action"].endswith("Use the escalation channel.")
+
+
+@pytest.mark.parametrize("flags,want", [
+    ({"ball": "us", "not_raised": True}, "act"),
+    ({"ball": "unknown", "not_raised": True}, "raise"),
+    ({"ball": "unknown", "missing_link": True}, "raise"),
+    ({"ball": "engineering"}, "engineering"),
+    ({"ball": "third_party"}, "third_party"),
+    ({"ball": "customer"}, "customer"),
+    ({"ball": "ai"}, "ai"),
+    ({"ball": "unknown"}, "check"),
+])
+def test_every_case_has_exactly_one_stage(flags, want):
+    assert v.stage(flags) == want
+
+
+def test_verdict_reports_the_signal_and_newest_message(cfg):
+    r = v.compute(case(), [gh(msg(True, 9), msg(False, 2, "dev"))], cfg, NOW)
+    assert r["signal"]["code"] == "engineer_replied"
+    assert r["latest"]["who"] == "dev" and r["latest"]["url"] == "https://src/1"
+
+
+def test_no_evidence_has_no_signal_or_latest(cfg):
+    r = v.compute(case(links=[]), [], cfg, NOW)
+    assert r["signal"] is None and r["latest"] is None
+
+
+PARTNER_CFG = {"internal_email_domains": ["us.test"]}
+ACME_CASE = {"partner": {"name": "Acme Eats", "email_domains": ["acme.test"]},
+             "third_parties": ["Acme Eats", "NA"]}
+
+
+@pytest.mark.parametrize("sender,want", [
+    ("agent@us.test", "us"),
+    ("ops@acme.test", "third_party"),
+    ("Ops <ops@external.acme.test>", "third_party"),
+    ("help@acmeeats.io", "third_party"),
+    ("owner@gmail.com", "customer"),
+    ("gm@bigbrand.in", "customer"),
+    ("x@notacme.test", "customer"),
+    ("x@some-na.test", "customer"),
+])
+def test_email_party_from_sender_domain(sender, want):
+    assert v.email_party(sender, True, ACME_CASE, PARTNER_CFG) == want
+
+
+def test_outgoing_email_is_always_ours():
+    assert v.email_party("anything@x.test", False, ACME_CASE, PARTNER_CFG) == "us"
+
+
+def test_merchant_looped_into_the_thread_is_our_turn_and_says_so(cfg):
+    m = {**msg(False, 2, "owner@gmail.com"), "party": "customer"}
+    ev = {"kind": "email", "ok": True, "url": "e", "messages": [msg(True, 5), m]}
+    r = v.compute(agg(links=[]), [ev], cfg, NOW)
+    assert r["ball"] == "us" and r["signal"]["code"] == "customer_replied_email"
+    assert "Merchant" in r["signal"]["text"] and r["latest"]["party"] == "customer"
+
+
+def test_latest_party_defaults_by_source():
+    assert v.latest_message([gh(msg(False))])["party"] == "engineering"
+    assert v.latest_message([slack(msg(False))])["party"] == "third_party"
+    assert v.latest_message([gh(msg(True))])["party"] == "us"
+
+
+def test_reply_field_is_ignored_on_the_raising_record_type(cfg):
+    conf = {**cfg, "dependency_record_type": "DSP"}
+    ev = {"kind": "email", "ok": True, "url": "e", "messages": [msg(True, 2)]}
+    c = agg(links=[], record_type="DSP", last_reply_from="customer")
+    r = v.compute(c, [ev], conf, NOW)
+    assert r["ball"] == "third_party" and "customer_replied" not in codes(r)

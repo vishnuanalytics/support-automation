@@ -38,6 +38,23 @@ class FakeStore:
     def close_cases(self, tenant_id, ids):
         self.closed = ids
 
+    imported: dict = {}
+    partner_rows: list = []
+
+    def partners(self, tenant_id):
+        return self.partner_rows
+
+    labels: dict = {}
+
+    def reply_labels(self, tenant_id, hashes):
+        return {k: v for k, v in self.labels.items() if k in hashes}
+
+    def save_reply_labels(self, tenant_id, labels):
+        self.saved_labels = labels
+
+    def imported_evidence(self, tenant_id):
+        return self.imported
+
     def add_events(self, tenant_id, sync_id, events):
         self.events = events
 
@@ -64,6 +81,12 @@ class FakeReader:
 
     def brand_stats(self, brands):
         return {}
+
+    def post_links(self, ids):
+        self.post_ids = ids
+        return self.posts
+
+    posts: dict = {}
 
     def latest_emails(self, ids):
         self.email_ids = ids
@@ -205,7 +228,7 @@ def test_support_case_reads_its_child_dsp_emails():
     reader.emails = {"d": [{**EMAIL, "ours": True}]}
     store = FakeStore()
     run(store, reader, cfg=dsp_cfg())
-    assert reader.email_ids == ["d"]
+    assert "d" in reader.email_ids
     assert store.saved[0]["verdict"]["ball"] == "third_party"
     assert store.saved[0]["case"]["email_evidence"]["related"]
 
@@ -215,7 +238,7 @@ def test_support_case_emails_are_not_third_party_evidence():
     reader.emails = {"1": [EMAIL]}
     store = FakeStore()
     result = run(store, reader, cfg=dsp_cfg())
-    assert result["missing_link"] == 1 and result["my_turn"] == 0
+    assert result["not_raised"] == 1 and result["my_turn"] == 0
 
 
 def test_child_links_count_for_the_parent():
@@ -228,6 +251,279 @@ def test_child_links_count_for_the_parent():
     result = run(store, WithChild([agg("1")]), cfg=dsp_cfg())
     assert result["missing_link"] == 0
     assert "links" not in store.saved[0]["case"]["children"][0]
+
+
+SLACK_URL = "https://x.slack.com/archives/C1/p1700000000000100"
+
+
+class NoLoginSlack:
+    def fetch(self, link):
+        return {"kind": "slack", "url": link["url"], "ok": False,
+                "error": "connect Slack in Case Monitor to read this"}
+
+
+def test_sync_keeps_an_imported_thread_instead_of_an_error():
+    store = FakeStore()
+    store.imported = {SLACK_URL: {
+        "kind": "slack", "url": SLACK_URL, "ok": True, "imported_at": "2026-11-05T00:00:00Z",
+        "messages": [{"who": "ops", "ours": False, "at": "2026-11-05T10:00:00Z", "text": "x"}]}}
+    c = case("1", url=SLACK_URL, waiting_party="third_party", waiting_raw="Aggregator")
+    result = run(store, FakeReader([c]), {"slack": NoLoginSlack()})
+    assert result["status"] == "ok" and result["my_turn"] == 1
+    assert store.evidence[0]["imported_at"]
+
+
+def test_a_real_read_replaces_an_imported_thread():
+    class Works:
+        def fetch(self, link):
+            return {"kind": "slack", "url": link["url"], "ok": True, "messages": []}
+
+    store = FakeStore()
+    store.imported = {SLACK_URL: {"url": SLACK_URL, "ok": True, "imported_at": "x"}}
+    run(store, FakeReader([case("1", url=SLACK_URL)]), {"slack": Works()})
+    assert "imported_at" not in store.evidence[0]
+
+
+class ImportTable:
+    """The few supabase-client calls the import path makes."""
+
+    def __init__(self, rows):
+        self.rows, self.saved = rows, []
+
+    def table(self, name):
+        return self
+
+    def __getattr__(self, name):
+        return lambda *a, **k: self
+
+    def upsert(self, payload):
+        self.saved += payload
+        return self
+
+    def execute(self):
+        return type("R", (), {"data": self.rows})
+
+
+def _case_row():
+    from interpreter.monitor.links import parse
+    return [{"case_data": {"case_number": "7", "links": parse(SLACK_URL)}}]
+
+
+def test_import_cleans_text_and_records_when_it_was_read():
+    from interpreter.monitor import service
+
+    sb = ImportTable(_case_row())
+    service.import_slack_threads(sb, "t", [{"url": SLACK_URL, "messages": [
+        {"who": "ops", "ours": False, "at": "2026-11-05T10:00:00Z",
+         "text": "see https://s3.io/a?Signature=sek " + "y" * 600}]}])
+    data = sb.saved[0]["data"]
+    assert data["imported_at"] and "sek" not in data["messages"][0]["text"]
+    assert len(data["messages"][0]["text"]) <= 401
+
+
+def test_import_rejects_a_thread_not_linked_to_a_case():
+    from interpreter.monitor import service
+
+    with pytest.raises(ValueError):
+        service.import_slack_threads(ImportTable(_case_row()), "t",
+                                     [{"url": "https://x.slack.com/archives/C9/p1", "messages": []}])
+
+
+def test_import_records_a_thread_the_person_cant_see():
+    from interpreter.monitor import service
+
+    sb = ImportTable(_case_row())
+    service.import_slack_threads(sb, "t", [{"url": SLACK_URL, "error": "channel not visible"}])
+    assert not sb.saved[0]["data"]["ok"] and sb.saved[0]["data"]["error"]
+
+
+def test_empty_link_field_falls_back_to_case_posts():
+    from interpreter.monitor.links import parse
+
+    reader = FakeReader([case("1", url=None), case("2")])
+    reader.posts = {"1": [{**parse(GH)[0], "via": "post"}]}
+    store = FakeStore()
+    result = run(store, reader)
+    assert reader.post_ids == ["1"] and result["missing_link"] == 0
+    assert store.saved[0]["case"]["links"][0]["via"] == "post"
+
+
+def test_post_read_failure_does_not_fail_the_sync():
+    class Broken(FakeReader):
+        def post_links(self, ids):
+            raise RuntimeError("boom")
+
+    result = run(FakeStore(), Broken([case("1", url=None)]))
+    assert result["status"] == "partial" and result["total"] == 1
+
+
+def test_posts_only_yield_ticketing_and_chat_links():
+    jira = "https://x.atlassian.net/browse/A-1"
+    sf = FakeSF([{"ParentId": "1", "Body": f"<p><a href=\"{jira}\">t</a> https://x.io/a.png</p>",
+                  "LinkUrl": None,
+                  "FeedComments": {"records": [{"CommentBody": f"{GH}?a=1&amp;b=2"}]}}])
+    got = readers.SalesforceCaseReader(sf, CFG).post_links(["1"])["1"]
+    assert sorted(x["kind"] for x in got) == ["github", "jira"]
+    assert all(x["via"] == "post" for x in got)
+
+
+ACME = {"name": "AcmeEats", "channel": "email", "to_emails": ["a@acmeeats.test"],
+        "cc_emails": ["cc@x.test"], "email_domains": ["acmeeats.test"]}
+
+
+def test_email_channel_case_needs_no_link_once_emailed():
+    reader = FakeReader([agg("1", record_type="DSP", third_parties=["acmeeats"])])
+    reader.emails = {"1": [{**EMAIL, "ours": True}]}
+    store = FakeStore()
+    store.partner_rows = [ACME]
+    result = run(store, reader, cfg=dsp_cfg())
+    assert result["missing_link"] == 0 and result["not_raised"] == 0
+    assert store.saved[0]["verdict"]["ball"] == "third_party"
+
+
+def test_email_channel_with_no_email_is_not_raised_not_missing_link():
+    store = FakeStore()
+    store.partner_rows = [ACME]
+    result = run(store, FakeReader([agg("1", record_type="DSP", third_parties=["AcmeEats"])]),
+                 cfg=dsp_cfg())
+    assert result["not_raised"] == 1 and result["missing_link"] == 0
+    assert "by email" in store.saved[0]["verdict"]["next_action"]
+
+
+def test_aggregator_case_without_a_dsp_case_is_flagged():
+    store = FakeStore()
+    store.partner_rows = [ACME]
+    run(store, FakeReader([agg("1", record_type="Support", third_parties=["AcmeEats"])]),
+        cfg=dsp_cfg())
+    verdict_ = store.saved[0]["verdict"]
+    assert verdict_["not_raised"] and "Raise a DSP case first" in verdict_["next_action"]
+
+
+def test_slack_channel_still_needs_a_link():
+    store = FakeStore()
+    store.partner_rows = [{"name": "ChatCo", "channel": "slack"}]
+    result = run(store, FakeReader([agg("1", record_type="DSP", third_parties=["ChatCo"])]),
+                 cfg=dsp_cfg())
+    assert result["missing_link"] == 1 and "on Slack" in store.saved[0]["verdict"]["next_action"]
+
+
+def test_whatsapp_channel_is_checked_by_hand():
+    store = FakeStore()
+    store.partner_rows = [{"name": "WaCo", "channel": "whatsapp"}]
+    result = run(store, FakeReader([agg("1", record_type="DSP", third_parties=["WaCo"])]),
+                 cfg=dsp_cfg())
+    assert result["missing_link"] == 0 and result["not_raised"] == 0
+    assert "by hand" in store.saved[0]["verdict"]["next_action"]
+
+
+def test_support_case_keeps_only_emails_with_the_partner():
+    reader = FakeReader([agg("1", record_type="Support", third_parties=["AcmeEats"])])
+    reader.emails = {"1": [
+        {"who": "owner@shop.test", "to": "us@x.test", "ours": False, "at": "2026-11-05T09:00:00Z"},
+        {"who": "us@x.test", "to": "a@acmeeats.test, b@x.test", "ours": True,
+         "at": "2026-11-05T10:00:00Z"}]}
+    store = FakeStore()
+    store.partner_rows = [ACME]
+    run(store, reader, cfg=dsp_cfg())
+    assert len(store.saved[0]["case"]["email_evidence"]["messages"]) == 1
+    assert store.saved[0]["verdict"]["ball"] == "third_party"
+
+
+def test_alias_matches_the_directory_entry():
+    store = FakeStore()
+    store.partner_rows = [{**ACME, "aliases": ["AcmeFood"]}]
+    run(store, FakeReader([agg("1", record_type="DSP", third_parties=["AcmeFood"])]), cfg=dsp_cfg())
+    assert store.saved[0]["case"]["partner"]["name"] == "AcmeEats"
+
+
+def dsp_parent(**kw):
+    return {"id": "p", "case_number": "9", "record_type": "DSP", "status": "In Progress", **kw}
+
+
+def test_support_case_uses_its_parent_dsp():
+    reader = FakeReader([agg("1", record_type="Support", third_parties=["AcmeEats"],
+                             parent=dsp_parent())])
+    reader.emails = {"p": [{**EMAIL, "ours": True}]}
+    store = FakeStore()
+    store.partner_rows = [ACME]
+    result = run(store, reader, cfg=dsp_cfg())
+    assert result["not_raised"] == 0 and store.saved[0]["case"]["has_dsp"]
+    assert store.saved[0]["verdict"]["ball"] == "third_party"
+    assert store.saved[0]["case"]["email_evidence"]["related"]
+
+
+def test_a_resolved_parent_dsp_is_our_turn():
+    c = agg("1", record_type="Support", parent=dsp_parent(status="Resolved", closed=True))
+    store = FakeStore()
+    result = run(store, FakeReader([c]), cfg=dsp_cfg())
+    assert result["my_turn"] == 1
+    assert "Update the customer" in store.saved[0]["verdict"]["next_action"]
+
+
+def test_parent_posts_count_for_an_empty_support_case():
+    from interpreter.monitor.links import parse
+
+    reader = FakeReader([agg("1", record_type="Support", parent=dsp_parent())])
+    reader.posts = {"p": [{**parse(GH)[0], "via": "post"}]}
+    store = FakeStore()
+    run(store, reader, cfg=dsp_cfg())
+    assert reader.post_ids == ["1", "p"] and store.saved[0]["case"]["links"]
+
+
+def test_row_latest_includes_customer_email_on_the_case():
+    store = FakeStore()
+    store.prior = {"1": {"case": {"last_modified_at": "2026-11-05T11:00:00Z"}, "verdict": {},
+                         "timeline": {"emails": [{"from": "owner@gmail.com", "incoming": True,
+                                                  "at": "2026-11-05T11:30:00Z", "text": "any news?"}]}}}
+    run(store, FakeReader([case("1")]))
+    latest = store.saved[0]["verdict"]["latest"]
+    assert latest["party"] == "customer" and latest["text"] == "any news?"
+
+
+def test_dsp_email_from_merchant_is_labelled_merchant():
+    reader = FakeReader([agg("1", record_type="DSP", third_parties=["AcmeEats"])])
+    reader.emails = {"1": [{"who": "owner@gmail.com", "ours": False, "at": "2026-11-05T10:00:00Z",
+                            "text": "x"}]}
+    store = FakeStore()
+    store.partner_rows = [ACME]
+    run(store, reader, cfg=dsp_cfg())
+    assert store.saved[0]["verdict"]["signal"]["code"] == "customer_replied_email"
+
+
+def ack_reader(text):
+    reader = FakeReader([agg("1", record_type="DSP", third_parties=["AcmeEats"])])
+    reader.emails = {"1": [{"who": "ops@acmeeats.test", "ours": False, "text": text,
+                            "at": "2026-11-05T10:00:00Z"}]}
+    return reader
+
+
+def test_a_plain_ack_keeps_waiting_on_the_aggregator():
+    store = FakeStore()
+    store.partner_rows = [ACME]
+    run(store, ack_reader("Noted, let me check"), cfg=dsp_cfg())
+    verdict_ = store.saved[0]["verdict"]
+    assert verdict_["ball"] == "third_party" and verdict_["signal"]["code"] == "third_party_ack"
+
+
+def test_a_real_reply_with_no_llm_still_needs_action():
+    store = FakeStore()
+    store.partner_rows = [ACME]
+    run(store, ack_reader("The issue is caused by a mismatch in the tax config for this outlet."),
+        cfg=dsp_cfg())
+    assert store.saved[0]["verdict"]["ball"] == "us"
+
+
+def test_a_stored_label_drives_the_action():
+    from interpreter.monitor import replies
+
+    text = "Our engineering team is fixing this defect and will share a date."
+    store = FakeStore()
+    store.partner_rows = [ACME]
+    store.labels = {replies.text_hash(text): {"kind": "bug_raised", "summary": "Fix under way"}}
+    run(store, ack_reader(text), cfg=dsp_cfg())
+    verdict_ = store.saved[0]["verdict"]
+    assert verdict_["signal"]["code"] == "reply_bug_raised"
+    assert verdict_["signal"]["text"] == "Fix under way" and "bug" in verdict_["next_action"]
 
 
 def test_digest_events():
@@ -309,6 +605,17 @@ def test_github_normalises_and_paginates(http):
     assert ev["ok"] and len(ev["messages"]) == 101
     assert ev["messages"][-1]["ours"] and not ev["messages"][0]["ours"]
     assert all(c[0] == "GET" for c in calls)
+
+
+def test_configured_github_bot_accounts_are_ignored(http):
+    _, queue = http
+    queue += [Resp(200, {"user": {"login": "lead"}, "state": "open"}),
+              Resp(200, [{"user": {"login": "HelperBot"}, "created_at": "2026-01-02T00:00:00Z",
+                          "body": "summary"},
+                         {"user": {"login": "dev"}, "created_at": "2026-01-01T00:00:00Z",
+                          "body": "real"}])]
+    ev = readers.GithubReader("t", [], ["helperbot"]).fetch(LINK)
+    assert [m["who"] for m in ev["messages"]] == ["dev"]
 
 
 def test_github_support_users_are_ours(http):
@@ -455,6 +762,13 @@ def test_an_unrelated_salesforce_error_still_raises():
 
     with pytest.raises(RuntimeError):
         readers.SalesforceCaseReader(Broken(), CFG).list_dependency_cases()
+
+
+def test_unsent_email_drafts_are_never_read():
+    sf = FakeSF()
+    r = readers.SalesforceCaseReader(sf, CFG)
+    r.timeline("1"), r.latest_emails(["1"]), list(r.resolved_conversations("DSP", "a", "b"))
+    assert not [q for q in sf.soql if "FROM EmailMessage" in q and "Status != '5'" not in q]
 
 
 def test_soql_values_are_escaped():

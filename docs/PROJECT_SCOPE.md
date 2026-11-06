@@ -728,7 +728,36 @@ existing stack, and each tenant's fields and rules are config, not code. Setup a
   count as third-party evidence; links on parent and child cases are shared; an agent-nudge draft;
   `scripts/monitor_github_token.py`. The repo is public, so keep tenant names and tenant field names
   out of commits, code and docs; they belong in `monitor_config`.
-- **Not verified:** reading real Slack threads (no Slack login yet), the Slack user OAuth round trip, the tag-team post, LLM summaries, a scheduled sync
+- **Slack without an app (same day):** the org won't allow Slack app changes, so a Claude session
+  reads threads with the lead's own access and calls `service.import_slack_threads`. Syncs keep
+  the last import, which goes stale until the next refresh. `internal` threads show staleness only.
+- **Third-party directory (migration `117`, applied):** `monitor_partners` holds each third party's
+  raising channel, recipients, contacts and escalation time per tenant, and never portal passwords.
+  Email-channel cases need no link; DSP emails are the evidence, and a third-party case with no DSP
+  case shows as not raised. Queue also has BU, post-link fallback, a summary and more filters.
+- **Queue redesign:** tabs are now one stage per case (`verdict.stage`), so they add up to the total:
+  Act now, Raise it, Waiting on each party, Check by hand. Overdue is a flag. Rows show the latest
+  message and direct links, and filters sit in a collapsed panel.
+- **Parent direction:** a Support case's DSP is its parent, not a child, so third-party evidence
+  now reads linked cases both ways. A closed DSP parent means it's our turn.
+- **Last response:** emails are classified by sender domain (`internal_email_domains`, partner
+  domains or name, else customer). Rows show the sender's party and pending time, and
+  `focus_partners` adds cards for key third parties.
+- **Real updates, past cases, AI drafts:** third-party replies are sorted by rules, then an LLM
+  (`replies.py`, migration `118`, applied), and acks stay waiting on the third party. Unlabelled
+  replies count as real. `knowledge.py` holds 398 resolved conversations in a Knowledge collection
+  (redacted, 1,722 chunks) and writes AI drafts from them. Last-reply fields
+  are ignored on DSP cases, because any incoming email sets them.
+- **Screen check on real data:** queue and case page checked in light, dark and 1100px with real
+  rows fed through the browser, not by logging in as the owner. Normal text is at least 4.9:1, and
+  `--warn-text` was darkened. Added `github_bot_users`; a bot had the most comments and was
+  skewing turns. `support_github_users` is a partial list matched from owner names.
+- **Case page redesign:** a brief strip (whose turn, next step, last response), tabbed conversation,
+  linked items, past cases and related cases, and details and drafts in a side column. Messages are
+  tidied at read time, with `email_footer_markers` removing footers.
+- **Unsent drafts:** `EmailMessage` rows with Status 5 are excluded from every read, since a draft
+  had been counted as our last reply.
+- **Not verified:** the Slack user OAuth round trip, the tag-team post, LLM summaries, a scheduled sync
   firing, and the UI on real data. No `web/e2e` spec yet; the browser walk was a throwaway script.
 - **Salesforce without a secret:** the owner has no Connected App client ID or secret, so
   `scripts/sf_connect_cli.py` stores a `sf org login web` refresh token in Vault as a public OAuth
@@ -737,7 +766,7 @@ existing stack, and each tenant's fields and rules are config, not code. Setup a
   org got host `None`; its test had pinned the wrong value. Case Monitor builds its
   own client and deliberately skips `salesforce.client_for`, which falls back to the platform's env
   org on a failed login. Other `client_for` callers still have that fallback.
-- **Next step:** connect a Slack login per `docs/CASE_MONITOR.md`. 89 of 95 cases are overdue and 77 critical, so review the scoring.
+- **Next step:** owner reviews the queue on real data and reports wrong verdicts. 89 of 95 cases are overdue and 77 critical, so review the scoring.
 - `fix-jobs-failures-route` (commit `4c35e7f`) is still unmerged and has no PR. This branch is
   based on `origin/main` and doesn't include it.
 
