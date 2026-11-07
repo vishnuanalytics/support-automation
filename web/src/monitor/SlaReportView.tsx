@@ -17,7 +17,7 @@ const STATES: Record<string, { label: string; tone: "exception" | "warn" | "succ
 function reportText(d: SlaReport) {
   return [
     `Aggregator SLA, week from ${formatDay(d.since)}`,
-    ...d.partners.map((p) => `${p.name}: ${p.open_late} of ${p.open} open past SLA, ${p.closed_in_time} of ${p.closed_timed} SLA cases closed in time`),
+    ...d.partners.map((p) => `${p.name}: ${p.open_late} of ${p.open} new cases past SLA, ${p.old_late} of ${p.old_open} old cases past SLA, ${p.closed_in_time} of ${p.closed_timed} new cases closed in time`),
   ].join("\n");
 }
 
@@ -33,7 +33,7 @@ export function SlaReportView({ tenantId, onOpen }: { tenantId?: string; onOpen:
   // A search looks through every open case; without one only the late ones are listed.
   const shown = useMemo(() => (data?.rows ?? [])
     .filter((r) => (search.trim() ? matchesBusiness(search, [r]) : r.state !== "on_track"))
-    .sort((a, b) => a.hours_left - b.hours_left), [data, search]);
+    .sort((a, b) => Number(b.new) - Number(a.new) || a.hours_left - b.hours_left), [data, search]);
 
   if (err) return <Banner tone="exception" title={err} />;
   if (!data) return <Skeleton variant="row" lines={6} />;
@@ -50,6 +50,11 @@ export function SlaReportView({ tenantId, onOpen }: { tenantId?: string; onOpen:
         <div>
           <h2>Aggregator SLA this week</h2>
           <p className="monitor-muted">Each kind of issue has its own clock. Rules tighten once most cases beat them.</p>
+          {data.sla_start && (
+            <p className="monitor-muted">
+              Only cases raised from {formatDay(data.sla_start)} are judged by these SLAs. Anything older is old backlog.
+            </p>
+          )}
         </div>
         <div className="monitor-actions">
           <Input aria-label="Search business" placeholder="Business name or ID" value={search}
@@ -58,6 +63,32 @@ export function SlaReportView({ tenantId, onOpen }: { tenantId?: string; onOpen:
           <Button size="sm" variant="primary" disabled={!shown.length} onClick={download}>Download CSV</Button>
         </div>
       </div>
+
+      {data.progress.measures.length > 0 && (
+        <div className="monitor-esc-wrap">
+          <table className="monitor-esc">
+            <thead>
+              <tr><th>Your workload</th><th>Started {formatDay(data.progress.since)}</th><th>Latest</th><th>Change</th></tr>
+            </thead>
+            <tbody>
+              {data.progress.measures.map((m) => (
+                <tr key={m.key}>
+                  <td>{m.label}</td><td>{m.start ?? "None yet"}</td><td>{m.now ?? "None yet"}</td>
+                  <td>
+                    {m.change === "better" && <Tag tone="success">Better</Tag>}
+                    {m.change === "worse" && <Tag tone="warn">Worse</Tag>}
+                    {m.change === "same" && "Same"}
+                    {m.change === "too_early" && "Too early"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="monitor-muted">
+            Each number is a daily average over a week, so Change shows after 7 days of data. Recorded so far: {data.progress.days}.
+          </p>
+        </div>
+      )}
 
       {data.rules.length > 0 && (
         <div className="monitor-esc-wrap">
@@ -84,13 +115,17 @@ export function SlaReportView({ tenantId, onOpen }: { tenantId?: string; onOpen:
         <div className="monitor-esc-wrap">
           <table className="monitor-esc">
             <thead>
-              <tr><th>Aggregator</th><th>Open</th><th>Open past SLA</th><th>Closed this week</th><th>SLA cases closed in time</th></tr>
+              <tr>
+                <th>Aggregator</th><th>New open</th><th>New past SLA</th><th>Old open</th><th>Old past SLA</th>
+                <th>Closed this week</th><th>New cases closed in time</th>
+              </tr>
             </thead>
             <tbody>
               {data.partners.map((p) => (
                 <tr key={p.name}>
                   <td>{p.name}</td><td>{p.open}</td>
                   <td>{p.open_late ? <Tag tone="exception">{p.open_late}</Tag> : 0}</td>
+                  <td>{p.old_open}</td><td>{p.old_late}</td>
                   <td>{p.closed}</td><td>{p.closed_timed ? `${p.closed_in_time} of ${p.closed_timed}` : "None"}</td>
                 </tr>
               ))}
@@ -113,7 +148,9 @@ export function SlaReportView({ tenantId, onOpen }: { tenantId?: string; onOpen:
                 <tr key={r.case_id}>
                   <td><button type="button" className="monitor-link" onClick={() => onOpen(r.case_id)}>{r.case_number}</button></td>
                   <td>{businessLabel(r)}</td><td>{r.partner}</td><td>{r.subject}</td><td>{r.rule}</td><td>{formatDayTime(r.deadline)}</td>
-                  <td><Tag tone={STATES[r.state]?.tone}>{STATES[r.state]?.label}</Tag></td>
+                  <td><Tag tone={STATES[r.state]?.tone}>{STATES[r.state]?.label}</Tag>
+                    {!r.new && <div className="monitor-fu-subject">Old backlog</div>}
+                  </td>
                   <td>{r.owner}</td>
                 </tr>
               ))}

@@ -22,15 +22,20 @@ const today = {
 };
 const report = {
   since: "2026-10-30T00:00:00Z",
-  partners: [{ name: "PartnerA", open: 5, open_late: 4, closed: 55, closed_timed: 10, closed_in_time: 8 }],
+  sla_start: "2026-11-10T18:30:00Z",
+  progress: { since: "2026-11-07", days: 9, measures: [
+    { key: "cards", label: "Things on Today, busiest point of the day", start: 19, now: 12, change: "better" },
+    { key: "dsp_new_late", label: "New aggregator cases past SLA", start: null, now: null, change: "too_early" },
+  ] },
+  partners: [{ name: "PartnerA", open: 5, open_late: 4, old_open: 6, old_late: 3, closed: 55, closed_timed: 10, closed_in_time: 8 }],
   rules: [{ name: "Store not opening", escalate_hours: 6, resolve_hours: 24, goal_resolve_hours: 4, closed: 10,
             in_time: 9, share: 90, ready: true }],
   rows: [{ case_id: "a", case_number: "1001", subject: "Store down", owner: "Asha", partner: "PartnerA", priority: "Urgent",
            rule: "Store not opening", raised_at: "2026-11-05T00:00:00Z", deadline: "2026-11-05T04:00:00Z",
-           state: "breached", hours_left: -30, last_update_at: null, business: "Biz One", biz_id: "111" },
+           state: "breached", hours_left: -30, last_update_at: null, business: "Biz One", biz_id: "111", new: true },
          { case_id: "b", case_number: "1002", subject: "Menu wrong", owner: "Asha", partner: "PartnerA", priority: "Low",
            rule: "Menu issue", raised_at: "2026-11-05T00:00:00Z", deadline: "2026-11-10T00:00:00Z",
-           state: "on_track", hours_left: 50, last_update_at: null, business: "Biz Two", biz_id: "222" }],
+           state: "on_track", hours_left: 50, last_update_at: null, business: "Biz Two", biz_id: "222", new: false }],
 };
 
 test("today shows only what needs you, with the next step ready", async ({ page, context }) => {
@@ -73,6 +78,9 @@ test("today shows only what needs you, with the next step ready", async ({ page,
   await expect(page.getByRole("cell", { name: "9 of 10 (90%)" })).toBeVisible();
   await expect(page.getByText("Ready to tighten")).toBeVisible();
   await expect(page.getByRole("cell", { name: "8 of 10" })).toBeVisible();
+  await expect(page.getByText("Better")).toBeVisible();
+  await expect(page.getByText("Too early")).toBeVisible();
+  await expect(page.getByRole("columnheader", { name: "Old past SLA" })).toBeVisible();
   await expect(page.getByRole("button", { name: "1002" })).toHaveCount(0);
   await page.getByLabel("Search business").fill("biz two");
   await expect(page.getByRole("button", { name: "1002" })).toBeVisible();

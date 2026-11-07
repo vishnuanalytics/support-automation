@@ -8,7 +8,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from . import (brief, coaching, config, demo, drafts, dsp_sla, escalations, followups, help_requests,
-               readers, redact, similar, sync, tech_pending, timeline, today, verdict)
+               progress, readers, redact, similar, sync, tech_pending, timeline, today, verdict)
 from .store import SupabaseStore
 from .verdict import parse_dt
 
@@ -253,7 +253,28 @@ def sla_report(sb: Any, tenant_id: str, now: datetime | None = None) -> dict[str
                                                     "opened_at, closed_at")
                 .eq("tenant_id", tenant_id).eq("record_type", cfg["dependency_record_type"])
                 .gte("closed_at", since).execute().data or [])
-    return {**dsp_sla.weekly_report(sla, resolved, now, cfg), "rows": sla["rows"]}
+    days = (sb.table("monitor_daily_stats").select("day, stats").eq("tenant_id", tenant_id)
+            .order("day").execute().data or [])
+    return {**dsp_sla.weekly_report(sla, resolved, now, cfg), "rows": sla["rows"],
+            "progress": progress.summary(days)}
+
+
+def record_progress(sb: Any, tenant_id: str, now: datetime | None = None) -> None:
+    """Write today's row of workload numbers."""
+    now = now or datetime.now(timezone.utc)
+    cfg = load_config(sb, tenant_id)
+    day = progress.local_day(now, cfg)
+    sla = dsp_sla.build(_dsp_items(_cases_with_evidence(sb, tenant_id, cfg), cfg), now, cfg)
+    closed = (sb.table("monitor_closed_issues").select("opened_at, closed_at")
+              .eq("tenant_id", tenant_id).execute().data or [])
+    reviews = (sb.table("monitor_reviews").select("case_id, reviewed_at")
+               .eq("tenant_id", tenant_id).execute().data or [])
+    before = (sb.table("monitor_daily_stats").select("stats").eq("tenant_id", tenant_id)
+              .eq("day", day).execute().data or [])
+    stats = progress.snapshot(today_view(sb, tenant_id, now), sla, closed, reviews,
+                              before[0]["stats"] if before else None, now, cfg)
+    sb.table("monitor_daily_stats").upsert({"tenant_id": tenant_id, "day": day, "stats": stats,
+                                            "updated_at": now.isoformat()}).execute()
 
 
 def tech_pending_list(sb: Any, tenant_id: str, now: datetime | None = None) -> dict[str, Any]:

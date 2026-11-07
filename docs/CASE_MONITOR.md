@@ -174,6 +174,18 @@ time" only covers cases with a rule.
 A rule's optional `goal_resolve_hours` is where it should end up. **Weekly SLA** marks a rule "Ready to
 tighten" once at least 80% of at least 5 cases closed in time that week.
 
+### New cases and old backlog
+
+`sla_start` is an ISO date and time. Aggregator cases raised before it are old backlog: Weekly SLA counts
+them apart, and they don't affect closed-in-time numbers or whether a rule is ready to tighten. With no
+`sla_start`, every case is new. Today still lists late old cases, because they still need chasing.
+
+### Your workload
+
+After each sync the worker saves the day's numbers to `monitor_daily_stats`. Weekly SLA compares the
+average of the first 7 days with the latest 7, and judges a change once there are more than 7 days.
+It counts work, not time spent, because the app doesn't track how long the lead takes.
+
 ### Business search
 
 Engineering, Escalations and Weekly SLA each have a box that finds open cases by business name or ID.

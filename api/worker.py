@@ -842,7 +842,12 @@ def _reschedule(kind: str, sb) -> None:
 def _monitor_sync(payload: dict, sb) -> dict:
     from interpreter.monitor import service
 
-    return service.run_sync(sb, payload["tenant_id"], payload.get("trigger") or "schedule")
+    result = service.run_sync(sb, payload["tenant_id"], payload.get("trigger") or "schedule")
+    try:
+        service.record_progress(sb, payload["tenant_id"])
+    except Exception:  # the numbers can wait for the next sync; the sync itself worked
+        log.warning("monitor progress not recorded", exc_info=True)
+    return result
 
 
 def _sweep_handler(fn):

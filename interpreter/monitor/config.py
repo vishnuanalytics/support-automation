@@ -11,6 +11,8 @@ import copy
 import re
 from typing import Any
 
+from .verdict import parse_dt
+
 SOQL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)*$")
 USERNAME = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$")
 GH_USER = re.compile(r"^[A-Za-z0-9-]+(\[bot\])?$")
@@ -52,6 +54,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "issue_quiet_hours": 24,          # so does an issue nobody has touched for this long
     # [{"name", "modules", "sub_modules", "keywords", "escalate_hours", "resolve_hours"}], first match wins
     "dsp_sla_rules": [],
+    "sla_start": "",                  # cases raised before this ISO time are the old backlog
     "dsp_escalate_share": 0.5,        # with no rule, escalate this far through the target time
     "assist_hours": {},               # {"start": 11, "end": 20, "tz": "Area/City"}, the lead's own hours
     "github_squad_suffix": "-squad",  # the issue label ending in this names its squad
@@ -109,6 +112,8 @@ def validate(config: Any) -> list[str]:
         if not (rule.get("name") and all(isinstance(rule.get(k), (int, float)) and rule[k] > 0
                                          for k in ("escalate_hours", "resolve_hours"))):
             errors.append("each dsp_sla_rules entry needs a name, escalate_hours and resolve_hours")
+    if config.get("sla_start") and parse_dt(config["sla_start"]) is None:
+        errors.append("sla_start must be an ISO date and time")
     if not str(config.get("github_support_label", "support")).strip():
         errors.append("github_support_label can't be empty")
     for key in ("support_github_users", "github_bot_users"):

@@ -39,6 +39,12 @@ def rule_for(case: dict, rules: list[dict]) -> dict | None:
     return None
 
 
+def is_new(raised: datetime | None, cfg: dict) -> bool:
+    """Raised after the SLAs began, so it's fair to judge it by them."""
+    start = parse_dt(cfg.get("sla_start"))
+    return start is None or (raised is not None and raised >= start)
+
+
 def _clock(case: dict, started: datetime, cfg: dict) -> tuple[str, float, float] | None:
     rule = rule_for(case, cfg.get("dsp_sla_rules") or [])
     if rule:
@@ -71,6 +77,7 @@ def row(case: dict, v: dict, evidence: list[dict], now: datetime, cfg: dict) -> 
         "owner": case.get("owner"), "partner": (case.get("third_parties") or ["Not set"])[0],
         "priority": case.get("priority"), "bu": case.get("bu"), "rule": rule, **escalations.business(case),
         "urgent": rule != STANDARD and resolve_hours <= URGENT_HOURS,
+        "new": is_new(started, cfg),
         "raised_at": started.isoformat(), "escalate_at": escalate_at.isoformat(),
         "deadline": deadline.isoformat(), "state": state, "waiting": waiting,
         "hours_left": (deadline - now).total_seconds() / 3600,
@@ -122,7 +129,8 @@ def _rule_stats(resolved: list[dict], cfg: dict) -> list[dict]:
     rules = cfg.get("dsp_sla_rules") or []
     for r in rules:
         spans = [(parse_dt(c["closed_at"]) - parse_dt(c["opened_at"])).total_seconds() / 3600
-                 for c in resolved if rule_for(c, rules) is r and c.get("opened_at") and c.get("closed_at")]
+                 for c in resolved if rule_for(c, rules) is r and c.get("opened_at") and c.get("closed_at")
+                 and is_new(parse_dt(c["opened_at"]), cfg)]
         in_time = sum(h <= r["resolve_hours"] for h in spans)
         share = round(100 * in_time / len(spans)) if spans else 0
         out.append({**{k: r.get(k) for k in ("name", "escalate_hours", "resolve_hours", "goal_resolve_hours")},
@@ -133,18 +141,19 @@ def _rule_stats(resolved: list[dict], cfg: dict) -> list[dict]:
 
 
 def weekly_report(sla: dict, resolved: list[dict], now: datetime, cfg: dict) -> dict:
-    """The week's numbers by aggregator: what closed in time, and what's still late."""
+    """The week's numbers by aggregator. Only cases raised under the SLAs are judged by them."""
     since = now - timedelta(days=7)
     week = [c for c in resolved if (at := parse_dt(c.get("closed_at"))) and at >= since]
     by: dict[str, dict] = {}
 
     def entry(name: str) -> dict:
-        return by.setdefault(name, {"name": name, "open": 0, "open_late": 0, "closed": 0, "closed_timed": 0, "closed_in_time": 0})
+        return by.setdefault(name, {"name": name, "open": 0, "open_late": 0, "old_open": 0, "old_late": 0,
+                                    "closed": 0, "closed_timed": 0, "closed_in_time": 0})
 
     for r in sla["rows"]:
         e = entry(r["partner"])
-        e["open"] += 1
-        e["open_late"] += r["state"] == BREACHED
+        e["open" if r["new"] else "old_open"] += 1
+        e["open_late" if r["new"] else "old_late"] += r["state"] == BREACHED
     for c in week:
         closed, opened = parse_dt(c.get("closed_at")), parse_dt(c.get("opened_at"))
         names = c.get("third_parties") or []
@@ -153,8 +162,9 @@ def weekly_report(sla: dict, resolved: list[dict], now: datetime, cfg: dict) -> 
         e = entry(names[0])
         e["closed"] += 1
         rule = rule_for(c, cfg.get("dsp_sla_rules") or [])
-        if rule:  # a closed case keeps no target date, so only ruled ones can be judged
+        if rule and is_new(opened, cfg):  # a closed case keeps no target date, so only ruled ones can be judged
             e["closed_timed"] += 1
             e["closed_in_time"] += (closed - opened).total_seconds() / 3600 <= rule["resolve_hours"]
-    partners = sorted(by.values(), key=lambda e: -e["open_late"])
-    return {"since": since.isoformat(), "partners": partners, "rules": _rule_stats(week, cfg)}
+    partners = sorted(by.values(), key=lambda e: (-e["open_late"], -e["old_late"]))
+    return {"since": since.isoformat(), "sla_start": cfg.get("sla_start") or None,
+            "partners": partners, "rules": _rule_stats(week, cfg)}

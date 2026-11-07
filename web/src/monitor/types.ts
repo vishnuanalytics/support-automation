@@ -314,6 +314,7 @@ export type Today = {
   };
 };
 export type SlaRow = {
+  new: boolean;
   business?: string | null;
   biz_id?: string | null;
   case_id: string;
@@ -331,7 +332,13 @@ export type SlaRow = {
 };
 export type SlaReport = {
   since: string;
-  partners: { name: string; open: number; open_late: number; closed: number; closed_timed: number; closed_in_time: number }[];
+  sla_start: string | null;
+  progress: {
+    since: string | null;
+    days: number;
+    measures: { key: string; label: string; start: number | null; now: number | null; change: "too_early" | "not_judged" | "same" | "better" | "worse" }[];
+  };
+  partners: { name: string; open: number; open_late: number; old_open: number; old_late: number; closed: number; closed_timed: number; closed_in_time: number }[];
   rules: {
     name: string;
     escalate_hours: number;

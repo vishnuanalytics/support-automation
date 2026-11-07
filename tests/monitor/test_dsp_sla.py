@@ -99,8 +99,8 @@ def test_the_weekly_report_counts_by_partner():
                 {"third_parties": ["PartnerA"], "module": "Menu", "opened_at": ago(90), "closed_at": ago(8)},
                 {"third_parties": [], "module": "Stores", "opened_at": ago(10), "closed_at": ago(8)}]
     got = sla.weekly_report(build(case(5)), resolved, NOW, CFG)
-    assert got["partners"] == [{"name": "PartnerA", "open": 1, "open_late": 1, "closed": 3,
-                                "closed_timed": 2, "closed_in_time": 1}]
+    assert got["partners"] == [{"name": "PartnerA", "open": 1, "open_late": 1, "old_open": 0, "old_late": 0,
+                                "closed": 3, "closed_timed": 2, "closed_in_time": 1}]
     assert got["rules"][0]["name"] == "Store offline" and (got["rules"][0]["closed"], got["rules"][0]["in_time"]) == (3, 2)
 
 
@@ -138,3 +138,26 @@ def test_span_reads_naturally():
 def test_a_row_carries_its_business():
     r = row(case(business_name="Biz One", biz_id="111"))
     assert (r["business"], r["biz_id"]) == ("Biz One", "111")
+
+
+START = {**CFG, "sla_start": ago(20)}
+
+
+def test_a_case_raised_before_the_start_is_old_backlog():
+    got = sla.build([(case(30), WAITING, []), (case(5, id="2"), WAITING, [])], NOW, START)
+    assert [r["new"] for r in got["rows"]] == [False, True]
+    p = sla.weekly_report(got, [], NOW, START)["partners"][0]
+    assert (p["open"], p["open_late"], p["old_open"], p["old_late"]) == (1, 1, 1, 1)
+
+
+def test_with_no_start_every_case_is_new():
+    assert row(case(900))["new"] is True
+
+
+def test_old_closed_cases_are_not_judged_by_the_sla():
+    resolved = [{"third_parties": ["PartnerA"], "module": "Stores", "opened_at": ago(30), "closed_at": ago(28)},
+                {"third_parties": ["PartnerA"], "module": "Stores", "opened_at": ago(10), "closed_at": ago(8)}]
+    got = sla.weekly_report(sla.build([], NOW, START), resolved, NOW, START)
+    p = got["partners"][0]
+    assert (p["closed"], p["closed_timed"], p["closed_in_time"]) == (2, 1, 1)
+    assert (got["rules"][0]["closed"], got["rules"][0]["in_time"]) == (1, 1)

@@ -811,6 +811,9 @@ existing stack, and each tenant's fields and rules are config, not code. Setup a
     Requests start 2026-11-11.
   - **Business search** on Engineering, Escalations and Weekly SLA, by business name (`fields.business_name`,
     default `Account.Name`) or ID. No Slack tagging until the owner reviews the two-week watch, about 2026-11-21.
+  - **Old backlog and workload baseline** (`progress.py`, migration 124, applied): `sla_start` separates old
+    cases from those raised under the SLAs, and `monitor_daily_stats` records a daily baseline for Weekly SLA.
+    Planned next: missing-details flag, log expiry warning, then early check on new issues and live order status.
   - A GitHub webhook for instant reaction, and a check that stops a wrong raise, aren't built.
 - **AI evaluation:** `eval/monitor/backtest.py` hides a real agent reply on a resolved case and
   scores the draft with DeepEval. `eval/monitor/reply_labels.py` scores reply labels against a
