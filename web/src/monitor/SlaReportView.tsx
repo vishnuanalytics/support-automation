@@ -1,12 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
-import { Banner, Button, EmptyState, Skeleton, Tag } from "../ui";
-import { copyText, downloadCsv, formatDay, formatDayTime } from "./util";
+import { Banner, Button, EmptyState, Input, Skeleton, Tag } from "../ui";
+import { businessLabel, copyText, downloadCsv, formatDay, formatDayTime, matchesBusiness } from "./util";
 import type { SlaReport } from "./types";
 
 function hours(h: number) {
   return h % 24 === 0 ? `${h / 24}d` : `${h}h`;
 }
+
+const STATES: Record<string, { label: string; tone: "exception" | "warn" | "success" }> = {
+  breached: { label: "Past SLA", tone: "exception" },
+  escalate: { label: "Escalate", tone: "warn" },
+  on_track: { label: "On track", tone: "success" },
+};
 
 function reportText(d: SlaReport) {
   return [
@@ -18,21 +24,24 @@ function reportText(d: SlaReport) {
 export function SlaReportView({ tenantId, onOpen }: { tenantId?: string; onOpen: (id: string) => void }) {
   const [data, setData] = useState<SlaReport | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
 
   useEffect(() => {
     api.monitor.slaReport(tenantId).then(setData).catch((e: ApiError) => setErr(e.message));
   }, [tenantId]);
 
-  const late = useMemo(() => (data?.rows ?? [])
-    .filter((r) => r.state !== "on_track").sort((a, b) => a.hours_left - b.hours_left), [data]);
+  // A search looks through every open case; without one only the late ones are listed.
+  const shown = useMemo(() => (data?.rows ?? [])
+    .filter((r) => (search.trim() ? matchesBusiness(search, [r]) : r.state !== "on_track"))
+    .sort((a, b) => a.hours_left - b.hours_left), [data, search]);
 
   if (err) return <Banner tone="exception" title={err} />;
   if (!data) return <Skeleton variant="row" lines={6} />;
 
   const download = () => downloadCsv(`aggregator-sla-${formatDay(new Date().toISOString())}.csv`, [
-    ["Aggregator", "Case", "Subject", "Agent", "Priority", "SLA", "Raised", "Due", "State", "Last update"],
-    ...late.map((r) => [r.partner, r.case_number, r.subject, r.owner, r.priority, r.rule, formatDayTime(r.raised_at),
-      formatDayTime(r.deadline), r.state === "breached" ? "Past SLA" : "Escalate", formatDayTime(r.last_update_at)]),
+    ["Aggregator", "Case", "Business", "Biz ID", "Subject", "Agent", "Priority", "SLA", "Raised", "Due", "State", "Last update"],
+    ...shown.map((r) => [r.partner, r.case_number, r.business, r.biz_id, r.subject, r.owner, r.priority, r.rule, formatDayTime(r.raised_at),
+      formatDayTime(r.deadline), STATES[r.state]?.label, formatDayTime(r.last_update_at)]),
   ]);
 
   return (
@@ -43,8 +52,10 @@ export function SlaReportView({ tenantId, onOpen }: { tenantId?: string; onOpen:
           <p className="monitor-muted">Each kind of issue has its own clock. Rules tighten once most cases beat them.</p>
         </div>
         <div className="monitor-actions">
+          <Input aria-label="Search business" placeholder="Business name or ID" value={search}
+                 onChange={(e) => setSearch(e.target.value)} />
           <Button size="sm" variant="secondary" onClick={() => void copyText(reportText(data))}>Copy report</Button>
-          <Button size="sm" variant="primary" disabled={!late.length} onClick={download}>Download CSV</Button>
+          <Button size="sm" variant="primary" disabled={!shown.length} onClick={download}>Download CSV</Button>
         </div>
       </div>
 
@@ -88,18 +99,21 @@ export function SlaReportView({ tenantId, onOpen }: { tenantId?: string; onOpen:
         </div>
       )}
 
-      {late.length > 0 && (
+      {search.trim() && shown.length === 0 && (
+        <EmptyState title="Nothing matches" body="No open aggregator case has this business name or ID." />
+      )}
+      {shown.length > 0 && (
         <div className="monitor-esc-wrap">
           <table className="monitor-esc">
             <thead>
-              <tr><th>Case</th><th>Aggregator</th><th>Issue</th><th>SLA</th><th>Due</th><th>State</th><th>Agent</th></tr>
+              <tr><th>Case</th><th>Business</th><th>Aggregator</th><th>Issue</th><th>SLA</th><th>Due</th><th>State</th><th>Agent</th></tr>
             </thead>
             <tbody>
-              {late.map((r) => (
+              {shown.map((r) => (
                 <tr key={r.case_id}>
                   <td><button type="button" className="monitor-link" onClick={() => onOpen(r.case_id)}>{r.case_number}</button></td>
-                  <td>{r.partner}</td><td>{r.subject}</td><td>{r.rule}</td><td>{formatDayTime(r.deadline)}</td>
-                  <td><Tag tone={r.state === "breached" ? "exception" : "warn"}>{r.state === "breached" ? "Past SLA" : "Escalate"}</Tag></td>
+                  <td>{businessLabel(r)}</td><td>{r.partner}</td><td>{r.subject}</td><td>{r.rule}</td><td>{formatDayTime(r.deadline)}</td>
+                  <td><Tag tone={STATES[r.state]?.tone}>{STATES[r.state]?.label}</Tag></td>
                   <td>{r.owner}</td>
                 </tr>
               ))}

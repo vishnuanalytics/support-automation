@@ -27,7 +27,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "fields": {
         "waiting_on": "", "waiting_sub_status": "", "link": "", "third_party": "",
         "target_at": "", "ageing": "", "last_reply_from": "", "brand": "",
-        "biz_id": "", "business_id": "", "product": "", "module": "", "sub_module": "", "bu": "",
+        "biz_id": "", "business_id": "", "business_name": "Account.Name", "product": "", "module": "", "sub_module": "", "bu": "",
         "case_type": "Type", "escalation_level": "", "escalated": "",
     },
     "waiting_values": {},             # {"Engineer": "engineering", ...}

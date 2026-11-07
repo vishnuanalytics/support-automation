@@ -97,3 +97,15 @@ def test_issues_group_by_squad_with_the_biggest_first():
 
 def test_an_issue_with_no_squad_label_says_so():
     assert only(build(issue(labels=["support"])))["squad"] == tp.NO_SQUAD
+
+
+def test_every_business_with_an_open_case_is_listed_once():
+    same = {"business_name": "Biz One", "biz_id": "111"}
+    cases = [case(**same), case(id="2", case_number="43", **same),
+             case(id="3", case_number="44", business_name="Biz Two", business_id="222")]
+    row = only(build(issue(), cases))
+    assert row["businesses"] == [{"business": "Biz One", "biz_id": "111"}, {"business": "Biz Two", "biz_id": "222"}]
+
+
+def test_an_issue_with_no_business_lists_none():
+    assert only(build(issue()))["businesses"] == []

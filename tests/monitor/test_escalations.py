@@ -144,3 +144,7 @@ def test_a_case_with_two_aggregators_counts_under_both():
     c = case(third_parties=["AcmeEats", "Other"])
     got = escalations.build([(c, wait(), [ev("email", email(9, "us"))])], 5, NOW)
     assert got["total"] == 1 and {s["name"] for s in got["summary"]} == {"AcmeEats", "Other"}
+
+
+def test_a_business_id_stands_in_for_a_missing_biz_id():
+    assert escalations.business({"business_name": "Biz One", "business_id": "222"}) == {"business": "Biz One", "biz_id": "222"}

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
-import { Banner, Button, EmptyState, Select, Skeleton, Tag } from "../ui";
-import { downloadCsv, formatDay, formatDayTime } from "./util";
+import { Banner, Button, EmptyState, Input, Select, Skeleton, Tag } from "../ui";
+import { businessLabel, downloadCsv, formatDay, formatDayTime, matchesBusiness } from "./util";
 import type { TechIssue, TechPending } from "./types";
 
 const WAITING: Record<string, string> = {
@@ -11,11 +11,11 @@ const WAITING: Record<string, string> = {
 function csvRows(rows: TechIssue[]) {
   return [
     ["#", "Squad", "Issue #", "Title", "Last reply by", "GH Open since", "Case Priority", "Support SLA due",
-      "Support SLA status", "Status", "Waiting on", "AI note", "Case", "Other open cases", "GitHub link"],
+      "Support SLA status", "Status", "Waiting on", "AI note", "Case", "Other open cases", "Business", "GitHub link"],
     ...rows.map((r, i) => [
       i + 1, r.squad, r.issue, r.title, r.last_reply_by ?? "No replies", `${r.days_open} days`, r.priority,
       formatDayTime(r.sla_due), r.sla_status, r.tech_status, r.waiting_on ? WAITING[r.waiting_on] : "", r.reason,
-      r.case_number ?? "No open case", r.other_cases.join(" "), r.url,
+      r.case_number ?? "No open case", r.other_cases.join(" "), (r.businesses ?? []).map(businessLabel).join("; "), r.url,
     ]),
   ];
 }
@@ -30,6 +30,7 @@ export function TechPendingView({ tenantId, onOpen }: { tenantId?: string; onOpe
   const [squad, setSquad] = useState("");
   const [status, setStatus] = useState("");
   const [age, setAge] = useState("");
+  const [search, setSearch] = useState("");
 
   useEffect(() => {
     api.monitor.techPending(tenantId).then(setData).catch((e: ApiError) => setErr(e.message));
@@ -40,9 +41,10 @@ export function TechPendingView({ tenantId, onOpen }: { tenantId?: string; onOpe
     .filter((s) => !squad || s.squad === squad)
     .map((s) => ({
       ...s,
-      issues: s.issues.filter((r) => (!status || r.status === status) && (!age || r.over_days)),
+      issues: s.issues.filter((r) => (!status || r.status === status) && (!age || r.over_days)
+        && matchesBusiness(search, r.businesses ?? [])),
     }))
-    .filter((s) => s.issues.length > 0), [data, squad, status, age]);
+    .filter((s) => s.issues.length > 0), [data, squad, status, age, search]);
   const rows = groups.flatMap((g) => g.issues);
 
   if (err) return <Banner tone="exception" title={err} />;
@@ -68,6 +70,8 @@ export function TechPendingView({ tenantId, onOpen }: { tenantId?: string; onOpe
           </p>
         </div>
         <div className="monitor-actions">
+          <Input aria-label="Search business" placeholder="Business name or ID" value={search}
+                 onChange={(e) => setSearch(e.target.value)} />
           <Select aria-label="Squad" value={squad} onChange={(e) => setSquad(e.target.value)}
                   options={[{ value: "", label: "Squad: all" },
                     ...data.squads.map((s) => ({ value: s.squad, label: `${s.squad} (${s.issues.length})` }))]} />
@@ -90,7 +94,7 @@ export function TechPendingView({ tenantId, onOpen }: { tenantId?: string; onOpe
           <table className="monitor-esc monitor-esc--wide">
             <thead>
               <tr>
-                <th>#</th><th>Squad</th><th>Issue #</th><th>Title</th><th>Last reply by</th><th>GH Open since</th>
+                <th>#</th><th>Squad</th><th>Issue #</th><th>Title</th><th>Business</th><th>Last reply by</th><th>GH Open since</th>
                 <th>Case Priority</th><th>Support SLA due</th><th>Support SLA status</th><th>Status</th><th>Case</th>
               </tr>
             </thead>
@@ -101,6 +105,9 @@ export function TechPendingView({ tenantId, onOpen }: { tenantId?: string; onOpe
                   <td>{r.squad}</td>
                   <td><a className="monitor-link" href={r.url} target="_blank" rel="noreferrer">{r.issue}</a></td>
                   <td>{r.title}</td>
+                  <td>
+                    {(r.businesses ?? []).map((b) => <div key={businessLabel(b)}>{businessLabel(b)}</div>)}
+                  </td>
                   <td>{r.last_reply_by ?? "No replies"}</td>
                   <td>{r.days_open} days</td>
                   <td>{r.priority}</td>

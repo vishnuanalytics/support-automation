@@ -69,7 +69,7 @@ def row(case: dict, v: dict, evidence: list[dict], now: datetime, cfg: dict) -> 
     return {
         "case_id": case["id"], "case_number": case.get("case_number"), "subject": case.get("subject"),
         "owner": case.get("owner"), "partner": (case.get("third_parties") or ["Not set"])[0],
-        "priority": case.get("priority"), "bu": case.get("bu"), "rule": rule,
+        "priority": case.get("priority"), "bu": case.get("bu"), "rule": rule, **escalations.business(case),
         "urgent": rule != STANDARD and resolve_hours <= URGENT_HOURS,
         "raised_at": started.isoformat(), "escalate_at": escalate_at.isoformat(),
         "deadline": deadline.isoformat(), "state": state, "waiting": waiting,

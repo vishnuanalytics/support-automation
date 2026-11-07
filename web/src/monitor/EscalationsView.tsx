@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
-import { Banner, Button, EmptyState, Select, Skeleton, Tag } from "../ui";
-import { downloadCsv, formatDay } from "./util";
+import { Banner, Button, EmptyState, Input, Select, Skeleton, Tag } from "../ui";
+import { businessLabel, downloadCsv, formatDay, matchesBusiness } from "./util";
 import type { Escalation, Escalations } from "./types";
 
 const lastUpdate = (e: Escalation) => e.last_update_at
@@ -9,11 +9,11 @@ const lastUpdate = (e: Escalation) => e.last_update_at
 
 function csvRows(rows: Escalation[]) {
   return [
-    ["Case", "Waiting on", "Days without update", "Last update", "Last update via", "Last acknowledgement",
+    ["Case", "Business", "Biz ID", "Waiting on", "Days without update", "Last update", "Last update via", "Last acknowledgement",
       "Our last message", "Our messages since", "Owner", "Priority", "Record type", "Subject",
       "Linked support cases", "Channels checked", "Channels not read", "Link"],
     ...rows.map((e) => [
-      e.case_number, e.waiting_on.join(", "), e.days_silent, formatDay(e.last_update_at), e.last_update_via,
+      e.case_number, e.business, e.biz_id, e.waiting_on.join(", "), e.days_silent, formatDay(e.last_update_at), e.last_update_via,
       formatDay(e.last_ack_at), formatDay(e.our_last_at), e.our_follow_ups, e.owner, e.priority,
       e.record_type, e.subject, e.support_cases.join(" "), e.checked.join(" "), e.not_read.join(" "), e.url,
     ]),
@@ -24,12 +24,14 @@ export function EscalationsView({ tenantId, onOpen }: { tenantId?: string; onOpe
   const [data, setData] = useState<Escalations | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [who, setWho] = useState("");
+  const [search, setSearch] = useState("");
 
   useEffect(() => {
     api.monitor.escalations(tenantId).then(setData).catch((e: ApiError) => setErr(e.message));
   }, [tenantId]);
 
-  const rows = useMemo(() => (data?.cases ?? []).filter((e) => !who || e.waiting_on.includes(who)), [data, who]);
+  const rows = useMemo(() => (data?.cases ?? []).filter((e) => (!who || e.waiting_on.includes(who))
+    && matchesBusiness(search, [e])), [data, who, search]);
 
   if (err) return <Banner tone="exception" title={err} />;
   if (!data) return <Skeleton variant="row" lines={6} />;
@@ -49,6 +51,8 @@ export function EscalationsView({ tenantId, onOpen }: { tenantId?: string; onOpe
           </p>
         </div>
         <div className="monitor-actions">
+          <Input aria-label="Search business" placeholder="Business name or ID" value={search}
+                 onChange={(e) => setSearch(e.target.value)} />
           <Select aria-label="Waiting on" value={who} onChange={(e) => setWho(e.target.value)}
                   options={[{ value: "", label: "Waiting on: all" },
                     ...data.summary.map((s) => ({ value: s.name, label: `${s.name} (${s.cases})` }))]} />
@@ -85,6 +89,7 @@ export function EscalationsView({ tenantId, onOpen }: { tenantId?: string; onOpe
                         {e.case_number}
                       </button>
                       <div className="monitor-fu-subject">{e.subject}</div>
+                      {businessLabel(e) && <div className="monitor-fu-subject">{businessLabel(e)}</div>}
                       {e.support_cases.length > 0 && (
                         <div className="monitor-fu-subject">Support: {e.support_cases.join(", ")}</div>
                       )}

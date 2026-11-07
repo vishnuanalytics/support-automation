@@ -222,6 +222,8 @@ export type FollowUpOwner = {
   message: string;
 };
 export type Escalation = {
+  business?: string | null;
+  biz_id?: string | null;
   id: string;
   case_number: string | null;
   url: string | null;
@@ -242,6 +244,7 @@ export type Escalation = {
   support_cases: string[];
 };
 export type TechIssue = {
+  businesses?: { business: string | null; biz_id: string | null }[];
   squad: string;
   issue: string;
   url: string;
@@ -311,6 +314,8 @@ export type Today = {
   };
 };
 export type SlaRow = {
+  business?: string | null;
+  biz_id?: string | null;
   case_id: string;
   case_number: string | null;
   subject: string | null;

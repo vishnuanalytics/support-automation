@@ -36,6 +36,15 @@ function csvCell(value: string | number | null | undefined): string {
   return /[",\r\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 
+export function businessLabel(b: { business?: string | null; biz_id?: string | null }): string {
+  return [b.business, b.biz_id].filter(Boolean).join(" · ");
+}
+
+export function matchesBusiness(query: string, items: { business?: string | null; biz_id?: string | null }[]): boolean {
+  const q = query.trim().toLowerCase();
+  return !q || items.some((b) => `${b.business ?? ""} ${b.biz_id ?? ""}`.toLowerCase().includes(q));
+}
+
 export function toCsv(rows: (string | number | null | undefined)[][]): string {
   return rows.map((r) => r.map(csvCell).join(",")).join("\r\n");
 }

@@ -174,6 +174,13 @@ time" only covers cases with a rule.
 A rule's optional `goal_resolve_hours` is where it should end up. **Weekly SLA** marks a rule "Ready to
 tighten" once at least 80% of at least 5 cases closed in time that week.
 
+### Business search
+
+Engineering, Escalations and Weekly SLA each have a box that finds open cases by business name or ID.
+The name comes from `fields.business_name` (default `Account.Name`). The ID comes from `biz_id`, or
+`business_id` if that is empty. Weekly SLA lists late cases only, but a search covers every open
+aggregator case. An Engineering issue with no open case has no business, so a search can't find it.
+
 ### Resolution Assistance
 
 Rows in `monitor_help_requests` appear at the top of Today until someone other than the agent replies.

@@ -345,6 +345,7 @@ class SalesforceCaseReader:
         if last:
             reply_from = "customer" if last in self.cfg["customer_reply_values"] else "us"
         third = value("third_party")
+        business = value("business_name")
         case_id = row["Id"]
         base = self._base_url()
         parent = None
@@ -369,6 +370,8 @@ class SalesforceCaseReader:
             "third_parties": [x for x in (third or "").split(";") if x],
             "target_at": value("target_at"), "ageing": value("ageing"), "brand": value("brand"),
             "biz_id": value("biz_id"), "business_id": value("business_id"),
+            # Salesforce fills a missing account with a bracketed placeholder
+            "business_name": None if not business or business.startswith("[") else business,
             "product": value("product"), "module": value("module"),
             "sub_module": value("sub_module"), "bu": value("bu"), "case_type": value("case_type"),
             "reason": row.get("Reason"), "escalation_level": value("escalation_level"),

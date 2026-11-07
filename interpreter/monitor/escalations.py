@@ -17,6 +17,12 @@ CHANNELS = {"email": "Email", "slack": "Slack", "github": "GitHub", "jira": "Jir
 UNSET = ("", "na", "n/a", "none")
 
 
+def business(case: dict) -> dict:
+    """Who the case is for, as shown and searched on the lists."""
+    return {"business": case.get("business_name"),
+            "biz_id": case.get("biz_id") or case.get("business_id")}
+
+
 def _party(ev: dict, m: dict) -> str:
     if m.get("party"):
         return m["party"]
@@ -83,7 +89,7 @@ def row(case: dict, v: dict, evidence: list[dict], days: float, now: datetime) -
     return {
         "id": case["id"], "case_number": case.get("case_number"), "url": case.get("url"),
         "subject": case.get("subject"), "record_type": case.get("record_type"),
-        "owner": case.get("owner"), "priority": case.get("priority"),
+        "owner": case.get("owner"), "priority": case.get("priority"), **business(case),
         "waiting_on": _waiting_on(case),
         "days_silent": int((now - since).total_seconds() // 86400),
         "silent_since": since.isoformat(),

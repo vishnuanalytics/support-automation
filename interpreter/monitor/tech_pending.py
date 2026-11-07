@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from . import issue_status
+from . import escalations, issue_status
 from .verdict import parse_dt
 
 NO_SQUAD = "No squad"
@@ -27,6 +27,16 @@ def _main_case(cases: list[dict], support_type: str) -> dict:
                                      c.get("target_at") or "9999"))
 
 
+def _businesses(cases: list[dict]) -> list[dict]:
+    """Each business with an open case on this issue, once."""
+    seen: dict[tuple, dict] = {}
+    for c in cases:
+        found = escalations.business(c)
+        if found["business"] or found["biz_id"]:
+            seen.setdefault((found["business"], found["biz_id"]), found)
+    return list(seen.values())
+
+
 def _row(ev: dict, read: dict, cases: list[dict], days: float, now: datetime, cfg: dict) -> dict:
     opened = parse_dt(ev.get("opened_at"))
     age = (now - opened).total_seconds() if opened else 0
@@ -45,6 +55,7 @@ def _row(ev: dict, read: dict, cases: list[dict], days: float, now: datetime, cf
         "last_activity_at": messages[-1]["at"] if messages else ev.get("opened_at"),
         "case_id": case.get("id"), "case_number": case.get("case_number"),
         "other_cases": [c.get("case_number") for c in cases if c is not case],
+        "businesses": _businesses(cases),
         "priority": case.get("priority"), "sla_due": case.get("target_at"),
         "sla_status": sla_status(case.get("target_at"), now),
         "status": status, "tech_status": issue_status.LABELS[status],

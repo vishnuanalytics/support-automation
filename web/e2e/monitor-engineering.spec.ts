@@ -7,7 +7,8 @@ const issue = (over: Record<string, unknown>) => ({
   last_reply_by: "dev-one", days_open: 11, case_id: "a", case_number: "1001", other_cases: ["1002"],
   priority: "Low", sla_due: "2026-10-28T10:05:00Z", sla_status: "Breached by 9d 1h",
   status: "cause_given", tech_status: "Cause given, not closed yet", waiting_on: "third_party",
-  reason: "The partner must fix this at source.", over_days: true, ...over,
+  reason: "The partner must fix this at source.", over_days: true,
+  businesses: [{ business: "Biz One", biz_id: "111" }], ...over,
 });
 
 test("engineering issues group by squad, filter, download and survive a refresh", async ({ page }) => {
@@ -49,6 +50,15 @@ test("engineering issues group by squad, filter, download and survive a refresh"
   await expect(page.getByText("The partner must fix this at source.")).toBeVisible();
   await expect(page.getByText("Waiting on: Third party")).toBeVisible();
 
+  await page.getByLabel("Search business").fill("biz one");
+  await expect(page.getByRole("heading", { name: "3 open support issues" })).toBeVisible();
+  await page.getByLabel("Search business").fill("222");
+  await expect(page.getByRole("heading", { name: "0 open support issues" })).toBeVisible();
+  await expect(page.getByText("Nothing matches")).toBeVisible();
+  await page.getByLabel("Search business").fill("111");
+  await expect(page.getByRole("heading", { name: "3 open support issues" })).toBeVisible();
+  await page.getByLabel("Search business").fill("");
+
   await page.getByLabel("Age").selectOption("old");
   await expect(page.getByRole("heading", { name: "2 open support issues" })).toBeVisible();
   await expect(page.getByRole("cell", { name: "No open case" })).toHaveCount(0);
@@ -68,6 +78,7 @@ test("engineering issues group by squad, filter, download and survive a refresh"
   const lines = readFileSync(await download.path(), "utf8").split("\r\n");
   expect(lines[0]).toContain("#,Squad,Issue #,Title,Last reply by,GH Open since,Case Priority,Support SLA due,Support SLA status");
   expect(lines[0]).toContain("Status,Waiting on,AI note,Case");
+  expect(lines[1]).toContain("Biz One · 111");
   expect(lines[1]).toContain("1,order-squad,8645,Vendor sponsorship,dev-one,11 days,Low,");
   expect(lines[1]).toContain("Cause given, not closed yet");
 

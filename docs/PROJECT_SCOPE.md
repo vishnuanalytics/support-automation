@@ -809,6 +809,8 @@ existing stack, and each tenant's fields and rules are config, not code. Setup a
     2026-11-07) copies requests from the channel into that table, using the Slack and Supabase
     connectors. Today can lag a new request by up to an hour; Slack still alerts the owner at once.
     Requests start 2026-11-11.
+  - **Business search** on Engineering, Escalations and Weekly SLA, by business name (`fields.business_name`,
+    default `Account.Name`) or ID. No Slack tagging until the owner reviews the two-week watch, about 2026-11-21.
   - A GitHub webhook for instant reaction, and a check that stops a wrong raise, aren't built.
 - **AI evaluation:** `eval/monitor/backtest.py` hides a real agent reply on a resolved case and
   scores the draft with DeepEval. `eval/monitor/reply_labels.py` scores reply labels against a

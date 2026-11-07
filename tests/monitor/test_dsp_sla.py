@@ -133,3 +133,8 @@ def test_a_rule_at_its_goal_stops_tightening():
 
 def test_span_reads_naturally():
     assert (sla.span(0.5), sla.span(5.9), sla.span(50), sla.span(-3)) == ("30m", "5h", "2d 2h", "3h")
+
+
+def test_a_row_carries_its_business():
+    r = row(case(business_name="Biz One", biz_id="111"))
+    assert (r["business"], r["biz_id"]) == ("Biz One", "111")
