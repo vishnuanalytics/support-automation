@@ -1,5 +1,5 @@
 import { supabase } from "./supabase";
-import type { AiDraft, Alerts, CaseDetail, Digest, Escalations, FollowUps, Queue, SlackStatus, SlaReport, Summary, TechPending, Today } from "./monitor/types";
+import type { AgentsReport, AiDraft, Alerts, CaseDetail, Digest, Escalations, FollowUps, Queue, SlackStatus, SlaReport, Summary, TechPending, Today, Weekly } from "./monitor/types";
 import type {
   AssistResult,
   AuditEvent,
@@ -603,6 +603,8 @@ export const api = {
     today: (tenantId?: string) => req<Today>(`/monitor/today${monitorQuery(tenantId)}`),
     todayDone: (key: string, tenantId?: string) =>
       req<void>(`/monitor/today/done${monitorQuery(tenantId)}`, { method: "POST", body: JSON.stringify({ key }) }),
+    weekly: (tenantId?: string) => req<Weekly>(`/monitor/weekly${monitorQuery(tenantId)}`),
+    agents: (tenantId?: string) => req<AgentsReport>(`/monitor/agents${monitorQuery(tenantId)}`),
     slaReport: (tenantId?: string) => req<SlaReport>(`/monitor/sla-report${monitorQuery(tenantId)}`),
     techPending: (tenantId?: string) => req<TechPending>(`/monitor/tech-pending${monitorQuery(tenantId)}`),
     alerts: (tenantId?: string) => req<Alerts>(`/monitor/alerts${monitorQuery(tenantId)}`),

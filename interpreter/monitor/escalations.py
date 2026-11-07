@@ -55,7 +55,7 @@ def _is_ack(m: dict, case: dict, v: dict) -> bool:
     latest = parse_dt((v.get("latest") or {}).get("at"))
     if stored and latest == m["at_dt"]:
         return True
-    return m["ack"] if "ack" in m else replies.rule_kind(m.get("text")) is not None
+    return m["ack"] if "ack" in m else replies.rule_kind(m.get("text")) in replies.NOISE
 
 
 def _waiting_on(case: dict) -> list[str]:

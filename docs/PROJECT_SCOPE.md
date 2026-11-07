@@ -813,7 +813,16 @@ existing stack, and each tenant's fields and rules are config, not code. Setup a
     default `Account.Name`) or ID. No Slack tagging until the owner reviews the two-week watch, about 2026-11-21.
   - **Old backlog and workload baseline** (`progress.py`, migration 124, applied): `sla_start` separates old
     cases from those raised under the SLAs, and `monitor_daily_stats` records a daily baseline for Weekly SLA.
-    Planned next: missing-details flag, log expiry warning, then early check on new issues and live order status.
+    **Log expiry** (`log_expiry.py`): Today warns before an aggregator's logs are lost, per `log_retention_days`.
+    **Missing details** (`case_details.py`): Today lists new aggregator cases lacking what their issue type needs.
+  - **Redesign (2026-11-07):** Case Monitor opens on three pages, with the old ones under Older pages.
+    **Needs Me** (`today.py`) groups replies by agent, one line per reply with a short next step (linked
+    cases merged; `no_answer` replies mean push the aggregator), SLA misses and agent asks. **Agents**
+    (`agent_quality.py`, migration 125, applied) scores raises by rule. **Wednesday Report** (`weekly.py`)
+    lists GitHub issues with an open case where tech owes the resolution, and aggregators past SLA, for the
+    lead to post by hand. Saved checks live in Metabase; the routine copies location IDs from them.
+    Design: https://claude.ai/artifact/8CbSZAAT8ca1cqw5dxGdkZ.
+    Planned next: order and stock log checks on new aggregator raises, using the saved Metabase questions.
   - A GitHub webhook for instant reaction, and a check that stops a wrong raise, aren't built.
 - **AI evaluation:** `eval/monitor/backtest.py` hides a real agent reply on a resolved case and
   scores the draft with DeepEval. `eval/monitor/reply_labels.py` scores reply labels against a

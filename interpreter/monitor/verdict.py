@@ -25,6 +25,7 @@ REPLY_ACTION = {
     "solution": ("reply_solution", "{third} shared a solution: verify it and update the {customer}."),
     "needs_info": ("reply_needs_info", "{third} needs more details: gather them and reply."),
     "update": ("reply_update", "Read the {third} update and act on it."),
+    "no_answer": ("reply_no_answer", "{third} gave no real answer: push them for the reason."),
 }
 
 

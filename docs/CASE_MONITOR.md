@@ -145,22 +145,47 @@ come from that party, so acknowledgements, customers and internal threads don't 
 turn or never raised aren't listed. A support case folds into its DSP case. A review doesn't remove
 a case: the silence is still true. Links that couldn't be read show as "Not read".
 
-### Today
+### Needs Me, Agents and the Wednesday Report
 
-**Today** is the first page. It lists only what needs the lead, most pressing first, with the next
-step ready to copy:
+Case Monitor opens on three pages. Everything else is under **Older pages**, and Salesforce stays the
+place to filter and browse.
 
-| Card | When it shows |
-|---|---|
-| Engineers answered | The AI reads an issue as waiting on support |
-| Escalate an aggregator | One or more of its cases are late, as one email for all of them |
-| No engineer has replied | No tech reply after `issue_chase_hours` (default 4) |
-| Engineers have gone quiet | Waiting on tech, untouched for `issue_quiet_hours` (default 24) |
-| Looks ready to close | Waiting on nobody |
-| Waiting on a merchant or aggregator | Untouched for `issue_quiet_hours` |
-| Send agents their follow-ups | Agents owe replies on their cases |
+**Needs Me** is what the lead must decide, in three groups:
 
-Done hides a card until something new happens, or for a day at most. Nothing is sent for you.
+- **Replies waiting:** an outside reply on GitHub, Slack or email has sat for `needs_reply_hours`
+  (default 24) with nothing from us. These are grouped into one card per agent, because the fix is the
+  same, and each card lists its cases with the last response and the next step in a few words. One
+  reply on linked cases is one job, on the card of whoever owns the aggregator case. A reply with no
+  cause, fix or request is labelled `no_answer`, and its step is to push the aggregator.
+- **No response past SLA:** aggregators to escalate, and GitHub issues gone quiet.
+- **Agents:** help requests, logs about to expire, and issues to close or follow up.
+
+Several GitHub issues of one kind become one card. Marking a card done hides it until something new
+happens, or for a day at most.
+
+**Agents** shows who raised what and what was wrong, worst first, for open aggregator cases raised in the
+last 30 days plus GitHub issues closed with a `wrong_raise_labels` label. A case stops counting once it
+closes. The raiser is whoever signed the first email out, falling back to the owner. A raise is wrong when:
+
+- a required detail is missing, other than an item name
+- the location belongs to another business, or the platform ID doesn't match that location
+- every payload link in our emails is for another store
+
+"Please check" is not counted against anyone. It means our records have no ID to compare, or no item
+name was found, which is the weakest match. `platform_aliases` maps an aggregator's name to its catalogue
+platform name when they differ.
+
+The IDs come from `monitor_location_facts`. The hourly routine copies them from Metabase question
+`ID-01`, refreshing each location weekly, so a new location's ID check can take up to an hour.
+
+**Wednesday Report** is ready to copy and post by hand. The app sends nothing. The week starts on
+`week_start_weekday` in `timezone`.
+
+- **Pending from engineering:** open issues with an open case where tech still owes the resolution, by
+  squad. Issues answered, unread, or waiting on support, a merchant or a partner are left out and counted.
+  `waiting_on` comes from the AI reading the comments, so check the left-out counts.
+- **Aggregators past SLA:** past their deadline, still waiting on the aggregator, and quiet for at
+  least a day.
 
 ### Aggregator SLAs
 
@@ -174,11 +199,25 @@ time" only covers cases with a rule.
 A rule's optional `goal_resolve_hours` is where it should end up. **Weekly SLA** marks a rule "Ready to
 tighten" once at least 80% of at least 5 cases closed in time that week.
 
+### Missing details
+
+`required_details` lists what each kind of aggregator issue needs, first match wins. Every case needs a
+business name. `location_id`, `platform_id` and the aggregator are read from fields. An order ID or item
+name is found by pattern in the subject, description and emails, so an unusual format can be missed. Cases
+raised from `sla_start` with something missing count on the Agents page.
+
+### Log expiry
+
+`log_retention_days` names the aggregators that delete logs early, and `log_topics` lists the modules
+or sub-modules that depend on them. An open case with `log_warn_days` or fewer left goes on a Needs Me card
+per aggregator, with a message for the agents. Cases don't record the order date, so the clock runs from
+when the case was raised. The real deadline can be earlier, never later.
+
 ### New cases and old backlog
 
 `sla_start` is an ISO date and time. Aggregator cases raised before it are old backlog: Weekly SLA counts
 them apart, and they don't affect closed-in-time numbers or whether a rule is ready to tighten. With no
-`sla_start`, every case is new. Today still lists late old cases, because they still need chasing.
+`sla_start`, every case is new. Needs Me still lists late old cases, because they still need chasing.
 
 ### Your workload
 
@@ -195,16 +234,16 @@ aggregator case. An Engineering issue with no open case has no business, so a se
 
 ### Resolution Assistance
 
-Rows in `monitor_help_requests` appear at the top of Today until someone other than the agent replies.
+Rows in `monitor_help_requests` appear on Needs Me until someone other than the agent replies.
 A bot's reply never counts as an answer. `assist_hours` sets the lead's hours, so requests outside them
-are marked and summed up in an overnight note. Today also shows the topics agents ask about most.
+are marked.
 
-The app doesn't read Slack for these. An hourly Claude routine with Slack and Supabase access writes
+The app doesn't read Slack for these. An hourly Claude routine with Slack, Metabase and Supabase access writes
 the rows, so a new request can take up to an hour to appear.
 
 ### Coaching
 
-Today shows how many closed issues carried a `wrong_raise_labels` label in the last 30 days, and a
+The Agents page counts closed issues that carried a `wrong_raise_labels` label in the last 30 days, and a
 ready note for any agent with at least two. The agent comes from the `github_reporter_field` line in
 the issue body.
 

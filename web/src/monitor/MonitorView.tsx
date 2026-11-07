@@ -8,6 +8,8 @@ import { TechPendingView } from "./TechPendingView";
 import { TodayView } from "./TodayView";
 import { CaseView } from "./CaseView";
 import { FollowUpsView } from "./FollowUpsView";
+import { AgentsView } from "./AgentsView";
+import { WeeklyView } from "./WeeklyView";
 import { MonitorSettings } from "./MonitorSettings";
 import { copyText, formatAge, formatTime } from "./util";
 import type { Digest, Queue, QueueCase, SlackStatus, Stage } from "./types";
@@ -48,7 +50,7 @@ const REASON_GROUP: Record<string, string> = {
   engineer_replied: "Engineer replied", team_replied: "Team replied", github_closed: "Issue closed",
   third_party_replied: "Aggregator replied", customer_replied: "Merchant replied",
   reply_bug_raised: "Raised as a bug", reply_solution: "Solution shared",
-  reply_needs_info: "Needs more details", reply_update: "Aggregator update",
+  reply_needs_info: "Needs more details", reply_update: "Aggregator update", reply_no_answer: "No real answer",
   customer_replied_email: "Merchant replied",
   ai_handoff: "AI handed over", dsp_resolved: "DSP resolved",
 };
@@ -96,10 +98,11 @@ function matches(c: QueueCase, f: Filters): boolean {
   );
 }
 
-const MODES = ["today", "sla", "queue", "followups", "escalations", "engineering", "alerts", "digest", "settings"] as const;
+const MODES = ["today", "agents", "weekly", "sla", "queue", "followups", "escalations", "engineering", "alerts", "digest", "settings"] as const;
 type Mode = (typeof MODES)[number];
 
 const MORE = [
+  { value: "queue", label: "All cases" }, { value: "sla", label: "Weekly SLA" },
   { value: "followups", label: "Follow-ups" }, { value: "escalations", label: "Escalations" },
   { value: "engineering", label: "Engineering" }, { value: "alerts", label: "Alerts" },
   { value: "digest", label: "Digest" }, { value: "settings", label: "Settings" },
@@ -522,12 +525,14 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
           </p>
         </div>
         <div className="monitor-actions">
-          <Button size="sm" variant={mode === "today" ? "secondary" : "ghost"} onClick={() => setMode("today")}>Today</Button>
-          <Button size="sm" variant={mode === "sla" ? "secondary" : "ghost"} onClick={() => setMode("sla")}>Weekly SLA</Button>
-          <Button size="sm" variant={mode === "queue" ? "secondary" : "ghost"} onClick={() => setMode("queue")}>All cases</Button>
+          <Input aria-label="Find a case" placeholder="Find a case" value={filters.search}
+                 onChange={(e) => { updateFilters({ search: e.target.value }); chooseTab("all"); setMode("queue"); }} />
+          <Button size="sm" variant={mode === "today" ? "secondary" : "ghost"} onClick={() => setMode("today")}>Needs Me</Button>
+          <Button size="sm" variant={mode === "agents" ? "secondary" : "ghost"} onClick={() => setMode("agents")}>Agents</Button>
+          <Button size="sm" variant={mode === "weekly" ? "secondary" : "ghost"} onClick={() => setMode("weekly")}>Wednesday Report</Button>
           <Select aria-label="More views" value={MORE.some((m) => m.value === mode) ? mode : ""}
                   onChange={(e) => e.target.value && setMode(e.target.value as Mode)}
-                  options={[{ value: "", label: alertState.unread ? `More (${alertState.unread})` : "More" },
+                  options={[{ value: "", label: alertState.unread ? `Older pages (${alertState.unread})` : "Older pages" },
                     ...MORE.filter((m) => isOwner || m.value !== "settings").map((m) => (
                       m.value === "alerts" && alertState.unread
                         ? { ...m, label: `Alerts (${alertState.unread})` } : m))]} />
@@ -555,7 +560,11 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
       )}
 
       {mode === "today" ? (
-        <TodayView tenantId={tid} onOpen={open} onTab={(t) => setMode(t as Mode)} />
+        <TodayView tenantId={tid} onOpen={open} thirdParty={thirdParty} customer={customer} />
+      ) : mode === "agents" ? (
+        <AgentsView tenantId={tid} onOpen={open} />
+      ) : mode === "weekly" ? (
+        <WeeklyView tenantId={tid} onOpen={open} thirdParty={thirdParty} customer={customer} />
       ) : mode === "sla" ? (
         <SlaReportView tenantId={tid} onOpen={open} />
       ) : mode === "settings" ? (

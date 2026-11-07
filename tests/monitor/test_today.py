@@ -99,9 +99,77 @@ def test_the_clear_count_is_open_cases_with_no_card():
     assert build(issue(status="no_reply", age=5), sla=late())["clear"] == 8
 
 
-def test_team_follow_ups_are_one_card():
-    got = build(team={"total": 12, "owners": [{}, {}]})
-    assert got["cards"][0]["title"] == "Send 2 agents their follow-ups"
+def test_team_follow_ups_stay_off_needs_me():
+    assert build(team={"total": 12, "owners": [{}, {}]})["cards"] == []
+
+
+def test_several_quiet_issues_become_one_card():
+    got = build(issue(status="no_reply", age=5), issue(issue="8701", status="no_reply", age=9, case_id="c2"))
+    assert [c["title"] for c in got["cards"]] == ["2 GitHub issues gone quiet"]
+    assert got["cards"][0]["key"] == "gh:chase" and got["cards"][0]["case_ids"] == ["c1", "c2"]
+    assert "- Printer down: https://x/8700" in got["cards"][0]["draft"]
+
+
+def test_each_card_sits_in_one_of_three_groups():
+    got = build(issue(waiting_on="support"), issue(issue="8701", status="no_reply", age=5),
+                issue(issue="8702", waiting_on="merchant", quiet=30))
+    assert [c["group"] for c in got["cards"]] == ["replies", "sla", "agents"]
+
+
+REPLY_CFG = {"needs_reply_hours": 24, "dependency_record_type": "DSP"}
+
+
+def waiting(owner="Asha", hours=30, party="third_party", ball="us", number="42", who=None, kind=None, record="Support"):
+    case = {"id": number, "case_number": number, "subject": "Menu wrong", "owner": owner, "record_type": record,
+            "third_parties": ["PartnerA"], "reply": {"kind": kind}}
+    v = {"ball": ball, "latest": {"at": ago(hours), "party": party, "source": "DSP email", "who": who}}
+    return case, v, []
+
+
+def test_replies_nobody_acted_on_become_one_card_per_agent():
+    cards = today.reply_cards([waiting(), waiting(number="43", hours=80), waiting(owner="Ravi", number="44")],
+                              REPLY_CFG, NOW)
+    assert [c["title"] for c in cards] == ["Asha: 2 replies not acted on", "Ravi: 1 reply not acted on"]
+    assert cards[0]["why"].startswith("Oldest: 43") and cards[0]["tone"] == "exception"
+    assert "- 43: Read the PartnerA reply and act on it (3d 8h ago)" in cards[0]["draft"]
+
+
+def test_each_line_says_the_next_step_in_a_few_words():
+    def step(**kw):
+        return today.reply_cards([waiting(**kw)], REPLY_CFG, NOW)[0]["steps"]["42"]
+    assert step(kind="no_answer") == "Push PartnerA for a real answer"
+    assert step(kind="needs_info") == "Send PartnerA what they asked for"
+    assert step(party="customer") == "Reply to the merchant"
+    assert step(party="engineering") == "Read the engineer's reply and update the merchant"
+
+
+def test_one_reply_on_two_linked_cases_is_one_job():
+    cards = today.reply_cards([waiting(number="1", who="a@partner.test"), waiting(number="2", who="a@partner.test", record="DSP")],
+                              REPLY_CFG, NOW)
+    assert [c["title"] for c in cards] == ["Asha: 1 reply not acted on"]
+    assert "- 2 + 1: " in cards[0]["draft"] and sorted(cards[0]["case_ids"]) == ["1", "2"]
+
+
+def test_a_shared_reply_goes_to_the_aggregator_case_owner_and_names_the_other():
+    cards = today.reply_cards([waiting(number="1", who="a@partner.test"),
+                               waiting(owner="Ravi", number="2", who="a@partner.test", record="DSP")], REPLY_CFG, NOW)
+    assert [c["title"] for c in cards] == ["Ravi: 1 reply not acted on"]
+    assert "- 2 + 1 (Asha): " in cards[0]["draft"]
+
+
+def test_a_fresh_reply_or_our_own_message_needs_nothing():
+    assert today.reply_cards([waiting(hours=5), waiting(party="us")], REPLY_CFG, NOW) == []
+
+
+def test_a_case_waiting_on_someone_else_needs_nothing():
+    assert today.reply_cards([waiting(ball="third_party")], REPLY_CFG, NOW) == []
+
+
+def test_a_github_reply_already_in_an_agents_card_shows_once():
+    reply = today.reply_cards([waiting(number="c1")], REPLY_CFG, NOW)
+    got = today.build({"squads": [{"issues": [issue(waiting_on="support", case_id="c1")]}]}, NO_SLA, COACH, NO_TEAM, 10,
+                      {}, CFG, NOW, replies=reply)
+    assert [c["kind"] for c in got["cards"]] == ["reply"]
 
 
 def test_the_lane_numbers():

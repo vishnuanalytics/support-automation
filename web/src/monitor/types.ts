@@ -270,9 +270,20 @@ export type TechPending = {
   statuses: Record<string, string>;
   squads: { squad: string; issues: TechIssue[] }[];
 };
+export type LastResponse = QueueCase["latest"];
+export type CardCase = {
+  case_id: string;
+  case_number: string | null;
+  subject: string | null;
+  owner: string | null;
+  latest: LastResponse;
+  step?: string | null;
+};
 export type TodayCard = {
   key: string;
-  kind: "help" | "act" | "chase" | "close" | "follow" | "escalate" | "team";
+  kind: "help" | "act" | "reply" | "logs" | "chase" | "close" | "follow" | "escalate";
+  group: "replies" | "sla" | "agents";
+  cases: CardCase[];
   title: string;
   why: string | null;
   meta?: string;
@@ -287,7 +298,6 @@ export type TodayCard = {
   cc?: string[];
   channel?: string | null;
   contacts?: string[];
-  tab?: string;
 };
 export type CoachAgent = {
   agent: string;
@@ -373,3 +383,58 @@ export type Alert = {
   unread: boolean;
 };
 export type Alerts = { alerts: Alert[]; unread: number };
+
+export type WeeklyIssue = {
+  issue: string;
+  title: string | null;
+  url: string;
+  squad: string;
+  last_reply_by: string | null;
+  last_activity_at: string | null;
+  days_open: number;
+  case_id: string;
+  case_number: string;
+  tech_status: string;
+  businesses?: { business?: string | null; biz_id?: string | null }[];
+};
+export type WeeklyDspRow = {
+  case_id: string;
+  case_number: string;
+  subject: string | null;
+  business?: string | null;
+  biz_id?: string | null;
+  quiet_days: number;
+  new: boolean;
+  latest: LastResponse;
+};
+export type Weekly = {
+  week_start: string;
+  week_label: string;
+  as_of: string;
+  engineering: {
+    total: number;
+    message: string | null;
+    left_out: Record<string, number>;
+    squads: { squad: string; message: string; issues: WeeklyIssue[] }[];
+  };
+  dsp: { total: number; partners: { name: string; message: string; rows: WeeklyDspRow[] }[] };
+};
+export type AgentCase = {
+  case_id: string;
+  case_number: string | null;
+  subject: string | null;
+  raised_at: string;
+  problems: { kind: string; text: string }[];
+  check: string[];
+};
+export type AgentRow = {
+  agent: string;
+  raised: number;
+  wrong: number;
+  main_mistake: string | null;
+  message: string | null;
+  cases: AgentCase[];
+  check: AgentCase[];
+  github: { title: string; url: string; reasons: string[] }[];
+};
+export type AgentsReport = { days: number; raised: number; wrong: number; share: number; agents: AgentRow[] };

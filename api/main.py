@@ -5027,7 +5027,7 @@ def monitor_today(tenant_id: str | None = None, c: Caller = Depends(caller)) -> 
 def monitor_today_done(body: dict, tenant_id: str | None = None, c: Caller = Depends(caller)) -> None:
     from interpreter.monitor import service
     key = str(body.get("key") or "")
-    if not key.startswith(("gh:", "dsp:", "team:", "help:")):
+    if not key.startswith(("gh:", "dsp:", "team:", "help:", "logs:", "reply:")):
         raise HTTPException(status_code=422, detail="unknown card")
     service.set_review(c.sb, _caller_tenant(c, tenant_id), key, c.user_id, reviewed=True)
 
@@ -5036,6 +5036,18 @@ def monitor_today_done(body: dict, tenant_id: str | None = None, c: Caller = Dep
 def monitor_sla_report(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
     from interpreter.monitor import service
     return service.sla_report(c.sb, _caller_tenant(c, tenant_id))
+
+
+@app.get("/api/monitor/weekly")
+def monitor_weekly(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    from interpreter.monitor import service
+    return service.weekly_view(c.sb, _caller_tenant(c, tenant_id))
+
+
+@app.get("/api/monitor/agents")
+def monitor_agents(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    from interpreter.monitor import service
+    return service.agents_view(c.sb, _caller_tenant(c, tenant_id))
 
 
 @app.get("/api/monitor/alerts")

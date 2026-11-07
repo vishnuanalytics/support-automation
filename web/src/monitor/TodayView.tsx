@@ -1,32 +1,25 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError } from "../api";
 import { Banner, Button, Skeleton, Tag } from "../ui";
-import { copyText } from "./util";
-import type { CoachAgent, Today, TodayCard } from "./types";
+import { CopyButton } from "./CopyButton";
+import { LastResponse } from "./LastResponse";
+import type { Today, TodayCard } from "./types";
 
-const FIRST = 7;
+const GROUPS: { key: TodayCard["group"]; title: string; hint: string }[] = [
+  { key: "replies", title: "Replies waiting", hint: "Someone answered on GitHub, Slack or email, and nobody on our side has acted." },
+  { key: "sla", title: "No response past SLA", hint: "An aggregator or engineer has gone quiet." },
+  { key: "agents", title: "Agents", hint: "An agent needs an answer, or a nudge." },
+];
 
-function CopyButton({ text, label, primary }: { text: string; label: string; primary?: boolean }) {
-  const [copied, setCopied] = useState(false);
-  const copy = () => {
-    void copyText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
-  return (
-    <Button size="sm" variant={primary ? "primary" : "secondary"} onClick={copy}>
-      {copied ? "Copied" : label}
-    </Button>
-  );
-}
-
-function Card({ card, onDone, onOpen, onTab }: {
+function Card({ card, labels, onDone, onOpen }: {
   card: TodayCard;
+  labels: { thirdParty: string; customer: string };
   onDone: () => void;
   onOpen: (id: string) => void;
-  onTab: (tab: string) => void;
 }) {
+  const [showCases, setShowCases] = useState(false);
   const [showDraft, setShowDraft] = useState(false);
+  const single = card.cases.length === 1 ? card.cases[0] : null;
   return (
     <li className="today-card">
       <div className="today-card-chip"><Tag tone={card.tone}>{card.chip}</Tag></div>
@@ -34,6 +27,8 @@ function Card({ card, onDone, onOpen, onTab }: {
         <h3>{card.title}</h3>
         {card.why && <p>{card.why}</p>}
         {card.meta && <p className="today-meta">{card.meta}</p>}
+        {single?.step && <p className="today-step">{single.step}</p>}
+        {single && <LastResponse latest={single.latest} {...labels} />}
         {showDraft && card.draft && (
           <div className="today-draft">
             {!!card.to?.length && <p className="today-meta">To: {card.to.join(", ")}</p>}
@@ -42,22 +37,38 @@ function Card({ card, onDone, onOpen, onTab }: {
             <pre>{card.draft}</pre>
           </div>
         )}
+        {showCases && (
+          <ul className="today-cases">
+            {card.cases.map((c) => (
+              <li key={c.case_id}>
+                <p className="today-case-title">
+                  <button type="button" className="monitor-link" onClick={() => onOpen(c.case_id)}>{c.case_number}</button>{" "}
+                  {c.subject}
+                </p>
+                {c.step && <p className="today-step">{c.step}</p>}
+                <LastResponse latest={c.latest} {...labels} />
+              </li>
+            ))}
+          </ul>
+        )}
         <div className="today-card-actions">
           {card.draft && <CopyButton primary text={card.draft} label={`Copy ${card.draft_label?.toLowerCase()}`} />}
           {card.draft && (
             <Button size="sm" variant="ghost" onClick={() => setShowDraft(!showDraft)}>
-              {showDraft ? "Hide" : "Preview"}
+              {showDraft ? "Hide message" : "Preview"}
             </Button>
           )}
-          {card.kind !== "escalate" && card.case_id && (
-            <Button size="sm" variant={card.draft ? "ghost" : "primary"} onClick={() => onOpen(card.case_id as string)}>
+          {card.cases.length > 1 && (
+            <Button size="sm" variant="ghost" aria-expanded={showCases} onClick={() => setShowCases(!showCases)}>
+              {showCases ? "Hide cases" : `Show ${card.cases.length} cases`}
+            </Button>
+          )}
+          {single && (
+            <Button size="sm" variant={card.draft ? "ghost" : "primary"} onClick={() => onOpen(single.case_id)}>
               Open case
             </Button>
           )}
-          {card.url && (
-            <a className="today-link" href={card.url} target="_blank" rel="noreferrer">{card.url_label}</a>
-          )}
-          {card.tab && <Button size="sm" variant="primary" onClick={() => onTab(card.tab as string)}>Open messages</Button>}
+          {card.url && <a className="today-link" href={card.url} target="_blank" rel="noreferrer">{card.url_label}</a>}
           <span className="today-spacer" />
           <Button size="sm" variant="ghost" onClick={onDone}>Done</Button>
         </div>
@@ -66,36 +77,14 @@ function Card({ card, onDone, onOpen, onTab }: {
   );
 }
 
-function Coaching({ data }: { data: Today["coaching"] }) {
-  if (!data.closed) return null;
-  return (
-    <section className="today-section">
-      <h2>Raised without needing an engineer</h2>
-      <p className="today-meta">
-        {data.wrong} of {data.closed} issues closed in the last {data.days} days
-        {data.reasons.length > 0 && ` (${data.reasons.map(([r, n]) => `${r}: ${n}`).join(", ")})`}.
-        These are the labels engineers used, so talk it through rather than treating it as a score.
-      </p>
-      <ul className="today-coach">
-        {data.agents.slice(0, 6).map((a: CoachAgent) => (
-          <li key={a.agent}>
-            <span><strong>{a.agent}</strong> {a.wrong} of {a.raised}</span>
-            <CopyButton text={a.message} label="Copy coaching note" />
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
-}
-
-export function TodayView({ tenantId, onOpen, onTab }: {
+export function TodayView({ tenantId, onOpen, thirdParty, customer }: {
   tenantId?: string;
   onOpen: (id: string) => void;
-  onTab: (tab: string) => void;
+  thirdParty: string;
+  customer: string;
 }) {
   const [data, setData] = useState<Today | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [all, setAll] = useState(false);
 
   const load = useCallback(() => {
     api.monitor.today(tenantId).then(setData).catch((e: ApiError) => setErr(e.message));
@@ -110,7 +99,6 @@ export function TodayView({ tenantId, onOpen, onTab }: {
   if (err) return <Banner tone="exception" title={err} />;
   if (!data) return <Skeleton variant="row" lines={6} />;
 
-  const shown = all ? data.cards : data.cards.slice(0, FIRST);
   const n = data.cards.length;
   return (
     <div className="today">
@@ -120,53 +108,22 @@ export function TodayView({ tenantId, onOpen, onTab }: {
           {data.clear} of {data.open_cases} open cases need nothing from you
           {data.done > 0 && `, and you've cleared ${data.done} today`}.
         </p>
-        {data.help.away.total > 0 && (
-          <p>
-            While you were away, agents raised {data.help.away.total} help request{data.help.away.total === 1 ? "" : "s"},
-            and {data.help.away.answered} {data.help.away.answered === 1 ? "was" : "were"} answered.
-          </p>
-        )}
       </header>
-
-      <dl className="today-stats">
-        <div>
-          <dt>GitHub</dt>
-          <dd>{data.github.with_tech}</dd>
-          <p>of {data.github.open} open are with engineers</p>
-        </div>
-        <div>
-          <dt>Aggregators</dt>
-          <dd>{data.dsp.breached}</dd>
-          <p>of {data.dsp.total} are past SLA</p>
-        </div>
-        <div>
-          <dt>Raised wrongly</dt>
-          <dd>{data.coaching.share}%</dd>
-          <p>of issues closed this month</p>
-        </div>
-      </dl>
-
-      {n > 0 && (
-        <ol className="today-list">
-          {shown.map((c) => (
-            <Card key={c.key} card={c} onOpen={onOpen} onTab={onTab} onDone={() => done(c.key)} />
-          ))}
-        </ol>
-      )}
-      {!all && n > FIRST && (
-        <Button size="sm" variant="secondary" onClick={() => setAll(true)}>Show {n - FIRST} more</Button>
-      )}
-
-      <Coaching data={data.coaching} />
-      {data.help.modules.length > 0 && (
-        <section className="today-section">
-          <h2>What agents ask about most</h2>
-          <p className="today-meta">
-            Help requests this month: {data.help.modules.map(([m, c]) => `${m} (${c})`).join(", ")}.
-            These are the topics most worth training on.
-          </p>
-        </section>
-      )}
+      {GROUPS.map((g) => {
+        const cards = data.cards.filter((c) => c.group === g.key);
+        if (!cards.length) return null;
+        return (
+          <section key={g.key} className="today-group">
+            <h2>{g.title} ({cards.length})</h2>
+            <p>{g.hint}</p>
+            <ol className="today-list">
+              {cards.map((c) => (
+                <Card key={c.key} card={c} labels={{ thirdParty, customer }} onOpen={onOpen} onDone={() => done(c.key)} />
+              ))}
+            </ol>
+          </section>
+        );
+      })}
     </div>
   );
 }

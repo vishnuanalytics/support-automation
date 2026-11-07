@@ -29,6 +29,34 @@ def test_rule_kind(text, want):
     assert replies.rule_kind(text) == want
 
 
+@pytest.mark.parametrize("text, want", [
+    ("Hi Team,\n\nPlease ensure that the SOP is being followed. We are currently unable to\n"
+     "locate the dump logs to provide the exact rejection reason.\n\nRegards,\nA", "no_answer"),
+    ("We can't find the reason for this rejection.", "no_answer"),
+    # Asks for something, so it's a request we can act on.
+    ("Unable to locate the logs. Please request the team to repush the items.", None),
+    ("We can't find this order, please share the order ID.", None),
+    ("The logs show it was delivered.", None),
+])
+def test_a_reply_with_nothing_to_act_on(text, want):
+    assert replies.rule_kind(text) == want
+
+
+def test_a_rule_replaces_an_older_ai_label_on_the_same_text():
+    text = "We are unable to locate the logs."
+    case, saved = {}, {}
+
+    class Store:
+        def reply_labels(self, tenant_id, hashes):
+            return {hashes[0]: {"kind": "needs_info", "summary": "Old"}}
+
+        def save_reply_labels(self, tenant_id, labels):
+            saved.update(labels)
+
+    replies.label_latest("t", [(case, {"party": "third_party", "text": text})], Store(), {})
+    assert case["reply"]["kind"] == "no_answer" and list(saved.values())[0]["method"] == "rule"
+
+
 def test_llm_kind_redacts_and_validates():
     sent = {}
 

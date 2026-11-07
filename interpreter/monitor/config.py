@@ -29,7 +29,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "fields": {
         "waiting_on": "", "waiting_sub_status": "", "link": "", "third_party": "",
         "target_at": "", "ageing": "", "last_reply_from": "", "brand": "",
-        "biz_id": "", "business_id": "", "business_name": "Account.Name", "product": "", "module": "", "sub_module": "", "bu": "",
+        "biz_id": "", "business_id": "", "business_name": "Account.Name", "location_id": "", "platform_id": "", "product": "", "module": "", "sub_module": "", "bu": "",
         "case_type": "Type", "escalation_level": "", "escalated": "",
     },
     "waiting_values": {},             # {"Engineer": "engineering", ...}
@@ -54,6 +54,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "issue_quiet_hours": 24,          # so does an issue nobody has touched for this long
     # [{"name", "modules", "sub_modules", "keywords", "escalate_hours", "resolve_hours"}], first match wins
     "dsp_sla_rules": [],
+    # [{"modules", "sub_modules", "needs"}], first match wins; needs: order, location, item, platform
+    "required_details": [],
+    "needs_reply_hours": 24,          # an outside reply left this long goes on Needs Me
+    "week_start_weekday": 2,          # the Wednesday report's week; Monday is 0
+    "platform_aliases": {},           # {"PartnerA": "catalogue-platform-name"} when the names differ
+    "log_retention_days": {},         # {"PartnerA": 7}, for aggregators that delete logs early
+    "log_topics": [],                 # case modules or sub-modules that depend on those logs
+    "log_warn_days": 3,               # warn when a case has this many days of logs left
     "sla_start": "",                  # cases raised before this ISO time are the old backlog
     "dsp_escalate_share": 0.5,        # with no rule, escalate this far through the target time
     "assist_hours": {},               # {"start": 11, "end": 20, "tz": "Area/City"}, the lead's own hours
@@ -105,13 +113,18 @@ def validate(config: Any) -> list[str]:
     if not isinstance(waiting, dict) or any(v not in PARTIES for v in waiting.values()):
         errors.append(f"waiting_values must map to one of {PARTIES}")
     for key in ("eng_nudge_hours", "third_party_nudge_hours", "escalation_days",
-                "tech_pending_days"):
+                "tech_pending_days", "needs_reply_hours"):
         if key in config and not (isinstance(config[key], (int, float)) and config[key] > 0):
             errors.append(f"{key} must be a positive number")
     for rule in config.get("dsp_sla_rules", []):
         if not (rule.get("name") and all(isinstance(rule.get(k), (int, float)) and rule[k] > 0
                                          for k in ("escalate_hours", "resolve_hours"))):
             errors.append("each dsp_sla_rules entry needs a name, escalate_hours and resolve_hours")
+    if not isinstance(config.get("log_retention_days", {}), dict) or any(
+            not (isinstance(v, (int, float)) and v > 0) for v in (config.get("log_retention_days") or {}).values()):
+        errors.append("log_retention_days must map each aggregator to a positive number")
+    if config.get("week_start_weekday", 0) not in range(7):
+        errors.append("week_start_weekday must be 0 (Monday) to 6 (Sunday)")
     if config.get("sla_start") and parse_dt(config["sla_start"]) is None:
         errors.append("sla_start must be an ISO date and time")
     if not str(config.get("github_support_label", "support")).strip():

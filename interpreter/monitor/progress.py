@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 from .verdict import parse_dt
 
 WINDOW_DAYS = 7  # a day is noisy, so the start and the latest are each a week's average
-DONE_PREFIXES = ("gh:", "dsp:", "team:", "help:")
+DONE_PREFIXES = ("gh:", "dsp:", "team:", "help:", "logs:", "reply:")
 # (key, label, whether a lower number is better; None when either way can be good)
 MEASURES = (
     ("cards", "Things on Today, busiest point of the day", True),

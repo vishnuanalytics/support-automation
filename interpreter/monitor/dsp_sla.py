@@ -82,7 +82,7 @@ def row(case: dict, v: dict, evidence: list[dict], now: datetime, cfg: dict) -> 
         "deadline": deadline.isoformat(), "state": state, "waiting": waiting,
         "hours_left": (deadline - now).total_seconds() / 3600,
         "last_update_at": update["at_dt"].isoformat() if update else None,
-        "url": case.get("url"),
+        "url": case.get("url"), "latest": v.get("latest"),
     }
 
 

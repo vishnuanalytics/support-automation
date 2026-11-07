@@ -183,7 +183,7 @@ def _with_partner(messages: list[dict], domains: list[str]) -> list[dict]:
 def _email_log(messages: list[dict]) -> list[dict]:
     """Who wrote and when, without the text: enough to tell how long someone's been quiet."""
     return [{"who": m.get("who"), "at": m.get("at"), "party": m["party"], "ours": m["ours"],
-             "ack": replies.rule_kind(m.get("text")) is not None}
+             "ack": replies.rule_kind(m.get("text")) in replies.NOISE}
             for m in messages if m["party"] != verdict.CUSTOMER]
 
 

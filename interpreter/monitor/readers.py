@@ -370,6 +370,7 @@ class SalesforceCaseReader:
             "third_parties": [x for x in (third or "").split(";") if x],
             "target_at": value("target_at"), "ageing": value("ageing"), "brand": value("brand"),
             "biz_id": value("biz_id"), "business_id": value("business_id"),
+            "location_id": value("location_id"), "platform_id": value("platform_id"),
             # Salesforce fills a missing account with a bracketed placeholder
             "business_name": None if not business or business.startswith("[") else business,
             "product": value("product"), "module": value("module"),

@@ -382,6 +382,23 @@
 .today-draft { background: var(--ground-sunk); border-radius: var(--radius-md); margin-top: var(--space-2); padding: var(--space-2) var(--space-3); }
 .today-draft p { margin: 0; }
 .today-draft pre { font: var(--type-mono); margin: var(--space-1) 0 0; max-height: 240px; overflow: auto; white-space: pre-wrap; }
+.today-group { display: flex; flex-direction: column; gap: var(--space-2); }
+.today-group > h2, .week-part > h2 { font: var(--type-section); margin: 0; }
+.today-group > p { color: var(--text-muted); font-size: 13px; margin: 0; }
+.last-response { font-size: 13px; }
+.last-response p { color: var(--text-secondary); margin: var(--space-1) 0 0; overflow-wrap: anywhere; }
+.today-cases { display: flex; flex-direction: column; list-style: none; margin: var(--space-2) 0 0; padding: 0; }
+.today-cases li { border-top: 1px solid var(--line); padding: var(--space-2) 0; }
+.today-case-title { font-size: 14px; margin: 0 0 var(--space-1); overflow-wrap: anywhere; }
+.today-card-body .today-step { color: var(--text); font-size: 13px; font-weight: 600; margin: 0 0 var(--space-1); }
+.week { display: flex; flex-direction: column; gap: var(--space-6, 30px); max-width: 1100px; margin: 0 auto; width: 100%; }
+.week-part { display: flex; flex-direction: column; gap: var(--space-3); }
+.week-head { align-items: center; display: flex; flex-wrap: wrap; gap: var(--space-2); justify-content: space-between; }
+.week-head h3 { font: var(--type-label); font-size: 15px; font-weight: 600; margin: 0; }
+.week-table-wrap { overflow-x: auto; }
+.agent-detail { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-2) 0; }
+.agent-detail ul { display: flex; flex-direction: column; gap: var(--space-2); list-style: none; margin: 0; padding: 0; }
+.agent-detail p { color: var(--text-secondary); font-size: 13px; margin: 0; overflow-wrap: anywhere; }
 .today-section h2 { font: var(--type-section); margin: 0; }
 .today-coach { display: flex; flex-direction: column; list-style: none; margin: var(--space-2) 0 0; padding: 0; }
 .today-coach li { align-items: center; border-top: 1px solid var(--line); display: flex; justify-content: space-between; padding: var(--space-2) 0; }
@@ -389,3 +406,6 @@
   .today-stats { grid-template-columns: 1fr; }
   .today-card { grid-template-columns: 1fr; }
 }
+/* These tables have their own columns, so the queue's fixed widths don't apply. */
+.monitor-table.week-table { table-layout: auto; }
+.monitor-table.week-table th:nth-child(n), .monitor-table.week-table td:nth-child(n) { min-width: 0; width: auto; }

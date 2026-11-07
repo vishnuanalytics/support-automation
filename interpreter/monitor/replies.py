@@ -19,7 +19,8 @@ from .redact import redact_pii
 log = logging.getLogger("interpreter.monitor.replies")
 
 NOISE = ("ack", "internal_tag")
-REAL = ("bug_raised", "solution", "needs_info", "update")
+NO_ANSWER = "no_answer"
+REAL = ("bug_raised", "solution", "needs_info", "update", NO_ANSWER)
 MAX_LLM_PER_SYNC = 40
 # AI limits can stall a call for minutes, and that mustn't hold up a sync. Whatever
 # isn't labelled in time counts as real, and the next sync tries again.
@@ -37,6 +38,11 @@ _MENTIONS = re.compile(r"^([@+][^\n,:<]{2,40}(<[^>]*>)?[\s,:-]*)+"
                        r"((please|pls|kindly)?\s*(assist|check|help|look)[\w\s]{0,20})?[.!]?$", re.I)
 _SLACK_MENTION = re.compile(r"^(\s*<@[^>]+>[\s,]*)+(please|pls|kindly|can you|could you|fyi|cc|"
                             r"check|look|help|take)", re.I)
+# Replied, but with nothing to act on: they can't see why, and ask for nothing specific.
+_NO_ANSWER = re.compile(r"\b(unable to|not able to|can'?t|cannot|could ?n[o']t)\s+(locate|find|retrieve|fetch|get)\b"
+                        r"[^.]{0,40}\b(logs?|reason)\b", re.I)
+_ASKS_FOR_SOMETHING = re.compile(r"\b(re-?push|re-?publish|share|send|attach|provide us)\b", re.I)
+_MAX_NO_ANSWER_LENGTH = 250
 _SIGN_OFF = re.compile(r"^\W*((best|warm|kind) regards|thanks (&|and) regards|regards\W*$|"
                        r"thanks\W*$|thank you\W*$|cheers\W*$)", re.I)
 _SIGN_OFF_LINES = 5
@@ -52,6 +58,9 @@ SYSTEM = (
     "- needs_info: asks the support team for details, or to do or check something. Examples: "
     "'Please share the modifier names', 'This ID doesn't belong to that brand, please check', "
     "'Please align on adding the tag', 'Kindly recheck'.\n"
+    "- no_answer: replies, but gives no cause, fix or specific request, so there's nothing to act "
+    "on. Examples: 'We can't find the logs to give the reason', 'Please make sure the SOP is "
+    "followed, we can't tell what failed'.\n"
     "- ack: only confirms receipt or that it's queued or being looked at, with no result. "
     "Examples: 'Looking into this, will update soon', 'The IDs are prioritized'.\n"
     "- internal_tag: addressed to a colleague at the platform, asking them to take a look. "
@@ -84,6 +93,8 @@ def rule_kind(text: str | None) -> str | None:
     bare = re.sub(r"\s+", " ", core_text(text)).strip()
     if not bare:
         return "ack"
+    if len(bare) <= _MAX_NO_ANSWER_LENGTH and _NO_ANSWER.search(bare) and not _ASKS_FOR_SOMETHING.search(bare):
+        return NO_ANSWER
     if len(bare) > _MAX_RULE_LENGTH:
         return None
     if _MENTIONS.match(bare) or _SLACK_MENTION.search(bare):
@@ -117,13 +128,13 @@ def label_latest(tenant_id: str, rows: list[dict], store: Any, cfg: dict,
     fresh: dict[str, dict] = {}
     budget = MAX_LLM_PER_SYNC if cfg.get("llm_enabled") else 0
     for key, group in pending.items():
-        if key in known:
-            continue
         text = group[0]["m"]["text"]
         kind = rule_kind(text)
         if kind:
-            fresh[key] = {"kind": kind, "summary": "", "method": "rule"}
-        elif budget > 0 and clock() < deadline:
+            # A rule outranks an older AI label on the same text.
+            if (known.get(key) or {}).get("kind") != kind:
+                fresh[key] = {"kind": kind, "summary": "", "method": "rule"}
+        elif key not in known and budget > 0 and clock() < deadline:
             budget -= 1
             try:
                 fresh[key] = llm_kind(text, tenant_id)

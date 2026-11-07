@@ -7,8 +7,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from . import (brief, coaching, config, demo, drafts, dsp_sla, escalations, followups, help_requests,
-               progress, readers, redact, similar, sync, tech_pending, timeline, today, verdict)
+from . import (agent_quality, brief, coaching, config, demo, drafts, dsp_sla, escalations, followups, help_requests,
+               log_expiry, progress, readers, redact, similar, sync, tech_pending, timeline, today, verdict, weekly)
 from .store import SupabaseStore
 from .verdict import parse_dt
 
@@ -231,17 +231,51 @@ def today_view(sb: Any, tenant_id: str, now: datetime | None = None) -> dict[str
     cfg = load_config(sb, tenant_id)
     items = _cases_with_evidence(sb, tenant_id, cfg)
     sla = dsp_sla.build(_dsp_items(items, cfg), now, cfg)
-    closed = (sb.table("monitor_closed_issues").select("url, title, reporter, labels, closed_at")
-              .eq("tenant_id", tenant_id).execute().data or [])
+    closed = _closed_issues(sb, tenant_id)
     reviews = {r["case_id"]: r for r in (sb.table("monitor_reviews").select("case_id, reviewed_at")
                                          .eq("tenant_id", tenant_id).execute().data or [])}
     since = (now - timedelta(days=help_requests.STATS_DAYS)).isoformat()
     asks = (sb.table("monitor_help_requests").select("*").eq("tenant_id", tenant_id)
             .gte("raised_at", since).order("raised_at").execute().data or [])
     numbers = {c.get("case_number"): c["id"] for c, _, _ in items}
-    return today.build(tech_pending_list(sb, tenant_id, now), sla, coaching.build(closed, cfg, now),
+    view = today.build(tech_pending_list(sb, tenant_id, now), sla, coaching.build(closed, cfg, now),
                        follow_up_list(sb, tenant_id), len(items), reviews, cfg, now,
-                       help_requests.build(asks, cfg["assist_hours"], numbers, now))
+                       help_requests.build(asks, cfg["assist_hours"], numbers, now),
+                       log_expiry.build([c for c, _, _ in items], cfg, now),
+                       today.reply_cards(items, cfg, now))
+    return {**view, "cards": _with_last_response(view["cards"], items)}
+
+
+def _with_last_response(cards: list[dict], items: list[tuple]) -> list[dict]:
+    """Each card lists its cases and where the last response on each came from."""
+    known = {c["id"]: {"case_id": c["id"], "case_number": c.get("case_number"), "subject": c.get("subject"),
+                       "owner": c.get("owner"), "latest": v.get("latest")} for c, v, _ in items}
+    return [{**card, "cases": [{**known[i], "step": (card.get("steps") or {}).get(i)}
+                               for i in card.get("case_ids") or [] if i in known]} for card in cards]
+
+
+def _closed_issues(sb: Any, tenant_id: str) -> list[dict]:
+    return (sb.table("monitor_closed_issues").select("url, title, reporter, labels, closed_at")
+            .eq("tenant_id", tenant_id).execute().data or [])
+
+
+def weekly_view(sb: Any, tenant_id: str, now: datetime | None = None) -> dict[str, Any]:
+    now = now or datetime.now(timezone.utc)
+    cfg = load_config(sb, tenant_id)
+    sla = dsp_sla.build(_dsp_items(_cases_with_evidence(sb, tenant_id, cfg), cfg), now, cfg)
+    return weekly.build(tech_pending_list(sb, tenant_id, now), sla, now, cfg)
+
+
+def agents_view(sb: Any, tenant_id: str, now: datetime | None = None) -> dict[str, Any]:
+    now = now or datetime.now(timezone.utc)
+    cfg = load_config(sb, tenant_id)
+    rows = (sb.table("monitor_location_facts").select("location_id, platform, platform_id, biz_id")
+            .eq("tenant_id", tenant_id).execute().data or [])
+    facts: dict[str, dict] = {}
+    for r in rows:
+        facts.setdefault(r["location_id"], {})[r["platform"].lower()] = r
+    items = _dsp_items(_cases_with_evidence(sb, tenant_id, cfg), cfg)
+    return agent_quality.build(items, facts, coaching.build(_closed_issues(sb, tenant_id), cfg, now), cfg, now)
 
 
 def sla_report(sb: Any, tenant_id: str, now: datetime | None = None) -> dict[str, Any]:
