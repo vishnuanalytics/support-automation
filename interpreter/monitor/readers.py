@@ -75,6 +75,25 @@ class GithubReader:
                 return links
             page += 1
 
+    def closed_issues(self, owner: str, repo: str, label: str, since: str) -> list[dict[str, Any]]:
+        """Issues closed since a date, without their comments."""
+        headers = {"Authorization": f"Bearer {self.token}",
+                   "Accept": "application/vnd.github+json"}
+        rows: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            r = _get(f"https://api.github.com/repos/{owner}/{repo}/issues", headers,
+                     {"state": "closed", "labels": label, "since": since, "per_page": 100, "page": page})
+            r.raise_for_status()
+            batch = r.json()
+            rows += [{"url": x["html_url"], "title": clean(x.get("title")), "body": x.get("body"),
+                      "labels": [y.get("name") for y in x.get("labels") or []],
+                      "opened_at": x.get("created_at"), "closed_at": x.get("closed_at")}
+                     for x in batch if "pull_request" not in x]
+            if len(batch) < 100:
+                return rows
+            page += 1
+
     def fetch(self, link: dict[str, Any]) -> dict[str, Any]:
         repo = f"{link['owner']}/{link['repo']}"
         base = {"kind": "github", "url": link["url"], "label": f"{repo}#{link['number']}"}
@@ -527,7 +546,7 @@ class SalesforceCaseReader:
 
     def resolved_since(self, since_iso: str, limit: int = 2000) -> list[dict]:
         f = self.fields
-        cols = ["Id", "CaseNumber", "Subject", "CreatedDate", "ClosedDate"]
+        cols = ["Id", "CaseNumber", "Subject", "CreatedDate", "ClosedDate", "RecordType.Name"]
         cols += [c for c in (f.get("module"), f.get("sub_module"), f.get("third_party")) if c]
         rows = self._records(
             f"SELECT {', '.join(dict.fromkeys(cols))}, "
@@ -545,6 +564,7 @@ class SalesforceCaseReader:
                 "module": _dig(r, f["module"]) if f.get("module") else None,
                 "sub_module": _dig(r, f["sub_module"]) if f.get("sub_module") else None,
                 "third_parties": [x for x in (third or "").split(";") if x],
+                "record_type": (r.get("RecordType") or {}).get("Name"),
                 "opened_at": r.get("CreatedDate"), "closed_at": r.get("ClosedDate"),
                 "resolution_note": clean(comments[0].get("CommentBody")) if comments else None,
                 "url": f"{base}/lightning/r/Case/{r['Id']}/view" if base else None})

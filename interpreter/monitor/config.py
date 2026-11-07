@@ -46,6 +46,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "escalation_days": 5,             # no update for this long puts a case on the Escalations page
     "tech_pending_days": 7,           # the Engineering page's age filter
     "github_support_label": "support",  # the Engineering page lists open issues with this label
+    "github_reporter_field": "",      # the bold field in an issue's body naming the agent who raised it
+    "wrong_raise_labels": [],         # closing labels meaning an issue didn't need an engineer
+    "issue_chase_hours": 4,           # an issue with no tech reply for this long goes on Today
+    "issue_quiet_hours": 24,          # so does an issue nobody has touched for this long
+    # [{"name", "modules", "sub_modules", "keywords", "escalate_hours", "resolve_hours"}], first match wins
+    "dsp_sla_rules": [],
+    "dsp_escalate_share": 0.5,        # with no rule, escalate this far through the target time
+    "assist_hours": {},               # {"start": 11, "end": 20, "tz": "Area/City"}, the lead's own hours
     "github_squad_suffix": "-squad",  # the issue label ending in this names its squad
     "third_party_label": "Third party",
     "customer_label": "Customer",
@@ -97,6 +105,10 @@ def validate(config: Any) -> list[str]:
                 "tech_pending_days"):
         if key in config and not (isinstance(config[key], (int, float)) and config[key] > 0):
             errors.append(f"{key} must be a positive number")
+    for rule in config.get("dsp_sla_rules", []):
+        if not (rule.get("name") and all(isinstance(rule.get(k), (int, float)) and rule[k] > 0
+                                         for k in ("escalate_hours", "resolve_hours"))):
+            errors.append("each dsp_sla_rules entry needs a name, escalate_hours and resolve_hours")
     if not str(config.get("github_support_label", "support")).strip():
         errors.append("github_support_label can't be empty")
     for key in ("support_github_users", "github_bot_users"):

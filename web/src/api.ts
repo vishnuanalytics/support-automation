@@ -1,5 +1,5 @@
 import { supabase } from "./supabase";
-import type { AiDraft, Alerts, CaseDetail, Digest, Escalations, FollowUps, Queue, SlackStatus, Summary, TechPending } from "./monitor/types";
+import type { AiDraft, Alerts, CaseDetail, Digest, Escalations, FollowUps, Queue, SlackStatus, SlaReport, Summary, TechPending, Today } from "./monitor/types";
 import type {
   AssistResult,
   AuditEvent,
@@ -600,6 +600,10 @@ export const api = {
     digest: (tenantId?: string) => req<Digest>(`/monitor/digest${monitorQuery(tenantId)}`),
     followUps: (tenantId?: string) => req<FollowUps>(`/monitor/follow-ups${monitorQuery(tenantId)}`),
     escalations: (tenantId?: string) => req<Escalations>(`/monitor/escalations${monitorQuery(tenantId)}`),
+    today: (tenantId?: string) => req<Today>(`/monitor/today${monitorQuery(tenantId)}`),
+    todayDone: (key: string, tenantId?: string) =>
+      req<void>(`/monitor/today/done${monitorQuery(tenantId)}`, { method: "POST", body: JSON.stringify({ key }) }),
+    slaReport: (tenantId?: string) => req<SlaReport>(`/monitor/sla-report${monitorQuery(tenantId)}`),
     techPending: (tenantId?: string) => req<TechPending>(`/monitor/tech-pending${monitorQuery(tenantId)}`),
     alerts: (tenantId?: string) => req<Alerts>(`/monitor/alerts${monitorQuery(tenantId)}`),
     alertsSeen: (tenantId?: string) =>

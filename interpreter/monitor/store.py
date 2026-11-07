@@ -26,6 +26,7 @@ class Store(Protocol):
     def issue_reads(self, tenant_id: str) -> dict[str, dict]: ...
     def save_issues(self, tenant_id: str, reads: dict[str, dict], now: datetime) -> None: ...
     def close_issues(self, tenant_id: str, urls: list[str]) -> None: ...
+    def save_closed_issues(self, tenant_id: str, rows: list[dict]) -> None: ...
     def partners(self, tenant_id: str) -> list[dict]: ...
     def reply_labels(self, tenant_id: str, hashes: list[str]) -> dict[str, dict]: ...
     def save_reply_labels(self, tenant_id: str, labels: dict[str, dict]) -> None: ...
@@ -155,6 +156,11 @@ class SupabaseStore:
             (self.sb.table("monitor_issues").update({"is_open": False})
              .eq("tenant_id", tenant_id).in_("url", urls[start:start + _CHUNK]).execute())
 
+    def save_closed_issues(self, tenant_id: str, rows: list[dict]) -> None:
+        payload = [{"tenant_id": tenant_id, **r} for r in rows]
+        for start in range(0, len(payload), _CHUNK):
+            self.sb.table("monitor_closed_issues").upsert(payload[start:start + _CHUNK]).execute()
+
     def partners(self, tenant_id: str) -> list[dict]:
         return (self.sb.table("monitor_partners").select("*").eq("tenant_id", tenant_id)
                 .execute().data or [])
@@ -184,7 +190,7 @@ class SupabaseStore:
     def save_resolved(self, tenant_id: str, rows: list[dict]) -> None:
         payload = [{"tenant_id": tenant_id, "case_id": r["id"],
                     **{k: r.get(k) for k in ("case_number", "subject", "module", "sub_module",
-                                             "third_parties", "opened_at", "closed_at",
-                                             "resolution_note", "url")}} for r in rows]
+                                             "third_parties", "record_type", "opened_at",
+                                             "closed_at", "resolution_note", "url")}} for r in rows]
         for start in range(0, len(payload), _CHUNK):
             self.sb.table("monitor_resolved").upsert(payload[start:start + _CHUNK]).execute()

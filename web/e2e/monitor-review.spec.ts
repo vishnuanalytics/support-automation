@@ -55,7 +55,7 @@ test("a refresh stays on the page when setup was never dismissed", async ({ page
   await installApiMocks(page);
   await mockMonitor(page);
   await dropDismissFlag(page);
-  await page.goto("/?view=monitor");
+  await page.goto("/?view=monitor&tab=queue");
   await expect(page.getByRole("heading", { name: "Case Monitor" })).toBeVisible();
   await page.reload();
   await expect(page.getByRole("heading", { name: "Case Monitor" })).toBeVisible();
@@ -77,8 +77,8 @@ test("mark reviewed returns to the queue with the case and its alert gone", asyn
   await seedFakeSession(page);
   await installApiMocks(page);
   await mockMonitor(page);
-  await page.goto("/?view=monitor");
-  await expect(page.getByRole("button", { name: "Alerts (1)" })).toBeVisible();
+  await page.goto("/?view=monitor&tab=queue");
+  await expect(page.getByLabel("More views").locator("option").first()).toHaveText("More (1)");
   await page.getByRole("button", { name: "1001" }).click();
   await page.getByRole("button", { name: "Mark reviewed" }).click();
 
@@ -86,5 +86,5 @@ test("mark reviewed returns to the queue with the case and its alert gone", asyn
   await expect(page.getByRole("button", { name: "1001" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "1002" })).toBeVisible();
   await expect(page.getByText("1 open · 1 reviewed")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Alerts", exact: true })).toBeVisible();
+  await expect(page.getByLabel("More views").locator("option").first()).toHaveText("More");
 });

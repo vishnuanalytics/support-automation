@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from . import issue_status, replies, verdict
+from . import coaching, issue_status, replies, verdict
 from .readers import CONCURRENCY, EvidenceCollector, merge_links
 
 log = logging.getLogger("interpreter.monitor.sync")
@@ -275,10 +275,26 @@ def _read_issues(tenant_id: str, cases: list[dict], collector: EvidenceCollector
     missing = {url: {"status": issue_status.NOT_READ, "method": "none"}
                for url, ev in current.items() if not ev.get("ok") and url not in known}
     store.save_issues(tenant_id, {**reads, **missing}, now)
+    _closed_issues(linked, github, store, tenant_id, cfg, errors, now)
     if complete:
         kept = {url for url, ev in current.items() if not ev.get("ok") or ev.get("state") == "open"}
         store.close_issues(tenant_id, [url for url, row in known.items()
                                        if row.get("is_open") and url not in kept])
+
+
+def _closed_issues(linked: list[dict], github: Any, store: Any, tenant_id: str, cfg: dict,
+                   errors: list[dict], now: datetime) -> None:
+    since = (now - timedelta(days=coaching.DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    field = cfg["github_reporter_field"]
+    for owner, repo in sorted({(x["owner"], x["repo"]) for x in linked}):
+        try:
+            rows = github.closed_issues(owner, repo, cfg["github_support_label"], since)
+        except Exception as e:  # noqa: BLE001 -- yesterday's numbers are still useful
+            errors.append({"error": f"closed GitHub issues not read for {repo} ({type(e).__name__})"})
+            continue
+        store.save_closed_issues(tenant_id, [
+            {**{k: r.get(k) for k in ("url", "title", "labels", "opened_at", "closed_at")},
+             "reporter": coaching.reporter(r.get("body"), field)} for r in rows])
 
 
 def run(tenant_id: str, store: Any, reader: Any, evidence_readers: dict, cfg: dict,

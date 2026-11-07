@@ -51,6 +51,11 @@ class FakeStore:
     def close_issues(self, tenant_id, urls):
         self.issues_closed = urls
 
+    closed_saved: list = []
+
+    def save_closed_issues(self, tenant_id, rows):
+        self.closed_saved = rows
+
     imported: dict = {}
     partner_rows: list = []
 
@@ -119,6 +124,9 @@ class FakeReader:
 
 class ListsNothing:
     def open_issue_links(self, owner, repo, label):
+        return []
+
+    def closed_issues(self, owner, repo, label, since):
         return []
 
 
@@ -662,6 +670,14 @@ class LabelledGithub:
             raise self.list_error
         return self.listed
 
+    closed: list = []
+    closed_error = None
+
+    def closed_issues(self, owner, repo, label, since):
+        if self.closed_error:
+            raise self.closed_error
+        return self.closed
+
     def fetch(self, link):
         if link["number"] in self.fetch_error:
             raise requests.ConnectionError("down")
@@ -675,6 +691,22 @@ def test_sync_lists_labelled_issues_that_no_case_links():
     assert github.asked == ("o", "r", "support")
     assert sorted(store.issues_saved) == [GH, GH2]
     assert sorted(e["url"] for e in store.evidence) == [GH, GH2]
+
+
+def test_sync_saves_closed_issues_with_who_raised_them():
+    github = LabelledGithub()
+    github.closed = [{"url": GH2, "title": "T", "labels": ["invalid"], "closed_at": "2026-11-01T00:00:00Z",
+                      "opened_at": "2026-10-30T00:00:00Z", "body": "**Issue Reporter:** asha | Support\n"}]
+    store = FakeStore()
+    run(store, FakeReader([case("1")]), {"github": github}, merge({"github_reporter_field": "Issue Reporter"}))
+    assert store.closed_saved[0]["reporter"] == "asha" and "body" not in store.closed_saved[0]
+
+
+def test_closed_issues_failing_only_notes_an_error():
+    github = LabelledGithub()
+    github.closed_error = requests.ConnectionError("down")
+    result = run(FakeStore(), FakeReader([case("1")]), {"github": github})
+    assert result["status"] == "partial" and "closed GitHub issues" in result["errors"][0]["error"]
 
 
 def test_an_issue_that_left_the_list_is_closed():

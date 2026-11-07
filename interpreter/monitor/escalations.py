@@ -57,6 +57,13 @@ def _waiting_on(case: dict) -> list[str]:
     return names or ["Not set"]
 
 
+def last_update(case: dict, v: dict, evidence: list[dict]) -> dict | None:
+    """The third party's newest message that says something, or None."""
+    updates = [m for m in _messages(evidence)
+               if m["party"] == verdict.THIRD_PARTY and not _is_ack(m, case, v)]
+    return updates[-1] if updates else None
+
+
 def row(case: dict, v: dict, evidence: list[dict], days: float, now: datetime) -> dict | None:
     """The escalation for this case, or None if it isn't one."""
     if verdict.stage(v) != verdict.THIRD_PARTY:

@@ -787,6 +787,29 @@ existing stack, and each tenant's fields and rules are config, not code. Setup a
   Scored on 16 hand-read issues: 13 agree, none shown further along than they are. Open question:
   `support_github_users` is partial, so a support person off the list counts as a tech reply, because
   "No tech reply" is decided by that list alone and never by the LLM.
+- **Today page (2026-11-06):** the Case Monitor now opens on **Today** (`interpreter/monitor/today.py`,
+  `web/src/monitor/TodayView.tsx`): a ranked list of what needs the lead, each with its next step ready,
+  plus how many open cases need nothing. Queue is now "All cases", and the older views sit under More.
+  Done hides a card until something new happens, for a day at most, so nothing is lost by clearing it.
+  Nothing is sent: drafts are copied and sent by a person.
+  - **Aggregator SLAs** (`dsp_sla.py`): `dsp_sla_rules` gives each kind of issue its own clock, and an
+    issue with no rule uses the case's target date, escalating at `dsp_escalate_share` of it. Late cases
+    become one escalation per aggregator, and **Weekly SLA** reports them by aggregator with a CSV.
+    Clocks run on elapsed hours from case creation, with no business hours.
+  - **Coaching** (`coaching.py`, migration 121, applied): closed issues with `wrong_raise_labels`, per
+    agent, from `github_reporter_field` in the issue body. This measures wrong raises afterwards; it
+    doesn't yet stop one being raised.
+  - **SLA rules are set from evidence:** 90 days of closed aggregator cases (392) had a median of about
+    5 days, and only 14 closed within 4 hours. Rules start near what's achievable, each with a
+    `goal_resolve_hours`. **Weekly SLA** shows when a rule is ready to tighten: 80% of at least 5 cases.
+  - **Resolution Assistance** (`help_requests.py`, migrations 122 and 123, applied): `monitor_help_requests`
+    feeds help cards at the top of Today, an overnight note, and the topics agents ask about most. A
+    request is answered once someone other than the agent replies; a bot's reply doesn't count.
+    The Slack login isn't available, so an hourly Claude routine owned by the project owner (created
+    2026-11-07) copies requests from the channel into that table, using the Slack and Supabase
+    connectors. Today can lag a new request by up to an hour; Slack still alerts the owner at once.
+    Requests start 2026-11-11.
+  - A GitHub webhook for instant reaction, and a check that stops a wrong raise, aren't built.
 - **AI evaluation:** `eval/monitor/backtest.py` hides a real agent reply on a resolved case and
   scores the draft with DeepEval. `eval/monitor/reply_labels.py` scores reply labels against a
   hand-labelled file; gold data stays out of the repo. Holdout result: 1 of 22 real replies hidden.

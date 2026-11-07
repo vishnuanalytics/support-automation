@@ -41,6 +41,8 @@ def _row(ev: dict, read: dict, cases: list[dict], days: float, now: datetime, cf
         "issue": ev["label"].rsplit("#", 1)[-1], "url": ev["url"], "title": ev.get("title"),
         "last_reply_by": messages[-1]["who"] if messages else None,
         "days_open": int(age // 86400), "over_days": age > days * 86400,
+        "opened_at": ev.get("opened_at"),
+        "last_activity_at": messages[-1]["at"] if messages else ev.get("opened_at"),
         "case_id": case.get("id"), "case_number": case.get("case_number"),
         "other_cases": [c.get("case_number") for c in cases if c is not case],
         "priority": case.get("priority"), "sla_due": case.get("target_at"),

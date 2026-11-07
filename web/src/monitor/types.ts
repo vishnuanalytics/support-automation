@@ -267,6 +267,78 @@ export type TechPending = {
   statuses: Record<string, string>;
   squads: { squad: string; issues: TechIssue[] }[];
 };
+export type TodayCard = {
+  key: string;
+  kind: "help" | "act" | "chase" | "close" | "follow" | "escalate" | "team";
+  title: string;
+  why: string | null;
+  meta?: string;
+  chip: string;
+  tone: "exception" | "warn" | "neutral";
+  url?: string;
+  url_label?: string;
+  case_id?: string | null;
+  draft?: string;
+  draft_label?: string;
+  to?: string[];
+  cc?: string[];
+  channel?: string | null;
+  contacts?: string[];
+  tab?: string;
+};
+export type CoachAgent = {
+  agent: string;
+  raised: number;
+  wrong: number;
+  message: string;
+  issues: { title: string | null; url: string; reasons: string[] }[];
+};
+export type Today = {
+  cards: TodayCard[];
+  done: number;
+  clear: number;
+  open_cases: number;
+  github: { open: number; need_you: number; with_tech: number };
+  dsp: { total: number; breached: number; escalate: number; on_track: number };
+  help: { away: { total: number; answered: number }; modules: [string, number][] };
+  coaching: {
+    days: number;
+    closed: number;
+    wrong: number;
+    share: number;
+    reasons: [string, number][];
+    agents: CoachAgent[];
+  };
+};
+export type SlaRow = {
+  case_id: string;
+  case_number: string | null;
+  subject: string | null;
+  owner: string | null;
+  partner: string;
+  priority: string | null;
+  rule: string;
+  raised_at: string;
+  deadline: string;
+  state: "breached" | "escalate" | "on_track";
+  hours_left: number;
+  last_update_at: string | null;
+};
+export type SlaReport = {
+  since: string;
+  partners: { name: string; open: number; open_late: number; closed: number; closed_timed: number; closed_in_time: number }[];
+  rules: {
+    name: string;
+    escalate_hours: number;
+    resolve_hours: number;
+    goal_resolve_hours?: number;
+    closed: number;
+    in_time: number;
+    share: number;
+    ready: boolean;
+  }[];
+  rows: SlaRow[];
+};
 export type Escalations = {
   days: number;
   total: number;

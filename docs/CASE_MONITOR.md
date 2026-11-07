@@ -145,6 +145,50 @@ come from that party, so acknowledgements, customers and internal threads don't 
 turn or never raised aren't listed. A support case folds into its DSP case. A review doesn't remove
 a case: the silence is still true. Links that couldn't be read show as "Not read".
 
+### Today
+
+**Today** is the first page. It lists only what needs the lead, most pressing first, with the next
+step ready to copy:
+
+| Card | When it shows |
+|---|---|
+| Engineers answered | The AI reads an issue as waiting on support |
+| Escalate an aggregator | One or more of its cases are late, as one email for all of them |
+| No engineer has replied | No tech reply after `issue_chase_hours` (default 4) |
+| Engineers have gone quiet | Waiting on tech, untouched for `issue_quiet_hours` (default 24) |
+| Looks ready to close | Waiting on nobody |
+| Waiting on a merchant or aggregator | Untouched for `issue_quiet_hours` |
+| Send agents their follow-ups | Agents owe replies on their cases |
+
+Done hides a card until something new happens, or for a day at most. Nothing is sent for you.
+
+### Aggregator SLAs
+
+`dsp_sla_rules` sets a clock per kind of issue, matched by module, sub-module or a subject keyword, with
+the first match winning. Each rule has `escalate_hours` and `resolve_hours`. A case with no update by the
+escalate mark needs escalating, and any case past the resolve mark is past SLA. An acknowledgement isn't
+an update. Cases with no rule use their target date, escalating at `dsp_escalate_share` of it (default
+half). **Weekly SLA** shows each aggregator's numbers. Closed cases keep no target date, so "closed in
+time" only covers cases with a rule.
+
+A rule's optional `goal_resolve_hours` is where it should end up. **Weekly SLA** marks a rule "Ready to
+tighten" once at least 80% of at least 5 cases closed in time that week.
+
+### Resolution Assistance
+
+Rows in `monitor_help_requests` appear at the top of Today until someone other than the agent replies.
+A bot's reply never counts as an answer. `assist_hours` sets the lead's hours, so requests outside them
+are marked and summed up in an overnight note. Today also shows the topics agents ask about most.
+
+The app doesn't read Slack for these. An hourly Claude routine with Slack and Supabase access writes
+the rows, so a new request can take up to an hour to appear.
+
+### Coaching
+
+Today shows how many closed issues carried a `wrong_raise_labels` label in the last 30 days, and a
+ready note for any agent with at least two. The agent comes from the `github_reporter_field` line in
+the issue body.
+
 ### Engineering
 
 **Engineering** lists every open GitHub issue labelled `github_support_label` (default `support`), in

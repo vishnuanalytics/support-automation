@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from . import (brief, config, demo, drafts, escalations, followups, readers, redact, similar, sync,
-               tech_pending, timeline, verdict)
+from . import (brief, coaching, config, demo, drafts, dsp_sla, escalations, followups, help_requests,
+               readers, redact, similar, sync, tech_pending, timeline, today, verdict)
 from .store import SupabaseStore
 from .verdict import parse_dt
 
@@ -197,11 +197,9 @@ def _evidence_by_url(sb: Any, tenant_id: str, urls: list[str]) -> dict[str, dict
     return found
 
 
-def escalation_list(sb: Any, tenant_id: str, now: datetime | None = None) -> dict[str, Any]:
-    now = now or datetime.now(timezone.utc)
+def _cases_with_evidence(sb: Any, tenant_id: str, cfg: dict) -> list[tuple[dict, dict, list[dict]]]:
     rows = (sb.table("monitor_cases").select("source, case_data, verdict, timeline")
             .eq("tenant_id", tenant_id).eq("is_open", True).execute().data or [])
-    cfg = load_config(sb, tenant_id)
     urls = sorted({x["url"] for r in rows for x in r["case_data"].get("links") or []})
     found = _evidence_by_url(sb, tenant_id, urls)
     items = []
@@ -214,7 +212,48 @@ def escalation_list(sb: Any, tenant_id: str, now: datetime | None = None) -> dic
         evidence.append(sync.case_emails(case, r["timeline"], _cfg_for(cfg, r["source"])))
         evidence.append({"kind": "email", "ok": True, "messages": case.get("email_log") or []})
         items.append((case, r["verdict"], evidence))
-    return escalations.build(items, cfg["escalation_days"], now, cfg["dependency_record_type"])
+    return items
+
+
+def escalation_list(sb: Any, tenant_id: str, now: datetime | None = None) -> dict[str, Any]:
+    now = now or datetime.now(timezone.utc)
+    cfg = load_config(sb, tenant_id)
+    return escalations.build(_cases_with_evidence(sb, tenant_id, cfg), cfg["escalation_days"], now,
+                             cfg["dependency_record_type"])
+
+
+def _dsp_items(items: list[tuple], cfg: dict) -> list[tuple]:
+    return [i for i in items if i[0].get("record_type") == cfg["dependency_record_type"]]
+
+
+def today_view(sb: Any, tenant_id: str, now: datetime | None = None) -> dict[str, Any]:
+    now = now or datetime.now(timezone.utc)
+    cfg = load_config(sb, tenant_id)
+    items = _cases_with_evidence(sb, tenant_id, cfg)
+    sla = dsp_sla.build(_dsp_items(items, cfg), now, cfg)
+    closed = (sb.table("monitor_closed_issues").select("url, title, reporter, labels, closed_at")
+              .eq("tenant_id", tenant_id).execute().data or [])
+    reviews = {r["case_id"]: r for r in (sb.table("monitor_reviews").select("case_id, reviewed_at")
+                                         .eq("tenant_id", tenant_id).execute().data or [])}
+    since = (now - timedelta(days=help_requests.STATS_DAYS)).isoformat()
+    asks = (sb.table("monitor_help_requests").select("*").eq("tenant_id", tenant_id)
+            .gte("raised_at", since).order("raised_at").execute().data or [])
+    numbers = {c.get("case_number"): c["id"] for c, _, _ in items}
+    return today.build(tech_pending_list(sb, tenant_id, now), sla, coaching.build(closed, cfg, now),
+                       follow_up_list(sb, tenant_id), len(items), reviews, cfg, now,
+                       help_requests.build(asks, cfg["assist_hours"], numbers, now))
+
+
+def sla_report(sb: Any, tenant_id: str, now: datetime | None = None) -> dict[str, Any]:
+    now = now or datetime.now(timezone.utc)
+    cfg = load_config(sb, tenant_id)
+    sla = dsp_sla.build(_dsp_items(_cases_with_evidence(sb, tenant_id, cfg), cfg), now, cfg)
+    since = (now - timedelta(days=7)).isoformat()
+    resolved = (sb.table("monitor_resolved").select("subject, module, sub_module, third_parties, "
+                                                    "opened_at, closed_at")
+                .eq("tenant_id", tenant_id).eq("record_type", cfg["dependency_record_type"])
+                .gte("closed_at", since).execute().data or [])
+    return {**dsp_sla.weekly_report(sla, resolved, now, cfg), "rows": sla["rows"]}
 
 
 def tech_pending_list(sb: Any, tenant_id: str, now: datetime | None = None) -> dict[str, Any]:

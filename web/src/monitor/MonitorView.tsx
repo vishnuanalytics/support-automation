@@ -3,7 +3,9 @@ import { api, ApiError } from "../api";
 import { Banner, Button, ConfirmButton, Dialog, EmptyState, Input, Select, Skeleton, Tag, type TagTone } from "../ui";
 import { AlertsView, useAlerts } from "./AlertsView";
 import { EscalationsView } from "./EscalationsView";
+import { SlaReportView } from "./SlaReportView";
 import { TechPendingView } from "./TechPendingView";
+import { TodayView } from "./TodayView";
 import { CaseView } from "./CaseView";
 import { FollowUpsView } from "./FollowUpsView";
 import { MonitorSettings } from "./MonitorSettings";
@@ -94,8 +96,14 @@ function matches(c: QueueCase, f: Filters): boolean {
   );
 }
 
-const MODES = ["queue", "followups", "escalations", "engineering", "alerts", "digest", "settings"] as const;
+const MODES = ["today", "sla", "queue", "followups", "escalations", "engineering", "alerts", "digest", "settings"] as const;
 type Mode = (typeof MODES)[number];
+
+const MORE = [
+  { value: "followups", label: "Follow-ups" }, { value: "escalations", label: "Escalations" },
+  { value: "engineering", label: "Engineering" }, { value: "alerts", label: "Alerts" },
+  { value: "digest", label: "Digest" }, { value: "settings", label: "Settings" },
+];
 
 function choices(all: string, values: (string | null)[]) {
   const unique = [...new Set(values.filter(Boolean) as string[])].sort();
@@ -298,7 +306,7 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
   );
   const [mode, setModeState] = useState<Mode>(() => {
     const tab = new URLSearchParams(window.location.search).get("tab");
-    return MODES.includes(tab as Mode) ? (tab as Mode) : "queue";
+    return MODES.includes(tab as Mode) ? (tab as Mode) : "today";
   });
   const setMode = useCallback((next: Mode) => {
     setModeState(next);
@@ -514,17 +522,15 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
           </p>
         </div>
         <div className="monitor-actions">
-          <Button size="sm" variant={mode === "queue" ? "secondary" : "ghost"} onClick={() => setMode("queue")}>Queue</Button>
-          <Button size="sm" variant={mode === "followups" ? "secondary" : "ghost"} onClick={() => setMode("followups")}>Follow-ups</Button>
-          <Button size="sm" variant={mode === "escalations" ? "secondary" : "ghost"} onClick={() => setMode("escalations")}>Escalations</Button>
-          <Button size="sm" variant={mode === "engineering" ? "secondary" : "ghost"} onClick={() => setMode("engineering")}>Engineering</Button>
-          <Button size="sm" variant={mode === "alerts" ? "secondary" : "ghost"} onClick={() => setMode("alerts")}>
-            Alerts{alertState.unread ? ` (${alertState.unread})` : ""}
-          </Button>
-          <Button size="sm" variant={mode === "digest" ? "secondary" : "ghost"} onClick={() => setMode("digest")}>Digest</Button>
-          {isOwner && (
-            <Button size="sm" variant={mode === "settings" ? "secondary" : "ghost"} onClick={() => setMode("settings")}>Settings</Button>
-          )}
+          <Button size="sm" variant={mode === "today" ? "secondary" : "ghost"} onClick={() => setMode("today")}>Today</Button>
+          <Button size="sm" variant={mode === "sla" ? "secondary" : "ghost"} onClick={() => setMode("sla")}>Weekly SLA</Button>
+          <Button size="sm" variant={mode === "queue" ? "secondary" : "ghost"} onClick={() => setMode("queue")}>All cases</Button>
+          <Select aria-label="More views" value={MORE.some((m) => m.value === mode) ? mode : ""}
+                  onChange={(e) => e.target.value && setMode(e.target.value as Mode)}
+                  options={[{ value: "", label: alertState.unread ? `More (${alertState.unread})` : "More" },
+                    ...MORE.filter((m) => isOwner || m.value !== "settings").map((m) => (
+                      m.value === "alerts" && alertState.unread
+                        ? { ...m, label: `Alerts (${alertState.unread})` } : m))]} />
           <Button size="sm" variant="ghost" aria-label="Keyboard shortcuts" title="Keyboard shortcuts" onClick={() => setHelp(true)}>?</Button>
           <Button size="sm" variant="primary" loading={queue?.running} onClick={sync}>Refresh now</Button>
         </div>
@@ -548,7 +554,11 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
         </details>
       )}
 
-      {mode === "settings" ? (
+      {mode === "today" ? (
+        <TodayView tenantId={tid} onOpen={open} onTab={(t) => setMode(t as Mode)} />
+      ) : mode === "sla" ? (
+        <SlaReportView tenantId={tid} onOpen={open} />
+      ) : mode === "settings" ? (
         <MonitorSettings tenantId={tid} />
       ) : mode === "followups" ? (
         <FollowUpsView tenantId={tid} onOpen={open} />

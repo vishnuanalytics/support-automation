@@ -41,8 +41,7 @@ test("engineering issues group by squad, filter, download and survive a refresh"
     },
   }));
 
-  await page.goto("/?view=monitor");
-  await page.getByRole("button", { name: "Engineering" }).click();
+  await page.goto("/?view=monitor&tab=engineering");
   await expect(page.getByRole("heading", { name: "3 open support issues" })).toBeVisible();
   await expect(page.getByText("No tech reply: 2 · Cause given, not closed yet: 1")).toBeVisible();
   await expect(page.getByRole("table")).toHaveCount(2);
