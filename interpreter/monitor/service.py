@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from . import (agent_quality, brief, coaching, config, demo, drafts, dsp_sla, escalations, followups, help_requests,
                log_expiry, progress, readers, redact, similar, sync, tech_pending, timeline, today, verdict, weekly)
 from .store import SupabaseStore
-from .verdict import parse_dt
+from .verdict import latest_message, parse_dt
 
 log = logging.getLogger("interpreter.monitor.service")
 
@@ -211,7 +211,9 @@ def _cases_with_evidence(sb: Any, tenant_id: str, cfg: dict) -> list[tuple[dict,
         # The DSP feed keeps only the newest few emails; the timeline has the rest.
         evidence.append(sync.case_emails(case, r["timeline"], _cfg_for(cfg, r["source"])))
         evidence.append({"kind": "email", "ok": True, "messages": case.get("email_log") or []})
-        items.append((case, r["verdict"], evidence))
+        # Opening a case can fetch emails newer than the last sync.
+        fresh = latest_message(evidence[:-1])
+        items.append((case, {**r["verdict"], "latest": fresh or r["verdict"].get("latest")}, evidence))
     return items
 
 
@@ -242,7 +244,7 @@ def today_view(sb: Any, tenant_id: str, now: datetime | None = None) -> dict[str
                        follow_up_list(sb, tenant_id), len(items), reviews, cfg, now,
                        help_requests.build(asks, cfg["assist_hours"], numbers, now),
                        log_expiry.build([c for c, _, _ in items], cfg, now),
-                       today.reply_cards(items, cfg, now))
+                       today.reply_cards(items, cfg, now), today.merchant_emails(items))
     return {**view, "cards": _with_last_response(view["cards"], items)}
 
 

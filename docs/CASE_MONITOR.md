@@ -157,6 +157,10 @@ place to filter and browse.
   same, and each card lists its cases with the last response and the next step in a few words. One
   reply on linked cases is one job, on the card of whoever owns the aggregator case. A reply with no
   cause, fix or request is labelled `no_answer`, and its step is to push the aggregator.
+  If engineers answered and our newest email to the merchant came after that, the GitHub issue becomes
+  "follow up with the merchant, GitHub open" under Agents, once the merchant has been quiet for
+  `issue_quiet_hours`. Timelines are re-read hourly, because an email doesn't always change the case's
+  last modified time.
 - **No response past SLA:** aggregators to escalate, and GitHub issues gone quiet.
 - **Agents:** help requests, logs about to expire, and issues to close or follow up.
 

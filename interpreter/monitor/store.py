@@ -103,7 +103,7 @@ class SupabaseStore:
                 .eq("tenant_id", tenant_id).eq("is_open", True).neq("source", "demo")
                 .execute().data or [])
         return {r["case_id"]: {"case": r["case_data"], "verdict": r["verdict"],
-                               "timeline": r["timeline"]} for r in rows}
+                               "timeline": r["timeline"], "timeline_at": r["timeline_at"]} for r in rows}
 
     def save_cases(self, tenant_id: str, rows: list[dict], now: datetime) -> None:
         stamp = now.isoformat()

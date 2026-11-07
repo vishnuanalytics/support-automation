@@ -87,12 +87,19 @@ def _with_ai_feed(cases: list[dict], ai: dict[str, dict], reader: Any,
     return list(by_id.values())
 
 
-def _timelines(cases: list[dict], prior: dict[str, dict], reader: Any,
-               errors: list[dict]) -> dict[str, dict]:
-    """Only cases that changed since their timeline was last fetched."""
+TIMELINE_MAX_AGE = timedelta(hours=1)
+
+
+def _timelines(cases: list[dict], prior: dict[str, dict], reader: Any, errors: list[dict],
+               now: datetime) -> dict[str, dict]:
+    """Cases that changed since their timeline was last fetched, and any fetched over an
+    hour ago: an email doesn't always touch the case's last modified time."""
     def stale(c: dict) -> bool:
         old = prior.get(c["id"])
         if not old or not old.get("timeline"):
+            return True
+        fetched = verdict.parse_dt(old.get("timeline_at"))
+        if fetched and now - fetched >= TIMELINE_MAX_AGE:
             return True
         return c.get("last_modified_at") != (old.get("case") or {}).get("last_modified_at")
 
@@ -242,7 +249,7 @@ def case_emails(case: dict, raw: dict | None, cfg: dict) -> dict:
     messages = []
     for e in (raw or {}).get("emails") or []:
         party = verdict.email_party(e.get("from"), bool(e.get("incoming")), case, cfg)
-        messages.append({"who": e.get("from"), "party": party, "ours": party == verdict.US,
+        messages.append({"who": e.get("from"), "to": e.get("to"), "party": party, "ours": party == verdict.US,
                          "at": e.get("at"), "text": e.get("text") or e.get("subject"),
                          "url": case.get("url")})
     return {"kind": "email", "ok": True, "label": "Case email", "url": case.get("url"),
@@ -323,7 +330,7 @@ def run(tenant_id: str, store: Any, reader: Any, evidence_readers: dict, cfg: di
         except Exception as e:  # noqa: BLE001 -- the case queue doesn't depend on this
             log.exception("issue read failed for %s", tenant_id)
             errors.append({"error": f"GitHub issues not read ({type(e).__name__})"})
-        timelines = _timelines(cases, prior, reader, errors)
+        timelines = _timelines(cases, prior, reader, errors, now)
 
         rows = []
         evidence_by_case = {}

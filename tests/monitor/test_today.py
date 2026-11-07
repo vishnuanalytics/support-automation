@@ -19,8 +19,9 @@ def issue(status="cause_given", waiting_on="tech", age=48, quiet=1, **kw):
             "last_activity_at": ago(quiet), "case_id": "c1", "case_number": "42", "priority": "High", **kw}
 
 
-def build(*rows, sla=NO_SLA, team=NO_TEAM, reviews=None, open_cases=10):
-    return today.build({"squads": [{"issues": list(rows)}]}, sla, COACH, team, open_cases, reviews or {}, CFG, NOW)
+def build(*rows, sla=NO_SLA, team=NO_TEAM, reviews=None, open_cases=10, merchant_sent=None):
+    return today.build({"squads": [{"issues": list(rows)}]}, sla, COACH, team, open_cases, reviews or {}, CFG, NOW,
+                       merchant_sent=merchant_sent)
 
 
 def kinds(got):
@@ -170,6 +171,42 @@ def test_a_github_reply_already_in_an_agents_card_shows_once():
     got = today.build({"squads": [{"issues": [issue(waiting_on="support", case_id="c1")]}]}, NO_SLA, COACH, NO_TEAM, 10,
                       {}, CFG, NOW, replies=reply)
     assert [c["kind"] for c in got["cards"]] == ["reply"]
+
+
+def test_merchant_told_after_the_engineers_answer_means_follow_up_the_merchant():
+    row = issue(status="cause_given", waiting_on="support", quiet=60)
+    got = build(row, merchant_sent={"c1": ago(30)})
+    assert [c["kind"] for c in got["cards"]] == ["follow"]
+    assert got["cards"][0]["title"] == "#8700: follow up with the merchant, GitHub open"
+    assert got["cards"][0]["group"] == "agents"
+
+
+def test_a_merchant_just_told_stays_off_the_list_until_quiet():
+    row = issue(status="cause_given", waiting_on="support", quiet=60)
+    assert build(row, merchant_sent={"c1": ago(2)})["cards"] == []
+
+
+def test_an_older_email_to_the_merchant_leaves_the_next_move_with_us():
+    row = issue(status="cause_given", waiting_on="support", quiet=5)
+    assert kinds(build(row, merchant_sent={"c1": ago(30)})) == ["act"]
+
+
+def _mail(at, ours=True, to="owner@merchant.test"):
+    return {"at": at, "ours": ours, "to": to}
+
+
+def _item(*mails, domains=()):
+    case = {"id": "c1", "partner": {"email_domains": list(domains)}}
+    return case, {}, [{"label": "Case email", "messages": list(mails)}]
+
+
+def test_our_last_email_counts_as_telling_the_merchant():
+    assert today.merchant_emails([_item(_mail(ago(9)), _mail(ago(3)))]) == {"c1": ago(3)}
+
+
+def test_a_merchant_reply_after_ours_or_an_email_to_the_aggregator_does_not():
+    assert today.merchant_emails([_item(_mail(ago(9)), _mail(ago(3), ours=False))]) == {}
+    assert today.merchant_emails([_item(_mail(ago(3), to="ops@partner.test"), domains=["partner.test"])]) == {}
 
 
 def test_the_lane_numbers():

@@ -31,6 +31,29 @@ def _hours_since(at: str | None, now: datetime) -> float:
     return (now - when).total_seconds() / 3600 if when else 0
 
 
+def merchant_emails(items: list[tuple]) -> dict[str, str]:
+    """When we last emailed the merchant, for cases where nobody has written since."""
+    sent = {}
+    for case, _, evidence in items:
+        mails = [m for ev in evidence if ev.get("label") == "Case email" for m in ev.get("messages") or []
+                 if parse_dt(m.get("at"))]
+        last = max(mails, key=lambda m: parse_dt(m["at"]), default=None)
+        partner = (case.get("partner") or {}).get("email_domains") or []
+        if last and last.get("ours") and not any(d in (last.get("to") or "").lower() for d in partner):
+            sent[case["id"]] = last["at"]
+    return sent
+
+
+def _merchant_updated(r: dict, sent: dict[str, str]) -> dict:
+    """Engineers answered and we've told the merchant, so the next move is the merchant's."""
+    at = sent.get(r.get("case_id"))
+    done = parse_dt(at)
+    latest = parse_dt(r["last_activity_at"])
+    if r.get("waiting_on") != "support" or not done or (latest and done <= latest):
+        return r
+    return {**r, "waiting_on": "merchant", "reason": "We updated the merchant.", "last_activity_at": at}
+
+
 def _case_of(r: dict) -> str:
     return f"Case {r['case_number']}" + (f" ({r['priority']})" if r.get("priority") else "") if r.get("case_number") else "No open case"
 
@@ -62,8 +85,8 @@ def _issue_card(r: dict, cfg: dict, now: datetime) -> dict | None:
         return {**base, "rank": CLOSE, "kind": "close", "title": f"{tag}: looks ready to close",
                 "why": r["reason"], "chip": dsp_sla.span(age), "tone": "neutral"}
     if who in _WHO and quiet >= quiet_after:
-        draft = f"Please follow up with {_WHO[who]} on {tag}: {r['reason']} {r['url']}"
-        return {**base, "rank": FOLLOW, "kind": "follow", "title": f"{tag}: waiting on {_WHO[who]}",
+        draft = f"Please follow up with {_WHO[who]} on {tag}, the GitHub issue is still open: {r['reason']} {r['url']}"
+        return {**base, "rank": FOLLOW, "kind": "follow", "title": f"{tag}: follow up with {_WHO[who]}, GitHub open",
                 "why": r["reason"], "chip": dsp_sla.span(quiet), "tone": "neutral",
                 "draft": draft, "draft_label": "Message for the agent"}
     return None
@@ -172,7 +195,7 @@ def _merged(cards: list[dict], kind: str, key: str, title: str, label: str) -> d
 def _group_github(cards: list[dict]) -> list[dict]:
     for kind, key, title, label in (
             ("chase", "gh:chase", "{n} GitHub issues gone quiet", "Issue list"),
-            ("follow", "gh:follow", "{n} GitHub issues waiting on a merchant or partner", "Issue list"),
+            ("follow", "gh:follow", "{n} open GitHub issues: follow up with the merchant or partner", "Issue list"),
             ("close", "gh:close", "{n} GitHub issues look ready to close", "Issue list")):
         if sum(c["kind"] == kind for c in cards) > 1:
             cards = [c for c in cards if c["kind"] != kind] + [_merged(cards, kind, key, title, label)]
@@ -189,9 +212,10 @@ def _hidden(card: dict, reviews: dict[str, dict], now: datetime) -> bool:
 
 def build(issues: dict, sla: dict, coaching: dict, follow_ups: dict, open_cases: int,
           reviews: dict[str, dict], cfg: dict, now: datetime, help_view: dict | None = None,
-          logs: list[dict] | None = None, replies: list[dict] | None = None) -> dict:
+          logs: list[dict] | None = None, replies: list[dict] | None = None,
+          merchant_sent: dict[str, str] | None = None) -> dict:
     help_view = help_view or {"cards": [], "away": {"total": 0, "answered": 0}, "modules": []}
-    rows = [r for s in issues["squads"] for r in s["issues"]]
+    rows = [_merchant_updated(r, merchant_sent or {}) for s in issues["squads"] for r in s["issues"]]
     cards = [{**c, "rank": HELP} for c in help_view["cards"]]
     replies = replies or []
     answered_by_agent = {i for c in replies for i in c["case_ids"]}
