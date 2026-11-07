@@ -817,7 +817,10 @@ existing stack, and each tenant's fields and rules are config, not code. Setup a
     **Missing details** (`case_details.py`): Today lists new aggregator cases lacking what their issue type needs.
   - **Redesign (2026-11-07):** Case Monitor opens on three pages, with the old ones under Older pages.
     **Needs Me** (`today.py`) groups replies by agent, one line per reply with a short next step (linked
-    cases merged; `no_answer` replies mean push the aggregator), SLA misses and agent asks. **Agents**
+    cases merged; `no_answer` replies mean push the aggregator), SLA misses and agent asks. When engineers
+    answered and our newest email to the merchant came after that, the issue becomes "follow up with the
+    merchant, GitHub open" once the merchant has been quiet for `issue_quiet_hours`. Timelines are re-read
+    hourly, because an email doesn't always change a case's last modified time. **Agents**
     (`agent_quality.py`, migration 125, applied) scores raises by rule. **Wednesday Report** (`weekly.py`)
     lists GitHub issues with an open case where tech owes the resolution, and aggregators past SLA, for the
     lead to post by hand. Saved checks live in Metabase; the routine copies location IDs from them.
