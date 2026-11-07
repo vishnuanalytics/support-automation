@@ -322,7 +322,10 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
   const [slack, setSlack] = useState<SlackStatus | null>(null);
   const [help, setHelp] = useState(false);
   const pendingG = useRef(false);
-  const alertState = useAlerts(tid);
+  const alertState = useAlerts(tid, (caseId) => {
+    open(caseId);
+    if (!caseId) setMode("alerts");
+  });
 
   const load = useCallback(() => {
     api.monitor.queue(tid).then(setQueue).catch((e: ApiError) => setErr(e.message));

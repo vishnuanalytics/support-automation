@@ -55,13 +55,30 @@ function wantsDesktop() {
   }
 }
 
-/** Polls for alerts, and shows a desktop notification for each batch of new ones. */
-export function useAlerts(tenantId?: string) {
+// Held on to, or the browser can drop the notification and its click handler.
+const shown = new Set<Notification>();
+
+function notify(title: string, body: string, onClick: () => void) {
+  const notification = new Notification(title, { body });
+  notification.onclick = () => {
+    window.focus();
+    notification.close();
+    onClick();
+  };
+  notification.onclose = () => shown.delete(notification);
+  shown.add(notification);
+}
+
+/** Polls for alerts, and shows a desktop notification for each batch of new ones.
+ * Clicking one opens its case, or the Alerts page (null) for several. */
+export function useAlerts(tenantId: string | undefined, onNotificationClick: (caseId: string | null) => void) {
   const [alerts, setAlerts] = useState<Alert[] | null>(null);
   const [unread, setUnread] = useState(0);
   const [desktop, setDesktop] = useState(wantsDesktop);
   const [sound, setSound] = useState(wantsSound);
   const newest = useRef<number | null>(null);
+  const clicked = useRef(onNotificationClick);
+  clicked.current = onNotificationClick;
 
   useEffect(() => {
     window.addEventListener("pointerdown", unlockAudio, { once: true });
@@ -79,9 +96,9 @@ export function useAlerts(tenantId?: string) {
           if (wantsSound()) playChime();
           if (wantsDesktop()) {
             const first = fresh[0];
-            new Notification(`Case Monitor: ${fresh.length} new alert${fresh.length === 1 ? "" : "s"}`, {
-              body: `${first.case_number ?? ""} ${first.detail ?? first.subject ?? ""}`.trim(),
-            });
+            notify(`Case Monitor: ${fresh.length} new alert${fresh.length === 1 ? "" : "s"}`,
+              `${first.case_number ?? ""} ${first.detail ?? first.subject ?? ""}`.trim(),
+              () => clicked.current(fresh.length === 1 ? first.case_id : null));
           }
         }
       }
@@ -124,7 +141,7 @@ export function useAlerts(tenantId?: string) {
   const testAlert = () => {
     unlockAudio();
     if (sound) playChime();
-    if (wantsDesktop()) new Notification("Case Monitor: test alert", { body: "Alerts are working." });
+    if (wantsDesktop()) notify("Case Monitor: test alert", "Alerts are working.", () => clicked.current(null));
   };
 
   return { alerts, unread, desktop, sound, refresh: load, markSeen, enableDesktop, toggleSound, testAlert };
