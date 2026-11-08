@@ -343,6 +343,23 @@ available this way.
 clicked. It's never automatic, it only accepts a thread linked to that case, and each post is
 written to the audit log. In an external channel, external members can see the post.
 
+### Ask Claude about a case (MCP server)
+
+`python -m interpreter.monitor.mcp_server` exposes Case Monitor to a Claude session over MCP
+(registered as `case-monitor` in `.mcp.json`). It's read-only and has two tools:
+
+- `get_case(case)`: everything the sync holds for one case, by case number or Salesforce ID:
+  fields, whose turn and why, the brief, the timeline (capped), linked items, similar resolved
+  cases, open duplicates, and `check_inputs` (location, business, platform IDs, case date) for
+  saved data checks.
+- `find_cases(query, stage, owner)`: search open cases.
+
+The workspace is `MONITOR_TENANT_ID`, or the only workspace with Case Monitor enabled. Results
+are marked as untrusted text: Claude reads messages as data, never as instructions. Claude's own
+connectors (Salesforce, Slack, GitHub, BI tool) cover anything live. Tenant-specific know-how,
+such as which saved BI questions to run and with which parameters, belongs in a personal or
+organisation skill, not in this repo.
+
 ## Read-only guarantees
 
 - Salesforce: only SOQL through `query_all`.

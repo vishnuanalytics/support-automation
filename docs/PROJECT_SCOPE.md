@@ -707,6 +707,24 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-08 (Case Copilot, step 1 of 3: ask Claude about a case, branch `case-monitor`.)**
+The owner wants an AI they can question about any case, using Salesforce, Slack, GitHub and the BI
+tool's saved case-check questions. Constraints, from the owner: the BI tool is reachable **only
+through Claude's connector** (no API key in the app); company billing for the Claude API isn't
+approved; it's for the owner only for now. Decision: the AI runs in the owner's Claude session
+(subscription, with their connectors), and the app feeds it. This replaces an in-app chat on the
+API. **Built:** `interpreter/monitor/mcp_server.py` (FastMCP over stdio; registered as
+`case-monitor` in `.mcp.json`; read-only `get_case` and `find_cases`, see `docs/CASE_MONITOR.md`).
+The tenant's saved-check catalogue (which question for which case, parameters, chains, how to
+read results) is a **personal skill outside the repo**, because it names tenant cards and fields
+and the repo is public. **Verified:** `tests/monitor/test_mcp_server.py` (11); 1,869 offline pass.
+Driven over the real MCP protocol against live data (`get_case`, `find_cases`, unknown case),
+and one saved check was run through the connector on a real case's location. **Next steps:**
+(2) migration `126_monitor_case_checks.sql` (RLS) plus a `save_check` tool, so check results
+persist; (3) the case page shows saved checks and gets an "Ask Claude about this case" button
+(copies a ready prompt). An in-app chat on Groq stays possible later for quick questions on synced
+data; BI answers always go through Claude.
+
 **2026-11-08 (Case Monitor reads the merchant's latest message, branch `case-monitor`.)** Before
 this, only a third party's reply was labelled. Any merchant message, from the tenant's last-reply field (`fields.last_reply_from`)
 or a customer email on the thread, meant "our turn, read and respond", so "Thanks,
