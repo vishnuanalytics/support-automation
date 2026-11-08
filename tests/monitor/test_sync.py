@@ -1107,7 +1107,8 @@ def test_dsp_named_support_case_is_linked_both_ways():
     sync._subject_links([dsp, support], {}, reader, {"dependency_record_type": "DSP"}, errors)
     assert errors == [] and reader.asked == ["00132969"]
     assert dsp["children"] == [{"id": "s1", "case_number": "00132969", "status": "In Progress",
-                                "record_type": "Support", "url": "https://sf/s1", "via": "subject"}]
+                                "closed": False, "record_type": "Support", "url": "https://sf/s1",
+                                "via": "subject"}]
     assert dsp["links"] == gh
     assert support["parent"]["id"] == "d1" and support["parent"]["via"] == "subject"
     assert support["parent"]["closed"] is False and support["parent"]["record_type"] == "DSP"
@@ -1178,3 +1179,19 @@ def test_carried_subject_links_are_not_doubled_while_the_dsp_is_still_queued():
     sync._subject_links([dsp, support], prior, reader, {"dependency_record_type": "DSP"}, [])
     assert sorted(reader.asked) == ["00132969", "00132973"]
     assert [x["id"] for x in support["children"]] == ["d1"]
+
+
+def test_a_closed_subject_dsp_child_is_carried_with_its_closed_state():
+    support = _c("s1", "00132969", "Support", parent={"id": "d0", "record_type": "DSP", "closed": False})
+    prior = {"s1": {"case": {"children": [{"id": "d1", "case_number": "00132973", "record_type": "DSP",
+                                           "via": "subject"}]}}}
+    reader = _ByNumber({"00132973": _ref("d1", "00132973", "DSP", closed=True)})
+    sync._subject_links([support], prior, reader, {"dependency_record_type": "DSP"}, [])
+    assert support["children"][0]["closed"] is True and support["children"][0]["via"] == "subject"
+
+
+def test_children_of_reads_whether_each_child_is_closed():
+    sf = FakeSF([{"Id": "c1", "CaseNumber": "1", "Status": "Closed", "IsClosed": True, "ParentId": "p1",
+                  "RecordType": {"Name": "DSP"}}])
+    got = readers.SalesforceCaseReader(sf, CFG).children_of(["p1"])
+    assert "IsClosed" in sf.soql[0] and got["p1"][0]["closed"] is True

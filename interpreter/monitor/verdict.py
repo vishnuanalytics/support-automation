@@ -167,15 +167,21 @@ def _signals(case: dict, evidence: list[dict], cfg: dict) -> list[dict]:
                     "text": f"Marked {sub}",
                     "action": "Read the team's reply and act on it."})
 
-    parent = case.get("parent") or {}
-    if waiting == THIRD_PARTY and parent.get("closed") and \
-            parent.get("record_type") == cfg.get("dependency_record_type") and \
-            case.get("record_type") != parent.get("record_type"):
+    # Every DSP case linked to this one, parent or child (a child when linked by subject or
+    # when there's a DSP per aggregator). Done only once all of them are closed.
+    record_type = cfg.get("dependency_record_type")
+    dsps = [x for x in [case.get("parent"), *(case.get("children") or [])]
+            if x and x.get("record_type") == record_type]
+    if waiting == THIRD_PARTY and dsps and case.get("record_type") != record_type and \
+            all(x.get("closed") for x in dsps):
+        first = dsps[0]
+        text = (f"Linked {record_type} case {first.get('case_number')} is {first.get('status')}"
+                if len(dsps) == 1 else
+                f"Linked {record_type} cases {', '.join(str(x.get('case_number')) for x in dsps)} "
+                "are all closed")
         out.append({"ball": US, "code": "dsp_resolved",
-                    "source": _source(f"Salesforce: case {parent.get('case_number')}",
-                                      parent.get("url")),
-                    "text": f"Linked {parent['record_type']} case {parent.get('case_number')} "
-                            f"is {parent.get('status')}",
+                    "source": _source(f"Salesforce: case {first.get('case_number')}", first.get("url")),
+                    "text": text,
                     "action": f"Update the {customer.lower()} and close this case."})
 
     modified = parse_dt(case.get("last_modified_at"))

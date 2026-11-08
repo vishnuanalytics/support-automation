@@ -707,6 +707,18 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-08 (Case Monitor: "DSP resolved" counts every linked DSP case, branch `case-monitor`.)**
+Closes the gap in the subject-links entry below. **Built:** `verdict._signals`' `dsp_resolved` now
+takes every linked case of the raising record type (parent and children, Salesforce or `via:
+"subject"`) and fires only when all are closed; one DSP case cites it as before, several give
+"Linked DSP cases A, B are all closed". `children_of` now reads `IsClosed`, and subject-linked children
+keep `closed`; a child without it (rows saved before this) counts as open. **Behaviour change:** a
+Support case whose DSP parent is closed but which has another open DSP child is no longer ready to
+close. **Verified:** +6 tests (533 in `tests/monitor/`); full offline suite with only the known local
+pubsub failure. Live read-only dry run: the same 5 cases are ready to close under the old and new rule;
+the one case with two DSPs (00132969: 00132972 + 00132973 by subject) has both open. **Next:** owner
+review of the overdue/stale weighting, still open.
+
 **2026-11-08 (Case Monitor: DSP cases linked only by subject, branch `case-monitor`.)** Closes the
 "not covered" gap in the entry below: DSP 00132973 names Support 00132969 only in its subject.
 **Built:** `readers.SalesforceCaseReader.cases_by_number` (SOQL on `CaseNumber`, open or closed);

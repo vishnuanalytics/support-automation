@@ -187,8 +187,7 @@ def _subject_links(cases: list[dict], prior: dict[str, dict], reader: Any, cfg: 
         if where == "parent" and not c.get("parent"):
             c["parent"] = {**ref, "via": "subject"}
         else:
-            c["children"] = [*(c.get("children") or []),
-                             {**{k: v for k, v in ref.items() if k != "closed"}, "via": "subject"}]
+            c["children"] = [*(c.get("children") or []), {**ref, "via": "subject"}]
 
     by_id = {c["id"]: c for c in sf}
     for c in sf:

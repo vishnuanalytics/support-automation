@@ -451,3 +451,42 @@ def test_dsp_waits_on_the_merchant_when_the_linked_support_case_does(cfg):
     assert r["signal"]["code"] == "linked_awaiting_customer"
     assert r["signal"]["source"]["url"] == "https://sf/2"
     assert r["next_action"] == "Chase the merchant on case 00000043, then answer Aggregator."
+
+
+def _dsp_ref(number, closed, via=None):
+    ref = {"id": number, "case_number": number, "record_type": "DSP", "closed": closed,
+           "status": "Resolved" if closed else "In Progress", "url": f"https://sf/{number}"}
+    return {**ref, "via": via} if via else ref
+
+
+def test_a_closed_subject_linked_dsp_child_makes_the_case_ready_to_close(cfg):
+    conf = {**cfg, "dependency_record_type": "DSP"}
+    c = agg(record_type="Support", parent=None, children=[_dsp_ref("00132973", True, "subject")])
+    r = v.compute(c, [], conf, NOW)
+    assert r["ready_to_close"] and r["signal"]["code"] == "dsp_resolved"
+    assert r["signal"]["text"] == "Linked DSP case 00132973 is Resolved"
+    assert r["signal"]["source"]["url"] == "https://sf/00132973"
+
+
+def test_one_aggregator_closed_while_another_is_open_is_not_ready_to_close(cfg):
+    conf = {**cfg, "dependency_record_type": "DSP"}
+    c = agg(record_type="Support", parent=_dsp_ref("00132972", False),
+            children=[_dsp_ref("00132973", True, "subject")])
+    assert not v.compute(c, [], conf, NOW)["ready_to_close"]
+    c["parent"] = _dsp_ref("00132972", True)
+    r = v.compute(c, [], conf, NOW)
+    assert r["ready_to_close"] and r["signal"]["text"] == "Linked DSP cases 00132972, 00132973 are all closed"
+
+
+def test_a_dsp_child_with_no_closed_state_counts_as_open(cfg):
+    """Rows saved before children carried IsClosed: don't call them done."""
+    conf = {**cfg, "dependency_record_type": "DSP"}
+    child = {k: val for k, val in _dsp_ref("00132973", True).items() if k != "closed"}
+    c = agg(record_type="Support", parent=_dsp_ref("900", True), children=[child])
+    assert not v.compute(c, [], conf, NOW)["ready_to_close"]
+
+
+def test_non_dsp_children_dont_block_ready_to_close(cfg):
+    conf = {**cfg, "dependency_record_type": "DSP"}
+    c = resolved_dsp_child(children=[{"id": "x", "case_number": "1", "record_type": "Support"}])
+    assert v.compute(c, [], conf, NOW)["ready_to_close"]

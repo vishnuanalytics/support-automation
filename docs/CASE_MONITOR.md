@@ -127,7 +127,9 @@ and escalation time for a workspace. Never store portal passwords in it. The cha
 | whatsapp | None: it can't be read | Checked by hand |
 
 A third-party case with no linked case of the raising record type, as parent or child, shows as not
-raised. If that linked case is closed while this one is open, it's our turn to update the customer.
+raised. Once every linked case of that record type is closed, parent or child, linked in Salesforce
+or by subject, while this one is open, it's our turn to update the customer. With a DSP case per
+aggregator, one closing while another is still open isn't enough.
 A DSP case with no Salesforce parent or child is linked to the case its subject names (an
 8-digit case number, e.g. "Case #00132969 – …"), as if Salesforce had the link: the named case becomes
 the DSP's child, and the DSP becomes the named case's parent, or another child when it already has a

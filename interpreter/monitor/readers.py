@@ -424,11 +424,12 @@ class SalesforceCaseReader:
             chunk = ", ".join(f"'{_lit(i)}'" for i in ids[start:start + 200])
             link = self.fields.get("link")
             extra = f"{link}, " if link else ""
-            rows = self._records(f"SELECT Id, CaseNumber, Status, {extra}RecordType.Name, ParentId "
-                                 f"FROM Case WHERE ParentId IN ({chunk})")
+            rows = self._records(f"SELECT Id, CaseNumber, Status, IsClosed, {extra}RecordType.Name, "
+                                 f"ParentId FROM Case WHERE ParentId IN ({chunk})")
             for r in rows:
                 out.setdefault(r["ParentId"], []).append({
                     "id": r["Id"], "case_number": r.get("CaseNumber"), "status": r.get("Status"),
+                    "closed": bool(r.get("IsClosed")),
                     "links": parse(_dig(r, link)) if link else [],
                     "record_type": (r.get("RecordType") or {}).get("Name"),
                     "url": f"{base}/lightning/r/Case/{r['Id']}/view" if base else None})
