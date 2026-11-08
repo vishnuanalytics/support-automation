@@ -708,8 +708,8 @@ Design decisions already settled in that conversation:
 ## Immediate next step
 
 **2026-11-08 (Case Monitor reads the merchant's latest message, branch `case-monitor`.)** Before
-this, only a third party's reply was labelled. Any merchant message, from `Activity_Status__c =
-Merchant Replied` or a customer email on the thread, meant "our turn, read and respond", so "Thanks,
+this, only a third party's reply was labelled. Any merchant message, from the tenant's last-reply field (`fields.last_reply_from`)
+or a customer email on the thread, meant "our turn, read and respond", so "Thanks,
 it works now" looked the same as "Still broken". Now `replies.label_customer` labels the newest
 message overall when it's the merchant's. The newest message now includes the case's own emails, so
 `sync.run` computes it before the verdict. Labels are `confirmed`, `thanks` and `needs_reply`. Short,
@@ -726,13 +726,13 @@ message it was made for (matched by `at`). Tests: +29 (488 in `tests/monitor/`, 
 **Live (17:08 UTC sync):** 9 open cases end on a merchant message, and all 9 are `needs_reply`. They
 were checked by reading the texts ("still failing", "remains unresolved", "PFA", "please confirm…").
 None is `confirmed` today, so the close path hasn't fired on real data yet. One bug was found on
-live data and fixed in this chunk: the first rule labelled a bare "Hi" (a test case, 00128957) as
+live data and fixed in this chunk: the first rule labelled a bare "Hi" (on a test case) as
 `thanks`.
 **Not browser-checked by a person.** Next: review the overdue/stale weighting with the owner (58 of
 86 critical).
 
-**2026-11-08 (Case Monitor: "ready to close" stage, branch `case-monitor`.)** Prompted by case
-00130851: the lead saw it as closed, but only its parent DSP case had been resolved, by the agent,
+**2026-11-08 (Case Monitor: "ready to close" stage, branch `case-monitor`.)** Prompted by a real
+case the lead saw as closed, but only its parent DSP case had been resolved, by the agent,
 that day. The Support case was still open and the merchant hadn't been told. The monitor was right
 to show it, but it sat with real work as "critical, mismatch". Now `verdict.CLOSE_SIGNALS`
 (`dsp_resolved` only) sets `ready_to_close`. `verdict.stage` puts the case in a new `close` stage,
