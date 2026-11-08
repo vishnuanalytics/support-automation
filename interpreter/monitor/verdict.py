@@ -168,17 +168,25 @@ def _signals(case: dict, evidence: list[dict], cfg: dict) -> list[dict]:
                     "action": "Read the team's reply and act on it."})
 
     # Every DSP case linked to this one, parent or child (a child when linked by subject or
-    # when there's a DSP per aggregator). Done only once all of them are closed.
+    # when there's a DSP per aggregator). Done only once all of them are closed, and, for a
+    # case waiting on Engineering, once every GitHub issue it links is read and closed too.
     record_type = cfg.get("dependency_record_type")
     dsps = [x for x in [case.get("parent"), *(case.get("children") or [])]
             if x and x.get("record_type") == record_type]
-    if waiting == THIRD_PARTY and dsps and case.get("record_type") != record_type and \
-            all(x.get("closed") for x in dsps):
+    issues = [ev for ev in evidence if ev.get("kind") == "github"]
+    # No GitHub issue (e.g. raised on Slack) means there's nothing to say Engineering is done.
+    engineering_done = bool(issues) and all(ev.get("ok") and ev.get("state") == "closed"
+                                            for ev in issues)
+    if dsps and case.get("record_type") != record_type and all(x.get("closed") for x in dsps) and \
+            (waiting == THIRD_PARTY or (waiting == ENGINEERING and engineering_done)):
         first = dsps[0]
         text = (f"Linked {record_type} case {first.get('case_number')} is {first.get('status')}"
                 if len(dsps) == 1 else
                 f"Linked {record_type} cases {', '.join(str(x.get('case_number')) for x in dsps)} "
                 "are all closed")
+        if waiting == ENGINEERING:
+            text +=", and the GitHub issue is closed" if len(issues) == 1 else \
+                ", and the GitHub issues are closed"
         out.append({"ball": US, "code": "dsp_resolved",
                     "source": _source(f"Salesforce: case {first.get('case_number')}", first.get("url")),
                     "text": text,

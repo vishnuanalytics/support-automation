@@ -130,6 +130,9 @@ A third-party case with no linked case of the raising record type, as parent or 
 raised. Once every linked case of that record type is closed, parent or child, linked in Salesforce
 or by subject, while this one is open, it's our turn to update the customer. With a DSP case per
 aggregator, one closing while another is still open isn't enough.
+A case waiting on Engineering with linked DSP cases is ready to close only once they're all closed
+*and* every GitHub issue it links is read and closed. With no GitHub issue (raised on Slack, say)
+nothing says Engineering is done, so it isn't.
 A DSP case with no Salesforce parent or child is linked to the case its subject names (an
 8-digit case number, e.g. "Case #00132969 – …"), as if Salesforce had the link: the named case becomes
 the DSP's child, and the DSP becomes the named case's parent, or another child when it already has a

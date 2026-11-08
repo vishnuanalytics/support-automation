@@ -490,3 +490,39 @@ def test_non_dsp_children_dont_block_ready_to_close(cfg):
     conf = {**cfg, "dependency_record_type": "DSP"}
     c = resolved_dsp_child(children=[{"id": "x", "case_number": "1", "record_type": "Support"}])
     assert v.compute(c, [], conf, NOW)["ready_to_close"]
+
+
+def _eng_support(**kw):
+    """A Support case waiting on Engineering, with its DSP cases closed."""
+    return case(record_type="Support", parent=_dsp_ref("00132972", True),
+                children=[_dsp_ref("00132973", True, "subject")], **kw)
+
+
+def test_engineering_case_is_ready_to_close_when_dsps_and_the_issue_are_closed(cfg):
+    conf = {**cfg, "dependency_record_type": "DSP"}
+    r = v.compute(_eng_support(), [gh(msg(False), state="closed")], conf, NOW)
+    assert r["ready_to_close"] and v.stage(r) == "close" and not r["mismatch"]
+    assert r["signal"]["code"] == "dsp_resolved"
+    assert r["signal"]["text"] == ("Linked DSP cases 00132972, 00132973 are all closed, "
+                                   "and the GitHub issue is closed")
+    assert r["next_action"] == "Update the merchant and close this case."
+
+
+@pytest.mark.parametrize("evidence", [
+    [gh(msg(False))],                                   # the fix isn't done
+    [gh(state="closed"), gh()],                         # one of two issues still open
+    [{"kind": "github", "ok": False, "error": "404", "url": "https://gh/2"}],  # can't tell
+    [],                                                 # no GitHub issue to go by
+])
+def test_engineering_case_waits_while_engineering_isnt_known_to_be_done(cfg, evidence):
+    conf = {**cfg, "dependency_record_type": "DSP"}
+    r = v.compute(_eng_support(), evidence, conf, NOW)
+    assert not r["ready_to_close"] and "dsp_resolved" not in codes(r)
+
+
+def test_engineering_case_waits_while_a_dsp_is_open(cfg):
+    conf = {**cfg, "dependency_record_type": "DSP"}
+    c = _eng_support()
+    c["children"] = [_dsp_ref("00132973", False, "subject")]
+    r = v.compute(c, [gh(state="closed")], conf, NOW)
+    assert not r["ready_to_close"] and "dsp_resolved" not in codes(r)

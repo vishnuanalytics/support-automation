@@ -707,6 +707,17 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-08 (Case Monitor: "DSP resolved" for cases waiting on Engineering, branch `case-monitor`.)**
+Closes the gap left by the entry below: `dsp_resolved` only ran on cases waiting on a third party, so a
+Support case waiting on Engineer (00132969) could never become ready to close from its DSP cases.
+**Built:** `verdict._signals` also fires `dsp_resolved` for `waiting == engineering` when every linked
+DSP case is closed **and** the case links at least one GitHub issue and every one is read and closed
+(no GitHub issue, or an unreadable one, means Engineering isn't known to be done). The reason adds ",
+and the GitHub issue is closed". **Verified:** +6 tests (539 in `tests/monitor/`); full offline suite
+with only the known local pubsub failure. Live read-only dry run: 3 engineering cases have a linked DSP;
+none change today. 00132945 (DSP closed, GitHub open) correctly stays not ready; 00132969 (GitHub
+closed, both DSPs open) stays not ready. **Next:** owner review of the overdue/stale weighting, still open.
+
 **2026-11-08 (Case Monitor: "DSP resolved" counts every linked DSP case, branch `case-monitor`.)**
 Closes the gap in the subject-links entry below. **Built:** `verdict._signals`' `dsp_resolved` now
 takes every linked case of the raising record type (parent and children, Salesforce or `via:
