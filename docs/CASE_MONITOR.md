@@ -211,7 +211,11 @@ Several GitHub issues of one kind become one card. Marking a card done hides it 
 happens, or for a day at most.
 
 **Agents** shows who raised what and what was wrong, worst first, for open aggregator cases raised in the
-last 30 days plus GitHub issues closed with a `wrong_raise_labels` label. A case stops counting once it
+last 30 days plus GitHub issues closed with a `wrong_raise_labels` label. With the engineering scan on
+(`auto_checks_engineering`), open engineering cases from the same 30 days are judged by the same rules
+and tagged Engineering, except ones that have their own aggregator case. Their details can sit in the
+GitHub issue rather than the case's fields, which the rules don't read, so check a "missing" flag there.
+An automatic data check that found nothing is listed as "please check", never counted as wrong. A case stops counting once it
 closes. The raiser is whoever signed the first email out, falling back to the owner. A raise is wrong when:
 
 - a required detail is missing, other than an item name
@@ -252,6 +256,42 @@ tighten" once at least 80% of at least 5 cases closed in time that week.
 business name. `location_id`, `platform_id` and the aggregator are read from fields. An order ID or item
 name is found by pattern in the subject, description and emails, so an unusual format can be missed. Cases
 raised from `sla_start` with something missing count on the Agents page.
+
+### Automatic data checks
+
+New cases raised from `sla_start` get their saved data checks run without anyone asking. **Settings**
+has a switch for each kind: aggregator (DSP) cases (`auto_checks_dsp`, on by default) and cases raised
+to engineering (`auto_checks_engineering`, off by default). An engineering case is one waiting on
+engineering or linking a GitHub issue. One that has its own aggregator case is checked there instead,
+while the aggregator switch is on. Store, menu and stock checks need the aggregator's name, because
+those saved questions fall back to one platform without it.
+The app can't reach the BI tool, so it only decides what's due. After each sync the worker writes the
+list to `monitor_checks_due`. A scheduled Claude routine with BI-tool and Supabase access runs each one
+and saves the result to `monitor_case_checks`, the same table as `save_check`. A check with a saved
+result is done, so nothing runs twice.
+
+`auto_checks` picks the checks per kind of issue, by sub-module or module, first match wins.
+`check_questions` names the saved question for each kind, by `card_id` and `name`:
+
+| Kind | Needs from the case | Runs after |
+|---|---|---|
+| `order` | an order ID in the subject, description or emails, and the case date | |
+| `order_status` | the platform's order ID from the order result | `order` |
+| `order_items` | the order ID, date and business from the order result | `order` |
+| `item_stock` | the location, plus the item's ID from the items result | `order_items` |
+| `menu_publish` | the location | |
+| `store_actions` | the location | |
+
+The location is the case's first `location_id`, and the platform is its aggregator after
+`platform_aliases`, lowercased. Log windows start 2 days before the case was raised, in UTC.
+A check that follows another waits until that one is saved with rows. If the first check found nothing,
+the ones after it don't run. The MCP tool `checks_due` gives the same list to a local Claude session.
+
+The app reads results by row count only. A check that returned no rows (no such order, no publish,
+no store action in the window) goes on one **Needs Me** card under Agents, with a message asking agents
+to confirm the details with the merchant. The routine's summary shows on the case page. A check that
+errors isn't saved, so it's retried on the next run. A stock check needs an order, because there's no
+saved question that finds an item by name.
 
 ### Log expiry
 

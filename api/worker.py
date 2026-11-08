@@ -847,6 +847,10 @@ def _monitor_sync(payload: dict, sb) -> dict:
         service.record_progress(sb, payload["tenant_id"])
     except Exception:  # the numbers can wait for the next sync; the sync itself worked
         log.warning("monitor progress not recorded", exc_info=True)
+    try:
+        service.record_checks_due(sb, payload["tenant_id"])
+    except Exception:  # the routine reads last sync's list until the next one
+        log.warning("monitor checks due not recorded", exc_info=True)
     return result
 
 

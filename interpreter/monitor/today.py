@@ -13,7 +13,7 @@ from . import verdict
 from .verdict import parse_dt
 
 DONE_FOR_HOURS = 24
-HELP, ACT, ESCALATE_URGENT, LOGS, CHASE, CLOSE, ESCALATE, FOLLOW = range(8)
+HELP, ACT, ESCALATE_URGENT, LOGS, CHASE, CLOSE, ESCALATE, FOLLOW, CHECKS = range(9)
 _WHO = {"merchant": "the merchant", "third_party": "the aggregator"}
 _STEP_BY_PARTY = {verdict.CUSTOMER: "Reply to the merchant",
                   verdict.ENGINEERING: "Read the engineer's reply and update the merchant"}
@@ -23,7 +23,7 @@ _STEP_BY_REPLY = {"no_answer": "Push {third} for a real answer", "needs_info": "
                   "bug_raised": "Track the {third} fix and update the merchant"}
 REPLIES, SLA, AGENTS = "replies", "sla", "agents"
 GROUPS = {"act": REPLIES, "reply": REPLIES, "escalate": SLA, "chase": SLA, "help": AGENTS, "logs": AGENTS,
-          "close": AGENTS, "follow": AGENTS}
+          "close": AGENTS, "follow": AGENTS, "checks": AGENTS}
 
 
 def _hours_since(at: str | None, now: datetime) -> float:
@@ -247,7 +247,8 @@ def _hidden(card: dict, reviews: dict[str, dict], now: datetime) -> bool:
 def build(issues: dict, sla: dict, coaching: dict, follow_ups: dict, open_cases: int,
           reviews: dict[str, dict], cfg: dict, now: datetime, help_view: dict | None = None,
           logs: list[dict] | None = None, replies: list[dict] | None = None,
-          merchant_sent: dict[str, str] | None = None, closing: list[dict] | None = None) -> dict:
+          merchant_sent: dict[str, str] | None = None, closing: list[dict] | None = None,
+          checks: dict | None = None) -> dict:
     help_view = help_view or {"cards": [], "away": {"total": 0, "answered": 0}, "modules": []}
     rows = [_merchant_updated(r, merchant_sent or {}) for s in issues["squads"] for r in s["issues"]]
     cards = [{**c, "rank": HELP} for c in help_view["cards"]]
@@ -259,6 +260,7 @@ def build(issues: dict, sla: dict, coaching: dict, follow_ups: dict, open_cases:
     cards += [c for p in sla["partners"] if (c := _partner_card(p))]
     cards += [_logs_card(p) for p in logs or []]
     cards += closing or []
+    cards += [checks] if checks else []
     cards = [{**c, "group": GROUPS[c["kind"]]} for c in _group_github(cards)]
     shown = [c for c in cards if not _hidden(c, reviews, now)]
     shown.sort(key=lambda c: c["rank"])

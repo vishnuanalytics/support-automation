@@ -11,6 +11,7 @@ import copy
 import re
 from typing import Any
 
+from . import auto_checks
 from .verdict import parse_dt
 
 SOQL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)*$")
@@ -56,6 +57,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "dsp_sla_rules": [],
     # [{"modules", "sub_modules", "needs"}], first match wins; needs: order, location, item, platform
     "required_details": [],
+    # [{"name", "modules", "sub_modules", "checks"}], first match wins; checks are kinds in
+    # auto_checks.KINDS (order, order_status, order_items, item_stock, menu_publish, store_actions)
+    "auto_checks": [],
+    "auto_checks_dsp": True,          # run them on new aggregator cases
+    "auto_checks_engineering": False,  # and on new cases raised to engineering
+    # check kind -> the saved question that does it: {"order": {"card_id": "123", "name": "..."}}
+    "check_questions": {},
     "needs_reply_hours": 24,          # an outside reply left this long goes on Needs Me
     "week_start_weekday": 2,          # the Wednesday report's week; Monday is 0
     "platform_aliases": {},           # {"PartnerA": "catalogue-platform-name"} when the names differ
@@ -123,6 +131,10 @@ def validate(config: Any) -> list[str]:
     if not isinstance(config.get("log_retention_days", {}), dict) or any(
             not (isinstance(v, (int, float)) and v > 0) for v in (config.get("log_retention_days") or {}).values()):
         errors.append("log_retention_days must map each aggregator to a positive number")
+    errors += auto_checks.validate(config)
+    for key in ("auto_checks_dsp", "auto_checks_engineering"):
+        if key in config and not isinstance(config[key], bool):
+            errors.append(f"{key} must be true or false")
     if config.get("week_start_weekday", 0) not in range(7):
         errors.append("week_start_weekday must be 0 (Monday) to 6 (Sunday)")
     if config.get("sla_start") and parse_dt(config["sla_start"]) is None:

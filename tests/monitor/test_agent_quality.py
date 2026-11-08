@@ -154,3 +154,18 @@ def test_a_github_name_joins_the_salesforce_name():
 def test_worst_first():
     got = build((case(owner="Good"), []), (case(id="2", owner="Bad", module="Orders"), []))
     assert [a["agent"] for a in got["agents"]] == ["Bad", "Good"]
+
+
+def test_a_data_check_that_found_nothing_is_a_please_check_not_a_mistake():
+    got = aq.build([(case(), {}, [])], FACTS, NO_COACH, CFG, NOW,
+                   {"1": ["ORD-01 found nothing: No order found with this ID (order_id 77)"]})
+    a = got["agents"][0]
+    assert a["wrong"] == 0 and got["wrong"] == 0
+    assert a["check"][0]["check"] == ["ORD-01 found nothing: No order found with this ID (order_id 77)"]
+
+
+def test_each_case_says_whether_it_went_to_an_aggregator_or_engineering():
+    cfg = {**CFG, "dependency_record_type": "DSP"}
+    got = aq.build([(case(record_type="DSP", module="Orders"), {}, []),
+                    (case(id="2", record_type="Support", module="Orders"), {}, [])], FACTS, NO_COACH, cfg, NOW)
+    assert sorted(c["source"] for c in got["agents"][0]["cases"]) == ["aggregator", "engineering"]

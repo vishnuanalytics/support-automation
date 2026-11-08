@@ -294,7 +294,7 @@ export type CardCase = {
 };
 export type TodayCard = {
   key: string;
-  kind: "help" | "act" | "reply" | "logs" | "chase" | "close" | "follow" | "escalate";
+  kind: "help" | "act" | "reply" | "logs" | "chase" | "close" | "follow" | "escalate" | "checks";
   group: "replies" | "sla" | "agents";
   cases: CardCase[];
   title: string;
@@ -437,6 +437,7 @@ export type AgentCase = {
   case_number: string | null;
   subject: string | null;
   raised_at: string;
+  source?: "aggregator" | "engineering";
   problems: { kind: string; text: string }[];
   check: string[];
 };

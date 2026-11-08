@@ -16,6 +16,8 @@ LABELS = {"business": "business name", "order": "order ID", "location": "locatio
           "item": "item name", "platform": "platform name"}
 # "Order ID: 123456", "Order #1234567890", "order ABCD1234567890"
 _ORDER = re.compile(r"\border(?:\s*(?:id|no|number|ref))?\s*[:#\-]*\s*[A-Z0-9-]*\d{5,}", re.I)
+# The same, keeping the ID itself
+_ORDER_ID = re.compile(r"\border(?:\s*(?:id|no|number|ref))?\s*[:#\-]*\s*([A-Z0-9-]*\d{5,}[A-Z0-9-]*)", re.I)
 # "Item Name - Kunafa Dream Cake" or "items: Latte", anywhere including emails
 _ITEM_LABEL = re.compile(r"\bitems?(?:\s*(?:name|id|title))\s*[:\-]\s*\S|\bitems?\s*:\s*\S", re.I)
 # In the case itself only, since emails are full of quotes and "for Urban Piper":
@@ -27,6 +29,12 @@ def _text(case: dict, evidence: list[dict]) -> str:
     """Agents often put the order number in the email rather than the case."""
     mails = [m.get("text") or "" for ev in evidence for m in ev.get("messages") or []]
     return "\n".join([case.get("subject") or "", case.get("description") or "", *mails])
+
+
+def order_ids(case: dict, evidence: list[dict]) -> list[str]:
+    """Order IDs named in the case, then its emails, first seen first."""
+    found = [m.strip("-") for m in _ORDER_ID.findall(_text(case, evidence))]
+    return list(dict.fromkeys(f for f in found if f))
 
 
 def _has(case: dict, need: str, text: str) -> bool:

@@ -633,7 +633,8 @@ export const api = {
     getConfig: (tenantId?: string) =>
       req<{ config: Record<string, unknown> }>(`/monitor/config${monitorQuery(tenantId)}`),
     putConfig: (config: unknown, tenantId?: string) =>
-      req<unknown>(`/monitor/config${monitorQuery(tenantId)}`, { method: "PUT", body: JSON.stringify({ config }) }),
+      req<{ config: Record<string, unknown> }>(`/monitor/config${monitorQuery(tenantId)}`,
+        { method: "PUT", body: JSON.stringify({ config }) }),
     slackStatus: (tenantId?: string) => req<SlackStatus>(`/monitor/slack/status${monitorQuery(tenantId)}`),
     slackAuthorize: (tenantId?: string) => req<{ url: string }>(`/monitor/slack/authorize${monitorQuery(tenantId)}`),
   },

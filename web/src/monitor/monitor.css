@@ -212,6 +212,9 @@
   padding: var(--space-3);
 }
 .monitor-brief { display: flex; flex-direction: column; gap: var(--space-1); }
+.monitor-settings h3 { margin: var(--space-3) 0 var(--space-1); font-size: 14px; }
+.monitor-scans { display: flex; flex-direction: column; gap: var(--space-2); }
+.monitor-scan { display: flex; flex-direction: column; gap: var(--space-1); }
 .monitor-turn { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
 .monitor-facts { display: flex; flex-wrap: wrap; gap: var(--space-4); margin: 0; }
 .monitor-facts dt { color: var(--text-muted); font-size: 11px; }

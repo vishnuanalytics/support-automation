@@ -5,7 +5,8 @@ verdict, brief, timeline, linked items, similar past cases) in one call, so a
 chat starts from the facts instead of re-reading every source. Claude's own
 connectors (Salesforce, Slack, GitHub, Metabase) cover anything live.
 
-The one write is save_check: it stores a saved check's result on a case in this
+checks_due lists the saved checks new aggregator and engineering cases still need, for a
+scheduled routine to run. The one write is save_check: it stores a saved check's result on a case in this
 app's own monitor_case_checks table. Nothing is ever written to Salesforce,
 Slack, GitHub or the BI tool.
 
@@ -295,6 +296,20 @@ def build_server():
         sb.table("monitor_case_checks").insert(row).execute()
         return {"saved": True, "case_id": case_id, "check_name": row["check_name"],
                 "row_count": row["row_count"], "rows_kept": len(row["rows"])}
+
+    @server.tool()
+    def checks_due(limit: int = 20) -> dict:
+        """Saved data checks that new aggregator and engineering cases still need (each scan has
+        an on/off switch in Settings), newest case first. For each
+        check: the saved question's name and card_id, and the params taken from the case. When a
+        check has fill_from, read those params from that earlier check's saved result (get_case
+        lists it), and if the case names several items or orders, use the one the case is about.
+        Run each check, then record it with save_check, even when it returns no rows. If a check
+        errors, don't save it: it stays due and is retried, while a saved empty result reads as
+        "found nothing". blocked lists checks
+        that wait for an input or an earlier check; skip them. This tool itself writes nothing."""
+        sb, tenant = ctx()
+        return service.checks_due(sb, tenant, max(1, min(limit, 50)))
 
     @server.tool()
     def find_cases(query: str = "", stage: str = "", owner: str = "", limit: int = 25) -> dict:

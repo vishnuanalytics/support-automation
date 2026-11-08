@@ -707,6 +707,49 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-08 (Case Monitor: automatic data checks on new aggregator cases, branch `case-monitor`.)**
+The "order and stock log checks on new aggregator raises" item planned since the redesign. The owner
+chose order, stock, store and menu checks, rules in new per-tenant config, and the existing hourly
+routine as the runner (the app has no BI-tool access). **Built:** `interpreter/monitor/auto_checks.py`
+(pure): `auto_checks` rules (module/sub-module, first match) pick check kinds (`order`, `order_status`,
+`order_items`, `item_stock`, `menu_publish`, `store_actions`); `check_questions` maps each kind to the
+tenant's saved question. Params come from the case (first location, aliased lowercase platform, order ID
+from `case_details.order_ids`, case date, a window from 2 days before). A follower check waits for its
+first check to be saved with rows. A saved result means done. `service.record_checks_due` runs after each
+sync in `api.worker` and rewrites `monitor_checks_due` (**migration 127, not applied yet**). There's also a
+local MCP tool `checks_due`. Checks that returned no rows go on one Needs Me card (`kind: checks`, Agents
+group) asking agents to confirm details with the merchant. That's row count only, never a verdict.
+**Verified:** +16 tests (569 in `tests/monitor/`), `npm run build` passes. Read-only dry run on live data,
+with the proposed rules and `sla_start` ignored: 28 open DSP cases, 23 checks due on 23 cases, 31 blocked
+(25 waiting for the order lookup, 3 with no order ID found, 3 waiting for items). Extracted order IDs
+were spot-checked as real. With the real `sla_start` none are in scope yet, so nothing runs before it.
+**Then, on the owner's ask: on/off switches in Settings** for the DSP scan (`auto_checks_dsp`, default
+on) and an engineering scan (`auto_checks_engineering`, default off: open cases from `sla_start` waiting
+on engineering or linking a GitHub issue, skipped when they have a DSP case and the DSP scan is on).
+Store/menu/stock checks now need the aggregator name. `MonitorSettings.tsx` has two `Toggle`s that save
+at once, plus the JSON editor. **Verified:** +5 tests (574 in `tests/monitor/`), new
+`e2e/monitor-settings.spec.ts` (2, mocked API) passes with the other monitor specs, `npm run build`
+passes, light and dark screenshots checked. Not checked in a browser on live data.
+**Then the Agents page:** with the engineering switch on, open engineering cases (no DSP case of their
+own) from the last 30 days are judged by the same wrong-raise rules and tagged Engineering; an automatic
+check that found nothing is a "please check" line (`auto_checks.notes`), never counted as wrong.
+**Verified:** +4 tests (578 in `tests/monitor/`), new `e2e/monitor-agents.spec.ts` passes, build passes.
+Live dry run (read-only): switch on adds 24 engineering cases, 7 flagged missing details (6 location/platform
+ID, 1 order ID). Open question: an engineering case's details may be in its GitHub issue, which the rules
+don't read, so those flags can be false. The local API was restarted on the owner's ask (21:14).
+**Live (21:20):** migration 127 applied via Supabase MCP; tenant config gained `auto_checks` (4 rules:
+disabled item ordered, order issue, store on/off, menu) + `check_questions` + `auto_checks_dsp: true`,
+`auto_checks_engineering: false` (no other key changed); `api.worker` restarted with the new code
+(`SKIP_ENV_CHECK=1`, as before: the JWT key file isn't on this machine and Case Monitor uses the Vault
+OAuth token); one `record_checks_due` run wrote 0 rows (nothing after `sla_start` yet), and the Needs Me
+and Agents views were unchanged. The hourly routine gained JOB 3 (read `monitor_checks_due`, skip ones
+already saved, fill chained params from the earlier saved result, run the saved question, insert into
+`monitor_case_checks` with `saved_by = 'Hourly routine'`; an erroring check isn't saved).
+**Next:** after 2026-11-11 confirm the first routine run saved real ORD/ITM/STR/MNU results, look at their
+columns, and decide whether any reading beyond "found nothing" is safe to add. Open: an engineering case's
+details can live in its GitHub issue, which the wrong-raise rules don't read. The stock check needs an
+order first (no item-by-name saved question).
+
 **2026-11-08 (Case Monitor: first sync with today's changes, and a fix, branch `case-monitor`.)**
 Ran `service.run_sync` by hand (trigger `manual`) in a fresh process. **Found a regression from the
 subject-links change:** `_named_links` copied the named Support case's links onto the DSP case, so DSP
@@ -1051,7 +1094,7 @@ existing stack, and each tenant's fields and rules are config, not code. Setup a
     lists GitHub issues with an open case where tech owes the resolution, and aggregators past SLA, for the
     lead to post by hand. Saved checks live in Metabase; the routine copies location IDs from them.
     Design: https://claude.ai/artifact/8CbSZAAT8ca1cqw5dxGdkZ.
-    Planned next: order and stock log checks on new aggregator raises, using the saved Metabase questions.
+    Automatic data checks on new aggregator raises: built 2026-11-08 (see Immediate next step).
   - A GitHub webhook for instant reaction, and a check that stops a wrong raise, aren't built.
 - **AI evaluation:** `eval/monitor/backtest.py` hides a real agent reply on a resolved case and
   scores the draft with DeepEval. `eval/monitor/reply_labels.py` scores reply labels against a

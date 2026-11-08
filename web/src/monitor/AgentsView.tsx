@@ -12,6 +12,7 @@ function Detail({ a, onOpen }: { a: AgentRow; onOpen: (id: string) => void }) {
           <li key={c.case_id}>
             <p>
               <button type="button" className="monitor-link" onClick={() => onOpen(c.case_id)}>{c.case_number}</button>{" "}
+              {c.source === "engineering" && <><Tag tone="neutral">Engineering</Tag>{" "}</>}
               {c.subject}
             </p>
             {c.problems.map((p) => <p key={p.text}><Tag tone="exception">{p.kind}</Tag> {p.text}</p>)}
@@ -47,8 +48,10 @@ export function AgentsView({ tenantId, onOpen }: { tenantId?: string; onOpen: (i
       <header className="today-hero">
         <h2>{data.wrong} of {data.raised} raises had a problem</h2>
         <p>
-          Open aggregator cases raised in the last {data.days} days, plus GitHub issues closed as not needing an
-          engineer. Every flag shows its reason, so talk it through before treating it as a score.
+          Open aggregator cases raised in the last {data.days} days (and engineering cases, when that scan is on
+          in Settings), plus GitHub issues closed as not needing an engineer. A data check that found nothing
+          is a "please check", never a mistake. Every flag shows its reason, so talk it through before treating
+          it as a score.
         </p>
       </header>
       {agents.length === 0 ? <EmptyState title="No wrong raises found" body="Nothing to guide anyone on right now." /> : (

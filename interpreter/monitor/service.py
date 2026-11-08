@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from . import (agent_quality, brief, coaching, config, demo, drafts, dsp_sla, escalations, followups, help_requests,
+from . import (agent_quality, auto_checks, brief, coaching, config, demo, drafts, dsp_sla, escalations, followups, help_requests,
                log_expiry, progress, readers, redact, similar, sync, tech_pending, timeline, today, verdict, weekly)
 from .store import SupabaseStore
 from .verdict import latest_message, parse_dt
@@ -185,6 +185,42 @@ def case_checks(sb: Any, tenant_id: str, case_id: str, limit: int = 20,
             .execute().data or [])
 
 
+def checks_by_case(sb: Any, tenant_id: str, case_ids: list[str]) -> dict[str, list[dict]]:
+    """Saved checks (without rows) for many cases at once."""
+    found: dict[str, list[dict]] = {}
+    for start in range(0, len(case_ids), 50):
+        rows = (sb.table("monitor_case_checks").select("case_id, " + CHECK_COLS).eq("tenant_id", tenant_id)
+                .in_("case_id", case_ids[start:start + 50]).execute().data or [])
+        for r in rows:
+            found.setdefault(r["case_id"], []).append(r)
+    return found
+
+
+def _auto_items(sb: Any, tenant_id: str, cfg: dict) -> tuple[list[tuple], dict[str, list[dict]]]:
+    items = [i for i in _cases_with_evidence(sb, tenant_id, cfg) if auto_checks.in_scope(i[0], cfg)]
+    return items, checks_by_case(sb, tenant_id, [c["id"] for c, _, _ in items])
+
+
+def checks_due(sb: Any, tenant_id: str, limit: int = auto_checks.DUE_LIMIT) -> dict[str, Any]:
+    """Saved data checks new aggregator and engineering cases still need, for the routine to run."""
+    cfg = load_config(sb, tenant_id)
+    items, checks = _auto_items(sb, tenant_id, cfg)
+    return auto_checks.due(items, checks, cfg, limit)
+
+
+def record_checks_due(sb: Any, tenant_id: str, now: datetime | None = None) -> int:
+    """Rewrite monitor_checks_due for the routine: upsert what's due, then drop the rest."""
+    now = now or datetime.now(timezone.utc)
+    cfg = load_config(sb, tenant_id)
+    items, checks = _auto_items(sb, tenant_id, cfg)
+    rows = auto_checks.due_rows(tenant_id, items, checks, cfg, now.isoformat())
+    for start in range(0, len(rows), 200):
+        sb.table("monitor_checks_due").upsert(rows[start:start + 200]).execute()
+    (sb.table("monitor_checks_due").delete().eq("tenant_id", tenant_id)
+     .lt("computed_at", now.isoformat()).execute())
+    return len(rows)
+
+
 def digest(sb: Any, tenant_id: str, limit: int = 300) -> dict[str, Any]:
     last = (sb.table("monitor_syncs").select("id, started_at").eq("tenant_id", tenant_id)
             .neq("status", "running").neq("status", "failed").order("started_at", desc=True)
@@ -253,12 +289,14 @@ def today_view(sb: Any, tenant_id: str, now: datetime | None = None) -> dict[str
     asks = (sb.table("monitor_help_requests").select("*").eq("tenant_id", tenant_id)
             .gte("raised_at", since).order("raised_at").execute().data or [])
     numbers = {c.get("case_number"): c["id"] for c, _, _ in items}
+    auto = [i for i in items if auto_checks.in_scope(i[0], cfg)]
+    empty = auto_checks.found_nothing(auto, checks_by_case(sb, tenant_id, [c["id"] for c, _, _ in auto]), cfg)
     view = today.build(tech_pending_list(sb, tenant_id, now), sla, coaching.build(closed, cfg, now),
                        follow_up_list(sb, tenant_id), len(items), reviews, cfg, now,
                        help_requests.build(asks, cfg["assist_hours"], numbers, now),
                        log_expiry.build([c for c, _, _ in items], cfg, now),
                        today.reply_cards(items, cfg, now), today.merchant_emails(items),
-                       today.close_cards(items))
+                       today.close_cards(items), auto_checks.card(empty, today.CHECKS))
     return {**view, "cards": _with_last_response(view["cards"], items)}
 
 
@@ -290,8 +328,12 @@ def agents_view(sb: Any, tenant_id: str, now: datetime | None = None) -> dict[st
     facts: dict[str, dict] = {}
     for r in rows:
         facts.setdefault(r["location_id"], {})[r["platform"].lower()] = r
-    items = _dsp_items(_cases_with_evidence(sb, tenant_id, cfg), cfg)
-    return agent_quality.build(items, facts, coaching.build(_closed_issues(sb, tenant_id), cfg, now), cfg, now)
+    every = _cases_with_evidence(sb, tenant_id, cfg)
+    items = _dsp_items(every, cfg) + auto_checks.engineering_items(every, cfg)
+    auto = [i for i in items if auto_checks.in_scope(i[0], cfg)]
+    empty = auto_checks.found_nothing(auto, checks_by_case(sb, tenant_id, [c["id"] for c, _, _ in auto]), cfg)
+    return agent_quality.build(items, facts, coaching.build(_closed_issues(sb, tenant_id), cfg, now), cfg, now,
+                               auto_checks.notes(empty))
 
 
 def sla_report(sb: Any, tenant_id: str, now: datetime | None = None) -> dict[str, Any]:
