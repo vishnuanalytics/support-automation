@@ -434,6 +434,26 @@ class SalesforceCaseReader:
                     "url": f"{base}/lightning/r/Case/{r['Id']}/view" if base else None})
         return out
 
+    def cases_by_number(self, numbers: list[str]) -> dict[str, dict]:
+        """Case refs by case number, open or closed, for cases named in another's subject."""
+        from .links import parse
+
+        out: dict[str, dict] = {}
+        base = self._base_url()
+        link = self.fields.get("link")
+        extra = f"{link}, " if link else ""
+        for start in range(0, len(numbers), 200):
+            chunk = ", ".join(f"'{_lit(n)}'" for n in numbers[start:start + 200])
+            for r in self._records(f"SELECT Id, CaseNumber, Status, IsClosed, {extra}RecordType.Name "
+                                   f"FROM Case WHERE CaseNumber IN ({chunk})"):
+                out[r["CaseNumber"]] = {
+                    "id": r["Id"], "case_number": r.get("CaseNumber"), "status": r.get("Status"),
+                    "closed": bool(r.get("IsClosed")),
+                    "record_type": (r.get("RecordType") or {}).get("Name"),
+                    "links": parse(_dig(r, link)) if link else [],
+                    "url": f"{base}/lightning/r/Case/{r['Id']}/view" if base else None}
+        return out
+
     def post_links(self, ids: list[str]) -> dict[str, list[dict]]:
         """Links shared in a case's posts and post comments, for cases with
         nothing in the link field. Only ticketing and chat links count: other

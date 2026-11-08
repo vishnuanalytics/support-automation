@@ -707,6 +707,21 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-08 (Case Monitor: DSP cases linked only by subject, branch `case-monitor`.)** Closes the
+"not covered" gap in the entry below: DSP 00132973 names Support 00132969 only in its subject.
+**Built:** `readers.SalesforceCaseReader.cases_by_number` (SOQL on `CaseNumber`, open or closed);
+`sync.subject_numbers` and `sync._subject_links`, run right after `_enrich`, so the DSP-email fold,
+`has_dsp`, `linked_wait` and the MCP `linked_cases` all see the link. Only a DSP case with no
+Salesforce parent/child is read; a named DSP case (a sibling) isn't linked; links are marked
+`via: "subject"`. When the named case already has a Salesforce parent the DSP is added as a child
+(00132969's parent is DSP 00132972, a second aggregator). Subject links are carried from the last
+sync with fresh status. **Verified:** +9 tests (527 in `tests/monitor/`); offline suite 1,897 pass +
+the 1 pre-existing local pubsub failure. Live read-only dry run (real Salesforce, nothing written): 86
+cases, 28 DSP, 1 linked by subject, 00132973 ↔ 00132969, with 00132969 keeping its parent 00132972.
+**Not covered:** case numbers only in a description or email body; `dsp_resolved` still looks at
+the parent only, so a subject-linked DSP that is a child of the Support case doesn't trigger "update
+the customer and close" when it closes. **Next:** owner review of the overdue/stale weighting, still open.
+
 **2026-11-08 (Case Monitor: a DSP case waits on the merchant when its Support case does, branch
 `case-monitor`.)** Follows the linked-cases entry below. DSP 00131153 scored "our turn: Aggregator needs
 more details" (110), though the details were with the merchant on Support 00130532 (awaiting revert on

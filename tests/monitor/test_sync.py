@@ -935,7 +935,7 @@ def test_every_salesforce_read_only_uses_query_all():
     sf = FakeSF()
     r = readers.SalesforceCaseReader(sf, CFG)
     r.timeline("1"), r.children_of(["1"]), r.resolved_since("2026-01-01T00:00:00Z")
-    r.get_cases(["1"])
+    r.get_cases(["1"]), r.cases_by_number(["00000001"])
     assert all(q.startswith("SELECT") for q in sf.soql)
 
 
@@ -1068,3 +1068,113 @@ def test_no_linked_wait_for_a_support_case_or_an_unsynced_link():
     assert sync.linked_wait(support, [support], CFG_DSP) is None
     dsp = _row("d1", "DSP", "us", "reply_needs_info", children=[SUPPORT_REF])
     assert sync.linked_wait(dsp, [dsp], CFG_DSP) is None
+
+
+class _ByNumber:
+    def __init__(self, found, fail=False):
+        self.found, self.fail, self.asked = found, fail, None
+
+    def cases_by_number(self, numbers):
+        self.asked = numbers
+        if self.fail:
+            raise RuntimeError("down")
+        return {n: self.found[n] for n in numbers if n in self.found}
+
+
+def _ref(cid, number, record_type, closed=False, links=None):
+    return {"id": cid, "case_number": number, "status": "Closed" if closed else "In Progress",
+            "closed": closed, "record_type": record_type, "url": f"https://sf/{cid}", "links": links or []}
+
+
+def _c(cid, number, record_type, subject="", **kw):
+    return {"id": cid, "case_number": number, "record_type": record_type, "subject": subject,
+            "status": "In Progress", "url": f"https://sf/{cid}", "source": "salesforce",
+            "parent": None, "children": [], "links": [], **kw}
+
+
+def test_subject_numbers_skip_the_case_itself_and_repeats():
+    c = {"case_number": "00132973", "subject": "Case #00132969–Kulcha King 00132969 ref 00132973 x123456789"}
+    assert sync.subject_numbers(c) == ["00132969"]
+
+
+def test_dsp_named_support_case_is_linked_both_ways():
+    from interpreter.monitor.links import parse
+    dsp = _c("d1", "00132973", "DSP", "Case #00132969–Kulcha King – Careem store offline")
+    support = _c("s1", "00132969", "Support")
+    gh = parse("https://github.com/o/r/issues/7")
+    reader = _ByNumber({"00132969": _ref("s1", "00132969", "Support", links=gh)})
+    errors = []
+    sync._subject_links([dsp, support], {}, reader, {"dependency_record_type": "DSP"}, errors)
+    assert errors == [] and reader.asked == ["00132969"]
+    assert dsp["children"] == [{"id": "s1", "case_number": "00132969", "status": "In Progress",
+                                "record_type": "Support", "url": "https://sf/s1", "via": "subject"}]
+    assert dsp["links"] == gh
+    assert support["parent"]["id"] == "d1" and support["parent"]["via"] == "subject"
+    assert support["parent"]["closed"] is False and support["parent"]["record_type"] == "DSP"
+    # the DSP case is now found from the Support side, as with a Salesforce link
+    assert sync._dsp_ids(support, "DSP") == ["d1"]
+
+
+def test_salesforce_links_win_and_dsp_siblings_are_not_linked():
+    linked = _c("d1", "00000001", "DSP", "about 00000002", children=[{"id": "x", "record_type": "Support"}])
+    sibling = _c("d2", "00000003", "DSP", "dup of 00000004")
+    reader = _ByNumber({"00000004": _ref("d4", "00000004", "DSP")})
+    sync._subject_links([linked, sibling], {}, reader, {"dependency_record_type": "DSP"}, [])
+    assert reader.asked == ["00000004"]
+    assert linked["children"] == [{"id": "x", "record_type": "Support"}] and sibling["children"] == []
+
+
+def test_support_case_keeps_its_subject_parent_after_the_dsp_closes():
+    support = _c("s1", "00132969", "Support")
+    prior = {"s1": {"case": {"parent": {"id": "d1", "case_number": "00132973", "record_type": "DSP",
+                                       "via": "subject"}}}}
+    reader = _ByNumber({"00132973": _ref("d1", "00132973", "DSP", closed=True)})
+    sync._subject_links([support], prior, reader, {"dependency_record_type": "DSP"}, [])
+    assert support["parent"] == {"id": "d1", "case_number": "00132973", "status": "Closed", "closed": True,
+                                 "record_type": "DSP", "url": "https://sf/d1", "via": "subject"}
+
+
+def test_subject_lookup_failure_is_recorded_and_changes_nothing():
+    dsp = _c("d1", "00132973", "DSP", "Case #00132969")
+    errors = []
+    sync._subject_links([dsp], {}, _ByNumber({}, fail=True), {"dependency_record_type": "DSP"}, errors)
+    assert dsp["children"] == [] and "subjects not read" in errors[0]["error"]
+
+
+def test_reader_without_number_lookup_is_skipped():
+    dsp = _c("d1", "00132973", "DSP", "Case #00132969")
+    sync._subject_links([dsp], {}, object(), {"dependency_record_type": "DSP"}, [])
+    assert dsp["children"] == []
+
+
+def test_cases_by_number_maps_refs_by_number():
+    sf = FakeSF([{"Id": "s1", "CaseNumber": "00132969", "Status": "In Progress", "IsClosed": False,
+                  "Link__c": GH, "RecordType": {"Name": "Support"}}])
+    got = readers.SalesforceCaseReader(sf, CFG).cases_by_number(["00132969", "o'1"])
+    assert "WHERE CaseNumber IN ('00132969', 'o\\'1')" in sf.soql[0]
+    ref = got["00132969"]
+    assert ref["id"] == "s1" and ref["record_type"] == "Support" and ref["closed"] is False
+    assert ref["links"][0]["kind"] == "github" and ref["url"].endswith("/lightning/r/Case/s1/view")
+
+
+def test_support_case_with_a_salesforce_parent_gets_the_subject_dsp_as_a_child():
+    talabat = {"id": "d0", "case_number": "00132972", "record_type": "DSP", "closed": False}
+    dsp = _c("d1", "00132973", "DSP", "Case #00132969–Kulcha King")
+    support = _c("s1", "00132969", "Support", parent=talabat)
+    reader = _ByNumber({"00132969": _ref("s1", "00132969", "Support")})
+    sync._subject_links([dsp, support], {}, reader, {"dependency_record_type": "DSP"}, [])
+    assert support["parent"] is talabat
+    assert [(x["id"], x["via"]) for x in support["children"]] == [("d1", "subject")]
+    assert sync._dsp_ids(support, "DSP") == ["d0", "d1"]
+
+
+def test_carried_subject_links_are_not_doubled_while_the_dsp_is_still_queued():
+    dsp = _c("d1", "00132973", "DSP", "Case #00132969")
+    support = _c("s1", "00132969", "Support", parent={"id": "d0", "record_type": "DSP"})
+    prior = {"s1": {"case": {"children": [{"id": "d1", "case_number": "00132973", "record_type": "DSP",
+                                           "via": "subject"}]}}}
+    reader = _ByNumber({"00132969": _ref("s1", "00132969", "Support"),
+                        "00132973": _ref("d1", "00132973", "DSP")})
+    sync._subject_links([dsp, support], prior, reader, {"dependency_record_type": "DSP"}, [])
+    assert sorted(reader.asked) == ["00132969", "00132973"]
+    assert [x["id"] for x in support["children"]] == ["d1"]

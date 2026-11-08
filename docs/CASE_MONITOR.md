@@ -128,6 +128,12 @@ and escalation time for a workspace. Never store portal passwords in it. The cha
 
 A third-party case with no linked case of the raising record type, as parent or child, shows as not
 raised. If that linked case is closed while this one is open, it's our turn to update the customer.
+A DSP case with no Salesforce parent or child is linked to the case its subject names (an
+8-digit case number, e.g. "Case #00132969 – …"), as if Salesforce had the link: the named case becomes
+the DSP's child, and the DSP becomes the named case's parent, or another child when it already has a
+parent (one Support case can have a DSP per aggregator). Another DSP case named in a subject isn't
+linked. These links are marked `via: "subject"` and are kept from one sync to the next with fresh
+status, so a Support case still sees its DSP case after the DSP leaves the queue.
 A DSP case that's our turn only because the third party replied (asked for details, shared an
 update) waits on the customer instead when its linked Support case is waiting on the customer and was
 worked after that reply: the answer is with the customer, so the next step is to chase them on the
