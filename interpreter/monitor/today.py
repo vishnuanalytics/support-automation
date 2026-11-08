@@ -180,9 +180,38 @@ def reply_cards(items: list[tuple], cfg: dict, now: datetime) -> list[dict]:
     return cards
 
 
+def close_cards(items: list[tuple]) -> list[dict]:
+    """One card per agent for cases whose outside work is finished and only
+    need the customer told and the case closed. Admin, not investigation, so
+    they sit apart from replies to act on."""
+    owners: dict[str, list[tuple[dict, dict]]] = {}
+    for case, v, _ in items:
+        if v.get("ready_to_close"):
+            owners.setdefault(case.get("owner") or "Unassigned", []).append((case, v))
+    cards = []
+    for owner, rows in sorted(owners.items(), key=lambda o: -len(o[1])):
+        rows.sort(key=lambda r: -(r[1].get("overdue_hours") or 0))
+        n = len(rows)
+        lines = [f"Hi {owner}, the outside work on these is done. Please update the merchant "
+                 "and close the case today:", ""]
+        lines += [f"- {c.get('case_number')}: {(v.get('signal') or {}).get('text') or c.get('subject')}"
+                  for c, v in rows]
+        first = rows[0][0]
+        cards.append({"key": f"close:{owner}", "rank": CLOSE, "kind": "close",
+                      "title": f"{owner}: {n} case{'' if n == 1 else 's'} ready to close",
+                      "why": f"First: {first.get('case_number')}, {first.get('subject')}",
+                      "chip": str(n), "tone": "neutral",
+                      "draft": "\n".join(lines), "draft_label": "Message for the agent",
+                      "activity_at": max((v.get("latest_activity_at") or "" for _, v in rows),
+                                         default=None) or None,
+                      "case_ids": [c["id"] for c, _ in rows],
+                      "steps": {c["id"]: "Update the merchant and close" for c, _ in rows}})
+    return cards
+
+
 def _merged(cards: list[dict], kind: str, key: str, title: str, label: str) -> dict:
     """Several GitHub issues as one card, so the list stays a handful of decisions."""
-    same = [c for c in cards if c["kind"] == kind]
+    same = [c for c in cards if c["kind"] == kind and _is_issue(c)]
     lines = [f"- {c.get('subject')}: {c['url']}" for c in same]
     return {"key": key, "rank": min(c["rank"] for c in same), "kind": kind, "group": GROUPS[kind],
             "title": title.format(n=len(same)), "why": same[0].get("why"), "chip": str(len(same)),
@@ -192,13 +221,18 @@ def _merged(cards: list[dict], kind: str, key: str, title: str, label: str) -> d
             "case_ids": [i for c in same for i in c["case_ids"]]}
 
 
+def _is_issue(card: dict) -> bool:
+    return card["key"].startswith("gh:")
+
+
 def _group_github(cards: list[dict]) -> list[dict]:
     for kind, key, title, label in (
             ("chase", "gh:chase", "{n} GitHub issues gone quiet", "Issue list"),
             ("follow", "gh:follow", "{n} open GitHub issues: follow up with the merchant or partner", "Issue list"),
             ("close", "gh:close", "{n} GitHub issues look ready to close", "Issue list")):
-        if sum(c["kind"] == kind for c in cards) > 1:
-            cards = [c for c in cards if c["kind"] != kind] + [_merged(cards, kind, key, title, label)]
+        if sum(c["kind"] == kind and _is_issue(c) for c in cards) > 1:
+            cards = [c for c in cards if not (c["kind"] == kind and _is_issue(c))] + \
+                [_merged(cards, kind, key, title, label)]
     return cards
 
 
@@ -213,7 +247,7 @@ def _hidden(card: dict, reviews: dict[str, dict], now: datetime) -> bool:
 def build(issues: dict, sla: dict, coaching: dict, follow_ups: dict, open_cases: int,
           reviews: dict[str, dict], cfg: dict, now: datetime, help_view: dict | None = None,
           logs: list[dict] | None = None, replies: list[dict] | None = None,
-          merchant_sent: dict[str, str] | None = None) -> dict:
+          merchant_sent: dict[str, str] | None = None, closing: list[dict] | None = None) -> dict:
     help_view = help_view or {"cards": [], "away": {"total": 0, "answered": 0}, "modules": []}
     rows = [_merchant_updated(r, merchant_sent or {}) for s in issues["squads"] for r in s["issues"]]
     cards = [{**c, "rank": HELP} for c in help_view["cards"]]
@@ -224,6 +258,7 @@ def build(issues: dict, sla: dict, coaching: dict, follow_ups: dict, open_cases:
               and not (c["kind"] == "act" and c["case_id"] in answered_by_agent)]
     cards += [c for p in sla["partners"] if (c := _partner_card(p))]
     cards += [_logs_card(p) for p in logs or []]
+    cards += closing or []
     cards = [{**c, "group": GROUPS[c["kind"]]} for c in _group_github(cards)]
     shown = [c for c in cards if not _hidden(c, reviews, now)]
     shown.sort(key=lambda c: c["rank"])

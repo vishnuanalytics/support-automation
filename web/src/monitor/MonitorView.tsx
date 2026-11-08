@@ -41,7 +41,7 @@ const LEVEL_TONE: Record<string, TagTone> = {
   critical: "exception", high: "warn", medium: "warn-soft", low: "neutral",
 };
 const EVENT_TEXT: Record<string, string> = {
-  needs_action: "Needs action", new_case: "New case", new_reply: "New reply",
+  needs_action: "Needs action", ready_to_close: "Ready to close", new_case: "New case", new_reply: "New reply",
   newly_overdue: "Newly overdue", newly_stale: "Gone quiet",
   newly_missing_link: "Newly missing link",
 };
@@ -244,7 +244,7 @@ function Row({ c, selected, onOpen, thirdParty, customer }: {
         <div className="monitor-meta">{meta.join(" · ")}</div>
         <div className="monitor-flags">
           <Tag tone={LEVEL_TONE[c.level]}>{c.level}</Tag>
-          {c.latest && ["act", "check"].includes(c.stage) && (
+          {c.latest && ["act", "close", "check"].includes(c.stage) && (
             <Tag tone="warn">Pending {formatAge(hoursSince(c.latest.at))}</Tag>
           )}
           {c.overdue && <Tag tone="exception">Overdue {formatAge(c.overdue_hours)}</Tag>}
@@ -386,6 +386,7 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
 
   const stages: { key: StageTab; label: string; hint: string }[] = [
     { key: "act", label: "Act now", hint: "A real update or reply needs us" },
+    { key: "close", label: "Ready to close", hint: "Outside work is done: update the merchant and close" },
     { key: "raise", label: "Raise it", hint: "Not raised, or no link recorded" },
     { key: "engineering", label: "Waiting on Engineering", hint: "We spoke last" },
     { key: "third_party", label: `Waiting on ${thirdParty}`, hint: "We spoke last, or ack only" },

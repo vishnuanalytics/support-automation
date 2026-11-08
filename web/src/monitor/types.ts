@@ -2,7 +2,7 @@ export type Source = { label: string; url?: string | null };
 export type Ball = "us" | "engineering" | "third_party" | "ai" | "customer" | "unknown";
 export type Level = "critical" | "high" | "medium" | "low";
 
-export type Stage = "act" | "raise" | "engineering" | "third_party" | "customer" | "ai" | "check";
+export type Stage = "act" | "close" | "raise" | "engineering" | "third_party" | "customer" | "ai" | "check";
 export type QueueCase = {
   id: string;
   stage: Stage;
@@ -47,6 +47,7 @@ export type QueueCase = {
 export type Tiles = {
   total: number;
   my_turn: number;
+  ready_to_close?: number;
   mismatches: number;
   missing_link: number;
   not_raised: number;

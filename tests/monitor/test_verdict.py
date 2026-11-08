@@ -339,3 +339,47 @@ def test_reply_field_is_ignored_on_the_raising_record_type(cfg):
     c = agg(links=[], record_type="DSP", last_reply_from="customer")
     r = v.compute(c, [ev], conf, NOW)
     assert r["ball"] == "third_party" and "customer_replied" not in codes(r)
+
+
+def resolved_dsp_child(**kw):
+    """A Support case whose parent DSP case (the one raised with the aggregator) is closed."""
+    parent = {"closed": True, "record_type": "DSP", "case_number": "900", "status": "Resolved",
+              "url": "https://sf/900"}
+    return agg(record_type="Support", parent=parent, **kw)
+
+
+def test_a_resolved_dsp_parent_makes_the_case_ready_to_close(cfg):
+    conf = {**cfg, "dependency_record_type": "DSP"}
+    r = v.compute(resolved_dsp_child(), [], conf, NOW)
+    assert r["ball"] == "us" and r["ready_to_close"]
+    assert v.stage(r) == "close"
+    assert r["next_action"] == "Update the merchant and close this case."
+    # The waiting field naming the finished dependency is expected, not a mismatch.
+    assert not r["mismatch"] and "mismatch" not in {x["code"] for x in r["reasons"]}
+
+
+def test_ready_to_close_still_counts_overdue(cfg):
+    conf = {**cfg, "dependency_record_type": "DSP"}
+    r = v.compute(resolved_dsp_child(target_at=ago(24 * 30)), [], conf, NOW)
+    assert r["ready_to_close"] and r["overdue"]
+    assert "overdue" in {x["code"] for x in r["reasons"]}
+
+
+def test_an_open_dsp_parent_is_not_ready_to_close(cfg):
+    conf = {**cfg, "dependency_record_type": "DSP"}
+    c = resolved_dsp_child()
+    c["parent"] = {**c["parent"], "closed": False, "status": "In Progress"}
+    r = v.compute(c, [], conf, NOW)
+    assert not r["ready_to_close"] and v.stage(r) != "close"
+
+
+def test_a_customer_reply_outranks_ready_to_close(cfg):
+    """If the merchant wrote back, someone must read it before closing."""
+    conf = {**cfg, "dependency_record_type": "DSP"}
+    r = v.compute(resolved_dsp_child(last_reply_from="customer"), [], conf, NOW)
+    assert r["signal"]["code"] == "customer_replied"
+    assert not r["ready_to_close"] and v.stage(r) == "act"
+
+
+def test_ready_to_close_has_its_own_stage():
+    assert v.stage({"ball": "us", "ready_to_close": True}) == "close"

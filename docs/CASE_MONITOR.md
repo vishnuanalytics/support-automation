@@ -128,6 +128,12 @@ and escalation time for a workspace. Never store portal passwords in it. The cha
 
 A third-party case with no linked case of the raising record type, as parent or child, shows as not
 raised. If that linked case is closed while this one is open, it's our turn to update the customer.
+Such a case is **ready to close**: the outside work is done and only the case is still open. It
+gets its own **Ready to close** tab in All cases and one card per agent in Needs Me, with a message
+asking them to update the customer and close it. Its waiting field still names the finished
+dependency, which is expected, so it isn't scored as a mismatch; overdue still counts. A customer
+reply on the case outranks this, because someone has to read it first. Alerts shows "Ready to close"
+once, when a case first gets there.
 
 ### Follow-ups and alerts
 

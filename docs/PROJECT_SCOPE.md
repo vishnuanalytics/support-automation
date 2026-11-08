@@ -707,6 +707,26 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-08 (Case Monitor: "ready to close" stage, branch `case-monitor`.)** Prompted by case
+00130851: the lead saw it as closed, but only its parent DSP case had been resolved, by the agent,
+that day. The Support case was still open and the merchant hadn't been told. The monitor was right
+to show it, but it sat with real work as "critical, mismatch". Now `verdict.CLOSE_SIGNALS`
+(`dsp_resolved` only) sets `ready_to_close`. `verdict.stage` puts the case in a new `close` stage,
+and the expected "waiting on Aggregator" isn't scored as a mismatch. Overdue still counts, and a
+customer reply still outranks it. The queue has a **Ready to close** tab. `today.close_cards` gives
+one Needs Me card per agent with a copy-ready message. `_group_github` now merges only `gh:` cards,
+so these aren't folded into "GitHub issues look ready to close". Sync counts `ready_to_close`, and a
+`ready_to_close` alert fires once, replacing `needs_action` and `newly_stale` for that case.
+**Live (16:28 UTC sync):** 4 of 87 open cases are ready to close, and mismatches went from 32 to 28.
+Tests: +10 in `tests/monitor/` (459 pass); 1,829 offline pass; `npm run build` and vitest pass.
+**Not yet browser-checked by a person.**
+**Still open, measured on the same sync:** 60 of 87 cases are critical, mostly because of points.
+Overdue alone gives 30 to 60, and stale adds 20, so a case waiting on an aggregator that's past its
+target date reaches critical whatever its state (25 `waiting_third_party` cases are critical).
+Next chunks, in order: (1) review the overdue/stale weighting with the owner; (2) have the reply
+labeller also read the merchant's latest email, not only the third party's. It must stay a label
+that feeds rules, never something that decides whose turn it is.
+
 **2026-11-08 (Worker no longer dies on one failed Supabase call, branch `case-monitor`.)**
 The worker crashed after about 1.5 hours with `httpx.ReadTimeout` on the `claim_job` RPC. The
 `while True` loop in `api/worker.main` had no guard, and RPCs and writes are deliberately never

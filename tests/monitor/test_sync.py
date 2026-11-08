@@ -1003,3 +1003,18 @@ def test_older_emails_keep_a_textless_log_but_no_text():
     assert len(case["email_evidence"]["messages"]) == 5
     old = case["email_log"][-1]
     assert old["party"] == "third_party" and old["ack"] is False and "text" not in old
+
+
+def test_becoming_ready_to_close_alerts_once_and_not_as_needs_action():
+    ready = _v(ball="us", ready_to_close=True, stale=True,
+               signal={"code": "dsp_resolved", "text": "Linked DSP case 900 is Resolved"})
+    kinds = _kinds(_v(), ready)
+    assert "ready_to_close" in kinds
+    assert "needs_action" not in kinds and "newly_stale" not in kinds
+    assert "ready_to_close" not in _kinds(ready, ready)
+
+
+def test_counts_include_ready_to_close():
+    rows = [{"verdict": _v(ball="us", mismatch=False, ready_to_close=True, level="high")},
+            {"verdict": _v(mismatch=False, level="low")}]
+    assert sync.counts(rows)["ready_to_close"] == 1

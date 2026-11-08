@@ -8,6 +8,7 @@ const POLL_MS = 60_000;
 const NOTIFY_KEY = "monitor.notify";
 const KIND: Record<string, { label: string; tone: TagTone }> = {
   needs_action: { label: "Needs action", tone: "warn" },
+  ready_to_close: { label: "Ready to close", tone: "neutral" },
   new_reply: { label: "New reply", tone: "neutral" },
   newly_overdue: { label: "Overdue", tone: "exception" },
   newly_stale: { label: "Gone quiet", tone: "neutral" },

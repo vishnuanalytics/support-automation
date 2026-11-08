@@ -23,6 +23,7 @@ def counts(rows: list[dict]) -> dict[str, int]:
     v = [r["verdict"] for r in rows]
     return {"total": len(v),
             "my_turn": sum(x["ball"] == "us" for x in v),
+            "ready_to_close": sum(bool(x.get("ready_to_close")) for x in v),
             "mismatches": sum(bool(x["mismatch"]) for x in v),
             "missing_link": sum(bool(x["missing_link"]) for x in v),
             "not_raised": sum(bool(x.get("not_raised")) for x in v),
@@ -54,12 +55,15 @@ def diff_events(prior: dict[str, dict], rows: list[dict]) -> list[dict]:
         acts_now = verdict.stage(v) == "act"
         was_acting = before.get("ball") == verdict.US
         same_reason = (before.get("signal") or {}).get("code") == (v.get("signal") or {}).get("code")
-        if acts_now and not (was_acting and same_reason):
+        closing = bool(v.get("ready_to_close"))
+        if closing and not before.get("ready_to_close"):
+            out.append({**base, "kind": "ready_to_close", "detail": detail})
+        elif acts_now and not (was_acting and same_reason):
             out.append({**base, "kind": "needs_action", "detail": detail})
         elif _is_after(v.get("latest_reply_at"), before.get("latest_reply_at")) and \
                 (v.get("signal") or {}).get("code") != "third_party_ack":
             out.append({**base, "kind": "new_reply", "detail": detail})
-        if v.get("stale") and not before.get("stale") and not acts_now:
+        if v.get("stale") and not before.get("stale") and not acts_now and not closing:
             out.append({**base, "kind": "newly_stale", "detail": v.get("next_action")})
         if v["overdue"] and not before.get("overdue"):
             out.append({**base, "kind": "newly_overdue"})

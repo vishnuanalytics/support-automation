@@ -244,7 +244,8 @@ def today_view(sb: Any, tenant_id: str, now: datetime | None = None) -> dict[str
                        follow_up_list(sb, tenant_id), len(items), reviews, cfg, now,
                        help_requests.build(asks, cfg["assist_hours"], numbers, now),
                        log_expiry.build([c for c, _, _ in items], cfg, now),
-                       today.reply_cards(items, cfg, now), today.merchant_emails(items))
+                       today.reply_cards(items, cfg, now), today.merchant_emails(items),
+                       today.close_cards(items))
     return {**view, "cards": _with_last_response(view["cards"], items)}
 
 

@@ -19,9 +19,9 @@ def issue(status="cause_given", waiting_on="tech", age=48, quiet=1, **kw):
             "last_activity_at": ago(quiet), "case_id": "c1", "case_number": "42", "priority": "High", **kw}
 
 
-def build(*rows, sla=NO_SLA, team=NO_TEAM, reviews=None, open_cases=10, merchant_sent=None):
+def build(*rows, sla=NO_SLA, team=NO_TEAM, reviews=None, open_cases=10, merchant_sent=None, closing=None):
     return today.build({"squads": [{"issues": list(rows)}]}, sla, COACH, team, open_cases, reviews or {}, CFG, NOW,
-                       merchant_sent=merchant_sent)
+                       merchant_sent=merchant_sent, closing=closing)
 
 
 def kinds(got):
@@ -221,3 +221,31 @@ def test_a_help_request_comes_before_everything_else():
                       NO_TEAM, 10, {}, CFG, NOW, view)
     assert kinds(got) == ["help", "act"]
     assert got["help"] == {"away": {"total": 1, "answered": 0}, "modules": [("Order Relay", 3)]}
+
+
+def closable(owner="Asha", number="42", overdue=0):
+    case = {"id": number, "case_number": number, "subject": "Images missing", "owner": owner}
+    v = {"ready_to_close": True, "overdue_hours": overdue, "latest_activity_at": ago(2),
+         "signal": {"text": f"Linked DSP case 9{number} is Resolved"}}
+    return case, v, []
+
+
+def test_cases_ready_to_close_become_one_card_per_agent():
+    cards = today.close_cards([closable(), closable(number="43", overdue=500),
+                               closable(owner="Ravi", number="44"), (*closable(number="45")[:1],
+                                                                     {"ready_to_close": False}, [])])
+    assert [c["title"] for c in cards] == ["Asha: 2 cases ready to close", "Ravi: 1 case ready to close"]
+    asha = cards[0]
+    assert asha["kind"] == "close" and asha["case_ids"] == ["43", "42"]  # most overdue first
+    assert "- 43: Linked DSP case 943 is Resolved" in asha["draft"]
+    assert asha["steps"]["42"] == "Update the merchant and close"
+
+
+def test_case_close_cards_are_not_merged_into_the_github_issue_list():
+    got = build(issue(issue="8701", status="answered", waiting_on="nobody"),
+                issue(issue="8702", status="answered", waiting_on="nobody"),
+                closing=today.close_cards([closable()]))
+    keys = {c["key"] for c in got["cards"]}
+    assert "close:Asha" in keys and "gh:close" in keys
+    assert next(c for c in got["cards"] if c["key"] == "gh:close")["case_ids"] == ["c1", "c1"]
+    assert next(c for c in got["cards"] if c["key"] == "close:Asha")["case_ids"] == ["42"]

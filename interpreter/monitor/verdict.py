@@ -16,6 +16,9 @@ from typing import Any
 US, ENGINEERING, THIRD_PARTY, AI, CUSTOMER, UNKNOWN = (
     "us", "engineering", "third_party", "ai", "customer", "unknown")
 DEPENDENCY_PARTIES = (ENGINEERING, THIRD_PARTY)
+# Signals meaning the outside work is finished and only the case is left open:
+# the next step is to tell the customer and close it, not to investigate.
+CLOSE_SIGNALS = ("dsp_resolved",)
 
 
 # What a real third-party reply asks of us.
@@ -258,6 +261,8 @@ def latest_message(evidence: list[dict]) -> dict | None:
 def stage(verdict: dict) -> str:
     """The one bucket a case sits in, so the queue's tabs always add up."""
     ball = verdict["ball"]
+    if verdict.get("ready_to_close"):
+        return "close"
     if ball == US:
         return "act"
     if verdict.get("not_raised") or verdict.get("missing_link"):
@@ -299,7 +304,10 @@ def compute(case: dict, evidence: list[dict], cfg: dict, now: datetime) -> dict[
         days = int(overdue_hours // 24)
         add(30 + min(30, 2 * days), "overdue", f"Overdue by {days}d", sf("target_at"))
 
-    mismatch = ball == US and waiting in DEPENDENCY_PARTIES
+    # Closing is admin, not investigation: the waiting field still names the
+    # finished dependency, which is expected, so it isn't scored as a mismatch.
+    ready_to_close = bool(pick and pick["code"] in CLOSE_SIGNALS)
+    mismatch = ball == US and waiting in DEPENDENCY_PARTIES and not ready_to_close
     if mismatch:
         add(25, "mismatch", f"Case says waiting on {case.get('waiting_raw')}, but it is our turn",
             pick["source"])
@@ -380,7 +388,8 @@ def compute(case: dict, evidence: list[dict], cfg: dict, now: datetime) -> dict[
             reasons.append({"code": s["code"], "text": s["text"], "points": 0,
                             "source": s["source"]})
 
-    return {"ball": ball, "mismatch": mismatch, "score": score, "level": score_level(score),
+    return {"ball": ball, "mismatch": mismatch, "ready_to_close": ready_to_close,
+            "score": score, "level": score_level(score),
             "reasons": reasons, "next_action": action or "No action needed right now.",
             "stale_hours": stale_hours, "stale": stale, "overdue_hours": overdue_hours,
             "overdue": overdue_hours > 0, "missing_link": missing_link, "not_raised": not_raised,
