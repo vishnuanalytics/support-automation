@@ -129,3 +129,32 @@ def test_saved_check_view_leaves_out_rows_and_ids():
            "row_count": 3, "summary": "s", "rows": [[1]], "saved_by": "me", "created_at": "2026-11-08"}
     assert m.saved_check_view(row) == {"check_name": "X", "card_id": "1", "params": {}, "row_count": 3,
                                        "summary": "s", "saved_by": "me", "created_at": "2026-11-08"}
+
+
+def test_check_row_labels_list_rows_when_columns_are_given():
+    got = m.check_row("t", "c", "X", None, {}, "s", [[1, "a"], {"k": 2}], "me", columns=["id", "name"])
+    assert got["rows"] == [{"id": 1, "name": "a"}, {"k": 2}]
+
+
+class _ChecksQuery(_Query):
+    def order(self, col, desc=False):
+        self.log.append(("order", col, desc))
+        return self
+
+    def select(self, cols):
+        self.log.append(("select", cols))
+        return self
+
+
+def test_case_checks_reads_newest_first_for_one_case_and_can_skip_rows():
+    from interpreter.monitor import service
+    log = []
+    sb = type("SB", (), {"table": lambda self, name: (log.append(("table", name)),
+              _ChecksQuery([{"tenant_id": "t", "case_id": "c", "check_name": "X"},
+                            {"tenant_id": "t", "case_id": "other", "check_name": "Y"}], log))[1]})()
+    assert [r["check_name"] for r in service.case_checks(sb, "t", "c")] == ["X"]
+    assert ("table", "monitor_case_checks") in log and ("order", "created_at", True) in log
+    assert any(e[0] == "select" and e[1].endswith(", rows") for e in log)
+    log.clear()
+    service.case_checks(sb, "t", "c", with_rows=False)
+    assert all(not e[1].endswith(", rows") for e in log if e[0] == "select")

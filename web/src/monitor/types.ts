@@ -128,6 +128,17 @@ export type Partner = {
   escalation_note: string | null;
   notes: string | null;
 };
+export type CaseCheck = {
+  id: string;
+  check_name: string;
+  card_id: string | null;
+  params: Record<string, unknown>;
+  row_count: number | null;
+  summary: string | null;
+  saved_by: string | null;
+  created_at: string;
+  rows: unknown[];
+};
 export type CaseDetail = {
   source: string;
   partner: Partner | null;
@@ -180,6 +191,7 @@ export type CaseDetail = {
   slack_via_claude: boolean;
   labels: { third_party: string; customer: string };
   llm_enabled: boolean;
+  checks?: CaseCheck[];
 };
 export type Digest = {
   since: string | null;

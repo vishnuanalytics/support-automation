@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
 import { Banner, Button, Input, Skeleton, Tag, Textarea, type TagTone } from "../ui";
-import { copyText, formatTime } from "./util";
+import { askClaudePrompt, copyText, formatTime } from "./util";
+import { CaseChecks } from "./CaseChecks";
 import type { AiDraft, CaseDetail, Source, Summary, TimelineItem } from "./types";
 
 const STALE_MS = 15 * 60 * 1000;
@@ -10,7 +11,7 @@ const LEVEL_TONE: Record<string, TagTone> = {
   critical: "exception", high: "warn", medium: "warn-soft", low: "neutral",
 };
 
-type Pane = "conversation" | "linked" | "past" | "related";
+type Pane = "conversation" | "linked" | "checks" | "past" | "related";
 type Channel = "all" | "email" | "github" | "slack" | "notes";
 
 function channelOf(t: TimelineItem): Channel {
@@ -223,9 +224,11 @@ export function CaseView({ caseId, tenantId, slackConnected, onBack, onReviewed,
   const related = [...(c.parent ? [{ ...c.parent, rel: "Parent" }] : []),
     ...c.children.map((x) => ({ ...x, rel: "Child" }))];
   const stats = c.brand_stats;
+  const checks = data.checks ?? [];
   const panes: [Pane, string, number][] = [
     ["conversation", "Conversation", talk.length],
     ["linked", "Linked items", data.evidence.length],
+    ["checks", "Checks", checks.length],
     ["past", "Past cases", data.similar.length],
     ["related", "Related cases", related.length + data.duplicates.length],
   ];
@@ -236,6 +239,10 @@ export function CaseView({ caseId, tenantId, slackConnected, onBack, onReviewed,
         <Button size="sm" variant="ghost" onClick={onBack}>Back to queue</Button>
         <div className="monitor-actions">
           {c.url && <a className="ui-btn ui-btn--secondary ui-btn--sm" href={c.url} target="_blank" rel="noreferrer">Open in Salesforce</a>}
+          <Button size="sm" variant="secondary" title="Copies a prompt to paste into a Claude session with Case Monitor connected"
+                  onClick={() => void copy(askClaudePrompt(c.case_number || c.id), "Ask Claude about this case")}>
+            Ask Claude
+          </Button>
           <Button size="sm" onClick={() => review({ reviewed: true }, "Marked reviewed")}>Mark reviewed</Button>
           <Input type="datetime-local" aria-label="Snooze until" value={snooze}
                  onChange={(e) => setSnooze(e.target.value)} />
@@ -306,6 +313,8 @@ export function CaseView({ caseId, tenantId, slackConnected, onBack, onReviewed,
               ))}
             </>
           )}
+
+          {pane === "checks" && <CaseChecks checks={checks} />}
 
           {pane === "past" && (
             <>

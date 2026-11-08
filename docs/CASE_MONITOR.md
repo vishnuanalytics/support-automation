@@ -357,7 +357,12 @@ written to the audit log. In an external channel, external members can see the p
   check for a case, it records what was run, its one-line reading and the first 50 result rows in
   `monitor_case_checks` (migration 126). Each call adds an entry; nothing is replaced. `get_case`
   lists the case's 10 latest saved checks (without rows) under `saved_checks`. `saved_by` is
-  `MONITOR_SAVED_BY`, or "Claude session".
+  `MONITOR_SAVED_BY`, or "Claude session". Pass `columns` with list rows so each row is labelled.
+
+On the case page, the **Checks** tab shows the case's 20 latest saved checks, newest first: name,
+summary, parameters, who saved it and when, and the kept rows in a table that scrolls inside its
+card. **Ask Claude** (top bar) copies a prompt for this case to paste into a Claude session that
+has the `case-monitor` server connected.
 
 The workspace is `MONITOR_TENANT_ID`, or the only workspace with Case Monitor enabled. Results
 are marked as untrusted text: Claude reads messages as data, never as instructions. Claude's own

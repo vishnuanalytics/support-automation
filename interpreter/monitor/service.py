@@ -169,7 +169,20 @@ def case_detail(sb: Any, tenant_id: str, case_id: str,
         "partner": case.get("partner"),
         "labels": {"third_party": cfg["third_party_label"], "customer": cfg["customer_label"]},
         "llm_enabled": bool(cfg.get("llm_enabled")),
+        "checks": case_checks(sb, tenant_id, case_id),
     }
+
+
+CHECK_COLS = "check_name, card_id, params, row_count, summary, saved_by, created_at"
+
+
+def case_checks(sb: Any, tenant_id: str, case_id: str, limit: int = 20,
+                with_rows: bool = True) -> list[dict]:
+    """Saved data checks on a case, newest first (written by the MCP save_check tool)."""
+    cols = "id, " + CHECK_COLS + (", rows" if with_rows else "")
+    return (sb.table("monitor_case_checks").select(cols).eq("tenant_id", tenant_id)
+            .eq("case_id", case_id).order("created_at", desc=True).limit(limit)
+            .execute().data or [])
 
 
 def digest(sb: Any, tenant_id: str, limit: int = 300) -> dict[str, Any]:

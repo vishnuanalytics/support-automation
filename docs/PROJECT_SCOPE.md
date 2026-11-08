@@ -707,6 +707,21 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-08 (Case Copilot, step 3 of 3: checks on the case page, branch `case-monitor`.)**
+Case Copilot is complete. **Built:** `service.case_checks` (newest 20, with rows) feeds
+`case_detail["checks"]`; the MCP `get_case` reuses it (10, without rows), so there's one reader.
+`save_check` gains an optional `columns` that turns list rows into labelled objects. Web:
+`web/src/monitor/CaseChecks.tsx`, a **Checks** tab on the case page (summary, parameters, saved by and
+when, "First 50 of 80 rows" table that scrolls inside its card; "no rows" tag for an empty result),
+and an **Ask Claude** button that copies `util.askClaudePrompt(case)`. **Verified:** +2 pytest (19 in
+`test_mcp_server.py`, 507 in `tests/monitor/`, offline 1,877 pass + the 1 pre-existing local pubsub
+failure); vitest +4; `npm run build` passes; new `e2e/monitor-checks.spec.ts` (3, mocked API) passes
+with the existing monitor specs; light and dark screenshots checked; live `case_detail` returns the
+saved MNU-01 check for a real case. **Not checked in a browser on live data by a person** (the e2e
+runs on mocked API). **Owner action:** the personal case-checks skill must tell Claude to call
+`save_check` (Claude can't edit its own skill). **Next:** review the overdue/stale weighting with the
+owner (still open from the earlier entries).
+
 **2026-11-08 (Case Copilot, step 2 of 3: save check results, branch `case-monitor`.)** Step 1 is
 committed (`ab27b06`). Owner's decisions: store result rows (not only the summary), and let the MCP
 server write to this one table. **Built:** migration `126_monitor_case_checks.sql` (append-only,

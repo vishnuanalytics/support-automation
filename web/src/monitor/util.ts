@@ -59,3 +59,22 @@ export function downloadCsv(name: string, rows: (string | number | null | undefi
   link.click();
   URL.revokeObjectURL(url);
 }
+
+/** A saved check's rows as a header + body. Rows may be objects (labelled) or plain arrays. */
+export function checkTable(rows: unknown[]): { head: string[]; body: string[][] } {
+  const cell = (v: unknown) => (v == null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v));
+  const objects = rows.filter((r): r is Record<string, unknown> =>
+    r != null && typeof r === "object" && !Array.isArray(r));
+  if (objects.length === rows.length && rows.length > 0) {
+    const head = [...new Set(objects.flatMap((r) => Object.keys(r)))];
+    return { head, body: objects.map((r) => head.map((k) => cell(r[k]))) };
+  }
+  return { head: [], body: rows.map((r) => (Array.isArray(r) ? r.map(cell) : [cell(r)])) };
+}
+
+/** The prompt the "Ask Claude" button copies, for a Claude session with Case Monitor's MCP server. */
+export function askClaudePrompt(caseRef: string): string {
+  return `What's going on with case ${caseRef}, and what should I do next? ` +
+    "Start with case-monitor get_case, run any saved data checks that fit, " +
+    "and record each one with save_check.";
+}

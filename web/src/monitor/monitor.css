@@ -409,3 +409,15 @@
 /* These tables have their own columns, so the queue's fixed widths don't apply. */
 .monitor-table.week-table { table-layout: auto; }
 .monitor-table.week-table th:nth-child(n), .monitor-table.week-table td:nth-child(n) { min-width: 0; width: auto; }
+
+/* Saved data checks on a case: rows can be wide, so the table scrolls inside its card. */
+.monitor-check-rows { overflow-x: auto; margin-top: var(--space-1); }
+.monitor-check-rows table { border-collapse: collapse; font-size: 12px; min-width: 100%; }
+.monitor-check-rows th, .monitor-check-rows td {
+  border-bottom: 1px solid var(--border);
+  padding: var(--space-1) var(--space-2);
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+}
+.monitor-check-rows th { color: var(--text-muted); font-weight: 600; }
