@@ -707,6 +707,22 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-08 (Case Monitor: first sync with today's changes, and a fix, branch `case-monitor`.)**
+Ran `service.run_sync` by hand (trigger `manual`) in a fresh process. **Found a regression from the
+subject-links change:** `_named_links` copied the named Support case's links onto the DSP case, so DSP
+00132973 picked up Support 00132969's closed GitHub issue (a different bug) and became "our turn:
+verify the fix" (69, critical, mismatch). Having a link also made `_post_links` skip the DSP's posts,
+so its own Careem Slack thread was lost. That sync fired a false `needs_action` alert for 00132973.
+**Fix:** the named case's links are no longer copied (+1 test, 553 in `tests/monitor/`). **Re-synced:**
+86 cases, critical 26, my turn 29, mismatches 25, ready to close 4; status partial only for the 3
+known unreadable Slack threads. Act 21 critical + 4 high; waiting on aggregator 5 critical of 33.
+00131153 waits on the merchant (55, "Chase the merchant on case 00130532, then answer Aggregator");
+00132973 waits on Careem again (44, Slack thread back); 00132969 links 00132972 (Salesforce) and
+00132973 (subject). **Owner action:** the local `api.worker` (started 16:51) and the two
+`interpreter.monitor.mcp_server` processes run code from before today's commits; restart them, or the
+worker's next interval sync recomputes the queue with the old rules. Still true: Salesforce-linked
+DSP cases do inherit their child's link field (`_enrich`), unchanged.
+
 **2026-11-08 (Case Monitor: overdue reweighted, branch `case-monitor`.)** The owner review of the
 overdue/stale weighting, open since the "ready to close" entry, is done. **Measured** (86 open cases):
 77 are overdue, and overdue was ~60% of all points (30 from the first hour, +2/day, cap 60), so 60 were

@@ -1116,7 +1116,7 @@ def test_dsp_named_support_case_is_linked_both_ways():
     assert dsp["children"] == [{"id": "s1", "case_number": "00132969", "status": "In Progress",
                                 "closed": False, "record_type": "Support", "url": "https://sf/s1",
                                 "via": "subject"}]
-    assert dsp["links"] == gh
+    assert dsp["links"] == []   # the Support case's GitHub issue isn't copied over
     assert support["parent"]["id"] == "d1" and support["parent"]["via"] == "subject"
     assert support["parent"]["closed"] is False and support["parent"]["record_type"] == "DSP"
     # the DSP case is now found from the Support side, as with a Salesforce link
@@ -1231,3 +1231,17 @@ def test_description_links_are_carried_with_their_via():
     reader = _ByNumber({"00132756": _ref("d1", "00132756", "DSP", closed=True)})
     sync._named_links([support], prior, reader, {"dependency_record_type": "DSP"}, [])
     assert support["parent"]["closed"] is True and support["parent"]["via"] == "description"
+
+
+def test_a_named_case_keeps_the_dsp_reading_its_own_posts_for_links():
+    """00132973: its Careem Slack thread is only in its posts, and the Support case it names
+    links a GitHub issue about a different problem."""
+    from interpreter.monitor.links import parse
+    dsp = _c("d1", "00132973", "DSP", "Case #00132969–Kulcha King")
+    reader = _ByNumber({"00132969": _ref("s1", "00132969", "Support",
+                                         links=parse("https://github.com/o/r/issues/8701"))})
+    slack = parse("https://x.slack.com/archives/C1/p1793481670823519")
+    reader.post_links = lambda ids: {"d1": slack}
+    sync._named_links([dsp], {}, reader, {"dependency_record_type": "DSP"}, [])
+    sync._post_links([dsp], reader, [])
+    assert dsp["links"] == slack

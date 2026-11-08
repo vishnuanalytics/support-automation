@@ -139,6 +139,9 @@ most 3), as if Salesforce had the link: the named case becomes the DSP's child, 
 the named case's parent, or another child when it already has a parent (one Support case can have a
 DSP per aggregator). Only real cases of another record type link, so order IDs, RIDs and other
 8-digit numbers drop out at lookup, and another DSP case (often a "Ticket No:" line) isn't linked.
+The named case's own links aren't copied onto the DSP case: its GitHub issue is about its own
+problem, and the DSP case's empty link field must still send the sync to the DSP's posts for its
+thread.
 These links are marked `via: "subject"` or `via: "description"` and are kept from one sync to the
 next with fresh status, so a Support case still sees its DSP case after the DSP leaves the queue.
 A DSP case that's our turn only because the third party replied (asked for details, shared an

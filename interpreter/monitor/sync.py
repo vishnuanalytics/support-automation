@@ -207,8 +207,10 @@ def _named_links(cases: list[dict], prior: dict[str, dict], reader: Any, cfg: di
         hits = [(found[n], via) for n, via in named.get(c["id"], [])
                 if n in found and found[n].get("record_type") != record_type][:NAMED_CAP]
         for ref, via in hits:
+            # The named case's own links (its GitHub issue, say) aren't copied: they're about
+            # that case's problem, and an empty link field here must still send the sync to
+            # this DSP case's posts for its own thread.
             attach(c, {k: ref.get(k) for k in _REF_KEYS}, "child", via)
-            c["links"] = merge_links(c.get("links") or [], ref.get("links") or [])
             other = by_id.get(ref["id"])
             if other is not None:
                 attach(other, {"id": c["id"], "case_number": c.get("case_number"),
