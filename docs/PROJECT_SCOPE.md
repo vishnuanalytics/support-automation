@@ -707,6 +707,21 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-08 (Worker no longer dies on one failed Supabase call, branch `case-monitor`.)**
+The worker crashed after about 1.5 hours with `httpx.ReadTimeout` on the `claim_job` RPC. The
+`while True` loop in `api/worker.main` had no guard, and RPCs and writes are deliberately never
+retried (2026-11-03 transport hardening), so the error reached the top. It also explains the
+health check showing the worker as last seen about 18 hours earlier, and Case Monitor syncs
+stopping on 2026-11-07 at 16:31 UTC. `jobs.claim`/`jobs.complete`/`jobs.fail` all run outside
+`process_one`'s handler guard. Fix: the loop is now `api/worker.run_loop`, which survives any
+`Exception`. It backs off from idle-sleep, doubling to 60s, and resets after a clean pass.
+Network errors log as warnings; anything else logs with a traceback, so Sentry still sees it.
+Ctrl-C and SystemExit still stop it. A claim that landed before the timeout is reclaimed by
+`claim_job` after 10 minutes (migration 041). Tests: `tests/test_worker_loop.py` (4). Full
+offline suite: 1,820 passed. One failure is local only: `test_sf_pubsub_plan::
+test_cli_is_a_noop_without_sf_creds` calls `validate_env()`, which fails on a placeholder
+`SF_PRIVATE_KEY_FILE` in `.env`. Docker deploys need `docker compose up -d --build` to pick it up.
+
 **2026-11-05 (Case Monitor, FR-52, branch `case-monitor`.)** New feature for leads and managers:
 one queue showing whose turn it is on every open case, combining cases the AI agents handed to a
 human with cases waiting on engineering or a third party. It's built into the platform on the

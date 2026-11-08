@@ -992,11 +992,51 @@ def main(argv: list[str] | None = None) -> int:
                 jobs.enqueue(_k, {}, dedupe_key=f"{_k}:boot", sb=sb)
             except Exception as e:  # noqa: BLE001
                 log.warning("could not seed sweep %s: %s", _k, e)
-    while True:
-        did = process_one(sb)
+    run_loop(sb, args.idle_sleep, beat=beat)
+    return 0
+
+
+LOOP_ERROR_MAX_SLEEP = 60.0
+
+
+def run_loop(sb, idle_sleep: float, *, beat, _sleep=time.sleep,
+             _max_iters: int | None = None) -> None:
+    """The long-running poll loop. One failed iteration never ends the process.
+
+    `process_one` already catches handler errors, but `jobs.claim` and
+    `jobs.complete`/`jobs.fail` talk to Supabase outside that guard, and writes
+    and RPCs are deliberately never retried (`interpreter/supabase_client`).
+    A single `httpx.ReadTimeout` on `claim_job` used to kill the worker.
+    A claim that did land server-side is safe to drop here: `claim_job`
+    reclaims a 'running' row once its lock is 10 minutes old (migration 041).
+
+    Back off while errors repeat (idle_sleep doubling, capped at
+    LOOP_ERROR_MAX_SLEEP) and reset after a clean pass. Only `Exception` is
+    caught, so Ctrl-C / SystemExit still stop the worker.
+    """
+    import httpx
+
+    errors = 0
+    n = 0
+    while _max_iters is None or n < _max_iters:
+        n += 1
+        try:
+            did = process_one(sb)
+        except Exception as e:  # noqa: BLE001 -- the loop must outlive any one failure
+            errors += 1
+            delay = min(max(idle_sleep, 1.0) * 2 ** (errors - 1), LOOP_ERROR_MAX_SLEEP)
+            if isinstance(e, httpx.TransportError):
+                log.warning("worker loop: %s: %s (attempt %d, retrying in %.0fs)",
+                            type(e).__name__, e, errors, delay)
+            else:
+                log.exception("worker loop: unexpected %s (attempt %d, retrying in %.0fs)",
+                              type(e).__name__, errors, delay)
+            _sleep(delay)
+            continue
+        errors = 0
         beat("worker", {"idle": not did}, sb=sb)
         if not did:
-            time.sleep(args.idle_sleep)
+            _sleep(idle_sleep)
 
 
 if __name__ == "__main__":
