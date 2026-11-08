@@ -109,8 +109,12 @@ def _message(agent: str, cases: list[dict], github: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def build(items: list[tuple], facts: dict[str, dict], coaching: dict, cfg: dict, now: datetime) -> dict:
-    """items: (case, verdict, evidence) for open aggregator cases."""
+def build(items: list[tuple], facts: dict[str, dict], coaching: dict, cfg: dict, now: datetime,
+          notes: dict[str, list[str]] | None = None) -> dict:
+    """items: (case, verdict, evidence) for open aggregator cases, plus engineering cases when
+    that scan is on. notes: extra "please check" lines per case, e.g. a data check that found
+    nothing. Those are never counted as wrong: an empty result can be our own data's gap."""
+    notes = notes or {}
     since = now - timedelta(days=DAYS)
     people: dict[str, dict] = {}
 
@@ -127,8 +131,10 @@ def build(items: list[tuple], facts: dict[str, dict], coaching: dict, cfg: dict,
         p = person(raiser(case, evidence))
         p["raised"] += 1
         found = check_case(case, evidence, facts, cfg)
+        found["check"] = [*found["check"], *notes.get(case["id"], [])]
+        source = "aggregator" if case.get("record_type") == cfg.get("dependency_record_type") else "engineering"
         row = {"case_id": case["id"], "case_number": case.get("case_number"), "subject": case.get("subject"),
-               "raised_at": raised.isoformat(), **found}
+               "raised_at": raised.isoformat(), "source": source, **found}
         if found["problems"]:
             p["cases"].append(row)
         elif found["check"]:
