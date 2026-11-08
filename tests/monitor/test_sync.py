@@ -1032,3 +1032,39 @@ def test_a_merchant_saying_its_fixed_makes_the_case_ready_to_close():
     assert got["case"]["customer_reply"]["kind"] == "confirmed"
     assert got["verdict"]["ready_to_close"] and got["verdict"]["signal"]["code"] == "customer_confirmed"
     assert store.finished[1]["ready_to_close"] == 1
+
+
+def _row(cid, record_type, ball, code=None, latest_reply_at=None, activity=None, **case_kw):
+    return {"case": {"id": cid, "record_type": record_type, **case_kw},
+            "verdict": {"ball": ball, "signal": {"code": code} if code else None,
+                        "latest_reply_at": latest_reply_at, "latest_activity_at": activity}}
+
+
+CFG_DSP = {"dependency_record_type": "DSP"}
+SUPPORT_REF = {"id": "s1", "case_number": "00000043", "record_type": "Support", "url": "https://sf/s1"}
+
+
+def test_linked_wait_when_support_case_waits_on_merchant_after_the_ask():
+    dsp = _row("d1", "DSP", "us", "reply_needs_info", "2026-10-26T11:32:52Z", children=[SUPPORT_REF])
+    support = _row("s1", "Support", "customer", "awaiting_customer_report", activity="2026-11-06T05:31:05Z")
+    got = sync.linked_wait(dsp, [dsp, support], CFG_DSP)
+    assert got["case_number"] == "00000043" and got["url"] == "https://sf/s1"
+
+
+@pytest.mark.parametrize("support_ball,activity,code", [
+    ("us", "2026-11-06T05:31:05Z", "reply_needs_info"),        # support case is our turn
+    ("customer", "2026-10-20T00:00:00Z", "reply_needs_info"),  # not worked since the ask
+    ("customer", "2026-11-06T05:31:05Z", "waiting_third_party"),  # DSP isn't on us for a reply
+])
+def test_no_linked_wait(support_ball, activity, code):
+    ball = "us" if code != "waiting_third_party" else "third_party"
+    dsp = _row("d1", "DSP", ball, code, "2026-10-26T11:32:52Z", parent=SUPPORT_REF)
+    support = _row("s1", "Support", support_ball, activity=activity)
+    assert sync.linked_wait(dsp, [dsp, support], CFG_DSP) is None
+
+
+def test_no_linked_wait_for_a_support_case_or_an_unsynced_link():
+    support = _row("s1", "Support", "us", "reply_needs_info", children=[{"id": "d9", "record_type": "DSP"}])
+    assert sync.linked_wait(support, [support], CFG_DSP) is None
+    dsp = _row("d1", "DSP", "us", "reply_needs_info", children=[SUPPORT_REF])
+    assert sync.linked_wait(dsp, [dsp], CFG_DSP) is None

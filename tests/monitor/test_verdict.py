@@ -430,3 +430,24 @@ def test_a_label_for_a_different_message_is_not_applied(cfg):
     c = agg(customer_reply=merchant_said("confirmed", at=ago(30)))
     r = v.compute(c, [_merchant_email(ago(1))], cfg, NOW)
     assert r["signal"]["code"] == "customer_replied_email" and not r["ready_to_close"]
+
+
+def _dsp(**kw):
+    return case(waiting_party="third_party", waiting_raw="Aggregator", record_type="DSP",
+                reply={"kind": "needs_info", "summary": "They cannot find the items."},
+                links=[{"kind": "slack"}], **kw)
+
+
+def test_dsp_third_party_ask_is_our_turn_without_a_linked_wait(cfg):
+    r = v.compute(_dsp(), [slack(msg(False, who="zomato"))], {**cfg, "dependency_record_type": "DSP"}, NOW)
+    assert r["ball"] == "us" and r["signal"]["code"] == "reply_needs_info" and r["mismatch"]
+
+
+def test_dsp_waits_on_the_merchant_when_the_linked_support_case_does(cfg):
+    lw = {"id": "2", "case_number": "00000043", "record_type": "Support", "url": "https://sf/2"}
+    r = v.compute(_dsp(linked_wait=lw), [slack(msg(False, who="zomato"))],
+                  {**cfg, "dependency_record_type": "DSP"}, NOW)
+    assert r["ball"] == "customer" and not r["mismatch"] and v.stage(r) == "customer"
+    assert r["signal"]["code"] == "linked_awaiting_customer"
+    assert r["signal"]["source"]["url"] == "https://sf/2"
+    assert r["next_action"] == "Chase the merchant on case 00000043, then answer Aggregator."

@@ -160,6 +160,36 @@ def _dsp_ids(case: dict, record_type: str) -> list[str]:
     return [x["id"] for x in related if x.get("record_type") == record_type]
 
 
+# The third-party-replied signals that put a DSP case on us.
+_REPLY_CODES = {code for code, _ in verdict.REPLY_ACTION.values()} | {"third_party_replied"}
+
+
+def linked_wait(row: dict, rows: list[dict], cfg: dict) -> dict | None:
+    """When a DSP case is our turn only because the third party replied, but its linked
+    Support case is waiting on the customer and was worked after that reply, the answer
+    the third party needs is with the customer. Returns that linked case, else None."""
+    record_type = cfg.get("dependency_record_type")
+    case, v = row["case"], row["verdict"]
+    if not record_type or case.get("record_type") != record_type:
+        return None
+    if v.get("ball") != verdict.US or (v.get("signal") or {}).get("code") not in _REPLY_CODES:
+        return None
+    asked = verdict.parse_dt(v.get("latest_reply_at"))
+    by_id = {r["case"]["id"]: r for r in rows}
+    related = [*(c for c in [case.get("parent")] if c), *(case.get("children") or [])]
+    for ref in related:
+        other = by_id.get(ref.get("id"))
+        if not other or ref.get("record_type") == record_type:
+            continue
+        ov = other["verdict"]
+        worked = verdict.parse_dt(ov.get("latest_activity_at"))
+        if ov.get("ball") == verdict.CUSTOMER and worked and (not asked or worked > asked):
+            return {"id": ref["id"], "case_number": ref.get("case_number"),
+                    "record_type": ref.get("record_type"), "url": ref.get("url"),
+                    "since": ov.get("latest_activity_at")}
+    return None
+
+
 def _attach_partners(cases: list[dict], partners: list[dict], cfg: dict) -> None:
     """Add each third-party case's directory entry and whether a DSP case exists."""
     index: dict[str, dict] = {}
@@ -362,6 +392,15 @@ def run(tenant_id: str, store: Any, reader: Any, evidence_readers: dict, cfg: di
             v = verdict.compute(case, evidence, cfg, now)
             v["latest"] = newest[case["id"]]
             rows.append({"case": case, "verdict": v, "timeline": timelines.get(case["id"])})
+        # A DSP case's verdict can depend on its Support case's, so a second pass.
+        for row in rows:
+            wait = linked_wait(row, rows, cfg)
+            if wait:
+                case = row["case"]
+                case["linked_wait"] = wait
+                v = verdict.compute(case, evidence_by_case[case["id"]], cfg, now)
+                v["latest"] = newest[case["id"]]
+                row["verdict"] = v
 
         store.save_cases(tenant_id, rows, now)
         store.save_evidence(tenant_id, list(found.values()), now)

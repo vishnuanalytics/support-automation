@@ -224,6 +224,16 @@ def _signals(case: dict, evidence: list[dict], cfg: dict) -> list[dict]:
                 out.append({"ball": THIRD_PARTY, "code": "waiting_third_party", "source": src,
                             "text": f"Our {channel} message is the latest; waiting on {third}",
                             "action": f"Wait for {third}; follow up if it goes quiet."})
+            elif case.get("linked_wait"):
+                # The answer the third party wants is with the customer, on the linked case.
+                lw = case["linked_wait"]
+                out.append({"ball": CUSTOMER, "code": "linked_awaiting_customer",
+                            "source": _source(f"Salesforce: case {lw.get('case_number')}",
+                                              lw.get("url")),
+                            "text": f"{third} replied, but linked {lw.get('record_type')} case "
+                                    f"{lw.get('case_number')} is waiting on the {customer.lower()}",
+                            "action": f"Chase the {customer.lower()} on case "
+                                      f"{lw.get('case_number')}, then answer {third}."})
             else:
                 code, action = REPLY_ACTION.get(reply_kind) or (
                     "third_party_replied", "Read the {third} reply and act on it.")

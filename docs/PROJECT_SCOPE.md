@@ -707,6 +707,22 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-08 (Case Monitor: a DSP case waits on the merchant when its Support case does, branch
+`case-monitor`.)** Follows the linked-cases entry below. DSP 00131153 scored "our turn: Aggregator needs
+more details" (110), though the details were with the merchant on Support 00130532 (awaiting revert on
+the RID question). **Built:** `sync.linked_wait(row, rows, cfg)`: a DSP case whose turn is ours only from
+a third-party-reply signal (`REPLY_ACTION` codes or `third_party_replied`), with a linked non-DSP case in
+the same sync whose verdict is `customer` and whose latest activity is after the third party's latest
+message. `run` computes every verdict, then recomputes those cases with `case["linked_wait"]` set;
+`verdict._signals` then emits `linked_awaiting_customer` (ball customer, cites the Support case,
+"Chase the merchant on case X, then answer Aggregator."), so there's no mismatch points. **Verified:**
++7 tests (518 in `tests/monitor/`); offline suite 1,888 pass + the 1 pre-existing local pubsub failure.
+Dry run on stored live data (no writes): of 28 open DSP cases, 4 are on us from a reply; only 00131153
+changes (110 → 85, stage customer). **Not covered:** a Support case not in the queue (only cases waiting
+on engineering/a third party are synced), and DSP cases with no Salesforce parent/child link (e.g.
+00132973's Support case 00132969 is named only in the subject). **Next:** owner review of the
+overdue/stale weighting, still open.
+
 **2026-11-08 (Case Copilot: linked cases in `get_case`, branch `case-monitor`.)** Found on a live
 DSP case: asked for a summary, Claude missed the linked Support case entirely, including the merchant
 side's finding that the Zomato RID in the merchant's URL doesn't match the one in Hub Config. Cause:

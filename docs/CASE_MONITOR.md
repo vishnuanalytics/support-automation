@@ -128,6 +128,11 @@ and escalation time for a workspace. Never store portal passwords in it. The cha
 
 A third-party case with no linked case of the raising record type, as parent or child, shows as not
 raised. If that linked case is closed while this one is open, it's our turn to update the customer.
+A DSP case that's our turn only because the third party replied (asked for details, shared an
+update) waits on the customer instead when its linked Support case is waiting on the customer and was
+worked after that reply: the answer is with the customer, so the next step is to chase them on the
+Support case. It only applies when both cases are in the queue; the sync works out every verdict
+first, then rechecks those DSP cases.
 Such a case is **ready to close**: the outside work is done and only the case is still open. It
 gets its own **Ready to close** tab in All cases and one card per agent in Needs Me, with a message
 asking them to update the customer and close it. Its waiting field still names the finished
