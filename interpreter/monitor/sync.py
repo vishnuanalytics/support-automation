@@ -140,74 +140,86 @@ def _enrich(cases: list[dict], reader: Any, errors: list[dict]) -> None:
 
 _CASE_NUMBER = re.compile(r"(?<!\d)(\d{8})(?!\d)")
 _REF_KEYS = ("id", "case_number", "status", "closed", "record_type", "url")
+NAMED_VIA = ("subject", "description")
 
 
-def subject_numbers(case: dict) -> list[str]:
-    """Other cases' numbers named in this case's subject, e.g. "Case #00132969 – …"."""
-    own = case.get("case_number")
-    return list(dict.fromkeys(n for n in _CASE_NUMBER.findall(case.get("subject") or "") if n != own))
+NAMED_CAP = 3   # cases linked from one DSP case's subject and description
 
 
-def _subject_links(cases: list[dict], prior: dict[str, dict], reader: Any, cfg: dict,
-                   errors: list[dict]) -> None:
-    """Link a DSP case to the case its subject names when Salesforce has no parent/child
-    link, as if it did: the named case becomes the DSP's child and the DSP its parent, or
-    another child when it already has a parent (one Support case, a DSP per aggregator).
-    Each link is marked via "subject". A case keeps its subject-found DSP links from the
-    last sync, with fresh status, so it still sees a DSP case close after it leaves the queue."""
+def named_numbers(case: dict) -> list[tuple[str, str]]:
+    """Other cases' numbers this case names, as (number, where): the subject first
+    ("Case #00132969 – …"), then the description ("Case Number: 00131149")."""
+    own, out = case.get("case_number"), {}
+    for where in ("subject", "description"):
+        for n in _CASE_NUMBER.findall(case.get(where) or ""):
+            if n != own:
+                out.setdefault(n, where)
+    return list(out.items())
+
+
+def _named_links(cases: list[dict], prior: dict[str, dict], reader: Any, cfg: dict,
+                 errors: list[dict]) -> None:
+    """Link a DSP case to the cases its subject or description names when Salesforce has
+    no parent/child link, as if it did: a named case becomes the DSP's child and the DSP
+    its parent, or another child when it already has a parent (one Support case, a DSP per
+    aggregator). Each link is marked via "subject" or "description". Only real cases of
+    another record type count, so order IDs and other 8-digit numbers fall away at lookup.
+    A case keeps its named DSP links from the last sync, with fresh status, so it still
+    sees a DSP case close after it leaves the queue."""
     record_type = cfg.get("dependency_record_type")
     if not record_type or not hasattr(reader, "cases_by_number"):
         return
     sf = [c for c in cases if c.get("source") != "ai"]
-    named = {c["id"]: subject_numbers(c) for c in sf if c.get("record_type") == record_type
+    named = {c["id"]: named_numbers(c) for c in sf if c.get("record_type") == record_type
              and not c.get("parent") and not c.get("children")}
-    carried: dict[str, list[tuple[str, str]]] = {}
+    carried: dict[str, list[tuple[str, str, str]]] = {}
     for c in sf:
         old = (prior.get(c["id"]) or {}).get("case") or {}
         refs = [("parent", old["parent"])] if old.get("parent") else []
         refs += [("child", x) for x in old.get("children") or []]
-        kept = [(where, x["case_number"]) for where, x in refs
-                if x.get("via") == "subject" and x.get("record_type") == record_type
+        kept = [(where, x["case_number"], x["via"]) for where, x in refs
+                if x.get("via") in NAMED_VIA and x.get("record_type") == record_type
                 and x.get("case_number")]
         if kept:
             carried[c["id"]] = kept
-    numbers = sorted({n for ns in named.values() for n in ns}
-                     | {n for kept in carried.values() for _, n in kept})
+    numbers = sorted({n for ns in named.values() for n, _ in ns}
+                     | {n for kept in carried.values() for _, n, _ in kept})
     if not numbers:
         return
     try:
         found = reader.cases_by_number(numbers)
     except Exception as e:  # noqa: BLE001
-        errors.append({"error": f"cases named in subjects not read ({type(e).__name__})"})
+        errors.append({"error": f"cases named in subjects or descriptions not read ({type(e).__name__})"})
         return
 
-    def attach(c: dict, ref: dict, where: str) -> None:
+    def attach(c: dict, ref: dict, where: str, via: str) -> None:
         if any(x.get("id") == ref["id"] for x in [c.get("parent") or {}, *(c.get("children") or [])]):
             return
         if where == "parent" and not c.get("parent"):
-            c["parent"] = {**ref, "via": "subject"}
+            c["parent"] = {**ref, "via": via}
         else:
-            c["children"] = [*(c.get("children") or []), {**ref, "via": "subject"}]
+            c["children"] = [*(c.get("children") or []), {**ref, "via": via}]
 
     by_id = {c["id"]: c for c in sf}
     for c in sf:
-        for n in named.get(c["id"], []):
-            ref = found.get(n)
-            # Another DSP case named in the subject is a sibling, not the case it was raised for.
-            if not ref or ref.get("record_type") == record_type:
-                continue
-            attach(c, {k: ref.get(k) for k in _REF_KEYS}, "child")
+        # Another DSP case named is a sibling (often a "Ticket No:" line), not the case it was
+        # raised for, so it's skipped.
+        hits = [(found[n], via) for n, via in named.get(c["id"], [])
+                if n in found and found[n].get("record_type") != record_type][:NAMED_CAP]
+        for ref, via in hits:
+            attach(c, {k: ref.get(k) for k in _REF_KEYS}, "child", via)
             c["links"] = merge_links(c.get("links") or [], ref.get("links") or [])
             other = by_id.get(ref["id"])
             if other is not None:
                 attach(other, {"id": c["id"], "case_number": c.get("case_number"),
                                "status": c.get("status"), "closed": False,
-                               "record_type": c.get("record_type"), "url": c.get("url")}, "parent")
+                               "record_type": c.get("record_type"), "url": c.get("url")},
+                       "parent", via)
     for c in sf:
-        for where, n in carried.get(c["id"], []):
+        for where, n, via in carried.get(c["id"], []):
             ref = found.get(n)
             if ref and ref.get("record_type") == record_type:
-                attach(c, {k: ref.get(k) for k in _REF_KEYS}, where)
+                attach(c, {k: ref.get(k) for k in _REF_KEYS}, where, via)
 
 
 def _post_links(cases: list[dict], reader: Any, errors: list[dict]) -> None:
@@ -422,7 +434,7 @@ def run(tenant_id: str, store: Any, reader: Any, evidence_readers: dict, cfg: di
                               errors)
         prior = store.open_cases(tenant_id)
         _enrich(cases, reader, errors)
-        _subject_links(cases, prior, reader, cfg, errors)
+        _named_links(cases, prior, reader, cfg, errors)
         _post_links(cases, reader, errors)
         _attach_partners(cases, store.partners(tenant_id), cfg)
         _dsp_emails(cases, reader, cfg, errors)

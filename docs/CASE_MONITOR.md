@@ -128,17 +128,19 @@ and escalation time for a workspace. Never store portal passwords in it. The cha
 
 A third-party case with no linked case of the raising record type, as parent or child, shows as not
 raised. Once every linked case of that record type is closed, parent or child, linked in Salesforce
-or by subject, while this one is open, it's our turn to update the customer. With a DSP case per
+or by subject/description, while this one is open, it's our turn to update the customer. With a DSP case per
 aggregator, one closing while another is still open isn't enough.
 A case waiting on Engineering with linked DSP cases is ready to close only once they're all closed
 *and* every GitHub issue it links is read and closed. With no GitHub issue (raised on Slack, say)
 nothing says Engineering is done, so it isn't.
-A DSP case with no Salesforce parent or child is linked to the case its subject names (an
-8-digit case number, e.g. "Case #00132969 – …"), as if Salesforce had the link: the named case becomes
-the DSP's child, and the DSP becomes the named case's parent, or another child when it already has a
-parent (one Support case can have a DSP per aggregator). Another DSP case named in a subject isn't
-linked. These links are marked `via: "subject"` and are kept from one sync to the next with fresh
-status, so a Support case still sees its DSP case after the DSP leaves the queue.
+A DSP case with no Salesforce parent or child is linked to the cases its subject or description
+names (8-digit case numbers, e.g. "Case #00132969 – …" or "Case Number: 00131149"; subject first, at
+most 3), as if Salesforce had the link: the named case becomes the DSP's child, and the DSP becomes
+the named case's parent, or another child when it already has a parent (one Support case can have a
+DSP per aggregator). Only real cases of another record type link, so order IDs, RIDs and other
+8-digit numbers drop out at lookup, and another DSP case (often a "Ticket No:" line) isn't linked.
+These links are marked `via: "subject"` or `via: "description"` and are kept from one sync to the
+next with fresh status, so a Support case still sees its DSP case after the DSP leaves the queue.
 A DSP case that's our turn only because the third party replied (asked for details, shared an
 update) waits on the customer instead when its linked Support case is waiting on the customer and was
 worked after that reply: the answer is with the customer, so the next step is to chase them on the

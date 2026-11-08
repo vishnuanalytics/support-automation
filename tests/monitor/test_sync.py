@@ -1092,9 +1092,16 @@ def _c(cid, number, record_type, subject="", **kw):
             "parent": None, "children": [], "links": [], **kw}
 
 
-def test_subject_numbers_skip_the_case_itself_and_repeats():
+def test_named_numbers_skip_the_case_itself_and_repeats():
     c = {"case_number": "00132973", "subject": "Case #00132969–Kulcha King 00132969 ref 00132973 x123456789"}
-    assert sync.subject_numbers(c) == ["00132969"]
+    assert sync.named_numbers(c) == [("00132969", "subject")]
+
+
+def test_named_numbers_read_the_subject_first_then_the_description():
+    c = {"case_number": "00132756", "subject": "Zomato Menu Issue | Case Number 00132721",
+         "description": "Res ID 22901351\nCase Number 00132721\nTicket No: 00132700"}
+    assert sync.named_numbers(c) == [("00132721", "subject"), ("22901351", "description"),
+                                     ("00132700", "description")]
 
 
 def test_dsp_named_support_case_is_linked_both_ways():
@@ -1104,7 +1111,7 @@ def test_dsp_named_support_case_is_linked_both_ways():
     gh = parse("https://github.com/o/r/issues/7")
     reader = _ByNumber({"00132969": _ref("s1", "00132969", "Support", links=gh)})
     errors = []
-    sync._subject_links([dsp, support], {}, reader, {"dependency_record_type": "DSP"}, errors)
+    sync._named_links([dsp, support], {}, reader, {"dependency_record_type": "DSP"}, errors)
     assert errors == [] and reader.asked == ["00132969"]
     assert dsp["children"] == [{"id": "s1", "case_number": "00132969", "status": "In Progress",
                                 "closed": False, "record_type": "Support", "url": "https://sf/s1",
@@ -1120,7 +1127,7 @@ def test_salesforce_links_win_and_dsp_siblings_are_not_linked():
     linked = _c("d1", "00000001", "DSP", "about 00000002", children=[{"id": "x", "record_type": "Support"}])
     sibling = _c("d2", "00000003", "DSP", "dup of 00000004")
     reader = _ByNumber({"00000004": _ref("d4", "00000004", "DSP")})
-    sync._subject_links([linked, sibling], {}, reader, {"dependency_record_type": "DSP"}, [])
+    sync._named_links([linked, sibling], {}, reader, {"dependency_record_type": "DSP"}, [])
     assert reader.asked == ["00000004"]
     assert linked["children"] == [{"id": "x", "record_type": "Support"}] and sibling["children"] == []
 
@@ -1130,7 +1137,7 @@ def test_support_case_keeps_its_subject_parent_after_the_dsp_closes():
     prior = {"s1": {"case": {"parent": {"id": "d1", "case_number": "00132973", "record_type": "DSP",
                                        "via": "subject"}}}}
     reader = _ByNumber({"00132973": _ref("d1", "00132973", "DSP", closed=True)})
-    sync._subject_links([support], prior, reader, {"dependency_record_type": "DSP"}, [])
+    sync._named_links([support], prior, reader, {"dependency_record_type": "DSP"}, [])
     assert support["parent"] == {"id": "d1", "case_number": "00132973", "status": "Closed", "closed": True,
                                  "record_type": "DSP", "url": "https://sf/d1", "via": "subject"}
 
@@ -1138,13 +1145,13 @@ def test_support_case_keeps_its_subject_parent_after_the_dsp_closes():
 def test_subject_lookup_failure_is_recorded_and_changes_nothing():
     dsp = _c("d1", "00132973", "DSP", "Case #00132969")
     errors = []
-    sync._subject_links([dsp], {}, _ByNumber({}, fail=True), {"dependency_record_type": "DSP"}, errors)
-    assert dsp["children"] == [] and "subjects not read" in errors[0]["error"]
+    sync._named_links([dsp], {}, _ByNumber({}, fail=True), {"dependency_record_type": "DSP"}, errors)
+    assert dsp["children"] == [] and "descriptions not read" in errors[0]["error"]
 
 
 def test_reader_without_number_lookup_is_skipped():
     dsp = _c("d1", "00132973", "DSP", "Case #00132969")
-    sync._subject_links([dsp], {}, object(), {"dependency_record_type": "DSP"}, [])
+    sync._named_links([dsp], {}, object(), {"dependency_record_type": "DSP"}, [])
     assert dsp["children"] == []
 
 
@@ -1163,7 +1170,7 @@ def test_support_case_with_a_salesforce_parent_gets_the_subject_dsp_as_a_child()
     dsp = _c("d1", "00132973", "DSP", "Case #00132969–Kulcha King")
     support = _c("s1", "00132969", "Support", parent=talabat)
     reader = _ByNumber({"00132969": _ref("s1", "00132969", "Support")})
-    sync._subject_links([dsp, support], {}, reader, {"dependency_record_type": "DSP"}, [])
+    sync._named_links([dsp, support], {}, reader, {"dependency_record_type": "DSP"}, [])
     assert support["parent"] is talabat
     assert [(x["id"], x["via"]) for x in support["children"]] == [("d1", "subject")]
     assert sync._dsp_ids(support, "DSP") == ["d0", "d1"]
@@ -1176,7 +1183,7 @@ def test_carried_subject_links_are_not_doubled_while_the_dsp_is_still_queued():
                                            "via": "subject"}]}}}
     reader = _ByNumber({"00132969": _ref("s1", "00132969", "Support"),
                         "00132973": _ref("d1", "00132973", "DSP")})
-    sync._subject_links([dsp, support], prior, reader, {"dependency_record_type": "DSP"}, [])
+    sync._named_links([dsp, support], prior, reader, {"dependency_record_type": "DSP"}, [])
     assert sorted(reader.asked) == ["00132969", "00132973"]
     assert [x["id"] for x in support["children"]] == ["d1"]
 
@@ -1186,7 +1193,7 @@ def test_a_closed_subject_dsp_child_is_carried_with_its_closed_state():
     prior = {"s1": {"case": {"children": [{"id": "d1", "case_number": "00132973", "record_type": "DSP",
                                            "via": "subject"}]}}}
     reader = _ByNumber({"00132973": _ref("d1", "00132973", "DSP", closed=True)})
-    sync._subject_links([support], prior, reader, {"dependency_record_type": "DSP"}, [])
+    sync._named_links([support], prior, reader, {"dependency_record_type": "DSP"}, [])
     assert support["children"][0]["closed"] is True and support["children"][0]["via"] == "subject"
 
 
@@ -1195,3 +1202,32 @@ def test_children_of_reads_whether_each_child_is_closed():
                   "RecordType": {"Name": "DSP"}}])
     got = readers.SalesforceCaseReader(sf, CFG).children_of(["p1"])
     assert "IsClosed" in sf.soql[0] and got["p1"][0]["closed"] is True
+
+
+def test_description_names_the_support_case_and_order_ids_fall_away():
+    dsp = _c("d1", "00132756", "DSP", "Zomato Menu Issue | Samosa Party",
+             description="Res ID 22901351\nOrder 12345678\nCase Number 00132721\nTicket No: 00132700")
+    support = _c("s1", "00132721", "Support")
+    reader = _ByNumber({"00132721": _ref("s1", "00132721", "Support"),
+                        "00132700": _ref("d0", "00132700", "DSP")})
+    sync._named_links([dsp, support], {}, reader, {"dependency_record_type": "DSP"}, [])
+    assert sorted(reader.asked) == ["00132700", "00132721", "12345678", "22901351"]
+    assert [(x["id"], x["via"]) for x in dsp["children"]] == [("s1", "description")]
+    assert support["parent"]["id"] == "d1" and support["parent"]["via"] == "description"
+
+
+def test_at_most_three_named_cases_are_linked():
+    numbers = [f"0013000{i}" for i in range(5)]
+    dsp = _c("d1", "00139999", "DSP", "x", description=" ".join(numbers))
+    reader = _ByNumber({n: _ref(f"s{n}", n, "Support") for n in numbers})
+    sync._named_links([dsp], {}, reader, {"dependency_record_type": "DSP"}, [])
+    assert [x["case_number"] for x in dsp["children"]] == numbers[:sync.NAMED_CAP]
+
+
+def test_description_links_are_carried_with_their_via():
+    support = _c("s1", "00132721", "Support")
+    prior = {"s1": {"case": {"parent": {"id": "d1", "case_number": "00132756", "record_type": "DSP",
+                                        "via": "description"}}}}
+    reader = _ByNumber({"00132756": _ref("d1", "00132756", "DSP", closed=True)})
+    sync._named_links([support], prior, reader, {"dependency_record_type": "DSP"}, [])
+    assert support["parent"]["closed"] is True and support["parent"]["via"] == "description"

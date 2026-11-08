@@ -707,6 +707,21 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-08 (Case Monitor: DSP cases linked by case numbers in the description, branch
+`case-monitor`.)** Closes the "case numbers only in a description" gap from the subject-links entry
+below. **Built:** `sync.named_numbers` (was `subject_numbers`) reads 8-digit numbers from the subject,
+then the description, as `(number, where)`; `sync._named_links` (was `_subject_links`) links up to
+`NAMED_CAP` = 3 real non-DSP cases per DSP, marking each `via: "subject"` or `via: "description"`, and
+carries both kinds from the last sync. **Why no number-format filter:** a 90-day survey of 385 DSP
+cases found 114 distinct 8-digit numbers in descriptions, 26 of them real cases (all `00…`); the
+`CaseNumber` lookup already drops the rest (RIDs, order IDs), and a `00` prefix rule would be
+org-specific. Sibling DSPs named in the DSP template's "Ticket No:" line are skipped as before.
+**Verified:** +5 tests (543 in `tests/monitor/`); full offline suite with only the known local pubsub
+failure. Read-only: the live queue gains no new link today (still only 00132973 ↔ 00132969); over 90
+days, of 32 DSP cases with no Salesforce link, 2 link from the subject and 2 more from the description.
+**Not covered:** case numbers only in email bodies. **Next:** owner review of the overdue/stale
+weighting, still open.
+
 **2026-11-08 (Case Monitor: "DSP resolved" for cases waiting on Engineering, branch `case-monitor`.)**
 Closes the gap left by the entry below: `dsp_resolved` only ran on cases waiting on a third party, so a
 Support case waiting on Engineer (00132969) could never become ready to close from its DSP cases.
