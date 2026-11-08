@@ -153,6 +153,13 @@ dependency, which is expected, so it isn't scored as a mismatch; overdue still c
 reply on the case outranks this, because someone has to read it first. Alerts shows "Ready to close"
 once, when a case first gets there.
 
+**Score and level.** Points add up per case and sort each tab; the level is the tag (critical 60+,
+high 40+, medium 20+, else low). Overdue scores nothing for the first 3 days past target (the case is still
+tagged overdue and the reason listed at 0), then 10 at 3 days, +1 a day, capped at 30 (from 23 days),
+so being late alone never makes a case critical. Quiet past its nudge time adds 20,
+"waiting on X but it's our turn" 25, an external reply newer than the case 15, a customer reply 15,
+a missing link or no DSP raised 20, Urgent/High priority 10/5, an unreadable link 5.
+
 **The merchant's latest message is read too.** When the newest message on a case, including the
 case's own emails, is from the customer, it is labelled `confirmed` (fixed, working, OK to close),
 `thanks` (only thanks or an acknowledgement) or `needs_reply` (anything else). Short, clear

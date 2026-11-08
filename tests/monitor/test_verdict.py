@@ -155,11 +155,27 @@ def test_smallest_threshold_wins(cfg):
     assert v.threshold_hours(agg(third_parties=["PartnerA", "PartnerB", "PartnerC"]), cfg) == 6
 
 
-def test_overdue_scores_base_plus_daily_and_caps(cfg):
-    day = dict(target_at=ago(24 * 5), links=[{"kind": "github"}])
-    assert v.compute(case(**day), [gh(msg(True))], cfg, NOW)["score"] == 40
-    far = dict(target_at=ago(24 * 100))
-    assert v.compute(case(**far), [gh(msg(True))], cfg, NOW)["score"] == 60
+@pytest.mark.parametrize("days,pts", [(0.1, 0), (2.9, 0), (3, 10), (4, 11), (8, 15), (22, 29),
+                                      (23, 30), (100, 30)])
+def test_overdue_scores_from_three_days_then_daily_and_caps(cfg, days, pts):
+    r = v.compute(case(target_at=ago(24 * days)), [gh(msg(True))], cfg, NOW)
+    assert r["score"] == pts and r["overdue"]
+
+
+def test_overdue_within_the_grace_days_is_still_shown_but_scores_nothing(cfg):
+    r = v.compute(case(target_at=ago(24 * 2.5)), [gh(msg(True))], cfg, NOW)
+    reason = next(x for x in r["reasons"] if x["code"] == "overdue")
+    assert reason["points"] == 0 and reason["text"] == "Overdue by 2d (scored from 3d)"
+    assert r["overdue"] and r["overdue_hours"] == 60
+
+
+def test_a_quiet_overdue_waiting_case_is_critical_only_when_urgent(cfg):
+    """A case only waiting on a dependency, past target and quiet, at the cap."""
+    c = case(target_at=ago(24 * 100), last_modified_at=ago(24 * 10), priority="Urgent")
+    r = v.compute(c, [gh(msg(True, 24 * 10))], cfg, NOW)
+    assert r["ball"] == "engineering" and r["score"] == 30 + 20 + 10 and r["level"] == "critical"
+    r = v.compute({**c, "priority": "High"}, [gh(msg(True, 24 * 10))], cfg, NOW)
+    assert r["score"] == 30 + 20 + 5 and r["level"] == "high"
 
 
 def test_future_target_is_not_overdue(cfg):
@@ -192,8 +208,9 @@ def test_combination_reaches_critical(cfg):
     c = case(priority="Urgent", last_reply_from="customer", last_modified_at=ago(30),
              target_at=ago(24))
     r = v.compute(c, [gh(msg(False, 10))], cfg, NOW)
-    # overdue 32 + mismatch 25 + new reply 15 + stale 20 + customer 15 + urgent 10
-    assert r["score"] == 117 and r["level"] == "critical"
+    # overdue 0 (1 day, inside the grace days) + mismatch 25 + new reply 15 + stale 20
+    # + customer 15 + urgent 10
+    assert r["score"] == 85 and r["level"] == "critical"
 
 
 def test_every_reason_has_a_source(cfg):

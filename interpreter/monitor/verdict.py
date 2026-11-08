@@ -16,6 +16,7 @@ from typing import Any
 US, ENGINEERING, THIRD_PARTY, AI, CUSTOMER, UNKNOWN = (
     "us", "engineering", "third_party", "ai", "customer", "unknown")
 DEPENDENCY_PARTIES = (ENGINEERING, THIRD_PARTY)
+OVERDUE_GRACE_DAYS = 3   # days past target before overdue adds points
 # Signals meaning the outside work is finished and only the case is left open:
 # the next step is to tell the customer and close it, not to investigate.
 CLOSE_SIGNALS = ("dsp_resolved", "customer_confirmed")
@@ -343,7 +344,15 @@ def compute(case: dict, evidence: list[dict], cfg: dict, now: datetime) -> dict[
     overdue_hours = _hours(now, target) if target and target < now else 0.0
     if overdue_hours:
         days = int(overdue_hours // 24)
-        add(30 + min(30, 2 * days), "overdue", f"Overdue by {days}d", sf("target_at"))
+        # The first days past target are normal slack, so they score nothing (the case is
+        # still marked overdue). From then it's small and grows, so overdue alone doesn't
+        # make a case critical: 10 at 3 days, +1 a day, capped at 30 (from 23 days).
+        if days < OVERDUE_GRACE_DAYS:
+            add(0, "overdue", f"Overdue by {days}d (scored from {OVERDUE_GRACE_DAYS}d)",
+                sf("target_at"))
+        else:
+            add(10 + min(20, days - OVERDUE_GRACE_DAYS), "overdue", f"Overdue by {days}d",
+                sf("target_at"))
 
     # Closing is admin, not investigation: the waiting field still names the
     # finished dependency, which is expected, so it isn't scored as a mismatch.

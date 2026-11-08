@@ -707,6 +707,24 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-08 (Case Monitor: overdue reweighted, branch `case-monitor`.)** The owner review of the
+overdue/stale weighting, open since the "ready to close" entry, is done. **Measured** (86 open cases):
+77 are overdue, and overdue was ~60% of all points (30 from the first hour, +2/day, cap 60), so 60 were
+critical, including 27 of 33 only waiting on an aggregator; the level tag and filter didn't sort
+anything. Four options simulated on stored verdicts; **owner chose 10 + 1/day, cap 30**. **Built:** the
+overdue scoring in `verdict.compute`. **Then the owner asked for overdue to start at 3 days:**
+`OVERDUE_GRACE_DAYS = 3`, so under 3 days past target scores 0 (still tagged overdue, reason listed as
+"Overdue by 2d (scored from 3d)"), then 10 at 3 days, +1 a day, cap 30 (from 23 days). Level cut-offs
+(60/40/20), stale 20 and every other weight unchanged. Points are now listed in
+`docs/CASE_MONITOR.md`. **Verified:** tests updated (+9, 552 in `tests/monitor/`; full offline suite
+with only the known local pubsub failure). Live recompute with the real code (read-only): critical
+60 → 27, high 14 → 20, medium 10 → 29, low 2 → 10; 18 overdue cases are inside the 3 grace days.
+Act 22 of 26 critical; the 4 high are 00133438 (45: merchant replied, under a day overdue) and three at
+57–59 (5–7 days overdue, mismatch + stale), still in the Our turn tab. Waiting on aggregator 27 → 5
+critical (all 14–18 days overdue, quiet, with an unread aggregator reply); ready to close drops to
+high/medium/low (has its own tab and alert). Nothing else reads the level (no alert keys on it).
+**Next:** no open item from these entries; next work is the owner's call.
+
 **2026-11-08 (Case Monitor: DSP cases linked by case numbers in the description, branch
 `case-monitor`.)** Closes the "case numbers only in a description" gap from the subject-links entry
 below. **Built:** `sync.named_numbers` (was `subject_numbers`) reads 8-digit numbers from the subject,
