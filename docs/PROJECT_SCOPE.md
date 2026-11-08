@@ -707,6 +707,22 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-08 (Case Copilot: linked cases in `get_case`, branch `case-monitor`.)** Found on a live
+DSP case: asked for a summary, Claude missed the linked Support case entirely, including the merchant
+side's finding that the Zomato RID in the merchant's URL doesn't match the one in Hub Config. Cause:
+`sync._dsp_ids` only follows linked cases of the DSP record type, so a Support case gets its DSP's
+emails but a DSP case never gets its Support case's. **Built (MCP shaping only, sync and verdict
+untouched):** `mcp_server.linked_refs` (parent + children, capped at 3) and `linked_view` (the linked
+case's verdict, done-so-far, saved checks, and its latest 10 timeline items not already in this case,
+owner reassignments dropped; `synced: false` + Salesforce link when Case Monitor doesn't hold it).
+`get_case` returns them as `linked_cases`, and its description tells Claude to read them.
+**Verified:** +4 tests (23 in `test_mcp_server.py`, 511 in `tests/monitor/`); live `case_detail` on
+the real DSP/Support pair returns the merchant's RID emails from the DSP side and the Zomato thread
+from the Support side, with no duplicates. **Not done (next chunk, needs owner's OK):** the verdict
+still scores a DSP case "our turn" when its Support case is really waiting on the merchant; the sync
+could take the linked Support case's waiting state into account. **Owner action:** add a line to the
+personal case-checks skill: "read `linked_cases` too".
+
 **2026-11-08 (Case Copilot, step 3 of 3: checks on the case page, branch `case-monitor`.)**
 Case Copilot is complete. **Built:** `service.case_checks` (newest 20, with rows) feeds
 `case_detail["checks"]`; the MCP `get_case` reuses it (10, without rows), so there's one reader.

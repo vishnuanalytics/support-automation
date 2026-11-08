@@ -158,3 +158,53 @@ def test_case_checks_reads_newest_first_for_one_case_and_can_skip_rows():
     log.clear()
     service.case_checks(sb, "t", "c", with_rows=False)
     assert all(not e[1].endswith(", rows") for e in log if e[0] == "select")
+
+
+def _item(at, text, source="Email"):
+    return {"at": at, "source": source, "party": "us", "who": "s", "text": text, "url": "u"}
+
+
+def test_linked_refs_follow_both_directions_and_cap():
+    case = {"parent": {"id": "p1", "case_number": "1", "record_type": "DSP"},
+            "children": [{"id": f"c{i}", "record_type": "Support"} for i in range(5)] + [{"id": None}]}
+    got = m.linked_refs(case)
+    assert [r for r, _ in got] == ["parent", "child", "child"] and len(got) == m.LINKED_CAP
+    assert m.linked_refs({"parent": None, "children": []}) == []
+
+
+def test_linked_view_drops_items_this_case_already_has_and_keeps_the_latest():
+    own = [_item("2026-10-26T11:32:52Z", "Do not see any items")]
+    support = _detail(case_number="00000043", record_type="Support", status="In Progress",
+                      waiting_raw="Aggregator", sub_status="Awaiting Revert")
+    support["timeline"] = ([_item("2026-10-26T11:32:52Z", "Do not see any items ", "DSP email")]
+                           + [_item(f"2026-11-{d:02d}", f"merchant {d}") for d in range(1, 11)])
+    support["brief"] = {"done_so_far": [{"text": "Asked about the RID"}]}
+    support["checks"] = [{"check_name": "ID-01", "summary": "no match", "rows": [[1]]}]
+    ref = {"id": "500y", "case_number": "00000043", "record_type": "Support", "status": "x", "url": "su"}
+    got = m.linked_view("child", ref, support, own)
+    assert got["synced"] and got["relation"] == "child" and got["record_type"] == "Support"
+    assert got["whose_turn"] == "us" and got["next_action"] == "Close it"
+    assert got["sub_status"] == "Awaiting Revert"
+    assert got["done_so_far"] == [{"text": "Asked about the RID"}]
+    assert got["recent"]["not_in_this_case"] == 10 and got["recent"]["shown"] == m.LINKED_RECENT
+    assert got["recent"]["items"][-1]["text"] == "merchant 10"
+    assert all("Do not see" not in i["text"] for i in got["recent"]["items"])
+    assert got["saved_checks"][0] == {"check_name": "ID-01", "card_id": None, "params": None,
+                                      "row_count": None, "summary": "no match", "saved_by": None,
+                                      "created_at": None}
+
+
+def test_linked_view_says_when_the_linked_case_is_not_synced():
+    ref = {"id": "500z", "case_number": "00000044", "record_type": "Support", "status": "New", "url": "zu"}
+    got = m.linked_view("child", ref, None, [])
+    assert got["synced"] is False and got["case_number"] == "00000044" and "Salesforce" in got["note"]
+
+
+def test_linked_view_skips_owner_reassignments():
+    d = _detail()
+    d["timeline"] = [_item("2026-11-01", "the RID differs"),
+                     _item("2026-11-02", "Owner: Tier 1 → Asha", "Field change"),
+                     _item("2026-11-03", "Waiting_on__c: Parent case → Aggregator", "Field change")]
+    got = m.linked_view("child", {"id": "500y"}, d, [])
+    assert [i["text"] for i in got["recent"]["items"]] == [
+        "the RID differs", "Waiting_on__c: Parent case → Aggregator"]

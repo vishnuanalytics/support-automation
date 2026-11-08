@@ -351,7 +351,12 @@ written to the audit log. In an external channel, external members can see the p
 - `get_case(case)`: everything the sync holds for one case, by case number or Salesforce ID:
   fields, whose turn and why, the brief, the timeline (capped), linked items, similar resolved
   cases, open duplicates, and `check_inputs` (location, business, platform IDs, case date) for
-  saved data checks.
+  saved data checks. `linked_cases` holds each parent/child case (up to 3) in brief: its own
+  whose-turn, next action, done-so-far, saved checks and its latest 10 timeline items that this
+  case's timeline doesn't already hold, with owner reassignments left out. A DSP case's merchant
+  thread sits on its Support case, and the sync only folds DSP emails into a Support case, not the
+  other way, so without this a DSP case's chat never saw the merchant side. A linked case Case
+  Monitor doesn't hold comes back `synced: false` with its Salesforce link.
 - `find_cases(query, stage, owner)`: search open cases.
 - `save_check(case, check_name, card_id, params, summary, rows)`: after Claude runs a saved data
   check for a case, it records what was run, its one-line reading and the first 50 result rows in

@@ -33,6 +33,8 @@ SIMILAR_CAP = 5
 CHECK_ROWS_CAP = 50
 CHECK_TEXT_CAP = 1000
 SAVED_CHECKS_SHOWN = 10
+LINKED_CAP = 3
+LINKED_RECENT = 10
 
 # Case fields the case checks (and most questions) need, in the order shown.
 CHECK_FIELDS = ("location_id", "biz_id", "business_id", "platform_id", "brand", "business_name")
@@ -104,6 +106,49 @@ def pack(detail: dict) -> dict[str, Any]:
                               "resolution_note": _cap(s.get("resolution_note"), 600)}
                              for s in (detail.get("similar") or [])[:SIMILAR_CAP]],
         "open_duplicates": detail.get("duplicates") or [],
+    }
+
+
+def linked_refs(case: dict) -> list[tuple[str, dict]]:
+    """The cases linked to this one, both directions, as (relation, ref)."""
+    refs = [("parent", case["parent"])] if case.get("parent") else []
+    refs += [("child", c) for c in case.get("children") or []]
+    return [(rel, ref) for rel, ref in refs if ref.get("id")][:LINKED_CAP]
+
+
+def _item_key(i: dict) -> tuple:
+    return (i.get("at"), (i.get("text") or "").strip())
+
+
+def linked_view(relation: str, ref: dict, detail: dict | None,
+                own_items: list[dict]) -> dict[str, Any]:
+    """A linked case in brief: its own verdict, what's been done, and its latest items
+    that this case's timeline doesn't already hold (a Support case carries its DSP emails)."""
+    head = {"relation": relation,
+            **{k: ref.get(k) for k in ("id", "case_number", "record_type", "status", "url")}}
+    if not detail:
+        return {**head, "synced": False,
+                "note": "Not in Case Monitor; read it live in Salesforce."}
+    from . import verdict as verdict_mod
+
+    case, v = detail["case"], detail["verdict"]
+    seen = {_item_key(i) for i in own_items}
+    # Owner reassignments are routing noise; they'd crowd out the messages.
+    fresh = [i for i in detail.get("timeline") or [] if _item_key(i) not in seen
+             and not (i.get("source") == "Field change" and (i.get("text") or "").startswith("Owner:"))]
+    recent = fresh[-LINKED_RECENT:]
+    return {
+        **head, "synced": True, "subject": case.get("subject"), "status": case.get("status"),
+        "owner": case.get("owner"), "waiting_raw": case.get("waiting_raw"),
+        "sub_status": case.get("sub_status"),
+        "whose_turn": v.get("ball"), "stage": verdict_mod.stage(v), "next_action": v.get("next_action"),
+        "done_so_far": (detail.get("brief") or {}).get("done_so_far") or [],
+        "recent": {"shown": len(recent), "not_in_this_case": len(fresh),
+                   "items": [{"at": i.get("at"), "source": i.get("source"), "party": i.get("party"),
+                              "who": i.get("who"), "text": _cap(i.get("text"), 800), "url": i.get("url")}
+                             for i in recent]},
+        "saved_checks": [saved_check_view(r) for r in (detail.get("checks") or [])[:SAVED_CHECKS_SHOWN]],
+        "synced_at": detail.get("timeline_at"),
     }
 
 
@@ -210,7 +255,9 @@ def build_server():
         """Everything Case Monitor knows about one case, by case number (e.g. 00001234) or
         Salesforce ID: fields, whose turn it is and why, the brief, the timeline of emails,
         comments and linked threads, linked items, IDs for case checks, and similar resolved
-        cases. Read-only; reflects the latest sync (see timeline.synced_at)."""
+        cases. linked_cases holds each parent/child case in brief (a DSP case's merchant
+        thread sits on its Support case): read it too. Read-only; reflects the latest sync
+        (see timeline.synced_at)."""
         sb, tenant = ctx()
         case_id = find_case_id(sb, tenant, case)
         if not case_id:
@@ -219,8 +266,12 @@ def build_server():
         detail = service.case_detail(sb, tenant, case_id)
         if not detail:
             return {"error": f"Case {case!r} could not be read."}
-        return {**pack(detail), "saved_checks": [saved_check_view(r) for r in
-                                                 (detail.get("checks") or [])[:SAVED_CHECKS_SHOWN]]}
+        own = detail.get("timeline") or []
+        linked = [linked_view(rel, ref, service.case_detail(sb, tenant, ref["id"]), own)
+                  for rel, ref in linked_refs(detail["case"])]
+        return {**pack(detail), "linked_cases": linked,
+                "saved_checks": [saved_check_view(r) for r in
+                                 (detail.get("checks") or [])[:SAVED_CHECKS_SHOWN]]}
 
     @server.tool()
     def save_check(case: str, check_name: str, params: dict, summary: str,
