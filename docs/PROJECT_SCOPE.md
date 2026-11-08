@@ -707,6 +707,21 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-08 (Case Copilot, step 2 of 3: save check results, branch `case-monitor`.)** Step 1 is
+committed (`ab27b06`). Owner's decisions: store result rows (not only the summary), and let the MCP
+server write to this one table. **Built:** migration `126_monitor_case_checks.sql` (append-only,
+RLS member-read via `tenant_members`, no write policy so only the service role writes; **applied by
+hand via Supabase MCP**). MCP tool `save_check(case, check_name, card_id, params, summary, rows)`
+validates input, keeps the first 50 rows and records the full `row_count`. `get_case` now returns
+`saved_checks` (the 10 latest, without rows). The server's only write is to its own table, never
+Salesforce, Slack, GitHub or the BI tool (`docs/CASE_MONITOR.md`). **Verified:** +6 tests (17 in
+`tests/monitor/test_mcp_server.py`); offline suite 1,874 pass, 1 pre-existing local failure
+(`test_sf_pubsub_plan::test_cli_is_a_noop_without_sf_creds`, local SF creds without a private key,
+fails without this change too); migration-drift test passes after applying. Driven over the real MCP
+protocol: saved a real MNU-01 result on a live case, an unknown case is refused, and `get_case`
+shows it back. **Next:** step 3, the case page shows saved checks (rows included) and an "Ask Claude
+about this case" button that copies a ready prompt. UI only plus one read in `service.case_detail`.
+
 **2026-11-08 (Case Copilot, step 1 of 3: ask Claude about a case, branch `case-monitor`.)**
 The owner wants an AI they can question about any case, using Salesforce, Slack, GitHub and the BI
 tool's saved case-check questions. Constraints, from the owner: the BI tool is reachable **only

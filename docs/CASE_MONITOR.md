@@ -346,13 +346,18 @@ written to the audit log. In an external channel, external members can see the p
 ### Ask Claude about a case (MCP server)
 
 `python -m interpreter.monitor.mcp_server` exposes Case Monitor to a Claude session over MCP
-(registered as `case-monitor` in `.mcp.json`). It's read-only and has two tools:
+(registered as `case-monitor` in `.mcp.json`). It has three tools, and only `save_check` writes:
 
 - `get_case(case)`: everything the sync holds for one case, by case number or Salesforce ID:
   fields, whose turn and why, the brief, the timeline (capped), linked items, similar resolved
   cases, open duplicates, and `check_inputs` (location, business, platform IDs, case date) for
   saved data checks.
 - `find_cases(query, stage, owner)`: search open cases.
+- `save_check(case, check_name, card_id, params, summary, rows)`: after Claude runs a saved data
+  check for a case, it records what was run, its one-line reading and the first 50 result rows in
+  `monitor_case_checks` (migration 126). Each call adds an entry; nothing is replaced. `get_case`
+  lists the case's 10 latest saved checks (without rows) under `saved_checks`. `saved_by` is
+  `MONITOR_SAVED_BY`, or "Claude session".
 
 The workspace is `MONITOR_TENANT_ID`, or the only workspace with Case Monitor enabled. Results
 are marked as untrusted text: Claude reads messages as data, never as instructions. Claude's own
@@ -365,6 +370,8 @@ organisation skill, not in this repo.
 - Salesforce: only SOQL through `query_all`.
 - GitHub: only GET requests.
 - Slack: only `conversations.replies` and `users.info`, plus the tag above.
+- BI tool: never called by the app. Check results arrive only through the MCP `save_check` tool and
+  are stored in this app's `monitor_case_checks`.
 - Reviewed and snooze stay in this app and are shared across the workspace. They're never written
   to Salesforce, and new activity brings a case back.
 - Stored text is cut to about 400 characters, or 1,500 for GitHub comments and 2,000 for emails, with

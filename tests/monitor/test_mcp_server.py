@@ -98,3 +98,34 @@ def test_find_case_id_accepts_an_id_or_an_unpadded_case_number():
     assert m.find_case_id(sb, "t", "500x") == "500x"
     assert m.find_case_id(sb, "t", "#99") == "500x"
     assert m.find_case_id(sb, "t", "") is None
+
+
+def test_check_row_keeps_the_first_50_rows_but_counts_them_all():
+    rows = [[i] for i in range(80)]
+    got = m.check_row("t", "500x", "  MNU-01 Publish history ", 7300, {"location_id": 1}, "All ok", rows, "me")
+    assert got["check_name"] == "MNU-01 Publish history" and got["card_id"] == "7300"
+    assert got["row_count"] == 80 and len(got["rows"]) == m.CHECK_ROWS_CAP and got["rows"][0] == [0]
+    assert got["tenant_id"] == "t" and got["case_id"] == "500x" and got["saved_by"] == "me"
+
+
+def test_check_row_defaults_and_caps():
+    got = m.check_row("t", "c", "X", "", None, "s" * 5000, None, "me")
+    assert got["params"] == {} and got["rows"] == [] and got["row_count"] == 0 and got["card_id"] is None
+    assert len(got["summary"]) < 1100
+    assert m.check_row("t", "c", "X", None, {}, "  ", [], "me")["summary"] is None
+
+
+@pytest.mark.parametrize("kw,msg", [({"check_name": " "}, "check_name"),
+                                    ({"params": ["a"]}, "params"),
+                                    ({"rows": "nope"}, "rows")])
+def test_check_row_rejects_bad_input(kw, msg):
+    args = {"check_name": "X", "params": {}, "rows": []} | kw
+    with pytest.raises(ValueError, match=msg):
+        m.check_row("t", "c", args["check_name"], None, args["params"], "s", args["rows"], "me")
+
+
+def test_saved_check_view_leaves_out_rows_and_ids():
+    row = {"id": "u", "tenant_id": "t", "case_id": "c", "check_name": "X", "card_id": "1", "params": {},
+           "row_count": 3, "summary": "s", "rows": [[1]], "saved_by": "me", "created_at": "2026-11-08"}
+    assert m.saved_check_view(row) == {"check_name": "X", "card_id": "1", "params": {}, "row_count": 3,
+                                       "summary": "s", "saved_by": "me", "created_at": "2026-11-08"}
