@@ -197,3 +197,106 @@ def test_labelling_stops_at_its_time_limit_and_leaves_replies_as_real(monkeypatc
     ticks = iter([0, 0, 100, 100, 100])
     replies.label_latest("t", rows, Store(), {"llm_enabled": True}, clock=lambda: next(ticks))
     assert len(calls) == 1 and sum("reply" in case for case, _ in rows) == 1
+
+
+@pytest.mark.parametrize("text,want", [
+    ("Thanks!", "thanks"),
+    ("Thank you so much", "thanks"),
+    ("ok", "thanks"),
+    ("Images are visible now, thanks", "confirmed"),
+    ("Its working now", "confirmed"),
+    ("You can close this case", "confirmed"),
+    # Hedged, questioning or mixed: left to the LLM, never guessed.
+    ("Still not working", None),
+    ("Is it fixed now?", None),
+    ("Not visible now", None),
+    ("It is working but prices are wrong", None),
+    ("Thanks, but orders are still missing", None),
+    ("Please share an update", None),
+    ("", None),
+    ("Hi", None),
+    ("Hello team", None),
+])
+def test_customer_rule_kind(text, want):
+    assert replies.customer_rule_kind(text) == want
+
+
+class _LabelStore:
+    def __init__(self, known=None):
+        self.known, self.saved = known or {}, {}
+
+    def reply_labels(self, tenant_id, hashes):
+        return {h: v for h, v in self.known.items() if h in hashes}
+
+    def save_reply_labels(self, tenant_id, labels):
+        self.saved.update(labels)
+
+
+def _merchant(text, at="2026-11-05T10:00:00Z"):
+    return {"party": "customer", "text": text, "at": at}
+
+
+def test_label_customer_attaches_the_label_and_when_it_was_said():
+    case, store = {}, _LabelStore()
+    replies.label_customer("t", [(case, _merchant("Its working now"))], store, {})
+    assert case["customer_reply"] == {"kind": "confirmed", "summary": "", "at": "2026-11-05T10:00:00Z"}
+    # Stored under its own hash, so it can't clash with a third-party label on the same text.
+    assert list(store.saved) == [replies.customer_key("Its working now")]
+    assert replies.customer_key("Its working now") != replies.text_hash("Its working now")
+
+
+def test_label_customer_ignores_other_parties():
+    case = {}
+    replies.label_customer("t", [(case, {"party": "third_party", "text": "Its working now"})],
+                           _LabelStore(), {})
+    assert "customer_reply" not in case
+
+
+def test_a_failed_customer_label_leaves_the_reply_needing_us(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("down")
+    monkeypatch.setattr(replies, "customer_llm_kind", boom)
+    case = {}
+    replies.label_customer("t", [(case, _merchant("The menu looks different on two outlets today."))],
+                           _LabelStore(), {"llm_enabled": True})
+    assert "customer_reply" not in case
+
+
+def test_customer_llm_kind_redacts_and_defaults_to_needs_reply():
+    from interpreter import llm
+
+    seen = {}
+
+    def fake(system, user, **kw):
+        seen.update(kw, user=user)
+        return '{"kind": "maybe", "summary": "Unclear"}'
+
+    got = replies.customer_llm_kind("Call me on a@b.co", "t", complete=fake)
+    assert got["kind"] == "needs_reply" and seen["model"] == llm.FAST_MODEL
+    assert "a@b.co" not in seen["user"]
+
+
+def test_customer_llm_is_used_only_when_enabled(monkeypatch):
+    calls = []
+    monkeypatch.setattr(replies, "customer_llm_kind",
+                        lambda *a, **k: calls.append(1) or {"kind": "confirmed", "summary": "Fixed"})
+    text = "Orders from both outlets are coming through properly again after the change."
+    off, on = {}, {}
+    replies.label_customer("t", [(off, _merchant(text))], _LabelStore(), {})
+    replies.label_customer("t", [(on, _merchant(text))], _LabelStore(), {"llm_enabled": True})
+    assert calls == [1] and "customer_reply" not in off and on["customer_reply"]["kind"] == "confirmed"
+
+
+def test_a_stale_rule_label_is_dropped_when_the_rules_no_longer_give_it():
+    store = _LabelStore({replies.customer_key("Hi"): {"kind": "thanks", "summary": "", "method": "rule"}})
+    case = {}
+    replies.label_customer("t", [(case, _merchant("Hi"))], store, {})
+    assert "customer_reply" not in case
+
+
+def test_an_llm_label_is_kept_when_no_rule_applies():
+    text = "Orders from both outlets are coming through properly again after the change."
+    store = _LabelStore({replies.customer_key(text): {"kind": "confirmed", "summary": "Fixed", "method": "llm"}})
+    case = {}
+    replies.label_customer("t", [(case, _merchant(text))], store, {})
+    assert case["customer_reply"]["kind"] == "confirmed"

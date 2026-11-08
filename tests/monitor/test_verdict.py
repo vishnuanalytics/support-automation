@@ -383,3 +383,50 @@ def test_a_customer_reply_outranks_ready_to_close(cfg):
 
 def test_ready_to_close_has_its_own_stage():
     assert v.stage({"ball": "us", "ready_to_close": True}) == "close"
+
+
+def merchant_said(kind, at=None, summary=""):
+    return {"kind": kind, "summary": summary, "at": at or ago(1)}
+
+
+def test_a_merchant_confirmation_makes_the_case_ready_to_close(cfg):
+    c = agg(last_reply_from="customer", customer_reply=merchant_said("confirmed", summary="Images show now"))
+    r = v.compute(c, [slack(msg(True, 5))], cfg, NOW)
+    assert r["ball"] == "us" and r["ready_to_close"] and v.stage(r) == "close"
+    assert r["signal"]["code"] == "customer_confirmed" and r["signal"]["text"] == "Images show now"
+    assert "customer_replied" not in {x["code"] for x in r["reasons"]}
+
+
+def test_a_thank_you_alone_doesnt_make_it_our_turn(cfg):
+    c = agg(last_reply_from="customer", customer_reply=merchant_said("thanks"))
+    r = v.compute(c, [slack(msg(True, 5))], cfg, NOW)
+    assert r["ball"] == "third_party" and not r["ready_to_close"]
+    codes = {x["code"]: x["points"] for x in r["reasons"]}
+    assert codes.get("customer_thanks") == 0 and "customer_replied" not in codes
+
+
+@pytest.mark.parametrize("label", [None, "needs_reply"])
+def test_a_merchant_reply_without_a_settling_label_still_needs_us(cfg, label):
+    extra = {"customer_reply": merchant_said(label)} if label else {}
+    r = v.compute(agg(last_reply_from="customer", **extra), [slack(msg(True, 5))], cfg, NOW)
+    assert r["ball"] == "us" and r["signal"]["code"] == "customer_replied"
+    assert {x["code"]: x["points"] for x in r["reasons"]}["customer_replied"] == 15
+
+
+def _merchant_email(at):
+    return {"kind": "email", "ok": True, "url": "email:1", "label": "DSP email",
+            "messages": [{"who": "owner@shop.test", "ours": False, "party": "customer", "at": at,
+                          "text": "Its working now"}]}
+
+
+def test_a_labelled_merchant_email_on_the_thread_is_read(cfg):
+    at = ago(1)
+    c = agg(customer_reply=merchant_said("confirmed", at=at))
+    r = v.compute(c, [_merchant_email(at)], cfg, NOW)
+    assert r["signal"]["code"] == "customer_confirmed" and r["ready_to_close"]
+
+
+def test_a_label_for_a_different_message_is_not_applied(cfg):
+    c = agg(customer_reply=merchant_said("confirmed", at=ago(30)))
+    r = v.compute(c, [_merchant_email(ago(1))], cfg, NOW)
+    assert r["signal"]["code"] == "customer_replied_email" and not r["ready_to_close"]

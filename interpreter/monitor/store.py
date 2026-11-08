@@ -131,7 +131,7 @@ class SupabaseStore:
             self.sb.table("monitor_evidence").upsert(payload[start:start + _CHUNK]).execute()
 
     def reply_labels(self, tenant_id: str, hashes: list[str]) -> dict[str, dict]:
-        rows = (self.sb.table("monitor_reply_labels").select("text_hash, kind, summary")
+        rows = (self.sb.table("monitor_reply_labels").select("text_hash, kind, summary, method")
                 .eq("tenant_id", tenant_id).in_("text_hash", hashes).execute().data or [])
         return {r["text_hash"]: r for r in rows}
 

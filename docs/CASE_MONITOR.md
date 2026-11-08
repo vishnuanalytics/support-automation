@@ -135,6 +135,15 @@ dependency, which is expected, so it isn't scored as a mismatch; overdue still c
 reply on the case outranks this, because someone has to read it first. Alerts shows "Ready to close"
 once, when a case first gets there.
 
+**The merchant's latest message is read too.** When the newest message on a case, including the
+case's own emails, is from the customer, it is labelled `confirmed` (fixed, working, OK to close),
+`thanks` (only thanks or an acknowledgement) or `needs_reply` (anything else). Short, clear
+messages are labelled by rules for free. A hedge such as "still", "not", "but" or a question mark
+sends the message to the LLM instead, and a greeting alone ("Hi") is never thanks. The rules still
+decide: `confirmed` makes the case ready to close, `thanks` stops the message from making it our
+turn and lets the other signals decide, and `needs_reply`, a failed call or no label means our turn,
+as before. Labels are cached per message in `monitor_reply_labels`, under their own hash.
+
 ### Follow-ups and alerts
 
 **Follow-ups** lists what each agent owes today: cases to reply to, cases to raise, and waiting cases

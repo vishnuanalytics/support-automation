@@ -707,6 +707,30 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-08 (Case Monitor reads the merchant's latest message, branch `case-monitor`.)** Before
+this, only a third party's reply was labelled. Any merchant message, from `Activity_Status__c =
+Merchant Replied` or a customer email on the thread, meant "our turn, read and respond", so "Thanks,
+it works now" looked the same as "Still broken". Now `replies.label_customer` labels the newest
+message overall when it's the merchant's. The newest message now includes the case's own emails, so
+`sync.run` computes it before the verdict. Labels are `confirmed`, `thanks` and `needs_reply`. Short,
+clear text goes through rules: a hedge (still/not/but/?) is never settled by a rule, and a bare
+greeting is never thanks. The rest goes to the FAST LLM within the existing per-sync budget and time
+limit. The text is PII-redacted, and anything unknown becomes `needs_reply`. Labels are cached in
+`monitor_reply_labels` under a `customer:`-prefixed hash, so there's no migration. A cached rule label
+the rules no longer give is dropped and the text is labelled again (`store.reply_labels` now returns
+`method`). Verdict: `confirmed` gives a new `customer_confirmed` close signal, so the case is ready
+to close. `thanks` stops the merchant message from making it our turn and scores 0, not 15.
+`needs_reply` or no label behaves as before. On the thread, a label applies only to the exact
+message it was made for (matched by `at`). Tests: +29 (488 in `tests/monitor/`, 1,858 offline);
+`npm run build` passes.
+**Live (17:08 UTC sync):** 9 open cases end on a merchant message, and all 9 are `needs_reply`. They
+were checked by reading the texts ("still failing", "remains unresolved", "PFA", "please confirm…").
+None is `confirmed` today, so the close path hasn't fired on real data yet. One bug was found on
+live data and fixed in this chunk: the first rule labelled a bare "Hi" (a test case, 00128957) as
+`thanks`.
+**Not browser-checked by a person.** Next: review the overdue/stale weighting with the owner (58 of
+86 critical).
+
 **2026-11-08 (Case Monitor: "ready to close" stage, branch `case-monitor`.)** Prompted by case
 00130851: the lead saw it as closed, but only its parent DSP case had been resolved, by the agent,
 that day. The Support case was still open and the merchant hadn't been told. The monitor was right

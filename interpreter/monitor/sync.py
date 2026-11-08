@@ -349,12 +349,18 @@ def run(tenant_id: str, store: Any, reader: Any, evidence_readers: dict, cfg: di
             evidence_by_case[case["id"]] = evidence
         replies.label_latest(tenant_id, [(c, verdict.latest_message(evidence_by_case[c["id"]]))
                                          for c in cases], store, cfg)
+        # The newest message overall, including the case's own emails, so the
+        # merchant's latest word is labelled before the verdict reads it.
+        newest = {}
+        for case in cases:
+            raw = timelines.get(case["id"]) or (prior.get(case["id"]) or {}).get("timeline")
+            newest[case["id"]] = verdict.latest_message(
+                evidence_by_case[case["id"]] + [case_emails(case, raw, cfg)])
+        replies.label_customer(tenant_id, [(c, newest[c["id"]]) for c in cases], store, cfg)
         for case in cases:
             evidence = evidence_by_case[case["id"]]
             v = verdict.compute(case, evidence, cfg, now)
-            raw = timelines.get(case["id"]) or (prior.get(case["id"]) or {}).get("timeline")
-            v["latest"] = verdict.latest_message(
-                evidence + [case_emails(case, raw, cfg)])
+            v["latest"] = newest[case["id"]]
             rows.append({"case": case, "verdict": v, "timeline": timelines.get(case["id"])})
 
         store.save_cases(tenant_id, rows, now)

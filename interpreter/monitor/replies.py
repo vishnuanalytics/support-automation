@@ -72,6 +72,40 @@ SYSTEM = (
 )
 
 
+# The merchant's own latest message. Same contract: a label feeds the rules,
+# never decides whose turn it is, and anything uncertain means "needs a reply".
+CUSTOMER_CONFIRMED, CUSTOMER_THANKS, CUSTOMER_NEEDS_REPLY = "confirmed", "thanks", "needs_reply"
+CUSTOMER_KINDS = (CUSTOMER_CONFIRMED, CUSTOMER_THANKS, CUSTOMER_NEEDS_REPLY)
+_CUSTOMER_KEY = "customer:"
+_CUSTOMER_MAX_RULE_LENGTH = 80
+_THANKS = re.compile(r"^(hi|hello|hey|dear|team|ok(ay)?|sure|noted|got it|great|perfect|"
+                     r"thanks?( a lot| so much)?|thank you( so much| very much)?|ty|"
+                     r"[\s,.!:-])+$", re.I)
+# A greeting alone ("Hi") is usually a cut-off email or an image, not thanks.
+_THANKS_WORD = re.compile(r"\b(ok(ay)?|sure|noted|got it|great|perfect|thanks?|thank you|ty)\b", re.I)
+# Short, unhedged "it works now" / "you can close". A question mark, "still", "not" or
+# "but" anywhere sends it to the LLM instead, since those usually mean it isn't done.
+_CONFIRMED = re.compile(r"\b(it'?s|it is|its|now|all)\s+(working|fixed|resolved|showing|visible|fine|good)\b|"
+                        r"\b(issue|problem)\s+(is\s+)?(resolved|fixed|sorted)\b|"
+                        r"\b(working|fixed|resolved|showing|visible|fine)\s+now\b|"
+                        r"\b(you\s+)?(can|may)\s+close\b|\bworking fine\b", re.I)
+_HEDGE = re.compile(r"\?|\b(still|not|n't|but|however|again|except)\b", re.I)
+
+CUSTOMER_SYSTEM = (
+    "You sort one email a restaurant (the merchant) sent to its software vendor's support team "
+    "about an open support case. Decide what it means for that support team.\n"
+    "Answer as JSON: {\"kind\": ..., \"summary\": ...}. Kinds:\n"
+    "- confirmed: the merchant says the issue is fixed, working, resolved, or the case can be "
+    "closed, with nothing still wrong. Examples: 'Images are showing now, thanks', 'All good, you "
+    "can close this', 'Orders are coming through again'.\n"
+    "- thanks: only thanks or an acknowledgement, with no new problem, question or request. "
+    "Examples: 'Thanks for the update', 'Noted, will wait', 'Ok sure'.\n"
+    "- needs_reply: anything else: the problem persists or came back, a new issue, a question, "
+    "a complaint, details or a request, or a mix of thanks and any of those.\n"
+    "When unsure, answer needs_reply. summary is one short sentence using only what the email says."
+)
+
+
 def core_text(text: str | None) -> str:
     """Only what this reply says: no quoted thread, footer or sign-off. A sign-off
     only counts near the end, so "Thank you for reaching out." keeps what follows."""
@@ -100,6 +134,83 @@ def rule_kind(text: str | None) -> str | None:
     if _MENTIONS.match(bare) or _SLACK_MENTION.search(bare):
         return "internal_tag"
     return "ack" if _ACK.match(bare) or _QUEUED.search(bare) else None
+
+
+def customer_key(text: str) -> str:
+    """Merchant labels live in the same table under their own hashes."""
+    return text_hash(_CUSTOMER_KEY + text)
+
+
+def _is_thanks(bare: str) -> bool:
+    return bool(_THANKS.match(bare) and _THANKS_WORD.search(bare))
+
+
+def customer_rule_kind(text: str | None) -> str | None:
+    bare = re.sub(r"\s+", " ", core_text(text)).strip()
+    if not bare:
+        # A bare "Thanks!" is all sign-off, so core_text leaves nothing: judge the raw text.
+        bare = re.sub(r"\s+", " ", text or "").strip()
+        return CUSTOMER_THANKS if bare and len(bare) <= 30 and _is_thanks(bare) else None
+    if len(bare) > _CUSTOMER_MAX_RULE_LENGTH:
+        return None
+    if _is_thanks(bare):
+        return CUSTOMER_THANKS
+    if _CONFIRMED.search(bare) and not _HEDGE.search(bare):
+        return CUSTOMER_CONFIRMED
+    return None
+
+
+def customer_llm_kind(text: str, tenant_id: str, complete: Any = None) -> dict[str, str]:
+    from interpreter import llm
+
+    raw = (complete or llm.complete)(CUSTOMER_SYSTEM, redact_pii(core_text(text))[:1500],
+                                     max_tokens=200, json_object=True, tenant_id=tenant_id,
+                                     model=llm.FAST_MODEL)
+    body = json.loads(raw)
+    kind = body.get("kind")
+    if kind not in CUSTOMER_KINDS:
+        kind = CUSTOMER_NEEDS_REPLY
+    return {"kind": kind, "summary": str(body.get("summary") or "")[:200], "method": "llm"}
+
+
+def label_customer(tenant_id: str, rows: list[dict], store: Any, cfg: dict,
+                   clock: Any = time.monotonic) -> None:
+    """Attach `customer_reply` to each case whose latest message is the merchant's.
+
+    Unlabelled (no budget, LLM off, or a failed call) means no `customer_reply`,
+    which the verdict treats exactly as before: a merchant reply needs us."""
+    deadline = clock() + LABEL_SECONDS_PER_SYNC
+    pending: dict[str, list[dict]] = {}
+    for case, latest in rows:
+        if latest and latest.get("party") == "customer" and latest.get("text"):
+            pending.setdefault(customer_key(latest["text"]), []).append({"case": case, "m": latest})
+    if not pending:
+        return
+    known = store.reply_labels(tenant_id, list(pending))
+    fresh: dict[str, dict] = {}
+    budget = MAX_LLM_PER_SYNC if cfg.get("llm_enabled") else 0
+    for key, group in pending.items():
+        text = group[0]["m"]["text"]
+        kind = customer_rule_kind(text)
+        if not kind and (known.get(key) or {}).get("method") == "rule":
+            known.pop(key)   # the rules changed and no longer settle this text: label it afresh
+        if kind:
+            if (known.get(key) or {}).get("kind") != kind:
+                fresh[key] = {"kind": kind, "summary": "", "method": "rule"}
+        elif key not in known and budget > 0 and clock() < deadline:
+            budget -= 1
+            try:
+                fresh[key] = customer_llm_kind(text, tenant_id)
+            except Exception as e:  # noqa: BLE001 -- unlabelled means it needs a reply
+                log.warning("customer reply label failed: %s", type(e).__name__)
+    store.save_reply_labels(tenant_id, fresh)
+    labels = {**known, **fresh}
+    for key, group in pending.items():
+        label = labels.get(key)
+        if label and label.get("kind") in CUSTOMER_KINDS:
+            for item in group:
+                item["case"]["customer_reply"] = {"kind": label["kind"], "summary": label.get("summary"),
+                                                  "at": item["m"].get("at")}
 
 
 def llm_kind(text: str, tenant_id: str, complete: Any = None) -> dict[str, str]:

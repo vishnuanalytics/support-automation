@@ -18,7 +18,7 @@ US, ENGINEERING, THIRD_PARTY, AI, CUSTOMER, UNKNOWN = (
 DEPENDENCY_PARTIES = (ENGINEERING, THIRD_PARTY)
 # Signals meaning the outside work is finished and only the case is left open:
 # the next step is to tell the customer and close it, not to investigate.
-CLOSE_SIGNALS = ("dsp_resolved",)
+CLOSE_SIGNALS = ("dsp_resolved", "customer_confirmed")
 
 
 # What a real third-party reply asks of us.
@@ -113,6 +113,15 @@ def _signals(case: dict, evidence: list[dict], cfg: dict) -> list[dict]:
     customer = cfg.get("customer_label", "Customer")
     case_url = case.get("url")
     reply_kind = (case.get("reply") or {}).get("kind")
+    # What the customer's latest message says, when it was labelled. No label
+    # means "needs a reply", exactly as before labels existed.
+    creply = case.get("customer_reply") or {}
+    ckind = creply.get("kind")
+
+    def confirmed(source: dict) -> dict:
+        return {"ball": US, "code": "customer_confirmed", "source": source,
+                "text": creply.get("summary") or f"{customer} confirmed it's fixed",
+                "action": f"The {customer.lower()} confirmed it's fixed: close the case."}
 
     ai = case.get("ai") or {}
     src = _source("AI agent run", ai.get("url"))
@@ -135,10 +144,13 @@ def _signals(case: dict, evidence: list[dict], cfg: dict) -> list[dict]:
     customer_spoke = case.get("last_reply_from") == "customer" and not raised_case
     if customer_spoke:
         field = cfg["fields"].get("last_reply_from") or "last reply"
-        out.append({"ball": US, "code": "customer_replied",
-                    "source": _source(f"Salesforce: {field}", case_url),
-                    "text": f"{customer} replied last",
-                    "action": f"Read the {customer.lower()}'s reply and respond."})
+        source = _source(f"Salesforce: {field}", case_url)
+        if ckind == "confirmed":
+            out.append(confirmed(source))
+        elif ckind != "thanks":   # only thanks: nothing to answer, other signals decide
+            out.append({"ball": US, "code": "customer_replied", "source": source,
+                        "text": f"{customer} replied last",
+                        "action": f"Read the {customer.lower()}'s reply and respond."})
 
     # The raising record type tracks only the waiting field, not a sub-status.
     raised = case.get("record_type") == cfg.get("dependency_record_type")
@@ -195,7 +207,12 @@ def _signals(case: dict, evidence: list[dict], cfg: dict) -> list[dict]:
         elif ev["kind"] in ("slack", "email") and waiting == THIRD_PARTY and last \
                 and not ev.get("internal"):
             channel = "Slack" if ev["kind"] == "slack" else "email"
-            if last.get("party") == CUSTOMER:
+            labelled = ckind and creply.get("at") == last.get("at")
+            if last.get("party") == CUSTOMER and labelled and ckind == "confirmed":
+                out.append(confirmed(src))
+            elif last.get("party") == CUSTOMER and labelled and ckind == "thanks":
+                pass
+            elif last.get("party") == CUSTOMER:
                 out.append({"ball": US, "code": "customer_replied_email", "source": src,
                             "text": f"{customer} ({last.get('who')}) replied on the email thread",
                             "action": f"Read the {customer.lower()}'s email and respond."})
@@ -364,10 +381,14 @@ def compute(case: dict, evidence: list[dict], cfg: dict, now: datetime) -> dict[
             if ball == THIRD_PARTY and note:
                 action = f"{action} {note}"
 
+    ckind = (case.get("customer_reply") or {}).get("kind")
     if case.get("last_reply_from") == "customer" and \
             case.get("record_type") != cfg.get("dependency_record_type"):
-        add(15, "customer_replied", f"{cfg.get('customer_label', 'Customer')} replied last",
-            sf("last_reply_from"))
+        who = cfg.get("customer_label", "Customer")
+        if ckind == "thanks":
+            add(0, "customer_thanks", f"{who} only said thanks", sf("last_reply_from"))
+        elif ckind != "confirmed":
+            add(15, "customer_replied", f"{who} replied last", sf("last_reply_from"))
 
     points = {"urgent": 10, "high": 5}.get((case.get("priority") or "").lower())
     if points:

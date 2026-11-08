@@ -1018,3 +1018,17 @@ def test_counts_include_ready_to_close():
     rows = [{"verdict": _v(ball="us", mismatch=False, ready_to_close=True, level="high")},
             {"verdict": _v(mismatch=False, level="low")}]
     assert sync.counts(rows)["ready_to_close"] == 1
+
+
+def test_a_merchant_saying_its_fixed_makes_the_case_ready_to_close():
+    class MerchantWrote(FakeReader):
+        def timeline(self, case_id):
+            return {"emails": [{"from": "owner@shop.test", "incoming": True, "at": "2026-11-05T11:30:00Z",
+                                "text": "Its working now"}], "comments": [], "history": []}
+
+    store = FakeStore()
+    run(store, MerchantWrote([case("1", last_reply_from="customer")]))
+    got = store.saved[0]
+    assert got["case"]["customer_reply"]["kind"] == "confirmed"
+    assert got["verdict"]["ready_to_close"] and got["verdict"]["signal"]["code"] == "customer_confirmed"
+    assert store.finished[1]["ready_to_close"] == 1

@@ -51,7 +51,7 @@ const REASON_GROUP: Record<string, string> = {
   third_party_replied: "Aggregator replied", customer_replied: "Merchant replied",
   reply_bug_raised: "Raised as a bug", reply_solution: "Solution shared",
   reply_needs_info: "Needs more details", reply_update: "Aggregator update", reply_no_answer: "No real answer",
-  customer_replied_email: "Merchant replied",
+  customer_replied_email: "Merchant replied", customer_confirmed: "Merchant confirmed",
   ai_handoff: "AI handed over", dsp_resolved: "DSP resolved",
 };
 
