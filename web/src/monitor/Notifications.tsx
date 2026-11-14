@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { Button, EmptyState, Segmented, Tag } from "../ui";
+import { Button, EmptyState, Input, Segmented, Tag } from "../ui";
 import { daysSince, withoutMirrors } from "./tone";
 import { formatAge, formatTime } from "./util";
 import type { QueueCase, TechIssue } from "./types";
@@ -24,6 +24,7 @@ export type Notice = {
   text: string | null;
   url: string | null;
   unread: boolean;
+  issues: { number: string; url: string }[]; // the GitHub issues behind it
   // Still waiting on us, however old: it stays listed until the case moves on.
   pending: boolean;
   why: string | null;
@@ -90,6 +91,16 @@ function desktop(title: string, body: string, onClick: () => void) {
   shown.add(n);
 }
 
+/** A case's GitHub issues, by number. */
+export function githubIssues(c: Pick<QueueCase, "links">) {
+  const seen = new Map<string, string>();
+  for (const l of c.links ?? []) {
+    const m = l.kind === "github" ? /\/(?:issues|pull)\/(\d+)/.exec(l.url) : null;
+    if (m && !seen.has(m[1])) seen.set(m[1], l.url);
+  }
+  return [...seen].map(([number, url]) => ({ number, url }));
+}
+
 function day(at: string) {
   return new Date(at).toLocaleDateString(undefined, { day: "numeric", month: "short" });
 }
@@ -104,10 +115,12 @@ export function notices(cases: QueueCase[], views: Record<string, string>, issue
   const byId = new Map(open.map((c) => [c.id, c]));
   const out = new Map<string, Notice>();
   const unread = (id: string, at: string) => !views[id] || new Date(at) > new Date(views[id]);
-  const add = (n: Omit<Notice, "unread">) => {
-    const prior = out.get(n.id);
+  const add = (raw: Omit<Notice, "unread" | "issues">, issueList: Notice["issues"]) => {
+    const prior = out.get(raw.id);
+    const merged = [...(prior?.issues ?? []), ...issueList].filter((x, i, a) => a.findIndex((y) => y.number === x.number) === i);
+    const n = { ...raw, issues: merged };
     if (prior && prior.at >= n.at) {
-      if (n.pending && !prior.pending) out.set(n.id, { ...prior, pending: true, why: n.why });
+      out.set(n.id, { ...prior, issues: merged, ...(n.pending && !prior.pending ? { pending: true, why: n.why } : {}) });
       return;
     }
     out.set(n.id, { ...n, pending: n.pending || !!prior?.pending, why: n.why ?? prior?.why ?? null,
@@ -125,7 +138,7 @@ export function notices(cases: QueueCase[], views: Record<string, string>, issue
     if (!pending && new Date(l.at).getTime() < since) continue;
     add({ id: c.id, caseId: c.id, caseNumber: c.case_number, subject: c.subject, owner: c.owner, kind,
           who: l.who, source: l.source, at: l.at, text: l.text, url: l.url, pending,
-          why: pending ? `Replied ${day(l.at)} and nobody has acted on it since.` : null });
+          why: pending ? `Replied ${day(l.at)} and nobody has acted on it since.` : null }, githubIssues(c));
   }
 
   for (const i of issues) {
@@ -139,7 +152,7 @@ export function notices(cases: QueueCase[], views: Record<string, string>, issue
             url: i.url, pending: true,
             why: `No open case links this issue.${i.reporter ? ` Raised by ${i.reporter}` : ""}`
                + `${i.biz_id ? ` for ${i.biz_name ?? "Biz"} (${i.biz_id})` : ""}.`
-               + (done ? " Engineering has answered it." : "") });
+               + (done ? " Engineering has answered it." : "") }, [{ number: i.issue, url: i.url }]);
       continue;
     }
     if (!done) continue;
@@ -151,7 +164,8 @@ export function notices(cases: QueueCase[], views: Record<string, string>, issue
       add({ id: c.id, caseId: c.id, caseNumber: c.case_number, subject: c.subject, owner: c.owner,
             kind: "engineering", who: i.last_reply_by, source: `GitHub #${i.issue}`, at,
             text: i.reason || null, url: i.url, pending: true,
-            why: `${i.tech_status} on GitHub ${day(at)}. The case still says it's waiting on engineering.${told}` });
+            why: `${i.tech_status} on GitHub ${day(at)}. The case still says it's waiting on engineering.${told}` },
+          [{ number: i.issue, url: i.url }]);
     }
   }
   return [...out.values()].sort((a, b) => Number(b.unread) - Number(a.unread)
@@ -246,9 +260,14 @@ export function NotificationsView({ state, onOpen, thirdParty }: {
   state: ReturnType<typeof useNotifications>; onOpen: (id: string) => void; thirdParty: string;
 }) {
   const [filter, setFilter] = useState<Filter>("all");
+  const [q, setQ] = useState("");
   const { list, unread, pending, markViewed, desktopEnabled, enableDesktop, sound, toggleSound, test } = state;
   if (!list) return null;
-  const shownList = list.filter((n) => filter === "all" || (filter === "pending" ? n.pending : n.kind === filter));
+  const query = q.trim().replace(/^#/, "").replace(/^0+/, "");
+  const matches = (n: Notice) => !query || (n.caseNumber ?? "").replace(/^0+/, "").includes(query)
+    || n.issues.some((x) => x.number.endsWith(query));
+  const shownList = list.filter((n) => matches(n)
+    && (query !== "" || filter === "all" || (filter === "pending" ? n.pending : n.kind === filter)));
   const count = (k: NoticeKind) => list.filter((n) => n.kind === k && (n.unread || n.pending)).length;
   const unreadShown = shownList.filter((n) => n.unread).map((n) => n.id);
   const title = [unread ? `${unread} new` : "", pending ? `${pending} pending with us` : ""].filter(Boolean).join(" · ");
@@ -283,6 +302,9 @@ export function NotificationsView({ state, onOpen, thirdParty }: {
                    { value: "engineering", label: `Engineering (${count("engineering")})` },
                    { value: "unlinked", label: `No case linked (${count("unlinked")})` }]} />
 
+      <Input aria-label="Find by case or GitHub number" placeholder="Case or GitHub number, e.g. 8742"
+             value={q} onChange={(e) => setQ(e.target.value)} className="notice-find" />
+
       {shownList.length === 0 ? (
         <EmptyState title="Nothing here" body="New replies, and anything still waiting on us, appear here after each refresh." />
       ) : (
@@ -295,8 +317,12 @@ export function NotificationsView({ state, onOpen, thirdParty }: {
                   <Tag tone={n.kind === "aggregator" ? "warn" : n.kind === "unlinked" ? "neutral" : "accent"}>{KIND[n.kind]}</Tag>
                   {n.caseId
                     ? <button type="button" className="monitor-link" onClick={() => onOpen(n.caseId!)}>{n.caseNumber ?? "Case"}</button>
-                    : n.url && <a href={n.url} target="_blank" rel="noreferrer">{n.source}</a>}
+                    : <span className="monitor-muted">No case</span>}
                   <span className="notice-subject">{n.subject}</span>
+                  {n.issues.map((x) => (
+                    <a key={x.number} className="notice-issue" href={x.url} target="_blank" rel="noreferrer"
+                       aria-label={`GitHub issue ${x.number}`}>GitHub #{x.number}</a>
+                  ))}
                   {n.unread && <span className="notice-new">New</span>}
                   {n.pending && <Tag tone="exception">Pending {Math.floor(daysSince(n.at) ?? 0)}d</Tag>}
                 </div>

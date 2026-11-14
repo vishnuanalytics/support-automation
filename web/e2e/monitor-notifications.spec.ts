@@ -97,6 +97,7 @@ test("after time away, an engineering answer nobody passed on is still pending, 
   // Engineering answered 17 days ago, an agent said thanks on GitHub, and the case still says waiting on engineering.
   const old = kase({ id: "h", case_number: "00002001", subject: "Discount sent twice", record_type: "Support",
                      stage: "engineering", ball: "engineering", waiting_party: "engineering", owner: "Ravi K",
+                     links: [{ kind: "github", url: "https://github.com/o/incidents/issues/8742" }],
                      latest: msg("us", "Ravi K", 400, "Thanks, checking with the merchant") });
   await mockPage(page, { h: ago(500) }, [old], [
     issue({ case_ids: ["h"], case_id: "h", case_number: "00002001" }),
@@ -116,5 +117,20 @@ test("after time away, an engineering answer nobody passed on is still pending, 
   await page.getByRole("radio", { name: /No case linked/ }).click();
   const loose = items.filter({ hasText: "Orders not relaying" });
   await expect(loose.getByText(/No open case links this issue\. Raised by biswadeep\.m for House of Chettinad \(97346756\)/)).toBeVisible();
-  await expect(loose.getByRole("link", { name: "GitHub #8761" })).toBeVisible();
+  await expect(loose.getByRole("link", { name: "GitHub issue 8761" })).toBeVisible();
+
+  // The page's search finds a row by the GitHub number, whatever the filter.
+  await page.getByLabel("Find by case or GitHub number").fill("8742");
+  await expect(items).toHaveCount(1);
+  await expect(items.first().getByRole("link", { name: "GitHub issue 8742" })).toBeVisible();
+  await expect(items.first().getByText("00002001")).toBeVisible();
+
+  // The header box lists the open cases linked to a GitHub number.
+  const box = page.getByLabel("Open a case by number");
+  await box.fill("#8742");
+  await box.press("Enter");
+  const found = page.getByRole("region", { name: "Cases on GitHub issue 8742" });
+  await expect(found.getByText("is linked to 1 open case")).toBeVisible();
+  await found.getByRole("button", { name: "00002001" }).click();
+  await expect(page).toHaveURL(/case=h/);
 });

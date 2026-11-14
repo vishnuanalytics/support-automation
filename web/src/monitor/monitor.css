@@ -657,5 +657,9 @@
 .notice-new { color: var(--warn-text); font-size: 11px; font-weight: 700; text-transform: uppercase; }
 .notice-meta { font-size: 12px; margin-top: 2px; }
 .notice-text { font-size: 13px; margin: var(--space-1) 0 0; overflow-wrap: anywhere; white-space: pre-line; }
+.notice-find { max-width: 320px; margin: var(--space-3) 0; }
+.notice-issue { font-size: 12px; font-weight: 600; padding: 0 var(--space-1); border: 1px solid var(--border); border-radius: var(--radius-sm); text-decoration: none; }
+.find-results { margin: var(--space-2) 0; padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); }
+.find-results ul { margin: var(--space-2) 0 0; padding-left: var(--space-4); }
 .notice-why { font-size: 13px; margin: var(--space-1) 0 0; color: var(--exception); }
 .notice-actions { white-space: nowrap; }

@@ -707,6 +707,13 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-14 (Case Monitor: GitHub numbers on notifications.)** Every notification row shows its GitHub
+issue number(s) as a link (from the case's links or the tech-pending issue). Notifications has a search box
+that finds rows by case number or GitHub number, ignoring the filter. The header's "Open case number" box
+also takes a GitHub number (`8742` or `#8742`): a case number still opens the case; otherwise it lists every
+open case linked to that issue. Front end only. **Verified:** the e2e test covers both searches (12 monitor
+e2e pass) and the build passes.
+
 **2026-11-14 (Case Monitor: pending notifications and GitHub links from posts.)** For the lead coming back
 after days away: Notifications now lists everything **still waiting on us, however old**, beside new replies
 from the last 14 days. "Pending with us" means: an aggregator reply on a DSP case, or an engineering reply,

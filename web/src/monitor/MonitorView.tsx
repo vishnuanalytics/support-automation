@@ -4,11 +4,11 @@ import { Banner, Button, ConfirmButton, EmptyState, Input, Skeleton } from "../u
 import { CaseView } from "./CaseView";
 import { CasesView } from "./CasesView";
 import { MonitorSettings } from "./MonitorSettings";
-import { NotificationsView, useNotifications } from "./Notifications";
+import { githubIssues, NotificationsView, useNotifications } from "./Notifications";
 import { TodoView } from "./TodoView";
 import { useEscalationMarks } from "./marks";
 import { formatTime } from "./util";
-import type { Queue, SlackStatus } from "./types";
+import type { Queue, QueueCase, SlackStatus } from "./types";
 import "./monitor.css";
 
 type Page = "todo" | "notifications" | "cases" | "settings";
@@ -34,6 +34,7 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
   const [note, setNote] = useState<string | null>(null);
   const [slack, setSlack] = useState<SlackStatus | null>(null);
   const [find, setFind] = useState("");
+  const [found, setFound] = useState<{ number: string; url: string | null; cases: QueueCase[] } | null>(null);
   const [openId, setOpenId] = useState<string | null>(() => readParam("case"));
   const [page, setPageState] = useState<Page>(() => {
     const tab = readParam("tab") as Page;
@@ -87,14 +88,23 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
     }
   };
 
+  // A case number opens the case. A GitHub issue number lists every open case linked to that issue.
   const goTo = () => {
-    const q = find.trim().replace(/^0+/, "");
+    const q = find.trim().replace(/^#/, "").replace(/^0+/, "");
+    setErr(null);
+    setFound(null);
     const hit = cases.find((c) => (c.case_number ?? "").replace(/^0+/, "") === q);
     if (hit) {
       open(hit.id);
       setFind("");
-      setErr(null);
-    } else setErr(`Case ${find.trim()} isn't in the open cases from the last refresh`);
+      return;
+    }
+    const linked = cases.filter((c) => githubIssues(c).some((x) => x.number === q));
+    if (linked.length) {
+      setFound({ number: q, url: githubIssues(linked[0]).find((x) => x.number === q)?.url ?? null, cases: linked });
+      return;
+    }
+    setErr(`No open case is ${find.trim()} or links GitHub issue #${q}`);
   };
 
   const connectSlack = async () => {
@@ -133,7 +143,7 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
           </p>
         </div>
         <div className="monitor-actions">
-          <Input aria-label="Open a case by number" placeholder="Open case number" value={find}
+          <Input aria-label="Open a case by number" placeholder="Case or GitHub number" value={find}
                  onChange={(e) => setFind(e.target.value)} onKeyDown={(e) => e.key === "Enter" && find.trim() && goTo()} />
           {isOwner && (
             <Button size="sm" variant={page === "settings" ? "secondary" : "ghost"} onClick={() => setPage(page === "settings" ? "todo" : "settings")}>
@@ -160,6 +170,25 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
       </nav>
 
       {err && <Banner tone="exception" title={err} />}
+      {found && (
+        <div className="find-results" role="region" aria-label={`Cases on GitHub issue ${found.number}`}>
+          <strong>
+            {found.url ? <a href={found.url} target="_blank" rel="noreferrer">GitHub #{found.number}</a> : `GitHub #${found.number}`}
+            {" "}is linked to {found.cases.length} open case{found.cases.length === 1 ? "" : "s"}
+          </strong>
+          <Button size="sm" variant="ghost" onClick={() => setFound(null)}>Close</Button>
+          <ul>
+            {found.cases.map((c) => (
+              <li key={c.id}>
+                <button type="button" className="monitor-link" onClick={() => { setFound(null); setFind(""); open(c.id); }}>
+                  {c.case_number}
+                </button>{" "}
+                {c.subject} <span className="monitor-muted">· {c.owner ?? "No owner"} · {c.record_type}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {note && <p className="monitor-note" role="status">{note}</p>}
       {failed && (
         <Banner tone="warn" title="The last refresh didn't finish"
