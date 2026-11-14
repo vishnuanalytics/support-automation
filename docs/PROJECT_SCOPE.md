@@ -707,24 +707,25 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
-**2026-11-14 (Case Monitor: five working pages, branch `case-monitor`.)** On the owner's ask that the
-pages weren't helping resolve cases, the nav is now five pages; every older page (Wednesday report, SLA,
-Follow-ups, Escalations (all), Engineering (all), Agent raise quality, Alerts, Digest, Settings) sits under
-**More**. Default page is All cases. (1) **All cases**: six Salesforce filters inline (Waiting on, Record
-type, Aggregator, Owner, Sub-status, Module), the rest under More filters, plus a "last reply" strip by
-party (merchant/aggregator/engineering/agent/none) with reply-tone chips from the existing reply labels
-(new queue fields `reply_kind`, `customer_reply_kind`; new `tone` filter). (2) **Aggregator: no response**:
-the escalations list at 3 days (`/api/monitor/escalations?days=3`) with an "I escalated this" button.
-(3) **Engineering: no RCA**: open GitHub issues quiet 3+ days whose read status is no reply / investigating
-/ not read, with a copyable nudge. (4) **Escalated**: every case waiting on the aggregator plus ones added
-by hand; "Team responded" moves it to a Responded tab, Reopen undoes. **Salesforce is never written**
-(owner's choice). New table `monitor_escalation_marks` (**migration 128, applied 2026-11-14**) and
-`GET/PUT/DELETE /api/monitor/escalation-marks`. (5) **On me & agents**: Needs Me, an agents' list (agent-owned
-act/close/raise cases grouped by owner with a copyable message; nothing is sent, per the no-tagging trial),
-and the raise-quality report. **Verified:** +5 unit tests, +3 auth route cases (586 in `tests/monitor/`),
-new `e2e/monitor-escalated.spec.ts` (2) plus all monitor specs pass, `npm run build` passes, light/dark
-screenshots on mocked data. API container rebuilt. **Not checked on live data in a browser** (needs the
-owner's login). 3 days is a constant (`QUIET_DAYS` in `web/src/monitor/tone.ts`), not tenant config.
+**2026-11-14 (Case Monitor rebuilt as two pages, branch `case-monitor`.)** The owner said the many pages
+didn't make the daily work easier, so the UI was rebuilt: **To-do** and **All cases**, with Settings
+behind a button. Every other page (Needs Me, Agents, Wednesday report, SLA, Follow-ups, Escalations,
+Engineering, Alerts and browser notifications, Digest) was **deleted from the web app**. Their API
+endpoints stay, because the MCP tools and hourly routine use them. **To-do** (`TodoView.tsx`) lists only
+lead work, in five groups: the lead's own cases needing action (copy the case's draft); aggregators quiet
+3+ days (`/api/monitor/escalations?days=3`), one batch chase email per aggregator with To/Cc from the
+aggregator directory, plus "Escalated" / "Mark all escalated"; GitHub issues quiet 3+ days with no RCA,
+one batch chase per squad; cases the lead marked escalated, flagged when the aggregator replied, with
+"They responded" (and "Chased again" after 3 days); and agent-owned act/close/raise cases by agent, with a
+copyable message. **All cases** (`CasesView.tsx`): a "last reply from" strip with reply tone (queue fields
+`reply_kind`, `customer_reply_kind`), ten Salesforce filters including Whose turn, and CSV download.
+Escalation state lives in `monitor_escalation_marks` (**migration 128, applied 2026-11-14**) through
+`GET/PUT/DELETE /api/monitor/escalation-marks`. **Salesforce is never written and nothing is sent**, per the
+no-tagging trial. **Verified:** 586 tests in `tests/monitor/`, 10 monitor e2e specs (new
+`monitor-todo.spec.ts`), `npm run build`, and light/dark screenshots on mocked data. Not checked on live data
+in a browser, because that needs the owner's login. Known issues: `monitor-review` "refresh stays" fails now
+and then under parallel load, on old code too; 3 days is a constant (`QUIET_DAYS` in `tone.ts`); CSS for the
+deleted pages is still in `monitor.css`.
 
 **2026-11-08 (Case Monitor: automatic data checks on new aggregator cases, branch `case-monitor`.)**
 The "order and stock log checks on new aggregator raises" item planned since the redesign. The owner

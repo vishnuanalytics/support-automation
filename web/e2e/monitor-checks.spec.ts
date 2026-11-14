@@ -49,7 +49,7 @@ async function openCase(page: Page, withChecks = true) {
   await seedFakeSession(page);
   await installApiMocks(page);
   await mockMonitor(page, withChecks);
-  await page.goto("/?view=monitor&tab=queue");
+  await page.goto("/?view=monitor&tab=cases");
   await page.getByRole("button", { name: "1001" }).click();
 }
 

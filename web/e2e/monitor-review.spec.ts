@@ -55,7 +55,7 @@ test("a refresh stays on the page when setup was never dismissed", async ({ page
   await installApiMocks(page);
   await mockMonitor(page);
   await dropDismissFlag(page);
-  await page.goto("/?view=monitor&tab=queue");
+  await page.goto("/?view=monitor&tab=cases");
   await expect(page.getByRole("heading", { name: "Case Monitor" })).toBeVisible();
   await page.reload();
   await expect(page.getByRole("heading", { name: "Case Monitor" })).toBeVisible();
@@ -73,71 +73,16 @@ test("a new workspace on the default page lands on setup and records it", async 
   expect(flag).toBe("1");
 });
 
-test("mark reviewed returns to the queue with the case and its alert gone", async ({ page }) => {
+test("mark reviewed returns to all cases with the case gone", async ({ page }) => {
   await seedFakeSession(page);
   await installApiMocks(page);
   await mockMonitor(page);
-  await page.goto("/?view=monitor&tab=queue");
-  await expect(page.getByLabel("More views").locator("option").first()).toHaveText("More (1)");
+  await page.goto("/?view=monitor&tab=cases");
   await page.getByRole("button", { name: "1001" }).click();
   await page.getByRole("button", { name: "Mark reviewed" }).click();
 
   await expect(page.getByRole("button", { name: "Refresh now" })).toBeVisible();
   await expect(page.getByRole("button", { name: "1001" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "1002" })).toBeVisible();
-  await expect(page.getByText("1 open · 1 reviewed")).toBeVisible();
-  await expect(page.getByLabel("More views").locator("option").first()).toHaveText("More");
-});
-
-const fakeNotifications = (page: Page) => page.addInitScript(() => {
-  localStorage.setItem("monitor.notify", "1");
-  const shown: { onclick?: () => void; close: () => void }[] = [];
-  class Fake {
-    static permission = "granted";
-    onclick?: () => void;
-    close() {}
-    constructor() { shown.push(this); }
-  }
-  Object.assign(window, { Notification: Fake, shownNotifications: shown });
-});
-
-const clickNotification = (page: Page) => page.evaluate(() => {
-  const list = (window as unknown as { shownNotifications: { onclick?: () => void }[] }).shownNotifications;
-  list[list.length - 1].onclick?.();
-});
-
-test("clicking a notification for one new alert opens its case", async ({ page }) => {
-  await seedFakeSession(page);
-  await installApiMocks(page);
-  await mockMonitor(page);
-  await fakeNotifications(page);
-  await page.clock.install();
-  await page.goto("/?view=monitor&tab=queue");
-  await expect(page.getByLabel("More views").locator("option").first()).toHaveText("More (1)");
-  await page.route(/\/api\/monitor\/alerts/, (route) => route.fulfill({
-    json: { unread: 2, alerts: [
-      { id: 2, case_id: "a", case_number: "1001", subject: "Subject 1001", kind: "new_reply", detail: null,
-        created_at: new Date().toISOString(), unread: true },
-      { id: 1, case_id: "a", case_number: "1001", subject: "Subject 1001", kind: "new_reply", detail: null,
-        created_at: new Date().toISOString(), unread: true }] },
-  }));
-  await page.clock.fastForward(61_000);
-  await expect(page.getByLabel("More views").locator("option").first()).toHaveText("More (2)");
-  await clickNotification(page);
-  await expect(page.getByRole("button", { name: "Mark reviewed" })).toBeVisible();
-  expect(page.url()).toContain("case=a");
-});
-
-test("clicking the test notification opens the Alerts page", async ({ page }) => {
-  await seedFakeSession(page);
-  await installApiMocks(page);
-  await mockMonitor(page);
-  await fakeNotifications(page);
-  await page.goto("/?view=monitor&tab=alerts");
-  await page.getByRole("button", { name: "Test alert" }).click();
-  await page.getByRole("button", { name: "1001" }).click();
-  await clickNotification(page);
-  await expect(page.getByRole("button", { name: "Test alert" })).toBeVisible();
-  expect(page.url()).toContain("tab=alerts");
-  expect(page.url()).not.toContain("case=");
+  await expect(page.getByText(/^1 open ·/)).toBeVisible();
 });

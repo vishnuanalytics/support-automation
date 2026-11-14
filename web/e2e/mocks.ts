@@ -78,6 +78,8 @@ export async function installApiMocks(
   });
 
   await page.route("**/api/templates", (route) => route.fulfill({ json: [] }));
+  // Case Monitor's escalation log: empty unless a spec routes it itself (later routes win).
+  await page.route(/\/api\/monitor\/escalation-marks(\?.*)?$/, (route) => route.fulfill({ json: { marks: [] } }));
 
   await page.route(/\/api\/models(\?.*)?$/, (route) => route.fulfill({ json: { models: [] } }));
 
