@@ -154,7 +154,7 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
               {p === "cases" && queue && <em>{openCount}</em>}
               {p === "notifications" && notes.unread > 0 && <em className="is-new" aria-label={`${notes.unread} new`}>{notes.unread}</em>}
             </span>
-            <small>{hint}</small>
+            <small>{p === "notifications" && notes.pending ? `${notes.pending} pending with us` : hint}</small>
           </button>
         ))}
       </nav>

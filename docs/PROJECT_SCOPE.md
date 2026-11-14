@@ -707,6 +707,22 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-14 (Case Monitor: pending notifications and GitHub links from posts.)** For the lead coming back
+after days away: Notifications now lists everything **still waiting on us, however old**, beside new replies
+from the last 14 days. "Pending with us" means: an aggregator reply on a DSP case, or an engineering reply,
+with the case's stage still act/close; or a linked support issue read as `answered`/`cause_given` (not
+waiting on tech) whose open case still says it's waiting on engineering, meaning the agent never passed the
+answer on. If support replied on GitHub after the engineer, the line says so. **Mark viewed** clears only
+the highlight; a pending item leaves once the case moves on. New filters: Pending with us and **No case
+linked**, which lists open support issues no open case links to, with the reporter, Biz ID and Biz Name
+read from the issue body. `tech_pending` rows gained `case_ids`, `last_tech_reply_at`,
+`last_support_reply_at`, `reporter`, `biz_id` and `biz_name`. **The sync now reads every case's posts**,
+not only cases with an empty link field: a case that has links still takes a GitHub issue from its posts,
+matched by issue number so it isn't added twice. **Verified:** +4 unit tests (594 in `tests/monitor/`),
+new e2e test (12 monitor e2e pass), build passes, API and worker rebuilt, live sync ran: 11 pending
+engineering answers and 5 unlinked issues. 4 of the 5 unlinked issues have closed Salesforce cases that
+link them, and #8761 has no case anywhere. Not checked in a browser on live data.
+
 **2026-11-14 (Case Monitor: Notifications page back.)** On the owner's ask, a third tab, **Notifications**, sits
 between To-do and All cases. It's built from the synced cases, not the old `monitor_events` alerts: it shows an
 aggregator's real reply on a DSP case (acks excluded) and engineering's replies from the last 14 days. A

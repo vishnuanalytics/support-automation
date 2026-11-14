@@ -1,20 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { Button, EmptyState, Segmented, Tag } from "../ui";
-import { withoutMirrors } from "./tone";
+import { daysSince, withoutMirrors } from "./tone";
 import { formatAge, formatTime } from "./util";
-import type { QueueCase } from "./types";
+import type { QueueCase, TechIssue } from "./types";
 
 // Replies older than this aren't news any more.
 const WINDOW_DAYS = 14;
 const NOTIFY_KEY = "monitor.notify";
 const SOUND_KEY = "monitor.sound";
 
-export type NoticeKind = "aggregator" | "engineering";
+export type NoticeKind = "aggregator" | "engineering" | "unlinked";
 export type Notice = {
-  caseId: string;
+  id: string; // what a view is saved against: the case, or the issue when no case links it
+  caseId: string | null;
   caseNumber: string | null;
   subject: string | null;
+  owner: string | null;
   kind: NoticeKind;
   who: string | null;
   source: string;
@@ -22,7 +24,14 @@ export type Notice = {
   text: string | null;
   url: string | null;
   unread: boolean;
+  // Still waiting on us, however old: it stays listed until the case moves on.
+  pending: boolean;
+  why: string | null;
 };
+
+// An engineer has given the cause or the fix, so the next step is ours.
+const TECH_DONE = new Set(["answered", "cause_given"]);
+const ACT = new Set(["act", "close"]);
 
 function stored(key: string, fallback: string) {
   try {
@@ -81,30 +90,79 @@ function desktop(title: string, body: string, onClick: () => void) {
   shown.add(n);
 }
 
-/** Replies that matter to the lead: an aggregator answering a DSP case, or engineering answering. */
-export function notices(cases: QueueCase[], views: Record<string, string>, dependencyType = "DSP"): Notice[] {
+function day(at: string) {
+  return new Date(at).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+}
+
+/** Replies that matter to the lead: an aggregator answering a DSP case, or engineering
+ * answering. A reply still waiting on us is listed however old it is, so after days away
+ * one refresh shows everything that's pending. */
+export function notices(cases: QueueCase[], views: Record<string, string>, issues: TechIssue[] = [],
+                        dependencyType = "DSP"): Notice[] {
   const since = Date.now() - WINDOW_DAYS * 86400000;
-  const out: Notice[] = [];
-  for (const c of withoutMirrors(cases, dependencyType)) {
+  const open = withoutMirrors(cases, dependencyType);
+  const byId = new Map(open.map((c) => [c.id, c]));
+  const out = new Map<string, Notice>();
+  const unread = (id: string, at: string) => !views[id] || new Date(at) > new Date(views[id]);
+  const add = (n: Omit<Notice, "unread">) => {
+    const prior = out.get(n.id);
+    if (prior && prior.at >= n.at) {
+      if (n.pending && !prior.pending) out.set(n.id, { ...prior, pending: true, why: n.why });
+      return;
+    }
+    out.set(n.id, { ...n, pending: n.pending || !!prior?.pending, why: n.why ?? prior?.why ?? null,
+                    unread: unread(n.id, n.at) });
+  };
+
+  for (const c of open) {
     const l = c.latest;
-    if (!l || new Date(l.at).getTime() < since) continue;
+    if (!l) continue;
     let kind: NoticeKind | null = null;
     if (l.party === "engineering") kind = "engineering";
     else if (l.party === "third_party" && c.record_type === dependencyType && c.signal?.code !== "third_party_ack") kind = "aggregator";
     if (!kind) continue;
-    const viewed = views[c.id];
-    out.push({
-      caseId: c.id, caseNumber: c.case_number, subject: c.subject, kind, who: l.who, source: l.source,
-      at: l.at, text: l.text, url: l.url, unread: !viewed || new Date(l.at) > new Date(viewed),
-    });
+    const pending = ACT.has(c.stage);
+    if (!pending && new Date(l.at).getTime() < since) continue;
+    add({ id: c.id, caseId: c.id, caseNumber: c.case_number, subject: c.subject, owner: c.owner, kind,
+          who: l.who, source: l.source, at: l.at, text: l.text, url: l.url, pending,
+          why: pending ? `Replied ${day(l.at)} and nobody has acted on it since.` : null });
   }
-  return out.sort((a, b) => Number(b.unread) - Number(a.unread) || b.at.localeCompare(a.at));
+
+  for (const i of issues) {
+    const done = TECH_DONE.has(i.status) && i.waiting_on !== "tech";
+    const at = i.last_tech_reply_at ?? i.last_activity_at ?? i.opened_at ?? "";
+    if (!at) continue;
+    const linked = (i.case_ids ?? []).map((id) => byId.get(id)).filter((c): c is QueueCase => !!c);
+    if (!linked.length) {
+      add({ id: `gh:${i.url}`, caseId: null, caseNumber: null, subject: i.title, owner: i.reporter ?? null,
+            kind: "unlinked", who: i.last_reply_by, source: `GitHub #${i.issue}`, at, text: i.reason || null,
+            url: i.url, pending: true,
+            why: `No open case links this issue.${i.reporter ? ` Raised by ${i.reporter}` : ""}`
+               + `${i.biz_id ? ` for ${i.biz_name ?? "Biz"} (${i.biz_id})` : ""}.`
+               + (done ? " Engineering has answered it." : "") });
+      continue;
+    }
+    if (!done) continue;
+    const told = i.last_support_reply_at && i.last_tech_reply_at && i.last_support_reply_at > i.last_tech_reply_at
+      ? ` Support replied on GitHub ${day(i.last_support_reply_at)} but the case wasn't moved on.` : "";
+    for (const c of linked) {
+      // Still marked Waiting on Engineer after engineering answered: nobody told the merchant.
+      if (c.waiting_party !== "engineering" && !ACT.has(c.stage)) continue;
+      add({ id: c.id, caseId: c.id, caseNumber: c.case_number, subject: c.subject, owner: c.owner,
+            kind: "engineering", who: i.last_reply_by, source: `GitHub #${i.issue}`, at,
+            text: i.reason || null, url: i.url, pending: true,
+            why: `${i.tech_status} on GitHub ${day(at)}. The case still says it's waiting on engineering.${told}` });
+    }
+  }
+  return [...out.values()].sort((a, b) => Number(b.unread) - Number(a.unread)
+    || Number(b.pending) - Number(a.pending) || b.at.localeCompare(a.at));
 }
 
 /** Notifications from the synced cases, what this person has viewed, and alerts for new ones. */
 export function useNotifications(tenantId: string | undefined, cases: QueueCase[] | null,
                                  onClick: (caseId: string | null) => void) {
   const [views, setViews] = useState<Record<string, string> | null>(null);
+  const [issues, setIssues] = useState<TechIssue[]>([]);
   const [desktopEnabled, setDesktopEnabled] = useState(desktopOn);
   const [sound, setSound] = useState(() => stored(SOUND_KEY, "1") !== "0");
   const known = useRef<Set<string> | null>(null);
@@ -114,26 +172,32 @@ export function useNotifications(tenantId: string | undefined, cases: QueueCase[
   useEffect(() => {
     api.monitor.notificationViews(tenantId).then((r) => setViews(r.views)).catch(() => setViews({}));
   }, [tenantId]);
+  // Re-read with every new queue, so a refresh brings the issues' latest state too.
+  useEffect(() => {
+    if (!cases) return;
+    api.monitor.techPending(tenantId).then((d) => setIssues(d.squads.flatMap((s) => s.issues))).catch(() => {});
+  }, [tenantId, cases]);
   useEffect(() => {
     window.addEventListener("pointerdown", unlockAudio, { once: true });
     return () => window.removeEventListener("pointerdown", unlockAudio);
   }, []);
 
-  const list = useMemo(() => (cases && views ? notices(cases, views) : null), [cases, views]);
+  const list = useMemo(() => (cases && views ? notices(cases, views, issues) : null), [cases, views, issues]);
   const unread = list?.filter((n) => n.unread) ?? [];
+  const pending = list?.filter((n) => n.pending).length ?? 0;
 
   // Alert only for replies that arrive while the app is open, not for what was already there.
   useEffect(() => {
     if (!list) return;
-    const keys = new Set(list.filter((n) => n.unread).map((n) => `${n.caseId}@${n.at}`));
+    const keys = new Set(list.filter((n) => n.unread).map((n) => `${n.id}@${n.at}`));
     if (known.current) {
-      const fresh = list.filter((n) => n.unread && !known.current!.has(`${n.caseId}@${n.at}`));
+      const fresh = list.filter((n) => n.unread && !known.current!.has(`${n.id}@${n.at}`));
       if (fresh.length) {
         if (stored(SOUND_KEY, "1") !== "0") chime();
         if (desktopOn()) {
           const first = fresh[0];
-          const who = first.kind === "engineering" ? "Engineering" : first.who ?? "Aggregator";
-          desktop(fresh.length === 1 ? `${who} replied on ${first.caseNumber ?? "a case"}` : `${fresh.length} new replies`,
+          const who = first.kind === "aggregator" ? first.who ?? "Aggregator" : "Engineering";
+          desktop(fresh.length === 1 ? `${who} replied on ${first.caseNumber ?? first.source}` : `${fresh.length} new replies`,
             `${first.subject ?? ""}${first.text ? `: ${first.text.slice(0, 120)}` : ""}`,
             () => clicked.current(fresh.length === 1 ? first.caseId : null));
         }
@@ -170,29 +234,34 @@ export function useNotifications(tenantId: string | undefined, cases: QueueCase[
     if (desktopOn()) desktop("Case Monitor: test notification", "Notifications are working.", () => clicked.current(null));
   };
 
-  return { list, unread: unread.length, markViewed, desktopEnabled, enableDesktop, sound, toggleSound, test };
+  return { list, unread: unread.length, pending, markViewed, desktopEnabled, enableDesktop, sound, toggleSound, test };
 }
 
-const KIND: Record<NoticeKind, string> = { aggregator: "Aggregator responded", engineering: "Engineering replied" };
+const KIND: Record<NoticeKind, string> = {
+  aggregator: "Aggregator responded", engineering: "Engineering replied", unlinked: "No case linked",
+};
+type Filter = "all" | "pending" | NoticeKind;
 
 export function NotificationsView({ state, onOpen, thirdParty }: {
   state: ReturnType<typeof useNotifications>; onOpen: (id: string) => void; thirdParty: string;
 }) {
-  const [kind, setKind] = useState<"all" | NoticeKind>("all");
-  const { list, unread, markViewed, desktopEnabled, enableDesktop, sound, toggleSound, test } = state;
+  const [filter, setFilter] = useState<Filter>("all");
+  const { list, unread, pending, markViewed, desktopEnabled, enableDesktop, sound, toggleSound, test } = state;
   if (!list) return null;
-  const shownList = list.filter((n) => kind === "all" || n.kind === kind);
-  const count = (k: NoticeKind) => list.filter((n) => n.kind === k && n.unread).length;
-  const unreadShown = shownList.filter((n) => n.unread).map((n) => n.caseId);
+  const shownList = list.filter((n) => filter === "all" || (filter === "pending" ? n.pending : n.kind === filter));
+  const count = (k: NoticeKind) => list.filter((n) => n.kind === k && (n.unread || n.pending)).length;
+  const unreadShown = shownList.filter((n) => n.unread).map((n) => n.id);
+  const title = [unread ? `${unread} new` : "", pending ? `${pending} pending with us` : ""].filter(Boolean).join(" · ");
 
   return (
     <section className="page">
       <header className="page-head">
         <div>
-          <h2>{unread ? `${unread} new notification${unread === 1 ? "" : "s"}` : "No new notifications"}</h2>
+          <h2>{title || "Nothing new or pending"}</h2>
           <p className="monitor-muted">
-            Replies from {thirdParty.toLowerCase()}s on DSP cases and from engineering in the last {WINDOW_DAYS} days.
-            New ones stay highlighted until you mark them viewed. A later reply on the same case highlights it again.
+            Replies from {thirdParty.toLowerCase()}s on DSP cases and from engineering. Anything still waiting on us
+            stays here however old it is, so after time away one refresh shows what's pending. Mark viewed only
+            clears the highlight. A pending item leaves the list once the case moves on.
           </p>
         </div>
         <div className="monitor-actions">
@@ -207,34 +276,41 @@ export function NotificationsView({ state, onOpen, thirdParty }: {
         </div>
       </header>
 
-      <Segmented aria-label="Notification type" value={kind} onChange={setKind}
-                 options={[{ value: "all", label: `All (${unread})` },
+      <Segmented aria-label="Notification type" value={filter} onChange={setFilter}
+                 options={[{ value: "all", label: `All (${list.filter((n) => n.unread || n.pending).length})` },
+                   { value: "pending", label: `Pending with us (${pending})` },
                    { value: "aggregator", label: `${thirdParty} responded (${count("aggregator")})` },
-                   { value: "engineering", label: `Engineering (${count("engineering")})` }]} />
+                   { value: "engineering", label: `Engineering (${count("engineering")})` },
+                   { value: "unlinked", label: `No case linked (${count("unlinked")})` }]} />
 
       {shownList.length === 0 ? (
-        <EmptyState title="Nothing yet" body="New replies appear here after each refresh." />
+        <EmptyState title="Nothing here" body="New replies, and anything still waiting on us, appear here after each refresh." />
       ) : (
         <ul className="notice-list">
           {shownList.map((n) => (
-            <li key={n.caseId} className={n.unread ? "is-unread" : ""}>
+            <li key={`${n.kind}:${n.id}`} className={n.unread ? "is-unread" : ""}>
               <span className="notice-dot" aria-hidden />
               <div className="notice-body">
                 <div className="notice-head">
-                  <Tag tone={n.kind === "engineering" ? "accent" : "warn"}>{KIND[n.kind]}</Tag>
-                  <button type="button" className="monitor-link" onClick={() => onOpen(n.caseId)}>{n.caseNumber ?? "Case"}</button>
+                  <Tag tone={n.kind === "aggregator" ? "warn" : n.kind === "unlinked" ? "neutral" : "accent"}>{KIND[n.kind]}</Tag>
+                  {n.caseId
+                    ? <button type="button" className="monitor-link" onClick={() => onOpen(n.caseId!)}>{n.caseNumber ?? "Case"}</button>
+                    : n.url && <a href={n.url} target="_blank" rel="noreferrer">{n.source}</a>}
                   <span className="notice-subject">{n.subject}</span>
                   {n.unread && <span className="notice-new">New</span>}
+                  {n.pending && <Tag tone="exception">Pending {Math.floor(daysSince(n.at) ?? 0)}d</Tag>}
                 </div>
                 <div className="monitor-muted notice-meta">
-                  {n.who} · {n.source} · {formatAge((Date.now() - new Date(n.at).getTime()) / 3600000)} ago ({formatTime(n.at)})
-                  {n.url && <> · <a href={n.url} target="_blank" rel="noreferrer">Open reply</a></>}
+                  {n.who && <>{n.who} · </>}{n.source} · {formatAge((Date.now() - new Date(n.at).getTime()) / 3600000)} ago ({formatTime(n.at)})
+                  {n.caseId && n.owner && <> · Agent: {n.owner}</>}
+                  {n.caseId && n.url && <> · <a href={n.url} target="_blank" rel="noreferrer">Open reply</a></>}
                 </div>
+                {n.why && <p className="notice-why">{n.why}</p>}
                 {n.text && <p className="notice-text">{n.text.slice(0, 300)}</p>}
               </div>
               <div className="notice-actions">
                 {n.unread
-                  ? <Button size="sm" variant="secondary" onClick={() => markViewed([n.caseId])}>Mark viewed</Button>
+                  ? <Button size="sm" variant="secondary" onClick={() => markViewed([n.id])}>Mark viewed</Button>
                   : <span className="monitor-muted">Viewed</span>}
               </div>
             </li>

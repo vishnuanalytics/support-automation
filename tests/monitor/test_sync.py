@@ -370,7 +370,8 @@ def test_empty_link_field_falls_back_to_case_posts():
     reader.posts = {"1": [{**parse(GH)[0], "via": "post"}]}
     store = FakeStore()
     result = run(store, reader)
-    assert reader.post_ids == ["1"] and result["missing_link"] == 0
+    # Every case's posts are read: one with links can still have its GitHub issue in a post.
+    assert reader.post_ids == ["1", "2"] and result["missing_link"] == 0
     assert store.saved[0]["case"]["links"][0]["via"] == "post"
 
 
@@ -1245,3 +1246,24 @@ def test_a_named_case_keeps_the_dsp_reading_its_own_posts_for_links():
     sync._named_links([dsp], {}, reader, {"dependency_record_type": "DSP"}, [])
     sync._post_links([dsp], reader, [])
     assert dsp["links"] == slack
+
+
+def test_a_github_issue_shared_only_in_a_post_is_added_to_field_links():
+    from interpreter.monitor.links import parse
+
+    case = {"id": "c1", "links": parse("https://x.slack.com/archives/C1/p1793481670823519")}
+    posted = parse("https://github.com/o/r/issues/12 https://x.slack.com/archives/C2/p1793481670823520")
+    reader = type("R", (), {"post_links": lambda self, ids: {"c1": posted}})()
+    sync._post_links([case], reader, [])
+    kinds = sorted(x["kind"] for x in case["links"])
+    assert kinds == ["github", "slack"]  # the post's other Slack thread isn't added
+
+
+def test_a_post_issue_already_in_the_field_under_another_url_is_not_added_twice():
+    from interpreter.monitor.links import parse
+
+    case = {"id": "c1", "links": parse("https://github.com/o/r/issues/12")}
+    posted = parse("https://github.com/o/r/issues/12#issuecomment-1")
+    reader = type("R", (), {"post_links": lambda self, ids: {"c1": posted}})()
+    sync._post_links([case], reader, [])
+    assert len(case["links"]) == 1

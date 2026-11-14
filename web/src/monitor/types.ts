@@ -289,6 +289,12 @@ export type TechIssue = {
   over_days: boolean;
   opened_at?: string | null;
   last_activity_at?: string | null;
+  case_ids?: string[];
+  last_tech_reply_at?: string | null;
+  last_support_reply_at?: string | null;
+  reporter?: string | null;
+  biz_id?: string | null;
+  biz_name?: string | null;
 };
 export type TechPending = {
   days: number;

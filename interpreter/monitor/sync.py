@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from . import coaching, issue_status, replies, verdict
+from . import coaching, issue_status, links, replies, verdict
 from .readers import CONCURRENCY, EvidenceCollector, merge_links
 
 log = logging.getLogger("interpreter.monitor.sync")
@@ -225,9 +225,12 @@ def _named_links(cases: list[dict], prior: dict[str, dict], reader: Any, cfg: di
 
 
 def _post_links(cases: list[dict], reader: Any, errors: list[dict]) -> None:
-    """When the link field is empty, the link may be in the case's posts."""
-    empty = [c for c in cases if c.get("source") != "ai" and not c.get("links")]
-    ids = sorted({i for c in empty for i in (c["id"], (c.get("parent") or {}).get("id")) if i})
+    """The link may be in the case's posts instead of the link field. A case with
+    nothing in the field takes every link its posts share. A case that has links
+    still takes a GitHub issue from its posts: agents often put the Slack thread in
+    the field and the issue only in a post."""
+    real = [c for c in cases if c.get("source") != "ai"]
+    ids = sorted({i for c in real for i in (c["id"], (c.get("parent") or {}).get("id")) if i})
     if not ids:
         return
     try:
@@ -235,9 +238,14 @@ def _post_links(cases: list[dict], reader: Any, errors: list[dict]) -> None:
     except Exception as e:  # noqa: BLE001
         errors.append({"error": f"case posts not read ({type(e).__name__})"})
         return
-    for c in empty:
-        c["links"] = merge_links(found.get(c["id"], []),
-                                 found.get((c.get("parent") or {}).get("id"), []))
+    for c in real:
+        posted = merge_links(found.get(c["id"], []),
+                             found.get((c.get("parent") or {}).get("id"), []))
+        if c.get("links"):
+            # The same issue can be written as another URL, so it's matched by number.
+            have = {links.github_key(x) for x in c["links"]}
+            posted = [x for x in posted if x["kind"] == "github" and links.github_key(x) not in have]
+        c["links"] = merge_links(c.get("links") or [], posted)
 
 
 def _dsp_ids(case: dict, record_type: str) -> list[str]:

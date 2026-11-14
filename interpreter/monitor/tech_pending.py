@@ -2,12 +2,26 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
-from . import escalations, issue_status
+from . import coaching, escalations, issue_status
 from .verdict import parse_dt
 
 NO_SQUAD = "No squad"
+_BIZ_ID = re.compile(r"\*\*Biz ID:\*\*\s*(\d+)")
+_BIZ_NAME = re.compile(r"\*\*Biz Name:\*\*\s*([^\n*]+)")
+
+
+def _raised_by(ev: dict, cfg: dict) -> dict:
+    """Who raised the issue and for which business, from its body, so an issue no
+    case links to can still be traced to one."""
+    body = ev.get("body") or ""
+    biz, name = _BIZ_ID.search(body), _BIZ_NAME.search(body)
+    return {"reporter": coaching.reporter(body, cfg.get("github_reporter_field") or "Issue Reporter"),
+            "biz_id": biz[1] if biz else None, "biz_name": name[1].strip() if name else None}
+
+
 _PRIORITY = {"urgent": 0, "high": 1, "medium": 2, "low": 3}
 
 
@@ -55,6 +69,10 @@ def _row(ev: dict, read: dict, cases: list[dict], days: float, now: datetime, cf
         "last_activity_at": messages[-1]["at"] if messages else ev.get("opened_at"),
         "case_id": case.get("id"), "case_number": case.get("case_number"),
         "other_cases": [c.get("case_number") for c in cases if c is not case],
+        "case_ids": [c["id"] for c in cases if c.get("id")],
+        "last_tech_reply_at": next((m["at"] for m in reversed(messages) if not m.get("ours")), None),
+        "last_support_reply_at": next((m["at"] for m in reversed(messages) if m.get("ours")), None),
+        **_raised_by(ev, cfg),
         "businesses": _businesses(cases),
         "priority": case.get("priority"), "sla_due": case.get("target_at"),
         "sla_status": sla_status(case.get("target_at"), now),

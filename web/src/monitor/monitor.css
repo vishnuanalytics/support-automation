@@ -657,4 +657,5 @@
 .notice-new { color: var(--warn-text); font-size: 11px; font-weight: 700; text-transform: uppercase; }
 .notice-meta { font-size: 12px; margin-top: 2px; }
 .notice-text { font-size: 13px; margin: var(--space-1) 0 0; overflow-wrap: anywhere; white-space: pre-line; }
+.notice-why { font-size: 13px; margin: var(--space-1) 0 0; color: var(--exception); }
 .notice-actions { white-space: nowrap; }

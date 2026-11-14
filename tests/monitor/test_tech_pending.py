@@ -109,3 +109,17 @@ def test_every_business_with_an_open_case_is_listed_once():
 
 def test_an_issue_with_no_business_lists_none():
     assert only(build(issue()))["businesses"] == []
+
+
+def test_the_last_engineer_and_support_replies_are_dated_and_every_case_listed():
+    tech = {"who": "eng", "at": ago(4), "ours": False, "text": "Fixed, released"}
+    thanks = {"who": "agent", "at": ago(3), "ours": True, "text": "Thanks, checking with Mx"}
+    r = only(build(issue(messages=[tech, thanks]), cases=[case(), case(id="2", case_number="43")]))
+    assert (r["last_tech_reply_at"], r["last_support_reply_at"]) == (ago(4), ago(3))
+    assert sorted(r["case_ids"]) == ["1", "2"]
+
+
+def test_an_issue_no_case_links_says_who_raised_it_and_for_which_business():
+    body = "**Issue Reporter:** rishitha.y | Support \n\n**Biz ID:** 53794636  \n**Biz Name:** Five Thirty\n"
+    r = only(build(issue(body=body), cases=[]))
+    assert (r["reporter"], r["biz_id"], r["biz_name"], r["case_ids"]) == ("rishitha.y", "53794636", "Five Thirty", [])
