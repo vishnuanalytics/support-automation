@@ -1,4 +1,5 @@
 import { supabase } from "./supabase";
+import type { AgentsReport, AiDraft, Alerts, CaseDetail, Digest, Escalations, FollowUps, Queue, SlackStatus, SlaReport, Summary, TechPending, Today, Weekly } from "./monitor/types";
 import type {
   AssistResult,
   AuditEvent,
@@ -74,6 +75,10 @@ import type {
 } from "./types";
 
 const BASE = (import.meta.env.VITE_API_BASE as string) || ""; // "" -> vite proxy
+
+function monitorQuery(tenantId?: string): string {
+  return tenantId ? `?tenant_id=${encodeURIComponent(tenantId)}` : "";
+}
 
 async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
   const { data } = await supabase.auth.getSession();
@@ -588,6 +593,50 @@ export const api = {
       submodule?: string;
       tenant_id?: string;
     }) => req<IntakePreview>("/intake/preview", { method: "POST", body: JSON.stringify(b) }),
+  },
+
+  monitor: {
+    queue: (tenantId?: string) => req<Queue>(`/monitor/queue${monitorQuery(tenantId)}`),
+    digest: (tenantId?: string) => req<Digest>(`/monitor/digest${monitorQuery(tenantId)}`),
+    followUps: (tenantId?: string) => req<FollowUps>(`/monitor/follow-ups${monitorQuery(tenantId)}`),
+    escalations: (tenantId?: string) => req<Escalations>(`/monitor/escalations${monitorQuery(tenantId)}`),
+    today: (tenantId?: string) => req<Today>(`/monitor/today${monitorQuery(tenantId)}`),
+    todayDone: (key: string, tenantId?: string) =>
+      req<void>(`/monitor/today/done${monitorQuery(tenantId)}`, { method: "POST", body: JSON.stringify({ key }) }),
+    weekly: (tenantId?: string) => req<Weekly>(`/monitor/weekly${monitorQuery(tenantId)}`),
+    agents: (tenantId?: string) => req<AgentsReport>(`/monitor/agents${monitorQuery(tenantId)}`),
+    slaReport: (tenantId?: string) => req<SlaReport>(`/monitor/sla-report${monitorQuery(tenantId)}`),
+    techPending: (tenantId?: string) => req<TechPending>(`/monitor/tech-pending${monitorQuery(tenantId)}`),
+    alerts: (tenantId?: string) => req<Alerts>(`/monitor/alerts${monitorQuery(tenantId)}`),
+    alertsSeen: (tenantId?: string) =>
+      req<void>(`/monitor/alerts/seen${monitorQuery(tenantId)}`, { method: "POST" }),
+    caseDetail: (id: string, tenantId?: string) =>
+      req<CaseDetail>(`/monitor/cases/${encodeURIComponent(id)}${monitorQuery(tenantId)}`),
+    refreshCase: (id: string, tenantId?: string) =>
+      req<{ refreshed: boolean }>(`/monitor/cases/${encodeURIComponent(id)}/refresh${monitorQuery(tenantId)}`, { method: "POST" }),
+    summary: (id: string, tenantId?: string) =>
+      req<Summary>(`/monitor/cases/${encodeURIComponent(id)}/summary${monitorQuery(tenantId)}`, { method: "POST" }),
+    aiDraft: (id: string, audience: "merchant" | "aggregator", tenantId?: string) =>
+      req<AiDraft>(`/monitor/cases/${encodeURIComponent(id)}/ai-draft${monitorQuery(tenantId)}${tenantId ? "&" : "?"}audience=${audience}`, { method: "POST" }),
+    review: (id: string, body: { reviewed?: boolean; snooze_until?: string; clear?: boolean }, tenantId?: string) =>
+      req<unknown>(`/monitor/cases/${encodeURIComponent(id)}/review${monitorQuery(tenantId)}`, {
+        method: "POST", body: JSON.stringify(body),
+      }),
+    tagTeam: (id: string, body: { channel: string; thread_ts: string; text: string }, tenantId?: string) =>
+      req<{ ok: boolean }>(`/monitor/cases/${encodeURIComponent(id)}/tag-team${monitorQuery(tenantId)}`, {
+        method: "POST", body: JSON.stringify(body),
+      }),
+    sync: (tenantId?: string) =>
+      req<{ job_id: string | null }>(`/monitor/sync${monitorQuery(tenantId)}`, { method: "POST" }),
+    loadDemo: (tenantId?: string) => req<unknown>(`/monitor/demo${monitorQuery(tenantId)}`, { method: "POST" }),
+    clearDemo: (tenantId?: string) => req<void>(`/monitor/demo${monitorQuery(tenantId)}`, { method: "DELETE" }),
+    getConfig: (tenantId?: string) =>
+      req<{ config: Record<string, unknown> }>(`/monitor/config${monitorQuery(tenantId)}`),
+    putConfig: (config: unknown, tenantId?: string) =>
+      req<{ config: Record<string, unknown> }>(`/monitor/config${monitorQuery(tenantId)}`,
+        { method: "PUT", body: JSON.stringify({ config }) }),
+    slackStatus: (tenantId?: string) => req<SlackStatus>(`/monitor/slack/status${monitorQuery(tenantId)}`),
+    slackAuthorize: (tenantId?: string) => req<{ url: string }>(`/monitor/slack/authorize${monitorQuery(tenantId)}`),
   },
 
   actionRequests: (limit = 50) => req<ActionRequest[]>(`/action-requests?limit=${limit}`),

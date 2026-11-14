@@ -9,6 +9,14 @@
         "NEO4J_PASSWORD": "${NEO4J_PASSWORD}",
         "NEO4J_DATABASE": "neo4j"
       }
+    },
+    "case-monitor": {
+      "command": "venv/bin/python",
+      "args": [
+        "-m",
+        "interpreter.monitor.mcp_server"
+      ],
+      "env": {}
     }
   }
 }

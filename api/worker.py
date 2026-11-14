@@ -823,7 +823,8 @@ _SWEEP_EVERY_MIN = {"queue_sweep": 5, "cdc_reconcile": 60, "reasoning_ttl": 5,
                     "fire_schedules": 1, "kil_digest": 30, "failed_jobs_sweep": 10,
                     "product_analytics_sync": 720, "zendesk_case_graph_sync": 60,
                     "billing_trial_sweep": 60, "correction_review_sweep": 5,
-                    "session_review_sweep": 5, "gate_tuning_sweep": 1440}
+                    "session_review_sweep": 5, "gate_tuning_sweep": 1440,
+                    "monitor_sync_sweep": 5}
 
 
 def _reschedule(kind: str, sb) -> None:
@@ -836,6 +837,21 @@ def _reschedule(kind: str, sb) -> None:
     bucket = int(nxt.timestamp() // (mins * 60))
     jobs.enqueue(kind, {}, dedupe_key=f"{kind}:{bucket}",
                  run_after=nxt.isoformat(), sb=sb)
+
+
+def _monitor_sync(payload: dict, sb) -> dict:
+    from interpreter.monitor import service
+
+    result = service.run_sync(sb, payload["tenant_id"], payload.get("trigger") or "schedule")
+    try:
+        service.record_progress(sb, payload["tenant_id"])
+    except Exception:  # the numbers can wait for the next sync; the sync itself worked
+        log.warning("monitor progress not recorded", exc_info=True)
+    try:
+        service.record_checks_due(sb, payload["tenant_id"])
+    except Exception:  # the routine reads last sync's list until the next one
+        log.warning("monitor checks due not recorded", exc_info=True)
+    return result
 
 
 def _sweep_handler(fn):
@@ -871,9 +887,13 @@ HANDLERS = {"run_flow": _run_flow, "check_resolution": _check_resolution,
             "billing_trial_sweep": _sweep_handler("billing_trial_sweep"),
             "correction_review_sweep": _sweep_handler("correction_review_sweep"),
             "session_review_sweep": _sweep_handler("session_review_sweep"),
-            "gate_tuning_sweep": _sweep_handler("gate_tuning_sweep")}
+            "gate_tuning_sweep": _sweep_handler("gate_tuning_sweep"),
+            "monitor_sync_sweep": _sweep_handler("monitor_sync_sweep"),
+            "monitor_sync": _monitor_sync}
 
 JOB_TIMEOUT = int(os.environ.get("WORKER_JOB_TIMEOUT", "120"))
+# A Case Monitor sync reads every linked thread, so it needs longer than a run.
+JOB_TIMEOUT_BY_KIND = {"monitor_sync": int(os.environ.get("MONITOR_SYNC_TIMEOUT", "600"))}
 
 
 class _JobTimeout(Exception):
@@ -926,12 +946,12 @@ def process_one(sb, *, job_id: str | None = None) -> bool:
                 log.warning("stamp job %s tenant: %s", jid, e)
 
     def _alarm(_sig, _frm):
-        raise _JobTimeout(f"job exceeded {JOB_TIMEOUT}s")
+        raise _JobTimeout(f"job exceeded {JOB_TIMEOUT_BY_KIND.get(kind, JOB_TIMEOUT)}s")
 
     have_alarm = hasattr(signal, "SIGALRM")
     if have_alarm:
         signal.signal(signal.SIGALRM, _alarm)
-        signal.alarm(JOB_TIMEOUT)
+        signal.alarm(JOB_TIMEOUT_BY_KIND.get(kind, JOB_TIMEOUT))
     try:
         handler = HANDLERS.get(kind)
         if not handler:
@@ -976,11 +996,51 @@ def main(argv: list[str] | None = None) -> int:
                 jobs.enqueue(_k, {}, dedupe_key=f"{_k}:boot", sb=sb)
             except Exception as e:  # noqa: BLE001
                 log.warning("could not seed sweep %s: %s", _k, e)
-    while True:
-        did = process_one(sb)
+    run_loop(sb, args.idle_sleep, beat=beat)
+    return 0
+
+
+LOOP_ERROR_MAX_SLEEP = 60.0
+
+
+def run_loop(sb, idle_sleep: float, *, beat, _sleep=time.sleep,
+             _max_iters: int | None = None) -> None:
+    """The long-running poll loop. One failed iteration never ends the process.
+
+    `process_one` already catches handler errors, but `jobs.claim` and
+    `jobs.complete`/`jobs.fail` talk to Supabase outside that guard, and writes
+    and RPCs are deliberately never retried (`interpreter/supabase_client`).
+    A single `httpx.ReadTimeout` on `claim_job` used to kill the worker.
+    A claim that did land server-side is safe to drop here: `claim_job`
+    reclaims a 'running' row once its lock is 10 minutes old (migration 041).
+
+    Back off while errors repeat (idle_sleep doubling, capped at
+    LOOP_ERROR_MAX_SLEEP) and reset after a clean pass. Only `Exception` is
+    caught, so Ctrl-C / SystemExit still stop the worker.
+    """
+    import httpx
+
+    errors = 0
+    n = 0
+    while _max_iters is None or n < _max_iters:
+        n += 1
+        try:
+            did = process_one(sb)
+        except Exception as e:  # noqa: BLE001 -- the loop must outlive any one failure
+            errors += 1
+            delay = min(max(idle_sleep, 1.0) * 2 ** (errors - 1), LOOP_ERROR_MAX_SLEEP)
+            if isinstance(e, httpx.TransportError):
+                log.warning("worker loop: %s: %s (attempt %d, retrying in %.0fs)",
+                            type(e).__name__, e, errors, delay)
+            else:
+                log.exception("worker loop: unexpected %s (attempt %d, retrying in %.0fs)",
+                              type(e).__name__, errors, delay)
+            _sleep(delay)
+            continue
+        errors = 0
         beat("worker", {"idle": not did}, sb=sb)
         if not did:
-            time.sleep(args.idle_sleep)
+            _sleep(idle_sleep)
 
 
 if __name__ == "__main__":

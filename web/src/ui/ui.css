@@ -66,7 +66,7 @@
 }
 .ui-tag--accent { background: color-mix(in srgb, var(--accent) 8%, transparent); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 25%, transparent); }
 .ui-tag--success { background: var(--success-wash); color: var(--success-text); border-color: color-mix(in srgb, var(--success) 40%, transparent); }
-.ui-tag--warn { background: var(--warn-wash); color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
+.ui-tag--warn { background: var(--warn-wash); color: var(--warn-text); border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
 .ui-tag--warn-soft { background: color-mix(in srgb, var(--warn) 8%, transparent); color: var(--warn-text); border-color: color-mix(in srgb, var(--warn) 28%, transparent); }
 .ui-tag--exception { background: var(--exception-wash); color: var(--exception-text); border-color: color-mix(in srgb, var(--exception) 42%, transparent); }
 .ui-tag--neutral { background: var(--surface-raised); color: var(--text-secondary); border-color: var(--line-strong); }

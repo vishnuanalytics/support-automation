@@ -707,6 +707,412 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-08 (Case Monitor: automatic data checks on new aggregator cases, branch `case-monitor`.)**
+The "order and stock log checks on new aggregator raises" item planned since the redesign. The owner
+chose order, stock, store and menu checks, rules in new per-tenant config, and the existing hourly
+routine as the runner (the app has no BI-tool access). **Built:** `interpreter/monitor/auto_checks.py`
+(pure): `auto_checks` rules (module/sub-module, first match) pick check kinds (`order`, `order_status`,
+`order_items`, `item_stock`, `menu_publish`, `store_actions`); `check_questions` maps each kind to the
+tenant's saved question. Params come from the case (first location, aliased lowercase platform, order ID
+from `case_details.order_ids`, case date, a window from 2 days before). A follower check waits for its
+first check to be saved with rows. A saved result means done. `service.record_checks_due` runs after each
+sync in `api.worker` and rewrites `monitor_checks_due` (**migration 127, not applied yet**). There's also a
+local MCP tool `checks_due`. Checks that returned no rows go on one Needs Me card (`kind: checks`, Agents
+group) asking agents to confirm details with the merchant. That's row count only, never a verdict.
+**Verified:** +16 tests (569 in `tests/monitor/`), `npm run build` passes. Read-only dry run on live data,
+with the proposed rules and `sla_start` ignored: 28 open DSP cases, 23 checks due on 23 cases, 31 blocked
+(25 waiting for the order lookup, 3 with no order ID found, 3 waiting for items). Extracted order IDs
+were spot-checked as real. With the real `sla_start` none are in scope yet, so nothing runs before it.
+**Then, on the owner's ask: on/off switches in Settings** for the DSP scan (`auto_checks_dsp`, default
+on) and an engineering scan (`auto_checks_engineering`, default off: open cases from `sla_start` waiting
+on engineering or linking a GitHub issue, skipped when they have a DSP case and the DSP scan is on).
+Store/menu/stock checks now need the aggregator name. `MonitorSettings.tsx` has two `Toggle`s that save
+at once, plus the JSON editor. **Verified:** +5 tests (574 in `tests/monitor/`), new
+`e2e/monitor-settings.spec.ts` (2, mocked API) passes with the other monitor specs, `npm run build`
+passes, light and dark screenshots checked. Not checked in a browser on live data.
+**Then the Agents page:** with the engineering switch on, open engineering cases (no DSP case of their
+own) from the last 30 days are judged by the same wrong-raise rules and tagged Engineering; an automatic
+check that found nothing is a "please check" line (`auto_checks.notes`), never counted as wrong.
+**Verified:** +4 tests (578 in `tests/monitor/`), new `e2e/monitor-agents.spec.ts` passes, build passes.
+Live dry run (read-only): switch on adds 24 engineering cases, 7 flagged missing details (6 location/platform
+ID, 1 order ID). Open question: an engineering case's details may be in its GitHub issue, which the rules
+don't read, so those flags can be false. The local API was restarted on the owner's ask (21:14).
+**Live (21:20):** migration 127 applied via Supabase MCP; tenant config gained `auto_checks` (4 rules:
+disabled item ordered, order issue, store on/off, menu) + `check_questions` + `auto_checks_dsp: true`,
+`auto_checks_engineering: false` (no other key changed); `api.worker` restarted with the new code
+(`SKIP_ENV_CHECK=1`, as before: the JWT key file isn't on this machine and Case Monitor uses the Vault
+OAuth token); one `record_checks_due` run wrote 0 rows (nothing after `sla_start` yet), and the Needs Me
+and Agents views were unchanged. The hourly routine gained JOB 3 (read `monitor_checks_due`, skip ones
+already saved, fill chained params from the earlier saved result, run the saved question, insert into
+`monitor_case_checks` with `saved_by = 'Hourly routine'`; an erroring check isn't saved).
+**Next:** after 2026-11-11 confirm the first routine run saved real ORD/ITM/STR/MNU results, look at their
+columns, and decide whether any reading beyond "found nothing" is safe to add. Open: an engineering case's
+details can live in its GitHub issue, which the wrong-raise rules don't read. The stock check needs an
+order first (no item-by-name saved question).
+
+**2026-11-08 (Case Monitor: first sync with today's changes, and a fix, branch `case-monitor`.)**
+Ran `service.run_sync` by hand (trigger `manual`) in a fresh process. **Found a regression from the
+subject-links change:** `_named_links` copied the named Support case's links onto the DSP case, so DSP
+00132973 picked up Support 00132969's closed GitHub issue (a different bug) and became "our turn:
+verify the fix" (69, critical, mismatch). Having a link also made `_post_links` skip the DSP's posts,
+so its own Careem Slack thread was lost. That sync fired a false `needs_action` alert for 00132973.
+**Fix:** the named case's links are no longer copied (+1 test, 553 in `tests/monitor/`). **Re-synced:**
+86 cases, critical 26, my turn 29, mismatches 25, ready to close 4; status partial only for the 3
+known unreadable Slack threads. Act 21 critical + 4 high; waiting on aggregator 5 critical of 33.
+00131153 waits on the merchant (55, "Chase the merchant on case 00130532, then answer Aggregator");
+00132973 waits on Careem again (44, Slack thread back); 00132969 links 00132972 (Salesforce) and
+00132973 (subject). **Owner action:** the local `api.worker` (started 16:51) and the two
+`interpreter.monitor.mcp_server` processes run code from before today's commits; restart them, or the
+worker's next interval sync recomputes the queue with the old rules. Still true: Salesforce-linked
+DSP cases do inherit their child's link field (`_enrich`), unchanged.
+
+**2026-11-08 (Case Monitor: overdue reweighted, branch `case-monitor`.)** The owner review of the
+overdue/stale weighting, open since the "ready to close" entry, is done. **Measured** (86 open cases):
+77 are overdue, and overdue was ~60% of all points (30 from the first hour, +2/day, cap 60), so 60 were
+critical, including 27 of 33 only waiting on an aggregator; the level tag and filter didn't sort
+anything. Four options simulated on stored verdicts; **owner chose 10 + 1/day, cap 30**. **Built:** the
+overdue scoring in `verdict.compute`. **Then the owner asked for overdue to start at 3 days:**
+`OVERDUE_GRACE_DAYS = 3`, so under 3 days past target scores 0 (still tagged overdue, reason listed as
+"Overdue by 2d (scored from 3d)"), then 10 at 3 days, +1 a day, cap 30 (from 23 days). Level cut-offs
+(60/40/20), stale 20 and every other weight unchanged. Points are now listed in
+`docs/CASE_MONITOR.md`. **Verified:** tests updated (+9, 552 in `tests/monitor/`; full offline suite
+with only the known local pubsub failure). Live recompute with the real code (read-only): critical
+60 → 27, high 14 → 20, medium 10 → 29, low 2 → 10; 18 overdue cases are inside the 3 grace days.
+Act 22 of 26 critical; the 4 high are 00133438 (45: merchant replied, under a day overdue) and three at
+57–59 (5–7 days overdue, mismatch + stale), still in the Our turn tab. Waiting on aggregator 27 → 5
+critical (all 14–18 days overdue, quiet, with an unread aggregator reply); ready to close drops to
+high/medium/low (has its own tab and alert). Nothing else reads the level (no alert keys on it).
+**Next:** no open item from these entries; next work is the owner's call.
+
+**2026-11-08 (Case Monitor: DSP cases linked by case numbers in the description, branch
+`case-monitor`.)** Closes the "case numbers only in a description" gap from the subject-links entry
+below. **Built:** `sync.named_numbers` (was `subject_numbers`) reads 8-digit numbers from the subject,
+then the description, as `(number, where)`; `sync._named_links` (was `_subject_links`) links up to
+`NAMED_CAP` = 3 real non-DSP cases per DSP, marking each `via: "subject"` or `via: "description"`, and
+carries both kinds from the last sync. **Why no number-format filter:** a 90-day survey of 385 DSP
+cases found 114 distinct 8-digit numbers in descriptions, 26 of them real cases (all `00…`); the
+`CaseNumber` lookup already drops the rest (RIDs, order IDs), and a `00` prefix rule would be
+org-specific. Sibling DSPs named in the DSP template's "Ticket No:" line are skipped as before.
+**Verified:** +5 tests (543 in `tests/monitor/`); full offline suite with only the known local pubsub
+failure. Read-only: the live queue gains no new link today (still only 00132973 ↔ 00132969); over 90
+days, of 32 DSP cases with no Salesforce link, 2 link from the subject and 2 more from the description.
+**Not covered:** case numbers only in email bodies. **Next:** owner review of the overdue/stale
+weighting, still open.
+
+**2026-11-08 (Case Monitor: "DSP resolved" for cases waiting on Engineering, branch `case-monitor`.)**
+Closes the gap left by the entry below: `dsp_resolved` only ran on cases waiting on a third party, so a
+Support case waiting on Engineer (00132969) could never become ready to close from its DSP cases.
+**Built:** `verdict._signals` also fires `dsp_resolved` for `waiting == engineering` when every linked
+DSP case is closed **and** the case links at least one GitHub issue and every one is read and closed
+(no GitHub issue, or an unreadable one, means Engineering isn't known to be done). The reason adds ",
+and the GitHub issue is closed". **Verified:** +6 tests (539 in `tests/monitor/`); full offline suite
+with only the known local pubsub failure. Live read-only dry run: 3 engineering cases have a linked DSP;
+none change today. 00132945 (DSP closed, GitHub open) correctly stays not ready; 00132969 (GitHub
+closed, both DSPs open) stays not ready. **Next:** owner review of the overdue/stale weighting, still open.
+
+**2026-11-08 (Case Monitor: "DSP resolved" counts every linked DSP case, branch `case-monitor`.)**
+Closes the gap in the subject-links entry below. **Built:** `verdict._signals`' `dsp_resolved` now
+takes every linked case of the raising record type (parent and children, Salesforce or `via:
+"subject"`) and fires only when all are closed; one DSP case cites it as before, several give
+"Linked DSP cases A, B are all closed". `children_of` now reads `IsClosed`, and subject-linked children
+keep `closed`; a child without it (rows saved before this) counts as open. **Behaviour change:** a
+Support case whose DSP parent is closed but which has another open DSP child is no longer ready to
+close. **Verified:** +6 tests (533 in `tests/monitor/`); full offline suite with only the known local
+pubsub failure. Live read-only dry run: the same 5 cases are ready to close under the old and new rule;
+the one case with two DSPs (00132969: 00132972 + 00132973 by subject) has both open. **Next:** owner
+review of the overdue/stale weighting, still open.
+
+**2026-11-08 (Case Monitor: DSP cases linked only by subject, branch `case-monitor`.)** Closes the
+"not covered" gap in the entry below: DSP 00132973 names Support 00132969 only in its subject.
+**Built:** `readers.SalesforceCaseReader.cases_by_number` (SOQL on `CaseNumber`, open or closed);
+`sync.subject_numbers` and `sync._subject_links`, run right after `_enrich`, so the DSP-email fold,
+`has_dsp`, `linked_wait` and the MCP `linked_cases` all see the link. Only a DSP case with no
+Salesforce parent/child is read; a named DSP case (a sibling) isn't linked; links are marked
+`via: "subject"`. When the named case already has a Salesforce parent the DSP is added as a child
+(00132969's parent is DSP 00132972, a second aggregator). Subject links are carried from the last
+sync with fresh status. **Verified:** +9 tests (527 in `tests/monitor/`); offline suite 1,897 pass +
+the 1 pre-existing local pubsub failure. Live read-only dry run (real Salesforce, nothing written): 86
+cases, 28 DSP, 1 linked by subject, 00132973 ↔ 00132969, with 00132969 keeping its parent 00132972.
+**Not covered:** case numbers only in a description or email body; `dsp_resolved` still looks at
+the parent only, so a subject-linked DSP that is a child of the Support case doesn't trigger "update
+the customer and close" when it closes. **Next:** owner review of the overdue/stale weighting, still open.
+
+**2026-11-08 (Case Monitor: a DSP case waits on the merchant when its Support case does, branch
+`case-monitor`.)** Follows the linked-cases entry below. DSP 00131153 scored "our turn: Aggregator needs
+more details" (110), though the details were with the merchant on Support 00130532 (awaiting revert on
+the RID question). **Built:** `sync.linked_wait(row, rows, cfg)`: a DSP case whose turn is ours only from
+a third-party-reply signal (`REPLY_ACTION` codes or `third_party_replied`), with a linked non-DSP case in
+the same sync whose verdict is `customer` and whose latest activity is after the third party's latest
+message. `run` computes every verdict, then recomputes those cases with `case["linked_wait"]` set;
+`verdict._signals` then emits `linked_awaiting_customer` (ball customer, cites the Support case,
+"Chase the merchant on case X, then answer Aggregator."), so there's no mismatch points. **Verified:**
++7 tests (518 in `tests/monitor/`); offline suite 1,888 pass + the 1 pre-existing local pubsub failure.
+Dry run on stored live data (no writes): of 28 open DSP cases, 4 are on us from a reply; only 00131153
+changes (110 → 85, stage customer). **Not covered:** a Support case not in the queue (only cases waiting
+on engineering/a third party are synced), and DSP cases with no Salesforce parent/child link (e.g.
+00132973's Support case 00132969 is named only in the subject). **Next:** owner review of the
+overdue/stale weighting, still open.
+
+**2026-11-08 (Case Copilot: linked cases in `get_case`, branch `case-monitor`.)** Found on a live
+DSP case: asked for a summary, Claude missed the linked Support case entirely, including the merchant
+side's finding that the Zomato RID in the merchant's URL doesn't match the one in Hub Config. Cause:
+`sync._dsp_ids` only follows linked cases of the DSP record type, so a Support case gets its DSP's
+emails but a DSP case never gets its Support case's. **Built (MCP shaping only, sync and verdict
+untouched):** `mcp_server.linked_refs` (parent + children, capped at 3) and `linked_view` (the linked
+case's verdict, done-so-far, saved checks, and its latest 10 timeline items not already in this case,
+owner reassignments dropped; `synced: false` + Salesforce link when Case Monitor doesn't hold it).
+`get_case` returns them as `linked_cases`, and its description tells Claude to read them.
+**Verified:** +4 tests (23 in `test_mcp_server.py`, 511 in `tests/monitor/`); live `case_detail` on
+the real DSP/Support pair returns the merchant's RID emails from the DSP side and the Zomato thread
+from the Support side, with no duplicates. **Not done (next chunk, needs owner's OK):** the verdict
+still scores a DSP case "our turn" when its Support case is really waiting on the merchant; the sync
+could take the linked Support case's waiting state into account. **Owner action:** add a line to the
+personal case-checks skill: "read `linked_cases` too".
+
+**2026-11-08 (Case Copilot, step 3 of 3: checks on the case page, branch `case-monitor`.)**
+Case Copilot is complete. **Built:** `service.case_checks` (newest 20, with rows) feeds
+`case_detail["checks"]`; the MCP `get_case` reuses it (10, without rows), so there's one reader.
+`save_check` gains an optional `columns` that turns list rows into labelled objects. Web:
+`web/src/monitor/CaseChecks.tsx`, a **Checks** tab on the case page (summary, parameters, saved by and
+when, "First 50 of 80 rows" table that scrolls inside its card; "no rows" tag for an empty result),
+and an **Ask Claude** button that copies `util.askClaudePrompt(case)`. **Verified:** +2 pytest (19 in
+`test_mcp_server.py`, 507 in `tests/monitor/`, offline 1,877 pass + the 1 pre-existing local pubsub
+failure); vitest +4; `npm run build` passes; new `e2e/monitor-checks.spec.ts` (3, mocked API) passes
+with the existing monitor specs; light and dark screenshots checked; live `case_detail` returns the
+saved MNU-01 check for a real case. **Not checked in a browser on live data by a person** (the e2e
+runs on mocked API). **Owner action:** the personal case-checks skill must tell Claude to call
+`save_check` (Claude can't edit its own skill). **Next:** review the overdue/stale weighting with the
+owner (still open from the earlier entries).
+
+**2026-11-08 (Case Copilot, step 2 of 3: save check results, branch `case-monitor`.)** Step 1 is
+committed (`ab27b06`). Owner's decisions: store result rows (not only the summary), and let the MCP
+server write to this one table. **Built:** migration `126_monitor_case_checks.sql` (append-only,
+RLS member-read via `tenant_members`, no write policy so only the service role writes; **applied by
+hand via Supabase MCP**). MCP tool `save_check(case, check_name, card_id, params, summary, rows)`
+validates input, keeps the first 50 rows and records the full `row_count`. `get_case` now returns
+`saved_checks` (the 10 latest, without rows). The server's only write is to its own table, never
+Salesforce, Slack, GitHub or the BI tool (`docs/CASE_MONITOR.md`). **Verified:** +6 tests (17 in
+`tests/monitor/test_mcp_server.py`); offline suite 1,874 pass, 1 pre-existing local failure
+(`test_sf_pubsub_plan::test_cli_is_a_noop_without_sf_creds`, local SF creds without a private key,
+fails without this change too); migration-drift test passes after applying. Driven over the real MCP
+protocol: saved a real MNU-01 result on a live case, an unknown case is refused, and `get_case`
+shows it back. **Next:** step 3, the case page shows saved checks (rows included) and an "Ask Claude
+about this case" button that copies a ready prompt. UI only plus one read in `service.case_detail`.
+
+**2026-11-08 (Case Copilot, step 1 of 3: ask Claude about a case, branch `case-monitor`.)**
+The owner wants an AI they can question about any case, using Salesforce, Slack, GitHub and the BI
+tool's saved case-check questions. Constraints, from the owner: the BI tool is reachable **only
+through Claude's connector** (no API key in the app); company billing for the Claude API isn't
+approved; it's for the owner only for now. Decision: the AI runs in the owner's Claude session
+(subscription, with their connectors), and the app feeds it. This replaces an in-app chat on the
+API. **Built:** `interpreter/monitor/mcp_server.py` (FastMCP over stdio; registered as
+`case-monitor` in `.mcp.json`; read-only `get_case` and `find_cases`, see `docs/CASE_MONITOR.md`).
+The tenant's saved-check catalogue (which question for which case, parameters, chains, how to
+read results) is a **personal skill outside the repo**, because it names tenant cards and fields
+and the repo is public. **Verified:** `tests/monitor/test_mcp_server.py` (11); 1,869 offline pass.
+Driven over the real MCP protocol against live data (`get_case`, `find_cases`, unknown case),
+and one saved check was run through the connector on a real case's location. **Next steps:**
+(2) migration `126_monitor_case_checks.sql` (RLS) plus a `save_check` tool, so check results
+persist; (3) the case page shows saved checks and gets an "Ask Claude about this case" button
+(copies a ready prompt). An in-app chat on Groq stays possible later for quick questions on synced
+data; BI answers always go through Claude.
+
+**2026-11-08 (Case Monitor reads the merchant's latest message, branch `case-monitor`.)** Before
+this, only a third party's reply was labelled. Any merchant message, from the tenant's last-reply field (`fields.last_reply_from`)
+or a customer email on the thread, meant "our turn, read and respond", so "Thanks,
+it works now" looked the same as "Still broken". Now `replies.label_customer` labels the newest
+message overall when it's the merchant's. The newest message now includes the case's own emails, so
+`sync.run` computes it before the verdict. Labels are `confirmed`, `thanks` and `needs_reply`. Short,
+clear text goes through rules: a hedge (still/not/but/?) is never settled by a rule, and a bare
+greeting is never thanks. The rest goes to the FAST LLM within the existing per-sync budget and time
+limit. The text is PII-redacted, and anything unknown becomes `needs_reply`. Labels are cached in
+`monitor_reply_labels` under a `customer:`-prefixed hash, so there's no migration. A cached rule label
+the rules no longer give is dropped and the text is labelled again (`store.reply_labels` now returns
+`method`). Verdict: `confirmed` gives a new `customer_confirmed` close signal, so the case is ready
+to close. `thanks` stops the merchant message from making it our turn and scores 0, not 15.
+`needs_reply` or no label behaves as before. On the thread, a label applies only to the exact
+message it was made for (matched by `at`). Tests: +29 (488 in `tests/monitor/`, 1,858 offline);
+`npm run build` passes.
+**Live (17:08 UTC sync):** 9 open cases end on a merchant message, and all 9 are `needs_reply`. They
+were checked by reading the texts ("still failing", "remains unresolved", "PFA", "please confirm…").
+None is `confirmed` today, so the close path hasn't fired on real data yet. One bug was found on
+live data and fixed in this chunk: the first rule labelled a bare "Hi" (on a test case) as
+`thanks`.
+**Not browser-checked by a person.** Next: review the overdue/stale weighting with the owner (58 of
+86 critical).
+
+**2026-11-08 (Case Monitor: "ready to close" stage, branch `case-monitor`.)** Prompted by a real
+case the lead saw as closed, but only its parent DSP case had been resolved, by the agent,
+that day. The Support case was still open and the merchant hadn't been told. The monitor was right
+to show it, but it sat with real work as "critical, mismatch". Now `verdict.CLOSE_SIGNALS`
+(`dsp_resolved` only) sets `ready_to_close`. `verdict.stage` puts the case in a new `close` stage,
+and the expected "waiting on Aggregator" isn't scored as a mismatch. Overdue still counts, and a
+customer reply still outranks it. The queue has a **Ready to close** tab. `today.close_cards` gives
+one Needs Me card per agent with a copy-ready message. `_group_github` now merges only `gh:` cards,
+so these aren't folded into "GitHub issues look ready to close". Sync counts `ready_to_close`, and a
+`ready_to_close` alert fires once, replacing `needs_action` and `newly_stale` for that case.
+**Live (16:28 UTC sync):** 4 of 87 open cases are ready to close, and mismatches went from 32 to 28.
+Tests: +10 in `tests/monitor/` (459 pass); 1,829 offline pass; `npm run build` and vitest pass.
+**Not yet browser-checked by a person.**
+**Still open, measured on the same sync:** 60 of 87 cases are critical, mostly because of points.
+Overdue alone gives 30 to 60, and stale adds 20, so a case waiting on an aggregator that's past its
+target date reaches critical whatever its state (25 `waiting_third_party` cases are critical).
+Next chunks, in order: (1) review the overdue/stale weighting with the owner; (2) have the reply
+labeller also read the merchant's latest email, not only the third party's. It must stay a label
+that feeds rules, never something that decides whose turn it is.
+
+**2026-11-08 (Worker no longer dies on one failed Supabase call, branch `case-monitor`.)**
+The worker crashed after about 1.5 hours with `httpx.ReadTimeout` on the `claim_job` RPC. The
+`while True` loop in `api/worker.main` had no guard, and RPCs and writes are deliberately never
+retried (2026-11-03 transport hardening), so the error reached the top. It also explains the
+health check showing the worker as last seen about 18 hours earlier, and Case Monitor syncs
+stopping on 2026-11-07 at 16:31 UTC. `jobs.claim`/`jobs.complete`/`jobs.fail` all run outside
+`process_one`'s handler guard. Fix: the loop is now `api/worker.run_loop`, which survives any
+`Exception`. It backs off from idle-sleep, doubling to 60s, and resets after a clean pass.
+Network errors log as warnings; anything else logs with a traceback, so Sentry still sees it.
+Ctrl-C and SystemExit still stop it. A claim that landed before the timeout is reclaimed by
+`claim_job` after 10 minutes (migration 041). Tests: `tests/test_worker_loop.py` (4). Full
+offline suite: 1,820 passed. One failure is local only: `test_sf_pubsub_plan::
+test_cli_is_a_noop_without_sf_creds` calls `validate_env()`, which fails on a placeholder
+`SF_PRIVATE_KEY_FILE` in `.env`. Docker deploys need `docker compose up -d --build` to pick it up.
+
+**2026-11-05 (Case Monitor, FR-52, branch `case-monitor`.)** New feature for leads and managers:
+one queue showing whose turn it is on every open case, combining cases the AI agents handed to a
+human with cases waiting on engineering or a third party. It's built into the platform on the
+existing stack, and each tenant's fields and rules are config, not code. Setup and limits: `docs/CASE_MONITOR.md`.
+- **Built:** `interpreter/monitor/` (pure: links, redact, verdict, timeline, brief, similar,
+  drafts; I/O: config, readers, store, sync, service, demo), migration `116_case_monitor.sql`
+  (**applied live**), `/api/monitor/*` in `api/main.py`, the `monitor_sync` job plus
+  `monitor_sync_sweep` in the worker, per-lead Slack user login, and `web/src/monitor/`.
+- **Verified:** 123 offline tests in `tests/monitor/` plus the full offline suite; 6 live tests
+  (real tables, sync lock, RLS); a real Chromium walk of the queue, all 9 demo cases, shortcuts,
+  digest and dark mode with no console errors; case API 300-420 ms against live Supabase; every
+  Salesforce query run for real on the dev org, which found and fixed a failure on orgs with no
+  record types.
+- **First real sync done (2026-11-05):** first production workspace, 3 open cases,
+  resolved pool 2000, partial status from one GitHub and one Slack link, no secrets or signed URLs
+  stored, case pages about 200 ms.
+- **Whole-team rules (same day):** owner filter removed (95 open cases). Added per-tenant
+  `customer_wait_sub_statuses`, `team_replied_sub_statuses` and `dependency_record_type`; DSP emails
+  count as third-party evidence; links on parent and child cases are shared; an agent-nudge draft;
+  `scripts/monitor_github_token.py`. The repo is public, so keep tenant names and tenant field names
+  out of commits, code and docs; they belong in `monitor_config`.
+- **Slack without an app (same day):** the org won't allow Slack app changes, so a Claude session
+  reads threads with the lead's own access and calls `service.import_slack_threads`. Syncs keep
+  the last import, which goes stale until the next refresh. `internal` threads show staleness only.
+- **Third-party directory (migration `117`, applied):** `monitor_partners` holds each third party's
+  raising channel, recipients, contacts and escalation time per tenant, and never portal passwords.
+  Email-channel cases need no link; DSP emails are the evidence, and a third-party case with no DSP
+  case shows as not raised. Queue also has BU, post-link fallback, a summary and more filters.
+- **Queue redesign:** tabs are now one stage per case (`verdict.stage`), so they add up to the total:
+  Act now, Raise it, Waiting on each party, Check by hand. Overdue is a flag. Rows show the latest
+  message and direct links, and filters sit in a collapsed panel.
+- **Parent direction:** a Support case's DSP is its parent, not a child, so third-party evidence
+  now reads linked cases both ways. A closed DSP parent means it's our turn.
+- **Last response:** emails are classified by sender domain (`internal_email_domains`, partner
+  domains or name, else customer). Rows show the sender's party and pending time, and
+  `focus_partners` adds cards for key third parties.
+- **Real updates, past cases, AI drafts:** third-party replies are sorted by rules, then an LLM
+  (`replies.py`, migration `118`, applied), and acks stay waiting on the third party. Unlabelled
+  replies count as real. `knowledge.py` holds 398 resolved conversations in a Knowledge collection
+  (redacted, 1,722 chunks) and writes AI drafts from them. Last-reply fields
+  are ignored on DSP cases, because any incoming email sets them.
+- **Screen check on real data:** queue and case page checked in light, dark and 1100px with real
+  rows fed through the browser, not by logging in as the owner. Normal text is at least 4.9:1, and
+  `--warn-text` was darkened. Added `github_bot_users`; a bot had the most comments and was
+  skewing turns. `support_github_users` is a partial list matched from owner names.
+- **Case page redesign:** a brief strip (whose turn, next step, last response), tabbed conversation,
+  linked items, past cases and related cases, and details and drafts in a side column. Messages are
+  tidied at read time, with `email_footer_markers` removing footers.
+- **Unsent drafts:** `EmailMessage` rows with Status 5 are excluded from every read, since a draft
+  had been counted as our last reply.
+- **Follow-ups and alerts (migration `119`, applied):** a daily list by agent, and alerts for what
+  changed, polled every minute with optional desktop notifications while the app is open. Syncs run
+  every 15 minutes, and a scheduled sync has been seen firing.
+- **Review and refresh fixes (2026-11-06):** "Mark reviewed" now returns to the list at once, and the
+  header, focus cards and breakdown leave reviewed cases out (the tabs already did). A review clears
+  that case's alerts so far, for the whole workspace; alerts raised later still count as new. Reviews
+  are stamped no earlier than the case's newest event, because the database clock runs about 0.3s
+  ahead of the app's. The setup wizard's auto-landing now happens once per tenant and never overrides
+  a page in the URL; it used to redirect every refresh for anyone who left it from the sidebar.
+  Covered by `web/e2e/monitor-review.spec.ts` with mocked API responses.
+- **Escalations page (2026-11-06):** a Case Monitor tab listing cases where the party we're waiting
+  on has sent no real update for `escalation_days` (default 5), with a CSV download.
+  `interpreter/monitor/escalations.py` reads email, Slack and GitHub. Acks, customers and internal
+  threads don't count, our-turn and never-raised cases are left out, and a Support case folds into
+  its DSP case, sharing replies from either side. Sync now keeps a textless `email_log` of up to 40
+  emails per case, because the 5-email feed hid older replies; the first 5 still drive verdicts, so
+  queue results don't change. Checked against Salesforce on all 12 real rows: every external email
+  from an aggregator is accounted for. Unread links show as "Not read" rather than as silence.
+- **Engineering page (2026-11-06):** Escalations is now third parties only. A new tab lists every open
+  GitHub issue with the `github_support_label` label, plus any an open case links to, by squad, with
+  filters for squad, status and age (`tech_pending_days`, default 7) and a CSV. Each sync lists the
+  label, so issues with no open case show too. `interpreter/monitor/issue_status.py` settles an issue
+  with no non-support comment by rule, and an LLM reads the rest into a status, who it's waiting on
+  and a reason. A reading is kept in `monitor_issues` (migration 120, applied) until `thread_hash`
+  changes, and anything unread shows as "Not read yet", never as answered. This replaced a keyword
+  RCA check, which called three explained issues "no RCA". It feeds this page only, never a verdict.
+  GitHub comments and descriptions are now stored up to 1,500 characters so they can be read whole.
+  Scored on 16 hand-read issues: 13 agree, none shown further along than they are. Open question:
+  `support_github_users` is partial, so a support person off the list counts as a tech reply, because
+  "No tech reply" is decided by that list alone and never by the LLM.
+- **Today page (2026-11-06):** the Case Monitor now opens on **Today** (`interpreter/monitor/today.py`,
+  `web/src/monitor/TodayView.tsx`): a ranked list of what needs the lead, each with its next step ready,
+  plus how many open cases need nothing. Queue is now "All cases", and the older views sit under More.
+  Done hides a card until something new happens, for a day at most, so nothing is lost by clearing it.
+  Nothing is sent: drafts are copied and sent by a person.
+  - **Aggregator SLAs** (`dsp_sla.py`): `dsp_sla_rules` gives each kind of issue its own clock, and an
+    issue with no rule uses the case's target date, escalating at `dsp_escalate_share` of it. Late cases
+    become one escalation per aggregator, and **Weekly SLA** reports them by aggregator with a CSV.
+    Clocks run on elapsed hours from case creation, with no business hours.
+  - **Coaching** (`coaching.py`, migration 121, applied): closed issues with `wrong_raise_labels`, per
+    agent, from `github_reporter_field` in the issue body. This measures wrong raises afterwards; it
+    doesn't yet stop one being raised.
+  - **SLA rules are set from evidence:** 90 days of closed aggregator cases (392) had a median of about
+    5 days, and only 14 closed within 4 hours. Rules start near what's achievable, each with a
+    `goal_resolve_hours`. **Weekly SLA** shows when a rule is ready to tighten: 80% of at least 5 cases.
+  - **Resolution Assistance** (`help_requests.py`, migrations 122 and 123, applied): `monitor_help_requests`
+    feeds help cards at the top of Today, an overnight note, and the topics agents ask about most. A
+    request is answered once someone other than the agent replies; a bot's reply doesn't count.
+    The Slack login isn't available, so an hourly Claude routine owned by the project owner (created
+    2026-11-07) copies requests from the channel into that table, using the Slack and Supabase
+    connectors. Today can lag a new request by up to an hour; Slack still alerts the owner at once.
+    Requests start 2026-11-11.
+  - **Business search** on Engineering, Escalations and Weekly SLA, by business name (`fields.business_name`,
+    default `Account.Name`) or ID. No Slack tagging until the owner reviews the two-week watch, about 2026-11-21.
+  - **Old backlog and workload baseline** (`progress.py`, migration 124, applied): `sla_start` separates old
+    cases from those raised under the SLAs, and `monitor_daily_stats` records a daily baseline for Weekly SLA.
+    **Log expiry** (`log_expiry.py`): Today warns before an aggregator's logs are lost, per `log_retention_days`.
+    **Missing details** (`case_details.py`): Today lists new aggregator cases lacking what their issue type needs.
+  - **Redesign (2026-11-07):** Case Monitor opens on three pages, with the old ones under Older pages.
+    **Needs Me** (`today.py`) groups replies by agent, one line per reply with a short next step (linked
+    cases merged; `no_answer` replies mean push the aggregator), SLA misses and agent asks. When engineers
+    answered and our newest email to the merchant came after that, the issue becomes "follow up with the
+    merchant, GitHub open" once the merchant has been quiet for `issue_quiet_hours`. Timelines are re-read
+    hourly, because an email doesn't always change a case's last modified time. **Agents**
+    (`agent_quality.py`, migration 125, applied) scores raises by rule. **Wednesday Report** (`weekly.py`)
+    lists GitHub issues with an open case where tech owes the resolution, and aggregators past SLA, for the
+    lead to post by hand. Saved checks live in Metabase; the routine copies location IDs from them.
+    Design: https://claude.ai/artifact/8CbSZAAT8ca1cqw5dxGdkZ.
+    Automatic data checks on new aggregator raises: built 2026-11-08 (see Immediate next step).
+  - A GitHub webhook for instant reaction, and a check that stops a wrong raise, aren't built.
+- **AI evaluation:** `eval/monitor/backtest.py` hides a real agent reply on a resolved case and
+  scores the draft with DeepEval. `eval/monitor/reply_labels.py` scores reply labels against a
+  hand-labelled file; gold data stays out of the repo. Holdout result: 1 of 22 real replies hidden.
+  Heavy runs exhaust Groq's 200k daily tokens, which also pushes the live pipeline to fallbacks.
+- **Not verified:** the Slack user OAuth round trip, the tag-team post, LLM summaries, a scheduled sync
+  firing, and the UI on real data. No `web/e2e` spec yet; the browser walk was a throwaway script.
+- **Salesforce without a secret:** the owner has no Connected App client ID or secret, so
+  `scripts/sf_connect_cli.py` stores a `sf org login web` refresh token in Vault as a public OAuth
+  client (`SF_OAUTH_PUBLIC_CLIENT_ID`). A production org accepted this login. Also fixed a bug from
+  2026-09-03: `client_from_oauth` passed a bare domain as `instance_url`, so every OAuth-connected
+  org got host `None`; its test had pinned the wrong value. Case Monitor builds its
+  own client and deliberately skips `salesforce.client_for`, which falls back to the platform's env
+  org on a failed login. Other `client_for` callers still have that fallback.
+- **Next step:** owner reviews the queue on real data and reports wrong verdicts. 89 of 95 cases are overdue and 77 critical, so review the scoring.
+- `fix-jobs-failures-route` (commit `4c35e7f`) is still unmerged and has no PR. This branch is
+  based on `origin/main` and doesn't include it.
+
 **2026-11-03 (Deploy prep + CI green + Supabase transport hardening.)**
 - **Deploy target changed:** the Oracle Always-Free signup rejects the card,
   so the plan is a **paid ~4 GB Ubuntu VPS** (Hetzner-class).

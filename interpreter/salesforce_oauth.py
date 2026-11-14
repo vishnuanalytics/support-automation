@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+_CLI_CLIENT_ID = "PlatformCLI"
 _TOKEN_PATH = "/services/oauth2/token"
 _AUTH_PATH = "/services/oauth2/authorize"
 
@@ -82,20 +83,44 @@ def exchange_code(code: str, redirect_uri: str, *, domain: str | None = None) ->
     return body
 
 
-def refresh_access_token(refresh_token: str, instance_url: str) -> str:
-    """A stored refresh_token -> a fresh, short-lived access (session) token."""
-    cid, secret = _need()
+def parse_sfdx_auth_url(url: str) -> dict[str, str]:
+    """Split `force://<client>:<secret>:<refresh>@<instance>`, the format
+    `sf org auth show-sfdx-auth-url` prints. The CLI leaves the client part
+    empty when a login used its own default client."""
+    prefix = "force://"
+    if not url or not url.startswith(prefix) or "@" not in url:
+        raise ValueError("not an SFDX auth URL")
+    creds, instance = url[len(prefix):].rsplit("@", 1)
+    parts = creds.split(":", 2)
+    if len(parts) == 2:
+        parts = [parts[0], "", parts[1]]
+    if len(parts) != 3 or not parts[2]:
+        raise ValueError("not an SFDX auth URL")
+    if not instance.startswith("http"):
+        instance = f"https://{instance}"
+    return {"client_id": parts[0] or _CLI_CLIENT_ID, "client_secret": parts[1], "refresh_token": parts[2],
+            "instance_url": instance}
+
+
+def refresh_access_token(refresh_token: str, instance_url: str,
+                         client_id: str | None = None) -> str:
+    """A stored refresh_token -> a fresh, short-lived access (session) token.
+    `client_id` means a public client (a CLI login), which has no secret."""
     import requests
 
+    if client_id:
+        auth = {"client_id": client_id}
+    else:
+        cid, secret = _need()
+        auth = {"client_id": cid, "client_secret": secret}
     r = requests.post(f"{instance_url.rstrip('/')}{_TOKEN_PATH}", data={
-        "grant_type": "refresh_token", "refresh_token": refresh_token,
-        "client_id": cid, "client_secret": secret,
+        "grant_type": "refresh_token", "refresh_token": refresh_token, **auth,
     }, timeout=15)
     r.raise_for_status()
     return r.json()["access_token"]
 
 
-def client_from_oauth(refresh_token: str, instance_url: str):
+def client_from_oauth(refresh_token: str, instance_url: str, client_id: str | None = None):
     """A ready-to-use `simple_salesforce.Salesforce` client from stored
     OAuth creds — mints a fresh access token first, every call (the
     caller, `client_for`, caches the resulting client for the process
@@ -104,9 +129,10 @@ def client_from_oauth(refresh_token: str, instance_url: str):
 
     from simple_salesforce import Salesforce
 
-    access_token = refresh_access_token(refresh_token, instance_url)
-    domain = instance_url.split("://", 1)[-1].rstrip("/")
-    sf = Salesforce(instance_url=domain, session_id=access_token)
+    access_token = refresh_access_token(refresh_token, instance_url, client_id)
+    # simple_salesforce reads the host out of a full URL, so a bare domain
+    # leaves it with no host at all.
+    sf = Salesforce(instance_url=instance_url.rstrip("/"), session_id=access_token)
     _to = float(os.environ.get("SF_HTTP_TIMEOUT", "30"))
     sf.session.request = functools.partial(sf.session.request, timeout=_to)
     return sf

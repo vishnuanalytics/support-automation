@@ -91,7 +91,8 @@ def _build_client(creds: dict[str, str]):
     if creds.get("SF_OAUTH_REFRESH_TOKEN") and creds.get("SF_OAUTH_INSTANCE_URL"):
         from . import salesforce_oauth
         return salesforce_oauth.client_from_oauth(
-            creds["SF_OAUTH_REFRESH_TOKEN"], creds["SF_OAUTH_INSTANCE_URL"])
+            creds["SF_OAUTH_REFRESH_TOKEN"], creds["SF_OAUTH_INSTANCE_URL"],
+            creds.get("SF_OAUTH_PUBLIC_CLIENT_ID"))
 
     from simple_salesforce import Salesforce
 

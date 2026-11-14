@@ -129,7 +129,7 @@ def test_client_from_oauth_builds_a_client_with_the_fresh_token(monkeypatch):
     monkeypatch.setenv("SF_OAUTH_CLIENT_ID", "cid")
     monkeypatch.setenv("SF_OAUTH_CLIENT_SECRET", "sec")
     monkeypatch.setattr(salesforce_oauth, "refresh_access_token",
-                        lambda rt, iu: "fresh-access-token")
+                        lambda rt, iu, cid=None: "fresh-access-token")
 
     captured = {}
 
@@ -146,7 +146,7 @@ def test_client_from_oauth_builds_a_client_with_the_fresh_token(monkeypatch):
     monkeypatch.setattr(simple_salesforce, "Salesforce", _FakeSalesforce)
 
     client = salesforce_oauth.client_from_oauth("rt-xyz", "https://acme.my.salesforce.com")
-    assert captured["instance_url"] == "acme.my.salesforce.com"
+    assert captured["instance_url"] == "https://acme.my.salesforce.com"
     assert captured["session_id"] == "fresh-access-token"
     assert isinstance(client, _FakeSalesforce)
 
@@ -158,7 +158,7 @@ def test_client_from_oauth_builds_a_client_with_the_fresh_token(monkeypatch):
 def test_build_client_dispatches_oauth_creds_to_salesforce_oauth(monkeypatch):
     called = {}
     monkeypatch.setattr(salesforce_oauth, "client_from_oauth",
-                        lambda rt, iu: called.update(rt=rt, iu=iu) or object())
+                        lambda rt, iu, cid=None: called.update(rt=rt, iu=iu) or object())
 
     salesforce._build_client({
         "SF_OAUTH_REFRESH_TOKEN": "rt-1", "SF_OAUTH_INSTANCE_URL": "https://x.my.salesforce.com",
@@ -168,7 +168,7 @@ def test_build_client_dispatches_oauth_creds_to_salesforce_oauth(monkeypatch):
 
 def test_build_client_oauth_creds_never_need_sf_username(monkeypatch):
     """The dict has no SF_USERNAME at all -- must not KeyError."""
-    monkeypatch.setattr(salesforce_oauth, "client_from_oauth", lambda rt, iu: "ok")
+    monkeypatch.setattr(salesforce_oauth, "client_from_oauth", lambda rt, iu, cid=None: "ok")
     result = salesforce._build_client({
         "SF_OAUTH_REFRESH_TOKEN": "rt", "SF_OAUTH_INSTANCE_URL": "https://x.my.salesforce.com",
     })
