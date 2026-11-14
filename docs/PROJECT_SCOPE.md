@@ -707,6 +707,17 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-14 (Case Monitor: AI merchant draft fixed for follow-ups.)** Reported on case 00133297 (GitHub
+#8783): "Draft for merchant" returned a paraphrase of our own last email. Two causes in
+`knowledge.draft_prompt`: (1) when our message was the newest, the prompt told the model to *reply to* it;
+(2) the last 20 timeline entries were mostly owner/status field changes, crowding out the merchant's
+emails. Now field changes are left out of the sources. When our message is newest, the prompt says to
+write a follow-up and shows our last message and the audience's last message (marked as already
+answered). It also adds a "Where it stands" line (Salesforce waiting-on value, and whether engineering
+has replied on GitHub since our last comment), and `DRAFT_SYSTEM` says never to restate our last message.
+Live result on 00133297: a short "still waiting on Engineering, we'll update you" instead of a repeat.
+**Verified:** +3 unit tests (597 in `tests/monitor/`), API rebuilt, live draft re-run.
+
 **2026-11-14 (Case Monitor: GitHub numbers on notifications.)** Every notification row shows its GitHub
 issue number(s) as a link (from the case's links or the tech-pending issue). Notifications has a search box
 that finds rows by case number or GitHub number, ignoring the filter. The header's "Open case number" box

@@ -134,7 +134,47 @@ def test_draft_prompt_puts_the_latest_message_first():
                  "text": "Status changed"}]
     user, _ = knowledge.draft_prompt({"subject": "S"}, "aggregator", timeline, [], None)
     head = user.split("Sources:")[0]
-    assert "Aggregator: It is a scheduled order" in head and "Status changed" not in head
+    assert "Aggregator (2, Email): It is a scheduled order" in head and "Status changed" not in head
+
+
+def _ownly_timeline():
+    """Case 00133297: the merchant asked, we escalated and said so, engineering hasn't replied."""
+    return [
+        {"source": "Email", "party": "customer", "party_label": "Merchant", "at": "2026-11-07",
+         "text": "Still auto marked Food Ready, please give a permanent resolution"},
+        {"source": "Field change", "party": "system", "party_label": "System", "at": "2026-11-11",
+         "text": "Owner: Shaheen Haque → Animesh Jha"},
+        {"source": "GitHub", "party": "us", "party_label": "Our team", "at": "2026-11-12",
+         "text": "Screenshots of the settings"},
+        {"source": "Email", "party": "us", "party_label": "Our team", "at": "2026-11-12",
+         "text": "I've raised this with our Engineering team and will update you"},
+    ]
+
+
+def test_when_our_message_is_newest_the_draft_is_a_follow_up_not_a_reply_to_ourselves():
+    case = {"subject": "Ownly orders auto Food Ready", "waiting_raw": "Engineer"}
+    user, sources = knowledge.draft_prompt(case, "merchant", _ownly_timeline(), [], None)
+    head = user.split("Sources:")[0]
+    assert "Latest message, which you are replying to" not in head
+    assert "The newest message is ours, so write a follow-up" in head
+    assert "Our last message:\nOur team (2026-11-12, Email): I've raised this" in head
+    assert "The merchant's last message, which our last message already answered" in head
+    assert "answer it again):\nMerchant (2026-11-07, Email): Still auto marked" in head
+    assert "waiting on: Engineer" in head and "no engineer reply since our comment on 2026-11-12" in head
+
+
+def test_field_changes_are_left_out_of_the_draft_sources():
+    _, sources = knowledge.draft_prompt({"subject": "S"}, "merchant", _ownly_timeline(), [], None)
+    assert [s["source"] for s in sources] == ["Email", "GitHub", "Email"]
+
+
+def test_an_engineer_reply_on_github_is_where_it_stands():
+    timeline = [*_ownly_timeline(), {"source": "GitHub", "party": "engineering", "party_label": "Engineering",
+                                      "at": "2026-11-13", "text": "Fixed in prime 4.2"}]
+    user, _ = knowledge.draft_prompt({"subject": "S"}, "merchant", timeline, [], None)
+    head = user.split("Sources:")[0]
+    assert "GitHub: last engineer reply on 2026-11-13" in head
+    assert "Latest message, which you are replying to:\nEngineering (2026-11-13, GitHub): Fixed" in head
 
 
 def test_generate_draft_returns_sources(monkeypatch):

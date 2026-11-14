@@ -144,6 +144,11 @@ DRAFT_SYSTEM = (
     "for the requested audience, responding to the latest message.\n"
     "Rules:\n"
     "- Start from the latest message: answer what it says or asks. Earlier messages are background.\n"
+    "- When the newest message is ours, write a follow-up, not a reply: give only what has changed "
+    "since our last message and where the case stands now. Never restate or paraphrase our last "
+    "message or thank them again for what they sent before it. If nothing has changed, say so in two "
+    "or three sentences: we're still waiting on whoever 'Where it stands' names, and we'll update "
+    "them when we hear back.\n"
     "- Match the size of what's needed. If the latest message settles the question, write a short "
     "reply that acknowledges it and gives the next step. Don't reopen or recap the whole issue.\n"
     "- When a platform team gives a finding, the usual reply thanks them and says what you'll do "
@@ -161,21 +166,52 @@ DRAFT_SYSTEM = (
 )
 
 
+def _line(t: dict) -> str:
+    return f"{t['party_label']} ({(t.get('at') or '')[:10]}, {t.get('source')}): {redact_pii(t.get('text'))}"
+
+
+def _standing(case: dict, talk: list[dict]) -> str:
+    """Where the case stands, from facts the case already has."""
+    parts = []
+    if case.get("waiting_raw"):
+        parts.append(f"Salesforce says it's waiting on: {case['waiting_raw']}")
+    github = [t for t in talk if "github" in (t.get("source") or "").lower()]
+    if github:
+        last = github[-1]
+        if last.get("party") == "us":
+            parts.append(f"GitHub: no engineer reply since our comment on {(last.get('at') or '')[:10]}")
+        else:
+            parts.append(f"GitHub: last engineer reply on {(last.get('at') or '')[:10]}")
+    return "; ".join(parts) or "not stated"
+
+
 def draft_prompt(case: dict, audience: str, timeline: list[dict], similar: list[dict],
                  partner: dict | None) -> tuple[str, list[dict]]:
-    sources = [{"source": t["source"], "url": t.get("url"),
-                "text": f"{t['party_label']} ({(t.get('at') or '')[:10]}): "
-                        f"{redact_pii(t.get('text'))}"} for t in timeline[-20:] if t.get("text")]
+    # Field changes (owner, status) aren't conversation: left in, they crowd the messages out.
+    talk = [t for t in timeline if t.get("party") != "system" and t.get("text")]
+    sources = [{"source": t["source"], "url": t.get("url"), "text": _line(t)} for t in talk[-20:]]
     sources += [{"source": "Past case", "url": s.get("url"), "text": redact_pii(s["text"])}
                 for s in similar]
     numbered = "\n\n".join(f"[{i + 1}] {s['source']}: {s['text']}" for i, s in enumerate(sources))
-    talk = [t for t in timeline if t.get("party") != "system" and t.get("text")]
-    latest = f"{talk[-1]['party_label']}: {redact_pii(talk[-1]['text'])}" if talk else "none"
     target = "the merchant" if audience == "merchant" else (
         f"the {partner['name']} team" if partner else "the delivery platform's team")
+    theirs = "customer" if audience == "merchant" else "third_party"
     header = (f"Audience: {target}\nCase: {redact_pii(case.get('subject'))}\n"
-              f"Aggregator: {', '.join(case.get('third_parties') or []) or 'not stated'}\n")
-    return f"{header}\nLatest message, which you are replying to:\n{latest}\n\nSources:\n{numbered}", sources
+              f"Aggregator: {', '.join(case.get('third_parties') or []) or 'not stated'}\n"
+              f"Where it stands: {_standing(case, talk)}\n")
+    if not talk:
+        latest = "Latest message, which you are replying to:\nnone"
+    elif talk[-1].get("party") != "us":
+        latest = f"Latest message, which you are replying to:\n{_line(talk[-1])}"
+    else:
+        # Our message is the newest, so this is a follow-up, not an answer to ourselves.
+        their_last = next((t for t in reversed(talk) if t.get("party") == theirs), None)
+        latest = ("The newest message is ours, so write a follow-up.\n"
+                  f"Our last message:\n{_line(talk[-1])}\n"
+                  f"{target.capitalize()}'s last message, which our last message already answered "
+                  "(don't thank them for it or answer it again):\n"
+                  f"{_line(their_last) if their_last else 'none'}")
+    return f"{header}\n{latest}\n\nSources:\n{numbered}", sources
 
 
 SIMILAR_LIMIT = 3
