@@ -707,6 +707,25 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-14 (Case Monitor: five working pages, branch `case-monitor`.)** On the owner's ask that the
+pages weren't helping resolve cases, the nav is now five pages; every older page (Wednesday report, SLA,
+Follow-ups, Escalations (all), Engineering (all), Agent raise quality, Alerts, Digest, Settings) sits under
+**More**. Default page is All cases. (1) **All cases**: six Salesforce filters inline (Waiting on, Record
+type, Aggregator, Owner, Sub-status, Module), the rest under More filters, plus a "last reply" strip by
+party (merchant/aggregator/engineering/agent/none) with reply-tone chips from the existing reply labels
+(new queue fields `reply_kind`, `customer_reply_kind`; new `tone` filter). (2) **Aggregator: no response**:
+the escalations list at 3 days (`/api/monitor/escalations?days=3`) with an "I escalated this" button.
+(3) **Engineering: no RCA**: open GitHub issues quiet 3+ days whose read status is no reply / investigating
+/ not read, with a copyable nudge. (4) **Escalated**: every case waiting on the aggregator plus ones added
+by hand; "Team responded" moves it to a Responded tab, Reopen undoes. **Salesforce is never written**
+(owner's choice). New table `monitor_escalation_marks` (**migration 128, applied 2026-11-14**) and
+`GET/PUT/DELETE /api/monitor/escalation-marks`. (5) **On me & agents**: Needs Me, an agents' list (agent-owned
+act/close/raise cases grouped by owner with a copyable message; nothing is sent, per the no-tagging trial),
+and the raise-quality report. **Verified:** +5 unit tests, +3 auth route cases (586 in `tests/monitor/`),
+new `e2e/monitor-escalated.spec.ts` (2) plus all monitor specs pass, `npm run build` passes, light/dark
+screenshots on mocked data. API container rebuilt. **Not checked on live data in a browser** (needs the
+owner's login). 3 days is a constant (`QUIET_DAYS` in `web/src/monitor/tone.ts`), not tenant config.
+
 **2026-11-08 (Case Monitor: automatic data checks on new aggregator cases, branch `case-monitor`.)**
 The "order and stock log checks on new aggregator raises" item planned since the redesign. The owner
 chose order, stock, store and menu checks, rules in new per-tenant config, and the existing hourly

@@ -1,5 +1,5 @@
 import { supabase } from "./supabase";
-import type { AgentsReport, AiDraft, Alerts, CaseDetail, Digest, Escalations, FollowUps, Queue, SlackStatus, SlaReport, Summary, TechPending, Today, Weekly } from "./monitor/types";
+import type { AgentsReport, AiDraft, Alerts, CaseDetail, Digest, EscalationMark, Escalations, FollowUps, Queue, SlackStatus, SlaReport, Summary, TechPending, Today, Weekly } from "./monitor/types";
 import type {
   AssistResult,
   AuditEvent,
@@ -599,7 +599,18 @@ export const api = {
     queue: (tenantId?: string) => req<Queue>(`/monitor/queue${monitorQuery(tenantId)}`),
     digest: (tenantId?: string) => req<Digest>(`/monitor/digest${monitorQuery(tenantId)}`),
     followUps: (tenantId?: string) => req<FollowUps>(`/monitor/follow-ups${monitorQuery(tenantId)}`),
-    escalations: (tenantId?: string) => req<Escalations>(`/monitor/escalations${monitorQuery(tenantId)}`),
+    escalations: (tenantId?: string, days?: number) => {
+      const q = monitorQuery(tenantId);
+      return req<Escalations>(`/monitor/escalations${q}${days === undefined ? "" : `${q ? "&" : "?"}days=${days}`}`);
+    },
+    escalationMarks: (tenantId?: string) =>
+      req<{ marks: EscalationMark[] }>(`/monitor/escalation-marks${monitorQuery(tenantId)}`),
+    setEscalationMark: (caseId: string, action: "escalate" | "responded" | "reopen", note?: string, tenantId?: string) =>
+      req<EscalationMark>(`/monitor/escalation-marks/${encodeURIComponent(caseId)}${monitorQuery(tenantId)}`, {
+        method: "PUT", body: JSON.stringify({ action, note }),
+      }),
+    clearEscalationMark: (caseId: string, tenantId?: string) =>
+      req<void>(`/monitor/escalation-marks/${encodeURIComponent(caseId)}${monitorQuery(tenantId)}`, { method: "DELETE" }),
     today: (tenantId?: string) => req<Today>(`/monitor/today${monitorQuery(tenantId)}`),
     todayDone: (key: string, tenantId?: string) =>
       req<void>(`/monitor/today/done${monitorQuery(tenantId)}`, { method: "POST", body: JSON.stringify({ key }) }),

@@ -78,7 +78,7 @@ test("mark reviewed returns to the queue with the case and its alert gone", asyn
   await installApiMocks(page);
   await mockMonitor(page);
   await page.goto("/?view=monitor&tab=queue");
-  await expect(page.getByLabel("More views").locator("option").first()).toHaveText("Older pages (1)");
+  await expect(page.getByLabel("More views").locator("option").first()).toHaveText("More (1)");
   await page.getByRole("button", { name: "1001" }).click();
   await page.getByRole("button", { name: "Mark reviewed" }).click();
 
@@ -86,7 +86,7 @@ test("mark reviewed returns to the queue with the case and its alert gone", asyn
   await expect(page.getByRole("button", { name: "1001" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "1002" })).toBeVisible();
   await expect(page.getByText("1 open · 1 reviewed")).toBeVisible();
-  await expect(page.getByLabel("More views").locator("option").first()).toHaveText("Older pages");
+  await expect(page.getByLabel("More views").locator("option").first()).toHaveText("More");
 });
 
 const fakeNotifications = (page: Page) => page.addInitScript(() => {
@@ -113,7 +113,7 @@ test("clicking a notification for one new alert opens its case", async ({ page }
   await fakeNotifications(page);
   await page.clock.install();
   await page.goto("/?view=monitor&tab=queue");
-  await expect(page.getByLabel("More views").locator("option").first()).toHaveText("Older pages (1)");
+  await expect(page.getByLabel("More views").locator("option").first()).toHaveText("More (1)");
   await page.route(/\/api\/monitor\/alerts/, (route) => route.fulfill({
     json: { unread: 2, alerts: [
       { id: 2, case_id: "a", case_number: "1001", subject: "Subject 1001", kind: "new_reply", detail: null,
@@ -122,7 +122,7 @@ test("clicking a notification for one new alert opens its case", async ({ page }
         created_at: new Date().toISOString(), unread: true }] },
   }));
   await page.clock.fastForward(61_000);
-  await expect(page.getByLabel("More views").locator("option").first()).toHaveText("Older pages (2)");
+  await expect(page.getByLabel("More views").locator("option").first()).toHaveText("More (2)");
   await clickNotification(page);
   await expect(page.getByRole("button", { name: "Mark reviewed" })).toBeVisible();
   expect(page.url()).toContain("case=a");

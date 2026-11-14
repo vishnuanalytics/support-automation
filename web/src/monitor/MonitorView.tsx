@@ -5,12 +5,16 @@ import { AlertsView, useAlerts } from "./AlertsView";
 import { EscalationsView } from "./EscalationsView";
 import { SlaReportView } from "./SlaReportView";
 import { TechPendingView } from "./TechPendingView";
-import { TodayView } from "./TodayView";
 import { CaseView } from "./CaseView";
 import { FollowUpsView } from "./FollowUpsView";
 import { AgentsView } from "./AgentsView";
 import { WeeklyView } from "./WeeklyView";
 import { MonitorSettings } from "./MonitorSettings";
+import { AggregatorQuietView } from "./AggregatorQuietView";
+import { EngineeringQuietView } from "./EngineeringQuietView";
+import { EscalatedView, useEscalationMarks } from "./EscalatedView";
+import { OnMeView } from "./AgentWorkView";
+import { lastParty, replyTone, toneLabel, toneTag, TONE_ORDER, withoutMirrors, type Party } from "./tone";
 import { copyText, formatAge, formatTime } from "./util";
 import type { Digest, Queue, QueueCase, SlackStatus, Stage } from "./types";
 import "./monitor.css";
@@ -19,18 +23,18 @@ type Who = "everyone" | "mine" | "agents";
 type Filters = {
   waiting: string; recordType: string; bu: string; thirdParty: string; module: string;
   subModule: string; subStatus: string; link: string; channel: string; lastFrom: string;
-  owner: string; level: string; search: string;
+  owner: string; level: string; tone: string; search: string;
 };
 type StageTab = Stage | "all";
 
 const NO_FILTERS: Filters = {
   waiting: "", recordType: "", bu: "", thirdParty: "", module: "", subModule: "", subStatus: "",
-  link: "", channel: "", lastFrom: "", owner: "", level: "", search: "",
+  link: "", channel: "", lastFrom: "", owner: "", level: "", tone: "", search: "",
 };
 const FILTER_LABEL: Record<keyof Filters, string> = {
   waiting: "Waiting on", recordType: "Record type", bu: "BU", thirdParty: "Aggregator",
   module: "Module", subModule: "Sub-module", subStatus: "Sub-status", link: "Link",
-  channel: "Raise channel", lastFrom: "Last response from", owner: "Owner", level: "Level", search: "Search",
+  channel: "Raise channel", lastFrom: "Last response from", owner: "Owner", level: "Level", tone: "Reply tone", search: "Search",
 };
 const FILTER_KEY = "monitor.filters";
 const PANEL_KEY = "monitor.panel";
@@ -94,19 +98,74 @@ function matches(c: QueueCase, f: Filters): boolean {
     (!f.lastFrom || matchesLast(c, f.lastFrom)) &&
     (!f.owner || c.owner === f.owner) &&
     (!f.level || c.level === f.level) &&
+    (!f.tone || replyTone(c) === f.tone) &&
     (!q || `${c.case_number} ${c.subject} ${c.owner}`.toLowerCase().includes(q))
   );
 }
 
-const MODES = ["today", "agents", "weekly", "sla", "queue", "followups", "escalations", "engineering", "alerts", "digest", "settings"] as const;
+const MODES = ["queue", "aggregator", "engquiet", "escalated", "today",
+  "agents", "weekly", "sla", "followups", "escalations", "engineering", "alerts", "digest", "settings"] as const;
 type Mode = (typeof MODES)[number];
 
-const MORE = [
-  { value: "queue", label: "All cases" }, { value: "sla", label: "Weekly SLA" },
-  { value: "followups", label: "Follow-ups" }, { value: "escalations", label: "Escalations" },
-  { value: "engineering", label: "Engineering" }, { value: "alerts", label: "Alerts" },
-  { value: "digest", label: "Digest" }, { value: "settings", label: "Settings" },
+// The five working pages; everything older sits under "More".
+const PAGES: { value: Mode; label: string; hint: string }[] = [
+  { value: "queue", label: "All cases", hint: "Filter by Salesforce fields and last reply" },
+  { value: "aggregator", label: "Aggregator: no response", hint: "3+ days quiet, to escalate" },
+  { value: "engquiet", label: "Engineering: no RCA", hint: "3+ days quiet, cause not shared" },
+  { value: "escalated", label: "Escalated", hint: "Waiting on the aggregator's team" },
+  { value: "today", label: "On me & agents", hint: "Mine to do, and agents' to fix" },
 ];
+const MORE = [
+  { value: "weekly", label: "Wednesday report" }, { value: "sla", label: "Weekly SLA" },
+  { value: "followups", label: "Follow-ups" }, { value: "escalations", label: "Escalations (all)" },
+  { value: "engineering", label: "Engineering (all issues)" }, { value: "agents", label: "Agent raise quality" },
+  { value: "alerts", label: "Alerts" }, { value: "digest", label: "Digest" }, { value: "settings", label: "Settings" },
+];
+
+const PARTY_LABEL = (p: Party, thirdParty: string, customer: string) => ({
+  customer, third_party: thirdParty, engineering: "Engineering", us: "Agent (us)", none: "No reply found",
+})[p];
+
+/** Where the last reply on each case came from, and what it said. */
+function ReplyStrip({ cases, active, onPick, thirdParty, customer }: {
+  cases: QueueCase[];
+  active: Filters;
+  onPick: (patch: Partial<Filters>) => void;
+  thirdParty: string;
+  customer: string;
+}) {
+  const parties: Party[] = ["customer", "third_party", "engineering", "us", "none"];
+  return (
+    <section className="reply-strip" aria-label="Where the last reply came from">
+      {parties.map((p) => {
+        const own = cases.filter((c) => lastParty(c) === p);
+        if (!own.length) return null;
+        const on = active.lastFrom === p;
+        const tones = TONE_ORDER.map((t) => [t, own.filter((c) => replyTone(c) === t).length] as const).filter(([, n]) => n);
+        return (
+          <article key={p} className={on ? "is-active" : ""}>
+            <button type="button" className="reply-strip-title" aria-pressed={on && !active.tone}
+                    onClick={() => onPick({ lastFrom: on && !active.tone ? "" : p, tone: "" })}>
+              <span>Last reply: {PARTY_LABEL(p, thirdParty, customer)}</span>
+              <strong>{own.length}</strong>
+            </button>
+            {tones.length > 0 && (
+              <div className="reply-strip-tones">
+                {tones.map(([t, n]) => (
+                  <button key={t} type="button" aria-pressed={on && active.tone === t}
+                          className={`reply-tone reply-tone--${toneTag(t)}${on && active.tone === t ? " is-active" : ""}`}
+                          onClick={() => onPick(on && active.tone === t ? { lastFrom: "", tone: "" } : { lastFrom: p, tone: t })}>
+                    {toneLabel(t)} <span>{n}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </article>
+        );
+      })}
+    </section>
+  );
+}
 
 function choices(all: string, values: (string | null)[]) {
   const unique = [...new Set(values.filter(Boolean) as string[])].sort();
@@ -261,6 +320,7 @@ function Row({ c, selected, onOpen, thirdParty, customer }: {
               </Tag>{" "}
               {c.latest.who} · {c.latest.source} · {formatAge(hoursSince(c.latest.at))} ago
             </div>
+            {replyTone(c) && <Tag tone={toneTag(replyTone(c)!)}>{toneLabel(replyTone(c)!)}</Tag>}
             <div className="monitor-latest">{c.latest.text}</div>
           </>
         ) : (
@@ -309,7 +369,7 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
   );
   const [mode, setModeState] = useState<Mode>(() => {
     const tab = new URLSearchParams(window.location.search).get("tab");
-    return MODES.includes(tab as Mode) ? (tab as Mode) : "today";
+    return MODES.includes(tab as Mode) ? (tab as Mode) : "queue";
   });
   const setMode = useCallback((next: Mode) => {
     setModeState(next);
@@ -322,6 +382,7 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
   const [slack, setSlack] = useState<SlackStatus | null>(null);
   const [help, setHelp] = useState(false);
   const pendingG = useRef(false);
+  const marks = useEscalationMarks(tid);
   const alertState = useAlerts(tid, (caseId) => {
     open(caseId);
     if (!caseId) setMode("alerts");
@@ -512,6 +573,10 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
   const errors = queue?.last_sync?.errors ?? [];
   const hasDemo = all.some((c) => c.source === "demo");
   const activeFilters = (Object.keys(filters) as (keyof Filters)[]).filter((k) => filters[k] && k !== "search");
+  const escalatedIds = new Set([
+    ...withoutMirrors(all.filter((c) => c.waiting_party === "third_party")).map((c) => c.id),
+    ...[...marks.marks.values()].filter((m) => m.manual).map((m) => m.case_id)]);
+  const escalatedOpen = all.filter((c) => escalatedIds.has(c.id) && !marks.marks.get(c.id)?.responded_at).length;
 
   return (
     <div className="monitor">
@@ -531,12 +596,9 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
         <div className="monitor-actions">
           <Input aria-label="Find a case" placeholder="Find a case" value={filters.search}
                  onChange={(e) => { updateFilters({ search: e.target.value }); chooseTab("all"); setMode("queue"); }} />
-          <Button size="sm" variant={mode === "today" ? "secondary" : "ghost"} onClick={() => setMode("today")}>Needs Me</Button>
-          <Button size="sm" variant={mode === "agents" ? "secondary" : "ghost"} onClick={() => setMode("agents")}>Agents</Button>
-          <Button size="sm" variant={mode === "weekly" ? "secondary" : "ghost"} onClick={() => setMode("weekly")}>Wednesday Report</Button>
           <Select aria-label="More views" value={MORE.some((m) => m.value === mode) ? mode : ""}
                   onChange={(e) => e.target.value && setMode(e.target.value as Mode)}
-                  options={[{ value: "", label: alertState.unread ? `Older pages (${alertState.unread})` : "Older pages" },
+                  options={[{ value: "", label: alertState.unread ? `More (${alertState.unread})` : "More" },
                     ...MORE.filter((m) => isOwner || m.value !== "settings").map((m) => (
                       m.value === "alerts" && alertState.unread
                         ? { ...m, label: `Alerts (${alertState.unread})` } : m))]} />
@@ -544,6 +606,19 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
           <Button size="sm" variant="primary" loading={queue?.running} onClick={sync}>Refresh now</Button>
         </div>
       </header>
+
+      <nav className="monitor-pages" aria-label="Sections">
+        {PAGES.map((p) => (
+          <button key={p.value} type="button" aria-current={mode === p.value ? "page" : undefined}
+                  className={mode === p.value ? "is-active" : ""} onClick={() => setMode(p.value)}>
+            <span>{p.label}
+              {p.value === "queue" && queue && <em>{all.length - reviewedCount}</em>}
+              {p.value === "escalated" && queue && escalatedOpen > 0 && <em>{escalatedOpen}</em>}
+            </span>
+            <small>{p.hint}</small>
+          </button>
+        ))}
+      </nav>
 
       {err && <Banner tone="exception" title={err} />}
       {note && <p className="monitor-note" role="status">{note}</p>}
@@ -564,7 +639,14 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
       )}
 
       {mode === "today" ? (
-        <TodayView tenantId={tid} onOpen={open} thirdParty={thirdParty} customer={customer} />
+        <OnMeView cases={all} tenantId={tid} onOpen={open} thirdParty={thirdParty} customer={customer} />
+      ) : mode === "aggregator" ? (
+        <AggregatorQuietView tenantId={tid} onOpen={open} marks={marks} thirdParty={thirdParty} />
+      ) : mode === "engquiet" ? (
+        <EngineeringQuietView tenantId={tid} onOpen={open} />
+      ) : mode === "escalated" ? (
+        queue ? <EscalatedView cases={all} tenantId={tid} onOpen={open} thirdParty={thirdParty} customer={customer} marks={marks} />
+          : <Skeleton variant="row" lines={6} />
       ) : mode === "agents" ? (
         <AgentsView tenantId={tid} onOpen={open} />
       ) : mode === "weekly" ? (
@@ -625,6 +707,24 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
             ))}
           </div>
 
+          <ReplyStrip cases={listed} active={filters} thirdParty={thirdParty} customer={customer}
+                      onPick={(patch) => { updateFilters(patch); chooseTab("all"); }} />
+
+          <div className="monitor-filters monitor-filters--inline" aria-label="Salesforce filters">
+            <Select aria-label="Waiting on" value={filters.waiting} options={choices("Waiting on: all", all.map((c) => c.waiting_raw))}
+                    onChange={(e) => updateFilters({ waiting: e.target.value })} />
+            <Select aria-label="Record type" value={filters.recordType} options={choices("Record type: all", all.map((c) => c.record_type))}
+                    onChange={(e) => updateFilters({ recordType: e.target.value })} />
+            <Select aria-label={thirdParty} value={filters.thirdParty} options={choices(`${thirdParty}: all`, all.flatMap((c) => c.third_parties))}
+                    onChange={(e) => updateFilters({ thirdParty: e.target.value })} />
+            <Select aria-label="Owner" value={filters.owner} options={choices("Owner: all", all.map((c) => c.owner))}
+                    onChange={(e) => updateFilters({ owner: e.target.value })} />
+            <Select aria-label="Sub-status" value={filters.subStatus} options={choices("Sub-status: all", all.map((c) => c.sub_status))}
+                    onChange={(e) => updateFilters({ subStatus: e.target.value })} />
+            <Select aria-label="Module" value={filters.module} options={choices("Module: all", all.map((c) => c.module))}
+                    onChange={(e) => updateFilters({ module: e.target.value, subModule: "" })} />
+          </div>
+
           {queue.focus_partners.length > 0 && (
             <FocusCards names={queue.focus_partners} cases={listed} customer={customer} active={filters}
                         onPick={(patch) => { updateFilters(patch); chooseTab("all"); }} />
@@ -650,7 +750,7 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
               </button>
             </div>
             <Button size="sm" variant="secondary" aria-expanded={panelOpen} onClick={togglePanel}>
-              Filters{activeFilters.length ? ` (${activeFilters.length})` : ""}
+              More filters{activeFilters.length ? ` (${activeFilters.length} on)` : ""}
             </Button>
             <label className="monitor-check">
               <input type="checkbox" checked={showHidden} onChange={(e) => setShowHidden(e.target.checked)} />
@@ -673,21 +773,11 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
           {panelOpen && (
             <section className="monitor-panel" aria-label="Filters and breakdown">
               <div className="monitor-filters">
-                <Select aria-label="Waiting on" value={filters.waiting} options={choices("Waiting on: all", all.map((c) => c.waiting_raw))}
-                        onChange={(e) => updateFilters({ waiting: e.target.value })} />
-                <Select aria-label="Record type" value={filters.recordType} options={choices("Record type: all", all.map((c) => c.record_type))}
-                        onChange={(e) => updateFilters({ recordType: e.target.value })} />
                 <Select aria-label="BU" value={filters.bu} options={choices("BU: all", all.map((c) => c.bu))}
                         onChange={(e) => updateFilters({ bu: e.target.value })} />
-                <Select aria-label={thirdParty} value={filters.thirdParty} options={choices(`${thirdParty}: all`, all.flatMap((c) => c.third_parties))}
-                        onChange={(e) => updateFilters({ thirdParty: e.target.value })} />
-                <Select aria-label="Module" value={filters.module} options={choices("Module: all", all.map((c) => c.module))}
-                        onChange={(e) => updateFilters({ module: e.target.value, subModule: "" })} />
                 <Select aria-label="Sub-module" value={filters.subModule}
                         options={choices("Sub-module: all", all.filter((c) => !filters.module || c.module === filters.module).map((c) => c.sub_module))}
                         onChange={(e) => updateFilters({ subModule: e.target.value })} />
-                <Select aria-label="Sub-status" value={filters.subStatus} options={choices("Sub-status: all", all.map((c) => c.sub_status))}
-                        onChange={(e) => updateFilters({ subStatus: e.target.value })} />
                 <Select aria-label="Link" value={filters.link}
                         options={[{ value: "", label: "Link: all" }, { value: "none", label: "No link" },
                                   ...Object.entries(LINK_TEXT).map(([value, label]) => ({ value, label }))]}
@@ -700,8 +790,9 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
                                   { value: "customer", label: customer },
                                   { value: "engineering", label: "Engineering" }, { value: "none", label: "None found" }]}
                         onChange={(e) => updateFilters({ lastFrom: e.target.value })} />
-                <Select aria-label="Owner" value={filters.owner} options={choices("Owner: all", all.map((c) => c.owner))}
-                        onChange={(e) => updateFilters({ owner: e.target.value })} />
+                <Select aria-label="Reply tone" value={filters.tone}
+                        options={[{ value: "", label: "Reply tone: all" }, ...TONE_ORDER.map((t) => ({ value: t, label: toneLabel(t) }))]}
+                        onChange={(e) => updateFilters({ tone: e.target.value })} />
                 <Select aria-label="Level" value={filters.level} options={choices("Level: all", ["critical", "high", "medium", "low"])}
                         onChange={(e) => updateFilters({ level: e.target.value })} />
               </div>

@@ -86,7 +86,7 @@ test("today shows only what needs you, with the next step ready", async ({ page,
   await page.route(/\/api\/monitor\/weekly/, (route) => route.fulfill({ json: weekly }));
   await page.route(/\/api\/monitor\/agents/, (route) => route.fulfill({ json: agents }));
 
-  await page.goto("/?view=monitor");
+  await page.goto("/?view=monitor&tab=today");
   await expect(page.getByRole("heading", { name: "4 things need you" })).toBeVisible();
   await expect(page.getByText("77 of 96 open cases need nothing from you")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Replies waiting (1)" })).toBeVisible();
@@ -112,7 +112,7 @@ test("today shows only what needs you, with the next step ready", async ({ page,
   expect((await done).postDataJSON()).toEqual({ key: "dsp:PartnerA" });
   await expect(page.getByRole("heading", { name: "3 things need you" })).toBeVisible();
 
-  await page.getByRole("button", { name: "Wednesday Report" }).click();
+  await page.getByLabel("More views").selectOption("weekly");
   await expect(page.getByRole("heading", { name: "Pending from engineering (1)" })).toBeVisible();
   await expect(page.getByText("Week from Wed 11 Nov.")).toBeVisible();
   await expect(page.getByRole("cell", { name: /ravi · GitHub/ })).toBeInViewport();
@@ -123,7 +123,7 @@ test("today shows only what needs you, with the next step ready", async ({ page,
   await page.getByRole("button", { name: "Copy PartnerA message" }).click();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("Hi PartnerA team, list");
 
-  await page.getByRole("button", { name: "Agents" }).click();
+  await page.getByLabel("More views").selectOption("agents");
   await expect(page.getByRole("heading", { name: "2 of 8 raises had a problem" })).toBeVisible();
   await page.getByRole("button", { name: "Asha" }).click();
   await expect(page.getByText("Payload is for location 777, but the case is 100")).toBeVisible();

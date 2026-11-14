@@ -86,6 +86,8 @@ def queue(sb: Any, tenant_id: str, now: datetime | None = None) -> dict[str, Any
             "ai_state": (c.get("ai") or {}).get("state"),
             "hidden": is_hidden(review, v, now),
             "snooze_until": (review or {}).get("snooze_until"),
+            "reply_kind": (c.get("reply") or {}).get("kind"),
+            "customer_reply_kind": (c.get("customer_reply") or {}).get("kind"),
         })
     items.sort(key=lambda i: i["score"], reverse=True)
 
@@ -266,11 +268,52 @@ def _cases_with_evidence(sb: Any, tenant_id: str, cfg: dict) -> list[tuple[dict,
     return items
 
 
-def escalation_list(sb: Any, tenant_id: str, now: datetime | None = None) -> dict[str, Any]:
+def escalation_list(sb: Any, tenant_id: str, now: datetime | None = None,
+                    days: float | None = None) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
     cfg = load_config(sb, tenant_id)
-    return escalations.build(_cases_with_evidence(sb, tenant_id, cfg), cfg["escalation_days"], now,
+    return escalations.build(_cases_with_evidence(sb, tenant_id, cfg),
+                             cfg["escalation_days"] if days is None else days, now,
                              cfg["dependency_record_type"])
+
+
+ESCALATION_ACTIONS = ("escalate", "responded", "reopen")
+
+
+def escalation_marks(sb: Any, tenant_id: str) -> list[dict]:
+    return (sb.table("monitor_escalation_marks").select("*").eq("tenant_id", tenant_id)
+            .execute().data or [])
+
+
+def set_escalation_mark(sb: Any, tenant_id: str, case_id: str, user_id: str, action: str,
+                        note: str | None = None, now: datetime | None = None) -> dict:
+    """Escalate stamps a fresh escalation; responded moves it to the Responded tab; reopen undoes that.
+
+    Only Case Monitor's own table changes; the case system is never written.
+    """
+    if action not in ESCALATION_ACTIONS:
+        raise ValueError(f"unknown action {action!r}")
+    stamp = (now or datetime.now(timezone.utc)).isoformat()
+    found = (sb.table("monitor_escalation_marks").select("*").eq("tenant_id", tenant_id)
+             .eq("case_id", case_id).execute().data or [])
+    row = found[0] if found else {"tenant_id": tenant_id, "case_id": case_id, "manual": False,
+                                  "escalated_at": None, "escalated_by": None, "note": None,
+                                  "responded_at": None, "responded_by": None}
+    if action == "escalate":
+        row.update(manual=True, escalated_at=stamp, escalated_by=user_id,
+                   responded_at=None, responded_by=None)
+    elif action == "responded":
+        row.update(responded_at=stamp, responded_by=user_id)
+    else:
+        row.update(responded_at=None, responded_by=None)
+    if note is not None:
+        row["note"] = note.strip()[:500] or None
+    return sb.table("monitor_escalation_marks").upsert(row).execute().data[0]
+
+
+def clear_escalation_mark(sb: Any, tenant_id: str, case_id: str) -> None:
+    (sb.table("monitor_escalation_marks").delete().eq("tenant_id", tenant_id)
+     .eq("case_id", case_id).execute())
 
 
 def _dsp_items(items: list[tuple], cfg: dict) -> list[tuple]:

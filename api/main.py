@@ -5006,9 +5006,43 @@ def monitor_follow_ups(tenant_id: str | None = None, c: Caller = Depends(caller)
 
 
 @app.get("/api/monitor/escalations")
-def monitor_escalations(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+def monitor_escalations(tenant_id: str | None = None, days: float | None = None,
+                        c: Caller = Depends(caller)) -> dict:
     from interpreter.monitor import service
-    return service.escalation_list(c.sb, _caller_tenant(c, tenant_id))
+    if days is not None and not 0 <= days <= 365:
+        raise HTTPException(status_code=422, detail="days must be between 0 and 365")
+    return service.escalation_list(c.sb, _caller_tenant(c, tenant_id), days=days)
+
+
+class EscalationMarkIn(BaseModel):
+    action: str
+    note: str | None = None
+
+
+@app.get("/api/monitor/escalation-marks")
+def monitor_escalation_marks(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    from interpreter.monitor import service
+    return {"marks": service.escalation_marks(c.sb, _caller_tenant(c, tenant_id))}
+
+
+@app.put("/api/monitor/escalation-marks/{case_id}")
+def monitor_set_escalation_mark(case_id: str, body: EscalationMarkIn, tenant_id: str | None = None,
+                                c: Caller = Depends(caller)) -> dict:
+    from interpreter.monitor import service
+    tid = _caller_tenant(c, tenant_id)
+    _require_editor(c, tid)
+    if body.action not in service.ESCALATION_ACTIONS:
+        raise HTTPException(status_code=422, detail="action must be escalate, responded or reopen")
+    return service.set_escalation_mark(_service, tid, case_id, c.user_id, body.action, body.note)
+
+
+@app.delete("/api/monitor/escalation-marks/{case_id}", status_code=204)
+def monitor_clear_escalation_mark(case_id: str, tenant_id: str | None = None,
+                                  c: Caller = Depends(caller)) -> None:
+    from interpreter.monitor import service
+    tid = _caller_tenant(c, tenant_id)
+    _require_editor(c, tid)
+    service.clear_escalation_mark(_service, tid, case_id)
 
 
 @app.get("/api/monitor/tech-pending")

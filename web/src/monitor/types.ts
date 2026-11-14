@@ -42,6 +42,18 @@ export type QueueCase = {
   ai_state: string | null;
   hidden: boolean;
   snooze_until: string | null;
+  reply_kind?: string | null;
+  customer_reply_kind?: string | null;
+};
+
+export type EscalationMark = {
+  case_id: string;
+  manual: boolean;
+  escalated_at: string | null;
+  escalated_by: string | null;
+  note: string | null;
+  responded_at: string | null;
+  responded_by: string | null;
 };
 
 export type Tiles = {
@@ -275,6 +287,8 @@ export type TechIssue = {
   waiting_on: string | null;
   reason: string;
   over_days: boolean;
+  opened_at?: string | null;
+  last_activity_at?: string | null;
 };
 export type TechPending = {
   days: number;
