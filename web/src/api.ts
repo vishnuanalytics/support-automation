@@ -609,6 +609,12 @@ export const api = {
       req<EscalationMark>(`/monitor/escalation-marks/${encodeURIComponent(caseId)}${monitorQuery(tenantId)}`, {
         method: "PUT", body: JSON.stringify({ action, note }),
       }),
+    notificationViews: (tenantId?: string) =>
+      req<{ views: Record<string, string> }>(`/monitor/notification-views${monitorQuery(tenantId)}`),
+    markNotificationsViewed: (caseIds: string[], tenantId?: string) =>
+      req<{ viewed_at: string }>(`/monitor/notification-views${monitorQuery(tenantId)}`, {
+        method: "POST", body: JSON.stringify({ case_ids: caseIds }),
+      }),
     clearEscalationMark: (caseId: string, tenantId?: string) =>
       req<void>(`/monitor/escalation-marks/${encodeURIComponent(caseId)}${monitorQuery(tenantId)}`, { method: "DELETE" }),
     today: (tenantId?: string) => req<Today>(`/monitor/today${monitorQuery(tenantId)}`),

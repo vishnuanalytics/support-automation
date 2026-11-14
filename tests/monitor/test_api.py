@@ -23,6 +23,7 @@ def client():
     ("delete", "/api/monitor/slack"),
     ("get", "/api/monitor/escalation-marks"), ("put", "/api/monitor/escalation-marks/1"),
     ("delete", "/api/monitor/escalation-marks/1"),
+    ("get", "/api/monitor/notification-views"), ("post", "/api/monitor/notification-views"),
 ])
 def test_every_monitor_route_needs_a_token(client, method, path):
     assert client.request(method.upper(), path, json={}).status_code == 401

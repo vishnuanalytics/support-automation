@@ -4,14 +4,17 @@ import { Banner, Button, ConfirmButton, EmptyState, Input, Skeleton } from "../u
 import { CaseView } from "./CaseView";
 import { CasesView } from "./CasesView";
 import { MonitorSettings } from "./MonitorSettings";
+import { NotificationsView, useNotifications } from "./Notifications";
 import { TodoView } from "./TodoView";
 import { useEscalationMarks } from "./marks";
 import { formatTime } from "./util";
 import type { Queue, SlackStatus } from "./types";
 import "./monitor.css";
 
-type Page = "todo" | "cases" | "settings";
-const PAGES: Page[] = ["todo", "cases", "settings"];
+type Page = "todo" | "notifications" | "cases" | "settings";
+const PAGES: Page[] = ["todo", "notifications", "cases", "settings"];
+// New replies arrive with each sync, so look for them every couple of minutes.
+const POLL_MS = 120_000;
 
 function readParam(name: string) {
   return new URLSearchParams(window.location.search).get(name);
@@ -52,6 +55,12 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
     api.monitor.slackStatus(tid).then(setSlack).catch(() => {});
   }, [tid]);
   useEffect(load, [load]);
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      api.monitor.queue(tid).then(setQueue).catch(() => {});
+    }, POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [tid]);
 
   // A running sync finishes in the worker, so poll until it does.
   useEffect(() => {
@@ -61,6 +70,10 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
   }, [queue, load]);
 
   const cases = useMemo(() => queue?.cases ?? [], [queue]);
+  const notes = useNotifications(tid, queue ? cases : null, (caseId) => {
+    if (caseId) open(caseId);
+    else setPage("notifications");
+  });
   const labels = { thirdParty: queue?.labels.third_party ?? "Aggregator", customer: queue?.labels.customer ?? "Merchant" };
 
   const sync = async () => {
@@ -132,10 +145,15 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
       </header>
 
       <nav className="monitor-pages" aria-label="Sections">
-        {([["todo", "To-do", "What needs you today"], ["cases", "All cases", "Search and filter every open case"]] as const).map(([p, label, hint]) => (
+        {([["todo", "To-do", "What needs you today"],
+           ["notifications", "Notifications", "Aggregator and engineering replies"],
+           ["cases", "All cases", "Search and filter every open case"]] as const).map(([p, label, hint]) => (
           <button key={p} type="button" aria-current={page === p ? "page" : undefined}
                   className={page === p ? "is-active" : ""} onClick={() => setPage(p)}>
-            <span>{label}{p === "cases" && queue && <em>{openCount}</em>}</span>
+            <span>{label}
+              {p === "cases" && queue && <em>{openCount}</em>}
+              {p === "notifications" && notes.unread > 0 && <em className="is-new" aria-label={`${notes.unread} new`}>{notes.unread}</em>}
+            </span>
             <small>{hint}</small>
           </button>
         ))}
@@ -167,6 +185,8 @@ export function MonitorView({ tenantId, isOwner }: { tenantId?: string | null; i
         <Skeleton variant="row" lines={6} />
       ) : cases.length === 0 ? (
         <EmptyState title="No cases yet" body="Connect your case system in Settings and press Refresh now." />
+      ) : page === "notifications" ? (
+        <NotificationsView state={notes} onOpen={open} thirdParty={labels.thirdParty} />
       ) : page === "todo" ? (
         <TodoView cases={cases} tenantId={tid} onOpen={open} labels={labels} marks={marks} />
       ) : (

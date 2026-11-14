@@ -5036,6 +5036,26 @@ def monitor_set_escalation_mark(case_id: str, body: EscalationMarkIn, tenant_id:
     return service.set_escalation_mark(_service, tid, case_id, c.user_id, body.action, body.note)
 
 
+class NotificationViewsIn(BaseModel):
+    case_ids: list[str]
+
+
+@app.get("/api/monitor/notification-views")
+def monitor_notification_views(tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    from interpreter.monitor import service
+    return {"views": service.notification_views(c.sb, _caller_tenant(c, tenant_id), c.user_id)}
+
+
+@app.post("/api/monitor/notification-views")
+def monitor_mark_notifications_viewed(body: NotificationViewsIn, tenant_id: str | None = None,
+                                      c: Caller = Depends(caller)) -> dict:
+    from interpreter.monitor import service
+    tid = _caller_tenant(c, tenant_id)  # any member may mark their own notifications viewed
+    if len(body.case_ids) > service.MAX_VIEWS_PER_CALL:
+        raise HTTPException(status_code=422, detail="too many cases in one call")
+    return {"viewed_at": service.mark_notifications_viewed(_service, tid, c.user_id, body.case_ids)}
+
+
 @app.delete("/api/monitor/escalation-marks/{case_id}", status_code=204)
 def monitor_clear_escalation_mark(case_id: str, tenant_id: str | None = None,
                                   c: Caller = Depends(caller)) -> None:

@@ -95,3 +95,42 @@ def test_clear_and_list_are_tenant_scoped():
 def test_unknown_action_is_refused():
     with pytest.raises(ValueError):
         service.set_escalation_mark(Sb(), T, CASE, USER, "close")
+
+
+class ViewsTable(Table):
+    def upsert(self, rows):
+        self.op, self.payload = "upsert_many", [dict(r) for r in rows]
+        return self
+
+    def execute(self):
+        if self.op == "upsert_many":
+            keys = {(r["tenant_id"], r["user_id"], r["case_id"]) for r in self.payload}
+            self.rows[:] = [r for r in self.rows if (r["tenant_id"], r["user_id"], r["case_id"]) not in keys]
+            self.rows.extend(self.payload)
+            return type("R", (), {"data": self.payload})()
+        return super().execute()
+
+
+class ViewsSb:
+    def __init__(self):
+        self.rows = []
+
+    def table(self, name):
+        assert name == "monitor_notification_views"
+        return ViewsTable(self.rows)
+
+
+def test_viewed_notifications_are_per_person_and_restamped():
+    sb = ViewsSb()
+    service.mark_notifications_viewed(sb, T, USER, ["a", "b", "a", ""], now=NOW)
+    assert service.notification_views(sb, T, USER) == {"a": NOW.isoformat(), "b": NOW.isoformat()}
+    assert service.notification_views(sb, T, "someone else") == {}
+    service.mark_notifications_viewed(sb, T, USER, ["a"], now=LATER)
+    assert service.notification_views(sb, T, USER)["a"] == LATER.isoformat()
+    assert len(sb.rows) == 2
+
+
+def test_marking_nothing_writes_nothing():
+    sb = ViewsSb()
+    service.mark_notifications_viewed(sb, T, USER, [], now=NOW)
+    assert sb.rows == []

@@ -316,6 +316,28 @@ def clear_escalation_mark(sb: Any, tenant_id: str, case_id: str) -> None:
      .eq("case_id", case_id).execute())
 
 
+MAX_VIEWS_PER_CALL = 500
+
+
+def notification_views(sb: Any, tenant_id: str, user_id: str) -> dict[str, str]:
+    """When this person last marked each case's notification viewed."""
+    rows = (sb.table("monitor_notification_views").select("case_id, viewed_at")
+            .eq("tenant_id", tenant_id).eq("user_id", user_id).execute().data or [])
+    return {r["case_id"]: r["viewed_at"] for r in rows}
+
+
+def mark_notifications_viewed(sb: Any, tenant_id: str, user_id: str, case_ids: list[str],
+                              now: datetime | None = None) -> str:
+    """A reply after this time highlights the case again."""
+    stamp = (now or datetime.now(timezone.utc)).isoformat()
+    ids = list(dict.fromkeys(str(i) for i in case_ids if i))[:MAX_VIEWS_PER_CALL]
+    if ids:
+        sb.table("monitor_notification_views").upsert(
+            [{"tenant_id": tenant_id, "user_id": user_id, "case_id": i, "viewed_at": stamp} for i in ids]
+        ).execute()
+    return stamp
+
+
 def _dsp_items(items: list[tuple], cfg: dict) -> list[tuple]:
     return [i for i in items if i[0].get("record_type") == cfg["dependency_record_type"]]
 

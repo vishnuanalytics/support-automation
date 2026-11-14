@@ -707,6 +707,17 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-14 (Case Monitor: Notifications page back.)** On the owner's ask, a third tab, **Notifications**, sits
+between To-do and All cases. It's built from the synced cases, not the old `monitor_events` alerts: it shows an
+aggregator's real reply on a DSP case (acks excluded) and engineering's replies from the last 14 days. A
+notification stays highlighted until the person presses **Mark viewed** or **Mark all viewed**. A later reply
+on the same case highlights it again. The tab shows a badge with the unread count, and the app checks the
+queue every 2 minutes, with an optional chime and desktop notification for new replies (clicking opens the
+case). Views are per person in `monitor_notification_views` (**migration 129, applied 2026-11-14**) through
+`GET/POST /api/monitor/notification-views`. **Verified:** +2 unit tests, +2 auth route cases (590 in
+`tests/monitor/`), new `e2e/monitor-notifications.spec.ts`, all 11 monitor e2e pass, build passes, API rebuilt.
+Live at deploy: 5 aggregator-on-DSP and up to 8 engineering notifications. Not checked in a browser on live data.
+
 **2026-11-14 (Case Monitor rebuilt as two pages, branch `case-monitor`.)** The owner said the many pages
 didn't make the daily work easier, so the UI was rebuilt: **To-do** and **All cases**, with Settings
 behind a button. Every other page (Needs Me, Agents, Wednesday report, SLA, Follow-ups, Escalations,
