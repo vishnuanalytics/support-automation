@@ -157,7 +157,9 @@ export function TodoView({ cases, tenantId, onOpen, labels, marks }: {
   const chaseAgg = (quiet ?? []).filter((e) => !isWaiting(marks.marks.get(e.id)));
   const aggGroups = groupBy(chaseAgg, (e) => e.waiting_on[0] ?? labels.thirdParty);
   const chaseEng = (issues ?? [])
-    .map((r) => ({ r, days: daysSince(r.last_activity_at ?? r.opened_at) ?? r.days_open }))
+    // Quiet = since an engineer last wrote (or the issue opened). Our own chase comments don't count,
+    // or nudging every few days would hide an issue no engineer has ever answered.
+    .map((r) => ({ r, days: daysSince(r.last_tech_reply_at ?? r.opened_at) ?? r.days_open }))
     .filter(({ r, days }) => NO_RCA.includes(r.status) && days >= QUIET_DAYS)
     .sort((a, b) => b.days - a.days);
   const engGroups = groupBy(chaseEng, ({ r }) => r.squad);
@@ -224,7 +226,7 @@ export function TodoView({ cases, tenantId, onOpen, labels, marks }: {
       </Section>
 
       <Section id="todo-eng" title="Chase engineering" count={chaseEng.length}
-               hint={`GitHub issues with no comment for ${QUIET_DAYS}+ days and no RCA shared. A comment on the issue takes it off this list for ${QUIET_DAYS} days.`}>
+               hint={`Open GitHub issues with no RCA or fix and no engineer reply for ${QUIET_DAYS}+ days. Our own comments don't take an issue off this list.`}>
         {issues === null ? <Skeleton variant="row" lines={3} /> : engGroups.map(([squad, rows]) => (
           <article key={squad} className="todo-group">
             <div className="todo-group-head">
@@ -238,7 +240,8 @@ export function TodoView({ cases, tenantId, onOpen, labels, marks }: {
                   <span className="todo-subject">{r.title}</span>
                   <Tag tone={days >= 7 ? "exception" : "warn"}>{Math.floor(days)}d quiet</Tag>
                   <span className="monitor-muted todo-meta">
-                    {r.tech_status} · last reply {r.last_reply_by ?? "none"}
+                    {r.tech_status} · {r.last_tech_reply_at ? "engineer replied" : "no engineer reply"}
+                    {r.last_support_reply_at && <> · we last commented {Math.floor(daysSince(r.last_support_reply_at) ?? 0)}d ago</>}
                     {r.case_id && <> · <button type="button" className="monitor-link" onClick={() => onOpen(r.case_id!)}>{r.case_number}</button></>}
                   </span>
                   <CopyButton text={`Hi team, any update on this? No reply for ${Math.floor(days)} days. Please share the RCA and an ETA for the fix.`} label="Copy nudge" />

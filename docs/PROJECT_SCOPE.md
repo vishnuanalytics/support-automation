@@ -707,6 +707,15 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-18 (Case Monitor: "Chase engineering" no longer hidden by our own comments.)** Reported on
+GitHub #8738 (case 00131xxx-era Noon Food timings issue, opened 6 Nov): no engineer ever replied, but our
+nudges on 11, 13 and 17 Nov reset the quiet clock (`last_activity_at` is the last message from anyone), so
+it never reached the To-do list. Rule now (front-end only, `TodoView.tsx`): an open issue whose status is
+`no_reply`, `investigating` or `not_read` is listed once 3+ days have passed since an engineer last wrote
+(`last_tech_reply_at`), or since it opened; our comments don't count. Rows say "no engineer reply" or
+"engineer replied" and "we last commented Nd ago". The old "a comment takes it off for 3 days" snooze is gone.
+**Verified:** `npm run build`. Not browser-checked (sign-in needed); `web` image needs a rebuild to deploy.
+
 **2026-11-18 (Case Monitor: AI merchant draft ignored engineering's fix.)** Reported on case 00134051
 (GitHub #8805): engineering posted the fix at 07:28, then Salesforce added a bot case comment
 (`SLA_WARNING_SENT - ...`). Case comments are labelled "us", so `knowledge.draft_prompt` saw "our message is
