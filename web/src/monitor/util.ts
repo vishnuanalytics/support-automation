@@ -91,6 +91,9 @@ export function askClaudePrompt(caseRef: string): string {
     "   - Next action: who does what.",
     "   - Draft reply: for the merchant or aggregator, using only verified facts.",
     "",
+    "5. Save the write-up on the case with case-monitor save_investigation (root cause, evidence with an " +
+      "exact quote per claim, what's not verified, next action, draft reply) so it shows at the top of the case.",
+    "",
     "Rules: never state an unverified guess as fact. Show times in IST. " +
       "Don't send, post or change anything: I'll send the reply.",
   ].join("\n");

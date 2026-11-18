@@ -3,7 +3,8 @@ import { api, ApiError } from "../api";
 import { Banner, Button, Input, Skeleton, Tag, Textarea, type TagTone } from "../ui";
 import { askClaudePrompt, copyText, formatTime } from "./util";
 import { CaseChecks } from "./CaseChecks";
-import type { AiDraft, CaseDetail, Source, Summary, TimelineItem } from "./types";
+import { InvestigationCard } from "./Investigation";
+import type { AiDraft, CaseDetail, DebugResult, Source, Summary, TimelineItem } from "./types";
 
 const STALE_MS = 15 * 60 * 1000;
 const LONG_MESSAGE = 420;
@@ -119,6 +120,8 @@ export function CaseView({ caseId, tenantId, slackConnected, onBack, onReviewed,
   const [summary, setSummary] = useState<Summary | null>(null);
   const [tagText, setTagText] = useState<string | null>(null);
   const [ai, setAi] = useState<AiDraft | null>(null);
+  const [dbg, setDbg] = useState<DebugResult | null>(null);
+  const [dbgBusy, setDbgBusy] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [pane, setPane] = useState<Pane>("conversation");
@@ -191,6 +194,18 @@ export function CaseView({ caseId, tenantId, slackConnected, onBack, onReviewed,
       setErr((e as ApiError).message);
     } finally {
       setAiBusy(false);
+    }
+  };
+
+  const runDebug = async () => {
+    setDbgBusy(true);
+    setErr(null);
+    try {
+      setDbg(await api.monitor.debug(caseId, tenantId));
+    } catch (e) {
+      setErr((e as ApiError).message);
+    } finally {
+      setDbgBusy(false);
     }
   };
 
@@ -408,10 +423,17 @@ export function CaseView({ caseId, tenantId, slackConnected, onBack, onReviewed,
             </details>
           )}
 
+          {data.investigation && (
+            <InvestigationCard w={data.investigation} title="Investigation (saved)" onCopy={copy} />
+          )}
+
           {data.llm_enabled && (
             <article className="monitor-card">
               <h3>AI help</h3>
               <div className="monitor-actions">
+                <Button size="sm" variant="secondary" loading={dbgBusy} onClick={runDebug}>
+                  Debug with proof
+                </Button>
                 <Button size="sm" loading={aiBusy} onClick={() => writeDraft("merchant")}>
                   Draft for {data.labels.customer.toLowerCase()}
                 </Button>
@@ -425,6 +447,12 @@ export function CaseView({ caseId, tenantId, slackConnected, onBack, onReviewed,
                   <Tag tone="warn-soft">AI-assisted, verify</Tag>
                   <p>{summary.text}</p>
                 </div>
+              )}
+              {dbg?.error && <Banner tone="warn" title={dbg.error} />}
+              {dbg?.root_cause && (
+                <InvestigationCard w={{ root_cause: dbg.root_cause, evidence: dbg.evidence ?? [],
+                  not_verified: dbg.not_verified ?? [], next_action: dbg.next_action ?? "",
+                  draft_reply: dbg.draft_reply ?? "" }} title="Debug with proof" onCopy={copy} />
               )}
               {ai?.error && <Banner tone="warn" title={ai.error} />}
               {ai?.draft && (

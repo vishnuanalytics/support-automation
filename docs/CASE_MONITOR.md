@@ -411,6 +411,23 @@ available this way.
 clicked. It's never automatic, it only accepts a thread linked to that case, and each post is
 written to the audit log. In an external channel, external members can see the post.
 
+### Debug with proof
+
+Two ways to get a root cause, evidence and a draft reply for a case, shown in an **Investigation** card:
+
+- **Debug with proof** (case page, AI help): `POST /api/monitor/cases/{id}/debug`. The app's own LLM reads
+  the case's numbered sources: its messages (email, GitHub, imported Slack) and any saved data checks. Each
+  evidence line must quote the source it cites; a line whose quote isn't in that source, or that cites a source
+  that doesn't exist, moves to "Not verified". It can't run new Metabase or Kibana queries. Read-only: nothing is
+  sent or saved. Rate limited like the other AI actions.
+- **Background Claude routine** (live Metabase proof): `investigations_due` lists open cases on our turn with no
+  write-up since their latest activity. For each, the routine runs `get_case`, reads the GitHub and Slack
+  links, runs the fitting saved checks (`save_check`), then calls `save_investigation`. It is stored as a
+  `monitor_case_checks` entry named "Investigation" (no migration) and the newest shows at the top of the case.
+  A claim without a source and an exact quote is stored as not verified. Suggested hourly routine prompt:
+  "Call case-monitor investigations_due. For each case follow its instructions, skipping any case you can't
+  get evidence for. Send, post and change nothing."
+
 ### Ask Claude about a case (MCP server)
 
 `python -m interpreter.monitor.mcp_server` exposes Case Monitor to a Claude session over MCP

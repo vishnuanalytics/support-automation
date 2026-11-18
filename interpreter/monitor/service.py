@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from . import (agent_quality, auto_checks, brief, coaching, config, demo, drafts, dsp_sla, escalations, followups, help_requests,
+from . import (agent_quality, auto_checks, brief, coaching, config, debug, demo, drafts, dsp_sla, escalations, followups, help_requests,
                log_expiry, progress, readers, redact, similar, sync, tech_pending, timeline, today, verdict, weekly)
 from .store import SupabaseStore
 from .verdict import latest_message, parse_dt
@@ -171,7 +171,9 @@ def case_detail(sb: Any, tenant_id: str, case_id: str,
         "partner": case.get("partner"),
         "labels": {"third_party": cfg["third_party_label"], "customer": cfg["customer_label"]},
         "llm_enabled": bool(cfg.get("llm_enabled")),
-        "checks": case_checks(sb, tenant_id, case_id),
+        "checks": (checks := case_checks(sb, tenant_id, case_id)),
+        "investigation": next((debug.from_check(c) for c in checks
+                               if c.get("check_name") == debug.INVESTIGATION), None),
     }
 
 
@@ -694,6 +696,54 @@ def ai_draft(sb: Any, tenant_id: str, case_id: str, audience: str) -> dict[str, 
         log.warning("ai draft failed: %s", type(e).__name__)
         return {"enabled": True, "error": "The AI service is busy or over its daily limit. "
                                           "Try again later, or use a copy draft below."}
+
+
+def debug_case(sb: Any, tenant_id: str, case_id: str, complete: Any = None) -> dict[str, Any] | None:
+    """Root cause, evidence and a draft reply for one case, from what the sync already holds.
+
+    Every evidence line must quote the source it cites, or it is moved to "not verified". Nothing is
+    sent or saved: the result is for the lead to read."""
+    from interpreter import llm
+
+    detail = case_detail(sb, tenant_id, case_id)
+    if detail is None:
+        return None
+    if not detail["llm_enabled"]:
+        return {"enabled": False}
+    sources = debug.build_sources(detail["timeline"], detail["checks"])
+    try:
+        raw = (complete or llm.complete)(debug.DEBUG_SYSTEM, debug.build_prompt(
+            detail["case"], detail["verdict"], sources), max_tokens=1400, json_object=True,
+            tenant_id=tenant_id)
+        return {"enabled": True, **debug.parse(raw, sources)}
+    except Exception as e:  # noqa: BLE001 -- usually the AI provider's daily limit
+        log.warning("ai debug failed: %s", type(e).__name__)
+        return {"enabled": True, "error": "The AI service is busy or over its daily limit. "
+                                          "Try again later."}
+
+
+INVESTIGATION_DUE_LIMIT = 10
+
+
+def investigations_due(sb: Any, tenant_id: str, limit: int = INVESTIGATION_DUE_LIMIT) -> dict[str, Any]:
+    """Open cases on our turn with no saved write-up since their latest activity, newest activity
+    first, for the background routine to investigate."""
+    cfg = load_config(sb, tenant_id)
+    items = _cases_with_evidence(sb, tenant_id, cfg)
+    acting = [(c, v) for c, v, _ in items if verdict.stage(v) == "act"]
+    saved = checks_by_case(sb, tenant_id, [c["id"] for c, _ in acting])
+    due = []
+    for c, v in acting:
+        done = [x["created_at"] for x in saved.get(c["id"], []) if x["check_name"] == debug.INVESTIGATION]
+        activity = v.get("latest_activity_at")
+        if done and (not activity or max(done) >= activity):
+            continue
+        due.append({"case_number": c.get("case_number"), "subject": c.get("subject"),
+                    "owner": c.get("owner"), "third_parties": c.get("third_parties"),
+                    "latest_activity_at": activity,
+                    "had_investigation": bool(done)})
+    due.sort(key=lambda d: d["latest_activity_at"] or "", reverse=True)
+    return {"count": len(due), "cases": due[:limit]}
 
 
 SUMMARY_SYSTEM = (

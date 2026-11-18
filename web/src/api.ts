@@ -1,5 +1,5 @@
 import { supabase } from "./supabase";
-import type { AgentsReport, AiDraft, Alerts, CaseDetail, Digest, EscalationMark, Escalations, FollowUps, Queue, SlackStatus, SlaReport, Summary, TechPending, Today, Weekly } from "./monitor/types";
+import type { AgentsReport, AiDraft, Alerts, CaseDetail, DebugResult, Digest, EscalationMark, Escalations, FollowUps, Queue, SlackStatus, SlaReport, Summary, TechPending, Today, Weekly } from "./monitor/types";
 import type {
   AssistResult,
   AuditEvent,
@@ -633,6 +633,8 @@ export const api = {
       req<{ refreshed: boolean }>(`/monitor/cases/${encodeURIComponent(id)}/refresh${monitorQuery(tenantId)}`, { method: "POST" }),
     summary: (id: string, tenantId?: string) =>
       req<Summary>(`/monitor/cases/${encodeURIComponent(id)}/summary${monitorQuery(tenantId)}`, { method: "POST" }),
+    debug: (id: string, tenantId?: string) =>
+      req<DebugResult>(`/monitor/cases/${encodeURIComponent(id)}/debug${monitorQuery(tenantId)}`, { method: "POST" }),
     aiDraft: (id: string, audience: "merchant" | "aggregator", tenantId?: string) =>
       req<AiDraft>(`/monitor/cases/${encodeURIComponent(id)}/ai-draft${monitorQuery(tenantId)}${tenantId ? "&" : "?"}audience=${audience}`, { method: "POST" }),
     review: (id: string, body: { reviewed?: boolean; snooze_until?: string; clear?: boolean }, tenantId?: string) =>

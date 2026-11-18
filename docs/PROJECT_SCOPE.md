@@ -707,6 +707,17 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-18 (Case Monitor: Debug with proof, in the app and as a background routine.)** Goal: faster, verified
+resolutions without pasting into Claude. (1) `interpreter/monitor/debug.py` (pure) + `service.debug_case` +
+`POST /api/monitor/cases/{id}/debug` + a **Debug with proof** button: the app's LLM answers from numbered sources
+and every evidence quote is checked against its source, else moved to "Not verified". (2) MCP
+`investigations_due` and `save_investigation`: a Claude routine investigates open our-turn cases with live
+Metabase checks and saves the write-up as a `monitor_case_checks` entry "Investigation" (no migration), shown at
+the top of the case. The Ask Claude prompt now ends with `save_investigation`. **Verified:** 8 new unit tests
+(607 in `tests/monitor/`), web tests 28 pass, `npm run build`. **Not verified:** the button on live data
+(sign-in needed) and a real routine run; the hourly routine must still be created in Claude (prompt in
+`docs/CASE_MONITOR.md`). Kibana is still out of reach (SSO), so app-event logs show as "not verified".
+
 **2026-11-18 (Case Monitor: Ask Claude now debugs with proof.)** Goal: faster resolutions. The Ask Claude prompt
 (`web/src/monitor/util.ts`) now asks the Claude session to read `get_case`, every linked GitHub issue and Slack
 thread, run the fitting Metabase Case checks (collection 3037, 9 questions) and `save_check` each, then answer

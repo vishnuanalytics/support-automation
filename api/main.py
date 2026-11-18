@@ -5165,6 +5165,18 @@ def monitor_ai_draft(case_id: str, audience: str = "merchant", tenant_id: str | 
     return result
 
 
+@app.post("/api/monitor/cases/{case_id}/debug")
+def monitor_debug(case_id: str, tenant_id: str | None = None, c: Caller = Depends(caller)) -> dict:
+    """Root cause with evidence and a draft reply for one case. Read-only: nothing is sent or saved."""
+    from interpreter.monitor import service
+    tid = _caller_tenant(c, tenant_id)
+    rate_limit(c.user_id, "monitor_summary", 20)
+    result = service.debug_case(c.sb, tid, case_id)
+    if result is None:
+        raise HTTPException(404, "case not found")
+    return result
+
+
 @app.post("/api/monitor/cases/{case_id}/review")
 def monitor_review(case_id: str, body: MonitorReviewIn, tenant_id: str | None = None,
                    c: Caller = Depends(caller)) -> dict:

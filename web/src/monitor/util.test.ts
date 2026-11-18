@@ -44,6 +44,7 @@ describe("askClaudePrompt", () => {
     expect(p).toContain("Evidence");
     expect(p).toContain("Not verified");
     expect(p).toContain("Case checks");
+    expect(p).toContain("save_investigation");
     expect(p).toContain("Don't send, post or change anything");
   });
 });

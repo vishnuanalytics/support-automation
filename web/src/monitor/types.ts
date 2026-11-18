@@ -204,12 +204,23 @@ export type CaseDetail = {
   labels: { third_party: string; customer: string };
   llm_enabled: boolean;
   checks?: CaseCheck[];
+  investigation?: Investigation | null;
 };
 export type Digest = {
   since: string | null;
   events: { id: number; case_id: string; case_number: string | null; subject: string | null; kind: string }[];
 };
 export type SlackStatus = { configured: boolean; connected: boolean; leads_connected: number };
+export type Investigation = {
+  root_cause: string;
+  evidence: { claim: string; source_name: string; quote: string; url?: string | null }[];
+  not_verified: string[];
+  next_action: string;
+  draft_reply: string;
+  saved_by?: string | null;
+  created_at?: string | null;
+};
+export type DebugResult = Partial<Investigation> & { enabled: boolean; error?: string };
 export type AiDraft = {
   enabled: boolean;
   error?: string;
