@@ -707,6 +707,15 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-18 (Case Monitor: Ask Claude now debugs with proof.)** Goal: faster resolutions. The Ask Claude prompt
+(`web/src/monitor/util.ts`) now asks the Claude session to read `get_case`, every linked GitHub issue and Slack
+thread, run the fitting Metabase Case checks (collection 3037, 9 questions) and `save_check` each, then answer
+root cause / evidence per claim / not verified / next action / draft reply, sending nothing. Checked Metabase for
+ELK-equivalent logs: only Talabat load-balancer logs and menu/action logs exist, no app events with response
+messages, so those stay Kibana-only (Kibana sits behind SSO; no API access yet). **Not built (open):** a cached
+per-case digest, a Kibana helper (sign-in-once Playwright session or a service token from infra). **Verified:**
++1 vitest case (8 pass), `npm run build`. Front end only; `web` image needs a rebuild to deploy.
+
 **2026-11-18 (Case Monitor: "Chase engineering" no longer hidden by our own comments.)** Reported on
 GitHub #8738 (case 00133369, Noon Food operating-hours changes, opened 6 Nov): no engineer ever replied, but our
 nudges on 11, 13 and 17 Nov reset the quiet clock (`last_activity_at` is the last message from anyone), so

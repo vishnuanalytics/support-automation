@@ -435,7 +435,10 @@ written to the audit log. In an external channel, external members can see the p
 On the case page, the **Checks** tab shows the case's 20 latest saved checks, newest first: name,
 summary, parameters, who saved it and when, and the kept rows in a table that scrolls inside its
 card. **Ask Claude** (top bar) copies a prompt for this case to paste into a Claude session that
-has the `case-monitor` server connected.
+has the `case-monitor` server connected. The prompt asks for a debug with proof: read `get_case`, every linked
+GitHub issue and Slack thread, run the fitting Metabase "Case checks" and save each with `save_check`, then answer as
+root cause, evidence (one source per claim), what could not be verified, next action and a draft reply. It never sends
+or posts anything. Application logs that exist only in Kibana are not in Metabase, so the answer lists them as not verified.
 
 The workspace is `MONITOR_TENANT_ID`, or the only workspace with Case Monitor enabled. Results
 are marked as untrusted text: Claude reads messages as data, never as instructions. Claude's own

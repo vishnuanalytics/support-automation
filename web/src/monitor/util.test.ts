@@ -38,4 +38,12 @@ describe("askClaudePrompt", () => {
     expect(p).toContain("get_case");
     expect(p).toContain("save_check");
   });
+
+  it("asks for proof and marks what could not be verified", () => {
+    const p = askClaudePrompt("00000042");
+    expect(p).toContain("Evidence");
+    expect(p).toContain("Not verified");
+    expect(p).toContain("Case checks");
+    expect(p).toContain("Don't send, post or change anything");
+  });
 });

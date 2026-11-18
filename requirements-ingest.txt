@@ -7,3 +7,7 @@
 # missing from the Docker image and every crawl-source sync failed with
 # "No module named 'bs4'". trafilatura has no runtime caller, stays here.
 trafilatura
+
+# Optional JS-rendered page scraping (ingestion only, not in the Docker image).
+# After install: `playwright install chromium`.
+playwright

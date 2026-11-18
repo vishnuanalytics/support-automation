@@ -74,7 +74,24 @@ export function checkTable(rows: unknown[]): { head: string[]; body: string[][] 
 
 /** The prompt the "Ask Claude" button copies, for a Claude session with Case Monitor's MCP server. */
 export function askClaudePrompt(caseRef: string): string {
-  return `What's going on with case ${caseRef}, and what should I do next? ` +
-    "Start with case-monitor get_case, run any saved data checks that fit, " +
-    "and record each one with save_check.";
+  return [
+    `Debug case ${caseRef} and give me a resolution I can send, with proof.`,
+    "",
+    "1. Start with case-monitor get_case: fields, brief, timeline, linked_cases, check_inputs and " +
+      "saved_checks. Don't re-run a check that is already saved.",
+    "2. Read every linked GitHub issue (all comments) and Slack thread with your own connectors.",
+    "3. Run the Metabase \"Case checks\" questions that fit (ORD-01/02 order and status, ITM-01/02 items " +
+      "and stock, MNU-01 menu publishes, STR-01 store actions, ID-01/02 ID checks), using check_inputs. " +
+      "Record each one with save_check.",
+    "4. Answer in this order:",
+    "   - Root cause: one sentence.",
+    "   - Evidence: one line per claim, naming its source (check name and rows, GitHub comment, " +
+      "Slack message or case email) with the exact value or quote.",
+    "   - Not verified: anything you could not confirm, and why (for example app logs that are only in Kibana).",
+    "   - Next action: who does what.",
+    "   - Draft reply: for the merchant or aggregator, using only verified facts.",
+    "",
+    "Rules: never state an unverified guess as fact. Show times in IST. " +
+      "Don't send, post or change anything: I'll send the reply.",
+  ].join("\n");
 }
