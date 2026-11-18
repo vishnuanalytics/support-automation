@@ -708,7 +708,7 @@ Design decisions already settled in that conversation:
 ## Immediate next step
 
 **2026-11-18 (Case Monitor: "Chase engineering" no longer hidden by our own comments.)** Reported on
-GitHub #8738 (case 00131xxx-era Noon Food timings issue, opened 6 Nov): no engineer ever replied, but our
+GitHub #8738 (case 00133369, Noon Food operating-hours changes, opened 6 Nov): no engineer ever replied, but our
 nudges on 11, 13 and 17 Nov reset the quiet clock (`last_activity_at` is the last message from anyone), so
 it never reached the To-do list. Rule now (front-end only, `TodoView.tsx`): an open issue whose status is
 `no_reply`, `investigating` or `not_read` is listed once 3+ days have passed since an engineer last wrote
