@@ -177,6 +177,33 @@ def test_an_engineer_reply_on_github_is_where_it_stands():
     assert "Latest message, which you are replying to:\nEngineering (2026-11-13, GitHub): Fixed" in head
 
 
+def test_a_bot_sla_comment_after_an_engineer_reply_does_not_make_our_message_newest():
+    """Case 00134051: engineering sent the fix, then Salesforce posted an SLA notice."""
+    timeline = [
+        {"source": "Email", "party": "customer", "party_label": "Merchant", "at": "2026-11-18T05:50",
+         "text": "There is no option to switch it off in the partner app"},
+        {"source": "Email", "party": "us", "party_label": "Our team", "at": "2026-11-18T05:57",
+         "text": "Let me check this further with our Technical Team"},
+        {"source": "GitHub", "party": "engineering", "party_label": "Engineering", "at": "2026-11-18T07:28",
+         "text": "Ignore that stopgap. Publish the catalogue from Prime, then republish menus"},
+        {"source": "Case comment", "party": "us", "party_label": "Our team", "at": "2026-11-18T08:27",
+         "text": "SLA_WARNING_SENT - alerted at 2026-11-18T08:26:36Z for milestone Resolution Time"},
+    ]
+    user, sources = knowledge.draft_prompt({"subject": "S"}, "merchant", timeline, [], None)
+    head = user.split("Sources:")[0]
+    assert "write a follow-up" not in head
+    assert "Latest message, which you are replying to:\nEngineering (2026-11-18, GitHub): Ignore that" in head
+    assert not any("SLA_WARNING_SENT" in s["text"] for s in sources)
+
+
+def test_a_person_s_internal_note_is_kept_as_a_source_but_is_not_a_message_to_anyone():
+    timeline = [*_ownly_timeline(), {"source": "Case comment", "party": "us", "party_label": "Our team",
+                                      "at": "2026-11-13", "text": "Called the store, they confirmed"}]
+    user, sources = knowledge.draft_prompt({"subject": "S"}, "merchant", timeline, [], None)
+    assert "Our last message:\nOur team (2026-11-12, Email)" in user
+    assert any("Called the store" in s["text"] for s in sources)
+
+
 def test_generate_draft_returns_sources(monkeypatch):
     monkeypatch.setattr(knowledge, "similar_context", lambda *a, **k: [])
     timeline = [{"source": "Email", "party_label": "Merchant", "at": "x", "text": "hi", "url": "u"}]

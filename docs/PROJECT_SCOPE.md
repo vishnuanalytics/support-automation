@@ -707,6 +707,15 @@ Design decisions already settled in that conversation:
 
 ## Immediate next step
 
+**2026-11-18 (Case Monitor: AI merchant draft ignored engineering's fix.)** Reported on case 00134051
+(GitHub #8805): engineering posted the fix at 07:28, then Salesforce added a bot case comment
+(`SLA_WARNING_SENT - ...`). Case comments are labelled "us", so `knowledge.draft_prompt` saw "our message is
+newest" and wrote a follow-up to a bot note; the engineer's reply was only a source. Now bot comments
+(`^[A-Z_]{5,} - `) are dropped from the sources, and case comments (internal notes) stay as sources but no
+longer decide who spoke last. `DRAFT_SYSTEM` also says to relay an engineer's finding to the merchant with
+the steps in order, and to say plainly when it retracts earlier advice. **Verified:** +2 unit tests
+(599 in `tests/monitor/`). Not yet re-run live: the browser session needs a sign-in; the API needs a rebuild.
+
 **2026-11-14 (Case Monitor: AI merchant draft fixed for follow-ups.)** Reported on case 00133297 (GitHub
 #8783): "Draft for merchant" returned a paraphrase of our own last email. Two causes in
 `knowledge.draft_prompt`: (1) when our message was the newest, the prompt told the model to *reply to* it;

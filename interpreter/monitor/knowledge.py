@@ -151,6 +151,10 @@ DRAFT_SYSTEM = (
     "them when we hear back.\n"
     "- Match the size of what's needed. If the latest message settles the question, write a short "
     "reply that acknowledges it and gives the next step. Don't reopen or recap the whole issue.\n"
+    "- When the latest message is an engineer's or platform team's finding and you're writing to "
+    "the merchant, pass it on: say what was found and give the merchant's next steps, in order. "
+    "If it contradicts or retracts something we told the merchant earlier, say so plainly and "
+    "don't repeat the old advice.\n"
     "- When a platform team gives a finding, the usual reply thanks them and says what you'll do "
     "with it, such as informing the merchant. Only ask them a new question if the case can't move "
     "without the answer.\n"
@@ -164,6 +168,10 @@ DRAFT_SYSTEM = (
     "Answer as JSON: {\"situation\": two sentences on where this case stands, citing sources like "
     "[1], \"draft\": the message with no citations, \"missing\": [facts to fill in before sending]}."
 )
+
+
+# Automated notices Salesforce posts as case comments, e.g. "SLA_WARNING_SENT - alerted at ...".
+_BOT_COMMENT = re.compile(r"^\s*[A-Z][A-Z0-9_]{4,}\s+-\s")
 
 
 def _line(t: dict) -> str:
@@ -188,7 +196,10 @@ def _standing(case: dict, talk: list[dict]) -> str:
 def draft_prompt(case: dict, audience: str, timeline: list[dict], similar: list[dict],
                  partner: dict | None) -> tuple[str, list[dict]]:
     # Field changes (owner, status) aren't conversation: left in, they crowd the messages out.
-    talk = [t for t in timeline if t.get("party") != "system" and t.get("text")]
+    talk = [t for t in timeline if t.get("party") != "system" and t.get("text")
+            and not (t.get("source") == "Case comment" and _BOT_COMMENT.match(t["text"]))]
+    # Who spoke last: an internal note isn't a message to anyone, so it can't make ours "newest".
+    spoken = [t for t in talk if t.get("source") != "Case comment"]
     sources = [{"source": t["source"], "url": t.get("url"), "text": _line(t)} for t in talk[-20:]]
     sources += [{"source": "Past case", "url": s.get("url"), "text": redact_pii(s["text"])}
                 for s in similar]
@@ -199,15 +210,15 @@ def draft_prompt(case: dict, audience: str, timeline: list[dict], similar: list[
     header = (f"Audience: {target}\nCase: {redact_pii(case.get('subject'))}\n"
               f"Aggregator: {', '.join(case.get('third_parties') or []) or 'not stated'}\n"
               f"Where it stands: {_standing(case, talk)}\n")
-    if not talk:
+    if not spoken:
         latest = "Latest message, which you are replying to:\nnone"
-    elif talk[-1].get("party") != "us":
-        latest = f"Latest message, which you are replying to:\n{_line(talk[-1])}"
+    elif spoken[-1].get("party") != "us":
+        latest = f"Latest message, which you are replying to:\n{_line(spoken[-1])}"
     else:
         # Our message is the newest, so this is a follow-up, not an answer to ourselves.
-        their_last = next((t for t in reversed(talk) if t.get("party") == theirs), None)
+        their_last = next((t for t in reversed(spoken) if t.get("party") == theirs), None)
         latest = ("The newest message is ours, so write a follow-up.\n"
-                  f"Our last message:\n{_line(talk[-1])}\n"
+                  f"Our last message:\n{_line(spoken[-1])}\n"
                   f"{target.capitalize()}'s last message, which our last message already answered "
                   "(don't thank them for it or answer it again):\n"
                   f"{_line(their_last) if their_last else 'none'}")
